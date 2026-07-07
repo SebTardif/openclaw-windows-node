@@ -840,7 +840,7 @@ public class SetupStepsTests : IDisposable
         registry.Save();
         await File.WriteAllTextAsync(
             GatewayInstallModeDetector.GetNativeOwnershipPath(ctx.LocalDataDir),
-            """{"GatewayRecordId":"native-before-wsl","ManagedConfigPaths":[]}""");
+            $$"""{"ProfileName":"{{GatewayCliRunner.GetManagedNativeProfile(ctx.Config)}}","TaskName":"{{GatewayCliRunner.GetManagedNativeTaskName(ctx.Config)}}","GatewayRecordId":"native-before-wsl","ManagedConfigPaths":[]}""");
         var identityFile = Path.Combine(registry.GetIdentityDirectory(record.Id), "nested", "device-key.json");
         Directory.CreateDirectory(Path.GetDirectoryName(identityFile)!);
         await File.WriteAllBytesAsync(identityFile, [1, 2, 3, 4]);
@@ -3008,7 +3008,7 @@ public class SetupStepsTests : IDisposable
         ctx.NativeCliPath = cliPath;
         await File.WriteAllTextAsync(
             GatewayInstallModeDetector.GetNativeProfileOwnershipPath(ctx.LocalDataDir),
-            """{"ManagedConfigPaths":["plugins.entries.stale.enabled"]}""");
+            $$"""{"ProfileName":"{{GatewayCliRunner.GetManagedNativeProfile(ctx.Config)}}","TaskName":"{{GatewayCliRunner.GetManagedNativeTaskName(ctx.Config)}}","ManagedConfigPaths":["plugins.entries.stale.enabled"]}""");
 
         var result = await new ConfigureGatewayStep().ExecuteAsync(ctx, CancellationToken.None);
 
