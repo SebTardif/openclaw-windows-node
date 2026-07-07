@@ -25,6 +25,7 @@ public class SetupConfigTests : IDisposable
     {
         var config = new SetupConfig();
         Assert.Equal("OpenClawGateway", config.DistroName);
+        Assert.Equal(GatewayInstallMode.Wsl, config.InstallMode);
         Assert.Equal(18789, config.GatewayPort);
         Assert.Equal("Ubuntu-24.04", config.BaseDistro);
         Assert.False(config.Headless);
@@ -103,6 +104,10 @@ public class SetupConfigTests : IDisposable
         config.Gateway.Bind = "loopback";
         config.BaseDistro = "Debian";
         Assert.Contains("Ubuntu-24.04", TailscaleSetupPolicy.ValidateConfig(config));
+
+        config.BaseDistro = "Ubuntu-24.04";
+        config.InstallMode = GatewayInstallMode.NativeWindows;
+        Assert.Contains("WSL gateway mode", TailscaleSetupPolicy.ValidateConfig(config));
     }
 
     [Fact]
@@ -124,6 +129,17 @@ public class SetupConfigTests : IDisposable
         Assert.True(TailscaleSetupPolicy.TryParseStatus("""{"BackendState":"NeedsLogin","AuthURL":"https://login.tailscale.com/a/next-token","Health":["register request: http 410: auth path not found"]}""", out var staleAuthorization));
         Assert.True(staleAuthorization.HasExpiredAuthorizationPath);
         Assert.Equal("https://login.tailscale.com/a/next-token", staleAuthorization.AuthorizationUri?.AbsoluteUri);
+    }
+
+    [Fact]
+    public void LoadFromFile_ParsesNativeWindowsInstallMode()
+    {
+        var path = Path.Combine(_tempDir, "native-config.json");
+        File.WriteAllText(path, """{"InstallMode":"NativeWindows"}""");
+
+        var config = SetupConfig.LoadFromFile(path);
+        Assert.Equal(GatewayInstallMode.NativeWindows, config.InstallMode);
+        Assert.Equal(GatewayInstallMode.NativeWindows, config.InstallMode);
     }
 
     [Fact]
@@ -182,12 +198,14 @@ public class SetupConfigTests : IDisposable
         var prevPort = Environment.GetEnvironmentVariable("OPENCLAW_SETUP_PORT");
         var prevHeadless = Environment.GetEnvironmentVariable("OPENCLAW_SETUP_HEADLESS");
         var prevTrustTailscaleAuth = Environment.GetEnvironmentVariable("OPENCLAW_SETUP_TAILSCALE_TRUST_AUTH");
+        var prevMode = Environment.GetEnvironmentVariable("OPENCLAW_SETUP_MODE");
         try
         {
             Environment.SetEnvironmentVariable("OPENCLAW_SETUP_DISTRO", "EnvDistro");
             Environment.SetEnvironmentVariable("OPENCLAW_SETUP_PORT", "9876");
             Environment.SetEnvironmentVariable("OPENCLAW_SETUP_HEADLESS", "true");
             Environment.SetEnvironmentVariable("OPENCLAW_SETUP_TAILSCALE_TRUST_AUTH", "true");
+            Environment.SetEnvironmentVariable("OPENCLAW_SETUP_MODE", "native");
 
             var config = SetupConfig.FromEnvironment();
             Assert.Equal("EnvDistro", config.DistroName);
@@ -195,6 +213,7 @@ public class SetupConfigTests : IDisposable
             Assert.True(config.Headless);
             Assert.True(config.Tailscale.Enabled);
             Assert.True(config.Tailscale.TrustTailscaleAuth);
+            Assert.Equal(GatewayInstallMode.NativeWindows, config.InstallMode);
         }
         finally
         {
@@ -202,6 +221,7 @@ public class SetupConfigTests : IDisposable
             Environment.SetEnvironmentVariable("OPENCLAW_SETUP_PORT", prevPort);
             Environment.SetEnvironmentVariable("OPENCLAW_SETUP_HEADLESS", prevHeadless);
             Environment.SetEnvironmentVariable("OPENCLAW_SETUP_TAILSCALE_TRUST_AUTH", prevTrustTailscaleAuth);
+            Environment.SetEnvironmentVariable("OPENCLAW_SETUP_MODE", prevMode);
         }
     }
 

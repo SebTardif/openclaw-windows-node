@@ -57,6 +57,19 @@ public sealed partial class CapabilitiesPage : Page
     protected override void OnNavigatedTo(NavigationEventArgs e)
     {
         _config = e.Parameter as SetupConfig ?? new SetupConfig();
+        SetupTitleText.Text = _config.InstallMode == GatewayInstallMode.NativeWindows
+            ? "Set up the Windows gateway"
+            : "Set up the WSL gateway";
+        InstallAdminBorder.Visibility = _config.InstallMode == GatewayInstallMode.Wsl
+            ? Visibility.Visible
+            : Visibility.Collapsed;
+        InstallRuntimeBadgeText.Text = _config.InstallMode == GatewayInstallMode.NativeWindows
+            ? "No WSL"
+            : "~200 MB";
+        var supportsTailscale = _config.InstallMode == GatewayInstallMode.Wsl;
+        TailscaleCard.Visibility = supportsTailscale ? Visibility.Visible : Visibility.Collapsed;
+        if (!supportsTailscale)
+            _config.Tailscale.Enabled = false;
         // The tray always registers device.info/status with Node Mode. Keep the
         // setup declaration and gateway allowlist aligned with that runtime contract.
         _config.Capabilities.Device = true;
@@ -206,7 +219,8 @@ public sealed partial class CapabilitiesPage : Page
             }
         }
         config.Settings.ApplyCapabilities(caps);
-        config.Tailscale.Enabled = TailscaleToggle.IsOn == true;
+        config.Tailscale.Enabled = config.InstallMode == GatewayInstallMode.Wsl
+            && TailscaleToggle.IsOn == true;
         config.Tailscale.TrustTailscaleAuth = TailscaleTrustAuthToggle.IsOn == true;
         config.Tailscale.AuthMode = TailscaleAuthModeSelector.SelectedIndex == 1
             ? TailscaleAuthMode.AuthKey
