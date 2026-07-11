@@ -115,17 +115,8 @@ public sealed partial class WelcomePage : Page
             return;
         }
 
-        if (_installMode == GatewayInstallMode.Wsl)
-        {
-            AsyncEventHandlerGuard.Run(
-                StartWslInstallAsync,
-                NullLogger.Instance,
-                nameof(Next_Click));
-            return;
-        }
-
         AsyncEventHandlerGuard.Run(
-            () => StartInstallAsync(GatewayInstallMode.NativeWindows),
+            StartInstallWithConfirmationAsync,
             NullLogger.Instance,
             nameof(Next_Click));
     }
@@ -142,28 +133,28 @@ public sealed partial class WelcomePage : Page
         return Task.CompletedTask;
     }
 
-    private async Task StartWslInstallAsync()
+    private async Task StartInstallWithConfirmationAsync()
     {
         var config = _config ?? throw new InvalidOperationException("Setup configuration has not been loaded.");
         var setupWindow = SetupWindow.Active;
         var dataDir = setupWindow?.DataDir ?? SetupContext.ResolveDataDir();
+        var localDataDir = setupWindow?.LocalDataDir ?? SetupContext.ResolveLocalDataDir();
+        config.InstallMode = _installMode;
 
         NextButton.IsEnabled = false;
         InstallTitle.Text = CheckingButtonText;
         var navigating = false;
         try
         {
-            var existing = await Task.Run(() => ExistingConfigDetector.Detect(dataDir, config.DistroName));
+            var existing = await Task.Run(() => ExistingConfigDetector.Detect(dataDir, localDataDir, config));
             var xamlRoot = XamlRoot;
             if (setupWindow is null or { IsClosed: true } || xamlRoot is null)
                 return;
 
-            var summary = ExistingConfigDetector.BuildReplacementSummary(existing);
+            var summary = ExistingConfigDetector.BuildReplacementSummary(existing, _installMode);
             var dialog = new ContentDialog
             {
-                Title = existing.HasLocalGateway || existing.HasDistro
-                    ? "Replace existing WSL gateway?"
-                    : "Install a new WSL gateway?",
+                Title = ExistingConfigDetector.BuildReplacementTitle(existing, _installMode),
                 Content = summary,
                 PrimaryButtonText = "Continue",
                 CloseButtonText = "Cancel",
@@ -175,7 +166,7 @@ public sealed partial class WelcomePage : Page
                 return;
 
             navigating = true;
-            await StartInstallAsync(GatewayInstallMode.Wsl);
+            await StartInstallAsync(_installMode);
         }
         finally
         {

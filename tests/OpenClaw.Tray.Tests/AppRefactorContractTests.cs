@@ -784,11 +784,11 @@ public sealed class AppRefactorContractTests
     }
 
     [Fact]
-    public void SetupWelcomePage_LocalChoiceNavigatesDirectlyToCapabilities()
+    public void SetupWelcomePage_SelectedInstallNavigatesToCapabilities()
     {
         var root = TestRepositoryPaths.GetRepositoryRoot();
         var source = File.ReadAllText(Path.Combine(root, "src", "OpenClaw.SetupEngine.UI", "Pages", "WelcomePage.xaml.cs"));
-        var method = ExtractMethod(source, "StartButtonClickAsync");
+        var method = ExtractMethod(source, "StartInstallAsync");
 
         Assert.Contains("config.InstallMode = installMode", method);
         Assert.Contains("GatewayLkgVersion.ApplyToConfig(config)", method);
@@ -817,6 +817,7 @@ public sealed class AppRefactorContractTests
         Assert.Contains("ScrollViewer.VerticalScrollMode=\"Disabled\"", xaml);
         Assert.Contains("SelectionChanged=\"GatewayChoice_SelectionChanged\"", xaml);
         Assert.Contains("AutomationProperties.AutomationId=\"WelcomeInstallLocalGatewayChoice\"", xaml);
+        Assert.Contains("AutomationProperties.AutomationId=\"WelcomeInstallNativeGatewayChoice\"", xaml);
         Assert.Contains("AutomationProperties.AutomationId=\"WelcomeConnectExistingGatewayChoice\"", xaml);
         Assert.DoesNotContain("PointerPressed=", xaml);
         // The old duplicate card-selection chrome and its border-swap logic must not return.
@@ -827,9 +828,11 @@ public sealed class AppRefactorContractTests
         Assert.DoesNotContain("GatewayChoiceSelector.SelectedIndex = 0;", welcomePage);
         Assert.Contains("_suppressSelectionWrite = true", welcomePage);
         Assert.Contains("SetupWindow.Active?.IsWelcomeInstallSelected ?? true", welcomePage);
-        Assert.Contains("SetupWindow.Active?.SetWelcomeInstallSelected(installSelected)", welcomePage);
+        Assert.Contains("SetupWindow.Active?.SetWelcomeInstallSelected(_installSelected)", welcomePage);
+        Assert.Contains("SetupWindow.Active?.SetWelcomeInstallMode(_installMode)", welcomePage);
         Assert.Contains("private bool _isWelcomeInstallSelected = true", setupWindow);
         Assert.Contains("public bool IsWelcomeInstallSelected => _isWelcomeInstallSelected", setupWindow);
+        Assert.Contains("public GatewayInstallMode WelcomeInstallMode => _welcomeInstallMode", setupWindow);
     }
 
     [Fact]
