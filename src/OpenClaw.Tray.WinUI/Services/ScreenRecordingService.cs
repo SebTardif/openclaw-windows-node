@@ -5,7 +5,6 @@ using System.Threading;
 using System.Threading.Tasks;
 using Windows.Graphics.Capture;
 using Windows.Graphics.DirectX;
-using Windows.Graphics.DirectX.Direct3D11;
 using Windows.Graphics.Imaging;
 using Windows.Media.Core;
 using Windows.Media.MediaProperties;
@@ -13,7 +12,6 @@ using Windows.Media.Transcoding;
 using Windows.Storage.Streams;
 using OpenClaw.Shared;
 using OpenClaw.Shared.Capabilities;
-using WinRT;
 
 namespace OpenClawTray.Services;
 
@@ -56,7 +54,7 @@ internal sealed class ScreenRecordingService : IDisposable
         var item    = CreateCaptureItem(screenIndex);
         var width   = item.Size.Width;
         var height  = item.Size.Height;
-        var d3d     = CreateDirect3DDevice();
+        var d3d     = GraphicsCaptureInterop.CreateDirect3DDevice();
 
         Direct3D11CaptureFramePool? pool    = null;
         GraphicsCaptureSession?     session = null;
@@ -269,37 +267,11 @@ internal sealed class ScreenRecordingService : IDisposable
     }
 
     // D3D11 / WinRT interop
-
-    // IID_IDXGIDevice
-    private static readonly Guid IID_DXGIDevice =
-        new Guid("54ec77fa-1377-44e6-8c32-88fd5f44c84c");
-
-    private static IDirect3DDevice CreateDirect3DDevice()
-    {
-        // D3D_DRIVER_TYPE_HARDWARE=1, D3D11_CREATE_DEVICE_BGRA_SUPPORT=0x20, D3D11_SDK_VERSION=7
-        var hr = D3D11CreateDevice(IntPtr.Zero, 1, IntPtr.Zero, 0x20, IntPtr.Zero, 0, 7,
-            out var d3dPtr, IntPtr.Zero, IntPtr.Zero);
-        Marshal.ThrowExceptionForHR(hr);
-        if (d3dPtr == IntPtr.Zero)
-            throw new InvalidOperationException("D3D11 device creation returned a null device.");
-
-        var iid = IID_DXGIDevice;
-        hr = Marshal.QueryInterface(d3dPtr, in iid, out var dxgiPtr);
-        Marshal.Release(d3dPtr);
-        Marshal.ThrowExceptionForHR(hr);
-        if (dxgiPtr == IntPtr.Zero)
-            throw new InvalidOperationException("D3D11 device did not expose IDXGIDevice.");
-
-        hr = NativeCreateDirect3D11DeviceFromDXGIDevice(dxgiPtr, out var winrtPtr);
-        Marshal.Release(dxgiPtr);
-        Marshal.ThrowExceptionForHR(hr);
-        if (winrtPtr == IntPtr.Zero)
-            throw new InvalidOperationException("WinRT Direct3D device creation returned a null device.");
-
-        var device = MarshalInterface<IDirect3DDevice>.FromAbi(winrtPtr);
-        Marshal.Release(winrtPtr);
-        return device;
-    }
+    //
+    // The D3D device + GraphicsCaptureItem activation boilerplate lives in
+    // GraphicsCaptureInterop, shared with WindowGraphicsCaptureHelper's
+    // single-window capture path, so neither stands up a duplicate D3D
+    // device stack.
 
     private static GraphicsCaptureItem CreateCaptureItem(int screenIndex)
     {
@@ -310,37 +282,7 @@ internal sealed class ScreenRecordingService : IDisposable
             throw new ArgumentOutOfRangeException(nameof(screenIndex),
                 $"Screen index {screenIndex} is out of range (0-{monitors.Count - 1})");
 
-        const string classId = "Windows.Graphics.Capture.GraphicsCaptureItem";
-        var iid = typeof(IGraphicsCaptureItemInterop).GUID;
-
-        var hr = WindowsCreateString(classId, classId.Length, out var hstring);
-        Marshal.ThrowExceptionForHR(hr);
-        if (hstring == IntPtr.Zero)
-            throw new InvalidOperationException("GraphicsCaptureItem activation string was null.");
-
-        try
-        {
-            hr = RoGetActivationFactory(hstring, ref iid, out var factoryPtr);
-            Marshal.ThrowExceptionForHR(hr);
-            if (factoryPtr == IntPtr.Zero)
-                throw new InvalidOperationException("GraphicsCaptureItem activation factory was null.");
-
-            var factory = (IGraphicsCaptureItemInterop)Marshal.GetObjectForIUnknown(factoryPtr);
-            Marshal.Release(factoryPtr);
-
-            var itemIid = new Guid("AF86E2E0-B12D-4C6A-9C5A-D7AA65101E90"); // IInspectable
-            factory.CreateForMonitor(monitors[screenIndex], in itemIid, out var itemPtr);
-            if (itemPtr == IntPtr.Zero)
-                throw new InvalidOperationException("GraphicsCaptureItem creation returned a null item.");
-
-            var item = MarshalInspectable<GraphicsCaptureItem>.FromAbi(itemPtr);
-            Marshal.Release(itemPtr);
-            return item;
-        }
-        finally
-        {
-            WindowsDeleteString(hstring);
-        }
+        return GraphicsCaptureInterop.CreateCaptureItemForMonitor(monitors[screenIndex]);
     }
 
     private static List<IntPtr> GetMonitorHandles()
@@ -365,27 +307,6 @@ internal sealed class ScreenRecordingService : IDisposable
 
     // P/Invoke declarations
 
-    [DllImport("d3d11.dll")]
-    private static extern int D3D11CreateDevice(
-        IntPtr pAdapter, uint DriverType, IntPtr Software, uint Flags,
-        IntPtr pFeatureLevels, uint FeatureLevels, uint SDKVersion,
-        out IntPtr ppDevice, IntPtr pFeatureLevel, IntPtr ppImmediateContext);
-
-    [DllImport("d3d11.dll", EntryPoint = "CreateDirect3D11DeviceFromDXGIDevice")]
-    private static extern int NativeCreateDirect3D11DeviceFromDXGIDevice(
-        IntPtr dxgiDevice, out IntPtr graphicsDevice);
-
-    [DllImport("combase.dll")]
-    private static extern int WindowsCreateString(
-        [MarshalAs(UnmanagedType.LPWStr)] string sourceString, int length, out IntPtr hstring);
-
-    [DllImport("combase.dll")]
-    private static extern int WindowsDeleteString(IntPtr hstring);
-
-    [DllImport("combase.dll")]
-    private static extern int RoGetActivationFactory(
-        IntPtr runtimeClassId, ref Guid iid, out IntPtr factory);
-
     [DllImport("user32.dll")]
     private static extern bool EnumDisplayMonitors(
         IntPtr hdc, IntPtr lprcClip, MonitorEnumProc lpfnEnum, IntPtr dwData);
@@ -395,14 +316,4 @@ internal sealed class ScreenRecordingService : IDisposable
 
     [StructLayout(LayoutKind.Sequential)]
     private struct RECT { public int Left, Top, Right, Bottom; }
-
-    [ComImport]
-    [Guid("3628E81B-3CAC-4C60-B7F4-23CE0E0C3356")]
-    [InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
-    private interface IGraphicsCaptureItemInterop
-    {
-        void CreateForWindow(IntPtr hwnd, in Guid riid, out IntPtr ppv);
-        void CreateForMonitor(IntPtr hMonitor, in Guid riid, out IntPtr ppv);
-    }
-
 }

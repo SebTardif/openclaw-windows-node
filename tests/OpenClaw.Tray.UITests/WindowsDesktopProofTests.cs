@@ -21,10 +21,11 @@ namespace OpenClaw.Tray.UITests;
 ///
 /// Screenshot capture is a witness only, never the pass/fail oracle: the
 /// deterministic UI automation assertion (<see cref="AccessibilityAppFixture.NavigateAsync"/>
-/// reaching the page marker) is the sole oracle for this test. A screenshot
-/// capture failure (for example, a background process unable to steal
-/// foreground focus even in an interactive session) is recorded as an
-/// unavailable witness and must never flip the oracle outcome. See
+/// reaching the page marker) is the sole oracle for this test. Capture tries
+/// Windows.Graphics.Capture app-window capture first (works without
+/// foreground focus), then PrintWindow, then a safety-gated screen copy; a
+/// failure of every method is recorded as an unavailable witness and must
+/// never flip the oracle outcome. See
 /// .agents/skills/windows-computer-use-proof/SKILL.md.
 /// </summary>
 [Collection(AccessibilityCollection.Name)]
@@ -72,11 +73,20 @@ public sealed class WindowsDesktopProofTests
         proof.Add("navigation=ok");
 
         // Witness: best-effort screenshot capture. A failure here (for
-        // example SetForegroundWindow being denied to a background process)
-        // is recorded as an unavailable witness and must not fail the test;
+        // example every capture method being unavailable or blank) is
+        // recorded as an unavailable witness and must not fail the test;
         // the capture script still fails closed on the missing artifact, but
         // reports it as a distinct "artifact-missing" phase rather than an
         // "oracle-failed" app regression.
+        //
+        // Diagnostics privacy: CaptureHubScreenshotIfRequested collects
+        // method-specific exception type/HResult/message for every capture
+        // attempt (WindowsGraphicsCapture, PrintWindow, CopyFromScreen) in
+        // _app.LastScreenshotDiagnostics. That detail is written only to this
+        // test's private output (visible in the TRX / local test run), never
+        // appended to `proof`, which becomes the redacted, publishable
+        // proof.txt artifact. proof.txt only ever records a safe method name
+        // or a generic exception type name on failure.
         string screenshotStatus;
         try
         {
@@ -87,6 +97,15 @@ public sealed class WindowsDesktopProofTests
         catch (Exception ex)
         {
             screenshotStatus = $"screenshot=unavailable reason={ex.GetType().Name}";
+        }
+        finally
+        {
+            if (_app.LastScreenshotDiagnostics.Count > 0)
+            {
+                _output.WriteLine("screenshot capture diagnostics (private test output only, not written to proof.txt):");
+                foreach (var line in _app.LastScreenshotDiagnostics)
+                    _output.WriteLine($"  {line}");
+            }
         }
         proof.Add(screenshotStatus);
 

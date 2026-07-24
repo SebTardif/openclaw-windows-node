@@ -8,6 +8,7 @@ using System.Runtime.InteropServices;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Automation;
+using OpenClawTray.Services;
 
 namespace OpenClaw.Tray.UITests;
 
@@ -26,6 +27,14 @@ public sealed class AccessibilityAppFixture : IDisposable
     private static readonly TimeSpan DeepLinkTimeout = TimeSpan.FromSeconds(10);
     private static readonly TimeSpan NavigationTimeout = TimeSpan.FromSeconds(10);
     private static readonly TimeSpan NavigationSettleTime = TimeSpan.FromMilliseconds(1_000);
+    private static readonly TimeSpan WindowsGraphicsCaptureFrameTimeout = TimeSpan.FromSeconds(5);
+
+    // Screenshot capture method names, in selection order. These are the
+    // only values LastScreenshotCaptureMethod may report on success, and the
+    // only values that ever appear in the redacted, publishable proof.txt.
+    private const string WindowsGraphicsCaptureMethod = "WindowsGraphicsCapture";
+    private const string PrintWindowCaptureMethod = "PrintWindow";
+    private const string CopyFromScreenCaptureMethod = "CopyFromScreen";
 
     private readonly string _dataDirectory;
     private readonly string _executablePath;
@@ -34,6 +43,14 @@ public sealed class AccessibilityAppFixture : IDisposable
     public IntPtr HubWindowHandle { get; }
 
     public string? LastScreenshotCaptureMethod { get; private set; }
+
+    /// <summary>
+    /// Method-specific diagnostic detail (exception type, HResult, message)
+    /// for every capture attempt, successful or not. Intended for private
+    /// test output (xunit ITestOutputHelper / TRX) only; never written to
+    /// the redacted, publishable proof.txt.
+    /// </summary>
+    public IReadOnlyList<string> LastScreenshotDiagnostics { get; private set; } = Array.Empty<string>();
 
     public AccessibilityAppFixture()
     {
@@ -87,6 +104,18 @@ public sealed class AccessibilityAppFixture : IDisposable
         await WaitForPageMarkerAsync(pageTag, pageMarkerAutomationId);
     }
 
+    /// <summary>
+    /// Captures a screenshot witness of the Hub window, trying methods in
+    /// order of increasing risk: Windows.Graphics.Capture app-window capture
+    /// first (compositor output, works even without foreground focus and
+    /// without capturing anything else on the desktop), then app-scoped
+    /// PrintWindow, then a full screen-copy fallback that is only attempted
+    /// after proving the Hub window is visible, not minimized/cloaked, fully
+    /// on-screen, the foreground window, and unobscured by any other visible
+    /// window in front of it. This never captures the full desktop or an
+    /// unproven application rectangle, and always rejects a blank/near-
+    /// uniform result via <see cref="HasMeaningfulVisualContent"/>.
+    /// </summary>
     public string? CaptureHubScreenshotIfRequested()
     {
         var configuredPath = Environment.GetEnvironmentVariable("OPENCLAW_UI_SCREENSHOT_PATH");
@@ -110,44 +139,95 @@ public sealed class AccessibilityAppFixture : IDisposable
 
         var path = Path.GetFullPath(configuredPath, Environment.CurrentDirectory);
         Directory.CreateDirectory(Path.GetDirectoryName(path)!);
-        using var bitmap = new Bitmap(width, height, PixelFormat.Format32bppRgb);
 
+        var diagnostics = new List<string>();
         LastScreenshotCaptureMethod = null;
-        if (TryCaptureWindow(bitmap) && HasMeaningfulVisualContent(bitmap))
-        {
-            LastScreenshotCaptureMethod = "PrintWindow";
-        }
-        else
-        {
-            CaptureForegroundWindow(bitmap, left, top);
-            if (!HasMeaningfulVisualContent(bitmap))
-                throw new InvalidOperationException("Hub screenshot capture was blank or near-uniform.");
-            LastScreenshotCaptureMethod = "CopyFromScreen";
-        }
+        LastScreenshotDiagnostics = diagnostics;
 
-        bitmap.Save(path, ImageFormat.Png);
+        var attempts = new[]
+        {
+            new CaptureMethodSelector.MethodAttempt(WindowsGraphicsCaptureMethod, () => TryWindowsGraphicsCapture(diagnostics)),
+            new CaptureMethodSelector.MethodAttempt(PrintWindowCaptureMethod, () => TryPrintWindow(width, height, diagnostics)),
+            new CaptureMethodSelector.MethodAttempt(CopyFromScreenCaptureMethod, () => TrySafeForegroundScreenCopy(width, height, left, top, diagnostics)),
+        };
+
+        var (method, bitmap) = CaptureMethodSelector.SelectFirstMeaningful(attempts, HasMeaningfulVisualContent, diagnostics);
+        using (bitmap)
+        {
+            bitmap.Save(path, ImageFormat.Png);
+        }
+        LastScreenshotCaptureMethod = method;
 
         if (new FileInfo(path).Length == 0)
             throw new InvalidOperationException("Hub screenshot capture produced an empty file.");
         return path;
     }
 
-    private bool TryCaptureWindow(Bitmap bitmap)
+    /// <summary>
+    /// First attempt: picker-free Windows.Graphics.Capture of the Hub HWND
+    /// via <see cref="WindowGraphicsCaptureHelper"/>. Reads compositor output
+    /// directly, so it does not require foreground focus or an unobscured
+    /// window, and never touches any other window or the desktop. Returns
+    /// null (never throws) on any failure, recording method-specific
+    /// exception type/HResult/message into <paramref name="diagnostics"/>.
+    /// </summary>
+    private Bitmap? TryWindowsGraphicsCapture(List<string> diagnostics)
     {
+        WindowGraphicsCaptureHelper.CaptureOutcome outcome;
+        try
+        {
+            outcome = WindowGraphicsCaptureHelper.TryCaptureWindow(HubWindowHandle, WindowsGraphicsCaptureFrameTimeout);
+        }
+        catch (Exception ex)
+        {
+            diagnostics.Add($"{WindowsGraphicsCaptureMethod}: {ex.GetType().Name} hresult=0x{ex.HResult:X8} message={ex.Message}");
+            return null;
+        }
+
+        if (!outcome.Success)
+        {
+            var hresult = outcome.HResult is { } hr ? $"0x{hr:X8}" : "n/a";
+            diagnostics.Add($"{WindowsGraphicsCaptureMethod}: {outcome.FailureKind} hresult={hresult} message={outcome.FailureMessage}");
+            return null;
+        }
+
+        using var stream = new MemoryStream(outcome.PngBytes!);
+        using var loaded = new Bitmap(stream);
+        return new Bitmap(loaded); // detach the copy from the backing stream before it is disposed
+    }
+
+    private Bitmap? TryPrintWindow(int width, int height, List<string> diagnostics)
+    {
+        var bitmap = new Bitmap(width, height, PixelFormat.Format32bppRgb);
         using var graphics = Graphics.FromImage(bitmap);
         var deviceContext = graphics.GetHdc();
+        bool ok;
         try
         {
             const uint renderFullContent = 2;
-            return PrintWindow(HubWindowHandle, deviceContext, renderFullContent);
+            ok = PrintWindow(HubWindowHandle, deviceContext, renderFullContent);
         }
         finally
         {
             graphics.ReleaseHdc(deviceContext);
         }
+
+        if (ok)
+            return bitmap;
+
+        bitmap.Dispose();
+        diagnostics.Add($"{PrintWindowCaptureMethod}: PrintWindow returned false");
+        return null;
     }
 
-    private void CaptureForegroundWindow(Bitmap bitmap, int left, int top)
+    /// <summary>
+    /// Last-resort attempt: only captures the Hub's own screen rectangle,
+    /// and only after proving the window is visible, not minimized or
+    /// cloaked, fully on-screen, the foreground window, and unobscured by
+    /// any other visible window above it in z-order. Never captures the
+    /// full desktop and never proceeds on an unproven rectangle.
+    /// </summary>
+    private Bitmap? TrySafeForegroundScreenCopy(int width, int height, int left, int top, List<string> diagnostics)
     {
         var foreground = false;
         for (var attempt = 0; attempt < 20; attempt++)
@@ -160,10 +240,19 @@ public sealed class AccessibilityAppFixture : IDisposable
             Thread.Sleep(100);
         }
         if (!foreground)
-            throw new InvalidOperationException(
-                "PrintWindow did not produce a usable image and the Hub window could not be foregrounded for the fallback capture.");
+        {
+            diagnostics.Add($"{CopyFromScreenCaptureMethod}: could not foreground the Hub window");
+            return null;
+        }
         Thread.Sleep(500);
 
+        if (!TryVerifyHubWindowSafeToScreenCopy(out var reason))
+        {
+            diagnostics.Add($"{CopyFromScreenCaptureMethod}: refused, {reason}");
+            return null;
+        }
+
+        var bitmap = new Bitmap(width, height, PixelFormat.Format32bppRgb);
         using var graphics = Graphics.FromImage(bitmap);
         graphics.CopyFromScreen(
             left,
@@ -172,6 +261,7 @@ public sealed class AccessibilityAppFixture : IDisposable
             0,
             bitmap.Size,
             CopyPixelOperation.SourceCopy);
+        return bitmap;
     }
 
     private bool TryForegroundHubWindow()
@@ -201,6 +291,108 @@ public sealed class AccessibilityAppFixture : IDisposable
                 _ = AttachThreadInput(currentThreadId, foregroundThreadId, attach: false);
         }
     }
+
+    /// <summary>
+    /// Proves every safety condition the CopyFromScreen fallback requires:
+    /// the Hub window is visible, not minimized, not DWM-cloaked, fully
+    /// within the virtual screen bounds, the current foreground window, and
+    /// not covered by any other visible, non-cloaked, non-owned window
+    /// higher in z-order. <see cref="EnumWindows"/> visits top-level windows
+    /// top-to-bottom in z-order, so any window enumerated before the Hub
+    /// handle is stacked above it.
+    /// </summary>
+    private bool TryVerifyHubWindowSafeToScreenCopy(out string reason)
+    {
+        if (!IsWindowVisible(HubWindowHandle))
+        {
+            reason = "Hub window is not visible";
+            return false;
+        }
+        if (IsIconic(HubWindowHandle))
+        {
+            reason = "Hub window is minimized";
+            return false;
+        }
+        if (IsWindowCloaked(HubWindowHandle))
+        {
+            reason = "Hub window is DWM-cloaked";
+            return false;
+        }
+        if (!GetWindowRect(HubWindowHandle, out var hubRect))
+        {
+            reason = "GetWindowRect failed for the Hub window";
+            return false;
+        }
+
+        var screenLeft = GetSystemMetrics(VirtualScreenLeft);
+        var screenTop = GetSystemMetrics(VirtualScreenTop);
+        var screenRight = screenLeft + GetSystemMetrics(VirtualScreenWidth);
+        var screenBottom = screenTop + GetSystemMetrics(VirtualScreenHeight);
+        if (hubRect.Left < screenLeft || hubRect.Top < screenTop ||
+            hubRect.Right > screenRight || hubRect.Bottom > screenBottom)
+        {
+            reason = "Hub window is not fully on-screen";
+            return false;
+        }
+
+        if (GetForegroundWindow() != HubWindowHandle)
+        {
+            reason = "Hub window is not the foreground window";
+            return false;
+        }
+
+        var reachedHub = false;
+        string? obscuredBy = null;
+        EnumWindows((hWnd, _) =>
+        {
+            if (hWnd == HubWindowHandle)
+            {
+                reachedHub = true;
+                return false; // reached the Hub window in z-order; nothing above it remains unchecked
+            }
+            if (!IsWindowVisible(hWnd) || IsIconic(hWnd) || IsWindowCloaked(hWnd))
+                return true;
+            if (GetWindow(hWnd, GwOwner) == HubWindowHandle)
+                return true; // window owned by the Hub (e.g. its own popups)
+            if (!GetWindowRect(hWnd, out var otherRect))
+                return true;
+            if (RectsIntersect(hubRect, otherRect))
+            {
+                obscuredBy = $"hwnd=0x{hWnd:X}";
+                return false;
+            }
+            return true;
+        }, IntPtr.Zero);
+
+        if (obscuredBy != null)
+        {
+            reason = $"Hub window is obscured by another visible window ({obscuredBy})";
+            return false;
+        }
+
+        // Fail closed if enumeration never reached the Hub handle: the
+        // unobscured claim above is only proven for windows actually visited
+        // before the Hub in z-order, so an enumeration that never reaches it
+        // (unexpected termination, or the Hub is not a top-level window)
+        // cannot be trusted to have checked anything.
+        if (!reachedHub)
+        {
+            reason = "z-order enumeration never reached the Hub window; unobscured z-order could not be proven";
+            return false;
+        }
+
+        reason = string.Empty;
+        return true;
+    }
+
+    private static bool IsWindowCloaked(IntPtr hWnd)
+    {
+        var hr = DwmGetWindowAttribute(hWnd, DwmwaCloaked, out var cloaked, sizeof(int));
+        return hr == 0 && cloaked != 0;
+    }
+
+    private static bool RectsIntersect(RECT a, RECT b) =>
+        a.Left < b.Right && b.Left < a.Right && a.Top < b.Bottom && b.Top < a.Bottom;
 
     internal static bool HasMeaningfulVisualContent(Bitmap bitmap)
     {
@@ -356,4 +548,38 @@ public sealed class AccessibilityAppFixture : IDisposable
 
     [DllImport("user32.dll")]
     private static extern int GetSystemMetrics(int index);
+
+    // Safety-gate P/Invokes for the CopyFromScreen fallback: these prove the
+    // Hub window is visible, not minimized/cloaked, fully on-screen, and
+    // unobscured before any pixel is ever read off the full screen.
+
+    private const uint GwOwner = 4;
+    private const int DwmwaCloaked = 14;
+
+    private delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool EnumWindows(EnumWindowsProc lpEnumFunc, IntPtr lParam);
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool IsWindowVisible(IntPtr hWnd);
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool IsIconic(IntPtr hWnd);
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GetWindowRect(IntPtr hWnd, out RECT lpRect);
+
+    [DllImport("user32.dll")]
+    private static extern IntPtr GetWindow(IntPtr hWnd, uint uCmd);
+
+    [DllImport("dwmapi.dll")]
+    private static extern int DwmGetWindowAttribute(IntPtr hwnd, int dwAttribute, out int pvAttribute, int cbAttribute);
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct RECT { public int Left, Top, Right, Bottom; }
 }

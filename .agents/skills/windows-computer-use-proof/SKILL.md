@@ -101,15 +101,34 @@ collide and sort chronologically. Inside that folder:
 
 ## App-only capture and redaction
 
-- The screenshot is bounded to the Hub window's own automation
-  `BoundingRectangle` and captured directly from that window with the native
-  `PrintWindow` API. If that app-scoped capture is unavailable or blank, the
-  runner falls back to `CopyFromScreen` only after confirming the Hub is the
-  foreground window, and still clips to the Hub bounds. It never captures the
-  full desktop or taskbar. The capture is rejected when the client area is
-  blank or near-uniform, even if window chrome contains several colors.
-  Inspect the image before publication and redact any unexpected system
-  overlay that appeared inside the app bounds.
+- Capture tries three methods in order, each strictly scoped to the Hub
+  window, never the full desktop or taskbar:
+  1. **Windows.Graphics.Capture (WGC) app-window capture.** A picker-free,
+     one-frame capture of the Hub HWND via `IGraphicsCaptureItemInterop.CreateForWindow`,
+     reusing the same D3D11/WinRT device stack as the tray's screen-recording
+     pipeline. It reads compositor output directly, so it needs no foreground
+     focus and cannot see any other window or the desktop. It never shows the
+     system `GraphicsCapturePicker` UI and never calls `RequestAccessAsync`,
+     a capability declaration, or any other consent/authorization API; those
+     are the user-facing screen-recording consent flow and out of scope for
+     this proof-only capture.
+  2. **`PrintWindow`.** App-scoped, native window capture, tried when WGC is
+     unavailable or blank.
+  3. **Safety-gated `CopyFromScreen`.** Tried last, and only after proving
+     the Hub window is visible, not minimized, not DWM-cloaked, fully within
+     the virtual screen bounds, the current foreground window, and
+     unobscured by any other visible window in front of it in z-order. It
+     still clips strictly to the Hub's own bounds.
+  Every method's result is rejected when the client area is blank or
+  near-uniform, even if window chrome contains several colors. Inspect the
+  image before publication and redact any unexpected system overlay that
+  appeared inside the app bounds.
+- Diagnostics privacy: method-specific exception type, HRESULT, and message
+  for every attempted capture method are written to private test output
+  (visible in the TRX / local test run) only. The redacted, publishable
+  `proof.txt` never contains that detail; on success it names only the
+  winning method (`WindowsGraphicsCapture`, `PrintWindow`, or
+  `CopyFromScreen`), and on failure only a generic exception type name.
 - The isolated tray runs against synthetic/deterministic data only (a fresh
   temp data directory and the built-in Connection page route). It never
   reads or writes real gateway tokens, device keys, settings, or prompts.
@@ -175,16 +194,54 @@ it is.
 ## Known environment constraint
 
 Screenshot capture requires an interactive Windows desktop session. The
-fixture first uses app-scoped `PrintWindow`, which does not need to steal
-foreground activation. If Windows returns an unusable image, it falls back to
-the existing foregrounded `CopyFromScreen` path. GitHub-hosted
+fixture first tries Windows.Graphics.Capture app-window capture, which reads
+compositor output directly and does not need foreground activation at all;
+this is the method most likely to succeed on a background/non-foregrounded
+process. If WGC is unsupported (`GraphicsCaptureSession.IsSupported()` is
+false on older hosts), unavailable, or blank, it falls back to app-scoped
+`PrintWindow`, which also does not need to steal foreground activation. If
+that is unusable too, it falls back to the safety-gated `CopyFromScreen` path,
+which only proceeds after confirming the Hub window is visible, not
+minimized/cloaked, fully on-screen, foreground, and unobscured. GitHub-hosted
 `windows-latest` runners and normal interactive developer sessions provide an
 interactive desktop. A hard non-interactive host (Session 0) is caught early
-by the `environment-non-interactive` guard above. If both capture methods fail,
-the test records that exception around the screenshot witness only, so the
-runner reports `artifact-missing` (oracle passed, witness unavailable) rather
-than an unexplained test failure. Report that case explicitly as a blocker
+by the `environment-non-interactive` guard above. If every capture method
+fails, the test records that exception around the screenshot witness only
+(the redacted proof.txt line stays a generic exception type name; the full
+per-method exception type/HResult/message goes to private test output only),
+so the runner reports `artifact-missing` (oracle passed, witness unavailable)
+rather than an unexplained test failure. Report that case explicitly as a
+blocker, with the exact per-method diagnostics from the private test output,
 rather than skipping or faking the capture.
+
+`Environment.UserInteractive == true` and `sessionId != 0` only prove the
+process is attached to a real (non-Session-0) window station; neither one
+proves the desktop is actually being composited right now. A Remote Desktop
+session can report `UserInteractive: true` while disconnected, and DWM stops
+producing frames for any window in a disconnected session, which is exactly
+the failure mode WGC's frame-arrival timeout is built to catch rather than
+hang forever. Check the actual session state with `qwinsta` (or
+`query session`) before assuming a capture failure is a code bug:
+
+```
+> qwinsta
+ SESSIONNAME       USERNAME                 ID  STATE   TYPE
+ console                                     1  Conn
+>                  <user>                    2  Disc
+```
+
+A `Disc` state on the session the proof process is running in means there is
+no attached compositor session and no capture method (WGC, `PrintWindow`, or
+`CopyFromScreen`) can be expected to produce real screen content; a WGC
+timeout with "No frame arrived" in the private diagnostics is the expected,
+correctly-reported symptom, not evidence of a broken implementation. Recovery
+is host-level, not a workaround in the capture code: reconnect to the same
+session (the same RDP session ID or the physical console), confirm `qwinsta`
+now reports `Active` for that session, and rerun the script. Do not substitute
+a full-desktop or manual screenshot to paper over a disconnected session; the
+capture must stay app-scoped to the Hub window even during recovery, and a
+disconnected-session run should be reported as a blocker with the exact
+per-method diagnostics rather than retried with a broader capture.
 
 ## PR `## Real behavior proof` content
 
