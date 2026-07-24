@@ -66,6 +66,346 @@ public sealed class CleanWindowsRunnerScriptTests
         Assert.Contains("Restore-OwnedCheckpoint -ResolvedVhdPath $ResolvedVhdPath", script);
     }
 
+    [Fact]
+    public void HyperVController_DefaultsToStrictUnattendedCreateAndVerifiedOfficialIso()
+    {
+        var controller = ReadScript("Invoke-CleanWindowsHyperV.ps1");
+        var helper = ReadScript("CleanWindowsUnattend.psm1");
+
+        Assert.Contains("[string]$CreateMode = \"Unattended\"", controller);
+        Assert.Contains("[switch]$GenerateCredential", controller);
+        Assert.Contains("[switch]$ResumeUnattended", controller);
+        Assert.Contains("[switch]$CleanupUnattend", controller);
+        Assert.Contains("[string]$CredentialPath", controller);
+        Assert.Contains(
+            "A61ADEAB895EF5A4DB436E0A7011C92A2FF17BB0357F58B13BBC4062E535E7B9",
+            controller);
+        Assert.Contains("Get-CleanWindowsFileSha256 -Path $ResolvedIsoPath", controller);
+        Assert.Contains("Refusing to create the VM", controller);
+        Assert.Contains(
+            "Unattended Create requires the pinned Windows 11 Enterprise Evaluation ISO SHA256.",
+            controller);
+
+        var create = controller[controller.IndexOf("function Invoke-CreateCommand", StringComparison.Ordinal)..];
+        Assert.True(
+            create.IndexOf("Assert-WindowsIsoHash -ResolvedIsoPath", StringComparison.Ordinal) <
+            create.IndexOf("New-OwnedHyperVVm", StringComparison.Ordinal));
+        Assert.Contains("Import-Module (Join-Path $PSScriptRoot \"CleanWindowsUnattend.psm1\")", controller);
+        Assert.Contains("New-CleanWindowsAnswerIso", controller);
+        Assert.Contains("Test-CleanWindowsAnswerIsoMount", controller);
+        Assert.Contains("Add-VMDvdDrive -VMName $VMName -Path $ResolvedIsoPath", controller);
+        Assert.Contains("Add-VMDvdDrive -VMName $VMName -Path $AnswerIsoPath", controller);
+        Assert.Contains("-FirstBootDevice $windowsDvdDrive", controller);
+        Assert.Contains("IMAPI2FS.MsftFileSystemImage", helper);
+        Assert.Contains("$root.AddTree($resolvedStagingPath, $false)", helper);
+        Assert.DoesNotContain("oscdimg", helper, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void HyperVController_MountValidatesAnswerIsoBeforeAnyUnattendedVmOrVhdCreation()
+    {
+        var controller = ReadScript("Invoke-CleanWindowsHyperV.ps1");
+        var unattendedStart = controller.IndexOf(
+            "$paths = Get-UnattendPaths -ResolvedVhdPath $resolvedVhdPath",
+            StringComparison.Ordinal);
+        var unattendedEnd = controller.IndexOf(
+            "function Invoke-PrepareCommand",
+            unattendedStart,
+            StringComparison.Ordinal);
+        var unattendedCreate = controller[unattendedStart..unattendedEnd];
+
+        var generateIndex = unattendedCreate.IndexOf(
+            "New-CleanWindowsAnswerIso",
+            StringComparison.Ordinal);
+        var validateIndex = unattendedCreate.IndexOf(
+            "Test-CleanWindowsAnswerIsoMount",
+            StringComparison.Ordinal);
+        var createVmIndex = unattendedCreate.IndexOf(
+            "$vm = New-OwnedHyperVVm",
+            StringComparison.Ordinal);
+        Assert.True(generateIndex >= 0);
+        Assert.True(validateIndex > generateIndex);
+        Assert.True(createVmIndex > validateIndex);
+        Assert.Contains("-ExpectedAnswerFilePath $paths.AnswerFilePath", unattendedCreate);
+        Assert.Contains("-Status \"answer-media-validated\"", unattendedCreate);
+    }
+
+    [Fact]
+    public void HyperVController_ClearsGen2OpticalPromptWithBoundedVmIdCimKeyboard()
+    {
+        var controller = ReadScript("Invoke-CleanWindowsHyperV.ps1");
+        var functionStart = controller.IndexOf(
+            "function Invoke-UnattendedOpticalBootKey",
+            StringComparison.Ordinal);
+        var functionEnd = controller.IndexOf(
+            "function Detach-OwnedInstallationMedia",
+            functionStart,
+            StringComparison.Ordinal);
+        var bootKeyFunction = controller[functionStart..functionEnd];
+
+        Assert.Contains("$script:OpticalBootKeyWindowSec = 7", controller);
+        Assert.Contains("$script:OpticalBootInitialDelayMilliseconds = 750", controller);
+        Assert.Contains("$script:OpticalBootPulseIntervalMilliseconds = 750", controller);
+        Assert.Contains("$script:OpticalBootMaxPulseCount = 9", controller);
+        Assert.Contains("\"Get-CimInstance\"", controller);
+        Assert.Contains("\"Get-CimAssociatedInstance\"", controller);
+        Assert.Contains("\"Invoke-CimMethod\"", controller);
+        Assert.Contains("\"root\\virtualization\\v2\"", bootKeyFunction);
+        Assert.Contains("\"Msvm_ComputerSystem\"", bootKeyFunction);
+        Assert.Contains("([Guid]$VmObject.Id).ToString(\"D\")", bootKeyFunction);
+        Assert.Contains("-Filter (\"Name = '{0}'\" -f $vmId)", bootKeyFunction);
+        Assert.Contains("\"Msvm_Keyboard\"", bootKeyFunction);
+        Assert.Contains("-MethodName \"TypeKey\"", bootKeyFunction);
+        Assert.Contains("@{ keyCode = [uint32]0x20 }", bootKeyFunction);
+        Assert.Contains("$successfulDeliveries++", bootKeyFunction);
+        Assert.Contains("$pulseCount -lt $script:OpticalBootMaxPulseCount", bootKeyFunction);
+        Assert.Contains("Start-Sleep -Milliseconds $script:OpticalBootPulseIntervalMilliseconds", bootKeyFunction);
+        Assert.Contains("$lastCimError = $_", bootKeyFunction);
+        Assert.Contains("Safe diagnostic: $lastDiagnostic", bootKeyFunction);
+        Assert.Contains("Last CIM error: $safeLastError", bootKeyFunction);
+        Assert.DoesNotContain("$lastCimError.Exception.Message", bootKeyFunction, StringComparison.Ordinal);
+        Assert.Contains("fixed boot window", bootKeyFunction);
+        Assert.DoesNotContain(
+            bootKeyFunction.Split('\n'),
+            line => string.Equals(line.Trim(), "return", StringComparison.Ordinal));
+        Assert.DoesNotContain("while ($true)", bootKeyFunction, StringComparison.Ordinal);
+        Assert.DoesNotContain("catch {\r\n        }", bootKeyFunction, StringComparison.Ordinal);
+        Assert.DoesNotContain("$VMName", bootKeyFunction, StringComparison.Ordinal);
+
+        var createStart = controller.IndexOf("function Invoke-CreateCommand", StringComparison.Ordinal);
+        var createEnd = controller.IndexOf("function Invoke-PrepareCommand", createStart, StringComparison.Ordinal);
+        var createBody = controller[createStart..createEnd];
+        var initialStartIndex = createBody.LastIndexOf(
+            "Start-VM -Name $VMName -Confirm:$false",
+            StringComparison.Ordinal);
+        var bootKeyIndex = createBody.IndexOf(
+            "Invoke-UnattendedOpticalBootKey -VmObject $vm",
+            StringComparison.Ordinal);
+        var directWaitIndex = createBody.IndexOf(
+            "Complete-UnattendedInstallation",
+            bootKeyIndex,
+            StringComparison.Ordinal);
+        Assert.True(initialStartIndex >= 0);
+        Assert.True(bootKeyIndex > initialStartIndex);
+        Assert.True(directWaitIndex > bootKeyIndex);
+
+        var manualStart = createBody.IndexOf("if ($CreateMode -eq \"Manual\")", StringComparison.Ordinal);
+        var unattendedStart = createBody.IndexOf(
+            "$paths = Get-UnattendPaths",
+            manualStart,
+            StringComparison.Ordinal);
+        Assert.DoesNotContain(
+            "Invoke-UnattendedOpticalBootKey",
+            createBody[manualStart..unattendedStart],
+            StringComparison.Ordinal);
+        var resumeStart = controller.IndexOf(
+            "function Invoke-ResumeUnattendedCommand",
+            StringComparison.Ordinal);
+        var resumeEnd = controller.IndexOf("function Invoke-CreateCommand", resumeStart, StringComparison.Ordinal);
+        Assert.DoesNotContain(
+            "Invoke-UnattendedOpticalBootKey",
+            controller[resumeStart..resumeEnd],
+            StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("Fresh", "Fresh unattended Create requires -GenerateCredential")]
+    [InlineData("Resume", "GenerateCredential is accepted only for a fresh unattended Create")]
+    [InlineData("Cleanup", "GenerateCredential is accepted only for a fresh unattended Create")]
+    [InlineData("Manual", "GenerateCredential is accepted only for unattended Create")]
+    public void HyperVController_EnforcesGenerateCredentialConsentBeforeHyperV(
+        string scenario,
+        string expectedError)
+    {
+        var result = RunHyperVParameterContract(scenario);
+
+        Assert.NotEqual(0, result.ExitCode);
+        Assert.Contains(expectedError, result.Stderr);
+        Assert.DoesNotContain("Run this controller from an elevated PowerShell session", result.Stderr);
+    }
+
+    [Fact]
+    public void UnattendHelper_EnforcesImageDiskLocaleOobeAndNoAutologonContract()
+    {
+        var helper = ReadScript("CleanWindowsUnattend.psm1");
+
+        Assert.Contains("New-Object Xml.XmlDocument", helper);
+        Assert.Contains("$element.InnerText = $Text", helper);
+        Assert.Contains("\"/IMAGE/INDEX\"", helper);
+        Assert.Contains("exactly one supported OS image selector", helper);
+        Assert.Contains("must not combine unsupported index and name selectors", helper);
+        Assert.Contains("Windows 11 Enterprise Evaluation", helper);
+        Assert.Contains("-Type \"EFI\" -Size \"260\"", helper);
+        Assert.Contains("-Type \"MSR\" -Size \"16\"", helper);
+        Assert.Contains("-Type \"Primary\" -Extend", helper);
+        Assert.Contains("-Format \"FAT32\"", helper);
+        Assert.Contains("-Format \"NTFS\"", helper);
+        Assert.Contains("-Letter \"C\"", helper);
+        Assert.Contains("\"WillWipeDisk\" -Text \"true\"", helper);
+        Assert.Contains("\"en-US\"", helper);
+        Assert.Contains("SkipMachineOOBE", helper);
+        Assert.Contains("SkipUserOOBE", helper);
+        Assert.Contains("\"Administrators\"", helper);
+        Assert.Contains("\"AutoLogon\"", helper);
+        Assert.Contains("\"ProductKey\"", helper);
+        Assert.Contains("Answer file must not contain $forbiddenName", helper);
+        Assert.DoesNotContain("<AutoLogon", helper, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("<ProductKey", helper, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("FirstLogonCommands>", helper, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("RunSynchronous>", helper, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void HyperVController_ProtectsRotatesAndCleansCredentialAndAnswerMaterial()
+    {
+        var controller = ReadScript("Invoke-CleanWindowsHyperV.ps1");
+        var helper = ReadScript("CleanWindowsUnattend.psm1");
+
+        Assert.Contains("Export-Clixml -LiteralPath $resolvedCredentialPath", helper);
+        Assert.Contains("current-user-dpapi-clixml", helper);
+        Assert.Contains("SetAccessRuleProtection($true, $false)", helper);
+        Assert.Contains("S-1-5-18", helper);
+        Assert.Contains("S-1-5-32-544", helper);
+        Assert.Contains("Path must stay beneath the owned marker directory.", helper);
+        Assert.Contains("Protect-CleanWindowsOwnedDirectory", controller);
+        Assert.DoesNotContain("not '$Expected'", helper, StringComparison.Ordinal);
+        Assert.Contains("Open-GuestSession", controller);
+        Assert.Contains("$UnattendedInstallTimeoutSec", controller);
+        Assert.Contains("Detach-OwnedInstallationMedia -State $State", controller);
+        Assert.Contains("Set-VMDvdDrive", controller);
+        Assert.Contains("Remove-OwnedUnattendMedia -Paths $Paths", controller);
+        Assert.Contains("Remove-GuestUnattendCache -Session $setupSession", controller);
+        Assert.Contains("Set-LocalUser -InputObject $localUser -Password $FinalSecurePassword", controller);
+        Assert.Contains("Assert-OldCredentialRejected", controller);
+        var finalSessionIndex = controller.IndexOf(
+            "$finalSession = Open-GuestSession -GuestCredential $finalCredential",
+            StringComparison.Ordinal);
+        var oldCredentialIndex = controller.IndexOf(
+            "Assert-OldCredentialRejected",
+            finalSessionIndex,
+            StringComparison.Ordinal);
+        Assert.True(finalSessionIndex >= 0);
+        Assert.True(oldCredentialIndex > finalSessionIndex);
+        Assert.Contains("Test-CleanWindowsCredentialAuthenticationRejection", controller);
+        Assert.Contains("Old credential attempt failed for a non-authentication reason", controller);
+        Assert.Contains("$probe.BeginInvoke()", controller);
+        Assert.Contains("AsyncWaitHandle.WaitOne([TimeSpan]::FromSeconds($TimeoutSec))", controller);
+        Assert.Contains("Confirming final credential PowerShell Direct availability", controller);
+        Assert.Contains("-TimeoutSec 120", controller);
+        Assert.Contains("CredentialPath = $Paths.FinalCredentialPath", controller);
+        Assert.Contains("ResumeUnattended", controller);
+        Assert.Contains("CleanupUnattend", controller);
+        Assert.Contains("Assert-UnattendStateMatchesVmMarker", controller);
+        Assert.Contains("Owned unattended-install marker Windows ISO does not match", controller);
+        Assert.Contains("requires -ConfirmOwnedAction and matching ownership markers", controller);
+        Assert.DoesNotContain("GetNetworkCredential().Password", controller, StringComparison.Ordinal);
+        Assert.DoesNotContain("ConvertFrom-SecureString -AsPlainText", controller, StringComparison.Ordinal);
+        Assert.DoesNotContain("Write-Host $Credential", controller, StringComparison.Ordinal);
+        Assert.DoesNotContain("Remove-VM ", controller, StringComparison.Ordinal);
+        Assert.DoesNotContain("Remove-VHD", controller, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void HyperVController_VerifiesInstalledEnterpriseEvaluationAndCompletedSetup()
+    {
+        var controller = ReadScript("Invoke-CleanWindowsHyperV.ps1");
+
+        Assert.Contains("Windows 11 Enterprise Evaluation", controller);
+        Assert.Contains("EnterpriseEval", controller);
+        Assert.Contains("PROCESSOR_ARCHITECTURE", controller);
+        Assert.Contains("\"AMD64\"", controller);
+        Assert.Contains("SystemSetupInProgress", controller);
+        Assert.Contains("OOBEInProgress", controller);
+        Assert.Contains("SetupPhase", controller);
+        Assert.Contains("SetupType", controller);
+        Assert.Contains("IMAGE_STATE_COMPLETE", controller);
+        Assert.Contains("Get-LocalUser", controller);
+        Assert.Contains("Get-LocalGroup -SID", controller);
+        Assert.Contains("AutoAdminLogon", controller);
+        Assert.Contains("DefaultPassword", controller);
+        Assert.Contains("installationMediaAttached = $false", controller);
+        Assert.Contains("autoLogon = $false", controller);
+    }
+
+    [Fact]
+    public void UnattendMediaValidation_GeneratesMountsVerifiesAndCleansWithoutASecretInOutput()
+    {
+        var ownedRoot = Path.Combine(
+            Root,
+            "TestResults",
+            "CleanWindowsUnattend",
+            $"test-{Guid.NewGuid():N}");
+        try
+        {
+            var result = RunUnattendValidation("ValidateMedia", ownedRoot);
+
+            Assert.True(
+                result.ExitCode == 0,
+                $"Media validation failed.\nstdout:\n{result.Stdout}\nstderr:\n{result.Stderr}");
+            var jsonLine = result.Stdout
+                .Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries)
+                .Last();
+            using var proof = JsonDocument.Parse(jsonLine);
+            var root = proof.RootElement;
+            Assert.True(root.GetProperty("succeeded").GetBoolean());
+            Assert.True(root.GetProperty("credential").GetProperty("dpapiRoundtrip").GetBoolean());
+            Assert.True(root.GetProperty("credential").GetProperty("restrictiveAcl").GetBoolean());
+            Assert.False(root.GetProperty("credential").GetProperty("passwordPrinted").GetBoolean());
+            Assert.True(root.GetProperty("answerMediaRestrictiveAcl").GetBoolean());
+            Assert.Equal(1, root.GetProperty("answerFile").GetProperty("imageIndex").GetInt32());
+            Assert.Equal(
+                "Windows 11 Enterprise Evaluation",
+                root.GetProperty("answerFile").GetProperty("imageName").GetString());
+            Assert.False(root.GetProperty("answerFile").GetProperty("autoLogon").GetBoolean());
+            Assert.False(root.GetProperty("answerFile").GetProperty("productKey").GetBoolean());
+            Assert.True(root.GetProperty("media").GetProperty("mountedReadOnly").GetBoolean());
+            Assert.True(root.GetProperty("media").GetProperty("answerFileAtRoot").GetBoolean());
+            Assert.DoesNotContain("OpenClawAdmin", result.Stdout, StringComparison.Ordinal);
+            Assert.DoesNotContain("OpenClaw & QA", result.Stdout, StringComparison.Ordinal);
+            Assert.False(Directory.Exists(ownedRoot));
+        }
+        finally
+        {
+            if (Directory.Exists(ownedRoot))
+            {
+                Directory.Delete(ownedRoot, recursive: true);
+            }
+        }
+    }
+
+    [Fact]
+    public void CredentialAuthenticationClassifier_RejectsTransientTransportFailures()
+    {
+        var ownedRoot = Path.Combine(
+            Root,
+            "TestResults",
+            "CleanWindowsUnattend",
+            $"classifier-{Guid.NewGuid():N}");
+        try
+        {
+            var result = RunUnattendValidation("ValidateAuthenticationClassifier", ownedRoot);
+
+            Assert.Equal(0, result.ExitCode);
+            var jsonLine = result.Stdout
+                .Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries)
+                .Last();
+            using var proof = JsonDocument.Parse(jsonLine);
+            var root = proof.RootElement;
+            Assert.True(root.GetProperty("succeeded").GetBoolean());
+            Assert.True(root.GetProperty("badPasswordRejected").GetBoolean());
+            Assert.True(root.GetProperty("accessDeniedRejected").GetBoolean());
+            Assert.False(root.GetProperty("transientTransportRejected").GetBoolean());
+            Assert.False(Directory.Exists(ownedRoot));
+        }
+        finally
+        {
+            if (Directory.Exists(ownedRoot))
+            {
+                Directory.Delete(ownedRoot, recursive: true);
+            }
+        }
+    }
+
     [Theory]
     [InlineData("CombinedInstalledSmoke", "normal", true, "combined-native-desktop-wsl2-installed-smoke", true)]
     [InlineData("NativeDesktopComponent", "normal", true, "native-desktop-component-only", false)]
@@ -304,6 +644,123 @@ public sealed class CleanWindowsRunnerScriptTests
 
     private static string ReadScript(string name) =>
         File.ReadAllText(Path.Combine(Root, "scripts", "clean-windows", name));
+
+    private static ProcessResult RunUnattendValidation(string command, string ownedRoot)
+    {
+        var script = Path.Combine(
+            Root,
+            "scripts",
+            "clean-windows",
+            "Test-CleanWindowsUnattendMedia.ps1");
+        var startInfo = new ProcessStartInfo
+        {
+            FileName = "powershell.exe",
+            UseShellExecute = false,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            CreateNoWindow = true,
+        };
+        foreach (var argument in new[]
+                 {
+                     "-NoProfile",
+                     "-ExecutionPolicy",
+                     "Bypass",
+                     "-File",
+                     script,
+                     "-Command",
+                     command,
+                     "-OwnedRoot",
+                     ownedRoot,
+                 })
+        {
+            startInfo.ArgumentList.Add(argument);
+        }
+
+        using var process = Process.Start(startInfo)
+            ?? throw new InvalidOperationException("Failed to start unattended media validation.");
+        var stdout = process.StandardOutput.ReadToEnd();
+        var stderr = process.StandardError.ReadToEnd();
+        if (!process.WaitForExit(120_000))
+        {
+            process.Kill(entireProcessTree: true);
+            throw new TimeoutException("Unattended media validation exceeded 120 seconds.");
+        }
+        return new ProcessResult(process.ExitCode, stdout, stderr);
+    }
+
+    private static ProcessResult RunHyperVParameterContract(string scenario)
+    {
+        var script = Path.Combine(
+            Root,
+            "scripts",
+            "clean-windows",
+            "Invoke-CleanWindowsHyperV.ps1");
+        var startInfo = new ProcessStartInfo
+        {
+            FileName = "powershell.exe",
+            UseShellExecute = false,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            CreateNoWindow = true,
+        };
+        var arguments = new List<string>
+        {
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            script,
+            "-Command",
+            "Create",
+            "-VMName",
+            "OpenClaw-Parameter-Contract",
+            "-OwnerId",
+            "openclaw-parameter-contract",
+            "-VhdPath",
+            Path.Combine(Root, "TestResults", "parameter-contract.vhdx"),
+        };
+        switch (scenario)
+        {
+            case "Fresh":
+                arguments.Add("-IsoPath");
+                arguments.Add(Path.Combine(Root, "TestResults", "missing.iso"));
+                break;
+            case "Resume":
+                arguments.Add("-ResumeUnattended");
+                arguments.Add("-GenerateCredential");
+                arguments.Add("-ConfirmOwnedAction");
+                break;
+            case "Cleanup":
+                arguments.Add("-CleanupUnattend");
+                arguments.Add("-GenerateCredential");
+                arguments.Add("-ConfirmOwnedAction");
+                break;
+            case "Manual":
+                arguments.Add("-CreateMode");
+                arguments.Add("Manual");
+                arguments.Add("-GenerateCredential");
+                arguments.Add("-IsoPath");
+                arguments.Add(Path.Combine(Root, "TestResults", "missing.iso"));
+                break;
+            default:
+                throw new ArgumentOutOfRangeException(nameof(scenario));
+        }
+        foreach (var argument in arguments)
+        {
+            startInfo.ArgumentList.Add(argument);
+        }
+
+        using var process = Process.Start(startInfo)
+            ?? throw new InvalidOperationException("Failed to start Hyper-V parameter validation.");
+        var stdout = process.StandardOutput.ReadToEnd();
+        var stderr = process.StandardError.ReadToEnd();
+        if (!process.WaitForExit(30_000))
+        {
+            process.Kill(entireProcessTree: true);
+            throw new TimeoutException("Hyper-V parameter validation exceeded 30 seconds.");
+        }
+        return new ProcessResult(process.ExitCode, stdout, stderr);
+    }
 
     private static ProcessResult RunCrabboxPlan(
         string mode,

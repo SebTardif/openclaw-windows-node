@@ -171,6 +171,41 @@ public sealed class WindowsProofSkillContractTests
     }
 
     [Fact]
+    public void HyperVSkills_RouteUnattendedCreateCredentialAndDesktopSecurity()
+    {
+        var hyperV = Read(".agents", "skills", "openclaw-hyperv-smoke", "SKILL.md");
+        var testing = Read(".agents", "skills", "windows-node-testing", "SKILL.md");
+        var docs = Read("docs", "CLEAN_WINDOWS_RUNNERS.md");
+        var combined = string.Join("\n", hyperV, testing, docs);
+
+        Assert.Contains("Win11_Enterprise_Eval_25H2_en-us_x64.iso", combined);
+        Assert.Contains(
+            "A61ADEAB895EF5A4DB436E0A7011C92A2FF17BB0357F58B13BBC4062E535E7B9",
+            combined);
+        Assert.Contains("Windows 11 Enterprise Evaluation", combined);
+        Assert.Contains("-GenerateCredential", combined);
+        Assert.Contains("requires `-GenerateCredential` as explicit consent", combined);
+        Assert.Contains("-CredentialPath", combined);
+        Assert.Contains("Test-CleanWindowsUnattendMedia.ps1", combined);
+        Assert.Contains("-ResumeUnattended", combined);
+        Assert.Contains("-CleanupUnattend", combined);
+        Assert.Contains("DPAPI", combined);
+        Assert.Contains("IMAPI2", combined);
+        Assert.Contains("before any VM or VHD creation", combined);
+        Assert.Contains("classified authentication", combined);
+        Assert.Contains(@"root\virtualization\v2", combined);
+        Assert.Contains("Msvm_Keyboard.TypeKey", combined);
+        Assert.Contains("trusted VM ID", combined);
+        Assert.Contains("fixed 7-second", combined);
+        Assert.Contains("multiple 750 ms", combined);
+        Assert.Contains("does not stop", combined);
+        Assert.Contains("never for resume", combined);
+        Assert.Contains("does not enable autologon", testing);
+        Assert.Contains("explicit interactive sign-in", combined);
+        Assert.Contains("never deletes", combined);
+    }
+
+    [Fact]
     public void ComputerUseProofSkill_DefinesOracleCurationAndFailClosedContracts()
     {
         var skill = Read(".agents", "skills", "windows-computer-use-proof", "SKILL.md");

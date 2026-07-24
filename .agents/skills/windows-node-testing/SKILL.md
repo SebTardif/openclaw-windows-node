@@ -224,7 +224,11 @@ runbook.
 .\scripts\setup-dev.ps1 -CheckOnly
 
 # Local operator-owned Hyper-V VM and checkpoint controller.
+# Create is unattended by default. Resume and cleanup are switches on Create.
 .\scripts\clean-windows\Invoke-CleanWindowsHyperV.ps1 -Command <Create|Prepare|Verify|Smoke|Restore> ...
+
+# Safe answer XML, DPAPI ACL, IMAPI2 ISO, mount, and cleanup proof. No VM.
+.\scripts\clean-windows\Test-CleanWindowsUnattendMedia.ps1 -Command ValidateMedia
 
 # Install the pinned Crabbox client, then run a disposable Azure Windows lease.
 .\scripts\clean-windows\Install-Crabbox.ps1
@@ -243,6 +247,30 @@ interactive Azure authentication, an approved image, Azure RBAC, and exact
 lease-id capture and cleanup. Missing elevation, RBAC, image preparation, or
 lease proof is an external blocker, never a reason to weaken ownership or
 success-shape separate component evidence.
+
+Fresh unattended Hyper-V `Create` requires `-GenerateCredential`, verifies the
+official ISO SHA256, builds a separate answer ISO with Windows IMAPI2, and
+mounts and validates that ISO before any VM or VHD creation. It then waits a
+bounded time for PowerShell Direct, but first clears the Gen2 optical boot
+prompt through Microsoft Hyper-V `root\virtualization\v2`
+`Msvm_Keyboard.TypeKey` using the trusted VM ID. It sends multiple 750 ms
+space-key pulses within a fixed 7-second boot-only window and does not stop
+after the first successful delivery. The bounded sequence runs only after
+fresh unattended `Start-VM`, never for resume or later reboots. The controller
+then detaches both ISO drives, removes answer media,
+verifies completed Windows 11 Enterprise Evaluation setup, and rotates the
+generated setup credential. It establishes the final-credential session
+before accepting only a classified authentication rejection from the old
+credential. It returns a current-user DPAPI `CredentialPath`; route
+`Prepare`, `Verify`, and `Smoke` through that path instead of passing
+plaintext. Owned partial installs may use `-ResumeUnattended` or
+`-CleanupUnattend`, but either requires `-ConfirmOwnedAction` and never deletes
+the VM or VHD.
+
+Unattended setup deliberately leaves the desktop at the sign-in screen and
+does not enable autologon. Native desktop screenshot proof requires a later
+explicit interactive sign-in. The no-VM media helper is focused setup-media
+proof only and is not clean-machine, installed-app, or desktop proof.
 
 GitHub-hosted `windows-latest` CI runners are clean by construction for normal
 automated suites, but they do not replace the controller-specific clean-machine

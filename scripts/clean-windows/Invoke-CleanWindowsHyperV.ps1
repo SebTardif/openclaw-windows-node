@@ -14,7 +14,8 @@
     - VMs and VHDs are never deleted by this script.
 
     Commands:
-    - Create: create a new Gen2 VM and attach the Windows 11 ISO
+    - Create: verify the Microsoft ISO, create a new Gen2 VM, and perform a
+      strict unattended install by default
     - Prepare: capture clean-windows, install guest prerequisites, capture
       openclaw-prerequisites
     - Verify: restore openclaw-prerequisites and verify host plus guest readiness
@@ -43,7 +44,24 @@ param(
 
     [System.Management.Automation.PSCredential]$Credential,
 
+    [string]$CredentialPath,
+
     [switch]$ConfirmOwnedAction,
+
+    [ValidateSet("Unattended", "Manual")]
+    [string]$CreateMode = "Unattended",
+
+    [switch]$GenerateCredential,
+
+    [switch]$ResumeUnattended,
+
+    [switch]$CleanupUnattend,
+
+    [ValidatePattern('^[0-9A-Fa-f]{64}$')]
+    [string]$ExpectedIsoSha256 = "A61ADEAB895EF5A4DB436E0A7011C92A2FF17BB0357F58B13BBC4062E535E7B9",
+
+    [ValidatePattern('^[^"\/\\\[\]:;|=,+*?<>@\s][^"\/\\\[\]:;|=,+*?<>@]{0,18}[^"\/\\\[\]:;|=,+*?<>@\s.]$|^[A-Za-z0-9]$')]
+    [string]$GuestAdministratorName = "OpenClawAdmin",
 
     [ValidateSet("clean-windows", "openclaw-prerequisites")]
     [string]$CheckpointName = "openclaw-prerequisites",
@@ -73,6 +91,9 @@ param(
     [ValidateRange(60, 7200)]
     [int]$PowerShellDirectTimeoutSec = 900,
 
+    [ValidateRange(900, 14400)]
+    [int]$UnattendedInstallTimeoutSec = 7200,
+
     [ValidateRange(60, 14400)]
     [int]$GuestCommandTimeoutSec = 7200,
 
@@ -91,6 +112,16 @@ $script:VmNotePrefix = "OPENCLAW-CLEAN-WINDOWS:"
 $script:MarkerSchema = "openclaw.clean-windows.owner/v1"
 $script:CleanCheckpointName = "clean-windows"
 $script:PreparedCheckpointName = "openclaw-prerequisites"
+$script:UnattendMarkerSchema = "openclaw.clean-windows.unattend/v1"
+$script:OfficialIsoSha256 = "A61ADEAB895EF5A4DB436E0A7011C92A2FF17BB0357F58B13BBC4062E535E7B9"
+$script:ExpectedWindowsImageName = "Windows 11 Enterprise Evaluation"
+$script:ExpectedWindowsImageIndex = 1
+$script:OpticalBootKeyWindowSec = 7
+$script:OpticalBootInitialDelayMilliseconds = 750
+$script:OpticalBootPulseIntervalMilliseconds = 750
+$script:OpticalBootMaxPulseCount = 9
+
+Import-Module (Join-Path $PSScriptRoot "CleanWindowsUnattend.psm1") -Force
 
 function Write-Step {
     param([string]$Message)
@@ -124,23 +155,57 @@ function Assert-RequiredParameters {
 
     switch ($Command) {
         "Create" {
-            if ([string]::IsNullOrWhiteSpace($IsoPath)) {
+            if ($ResumeUnattended -and $CleanupUnattend) {
+                throw "ResumeUnattended and CleanupUnattend are mutually exclusive."
+            }
+            if (($ResumeUnattended -or $CleanupUnattend) -and $CreateMode -ne "Unattended") {
+                throw "ResumeUnattended and CleanupUnattend require -CreateMode Unattended."
+            }
+            if (($ResumeUnattended -or $CleanupUnattend) -and $GenerateCredential) {
+                throw "GenerateCredential is accepted only for a fresh unattended Create."
+            }
+            if (($ResumeUnattended -or $CleanupUnattend)) {
+                Assert-ConfirmationForOwnedAction -Action "Resuming or cleaning an existing unattended installation"
+            } elseif ([string]::IsNullOrWhiteSpace($IsoPath)) {
                 throw "IsoPath is required for Create."
+            }
+            if ($CreateMode -eq "Manual" -and $GenerateCredential) {
+                throw "GenerateCredential is accepted only for unattended Create."
+            }
+            if (
+                $CreateMode -eq "Unattended" -and
+                $ExpectedIsoSha256.ToUpperInvariant() -cne $script:OfficialIsoSha256
+            ) {
+                throw "Unattended Create requires the pinned Windows 11 Enterprise Evaluation ISO SHA256."
+            }
+            if (
+                $CreateMode -eq "Unattended" -and
+                -not $ResumeUnattended -and
+                -not $CleanupUnattend -and
+                -not $GenerateCredential
+            ) {
+                throw "Fresh unattended Create requires -GenerateCredential as explicit credential-generation consent."
+            }
+            if ($CreateMode -eq "Unattended" -and $null -ne $Credential) {
+                throw "Unattended Create generates a per-VM credential. Do not pass -Credential."
+            }
+            if (-not [string]::IsNullOrWhiteSpace($CredentialPath)) {
+                throw "CredentialPath is an output of unattended Create and is not accepted as a Create input."
             }
         }
         "Prepare" {
-            if ($null -eq $Credential) {
-                throw "Credential is required for Prepare."
+            if ($null -eq $Credential -and [string]::IsNullOrWhiteSpace($CredentialPath)) {
+                throw "Credential or CredentialPath is required for Prepare."
             }
         }
         "Verify" {
-            if ($null -eq $Credential) {
-                throw "Credential is required for Verify."
+            if ($null -eq $Credential -and [string]::IsNullOrWhiteSpace($CredentialPath)) {
+                throw "Credential or CredentialPath is required for Verify."
             }
         }
         "Smoke" {
-            if ($null -eq $Credential) {
-                throw "Credential is required for Smoke."
+            if ($null -eq $Credential -and [string]::IsNullOrWhiteSpace($CredentialPath)) {
+                throw "Credential or CredentialPath is required for Smoke."
             }
 
             if ($ValidationLane -eq "Upgrade") {
@@ -157,6 +222,10 @@ function Assert-RequiredParameters {
                 throw "PreviousRelease and PreviousInstallerSha256 are accepted only with -ValidationLane Upgrade."
             }
         }
+    }
+
+    if ($null -ne $Credential -and -not [string]::IsNullOrWhiteSpace($CredentialPath)) {
+        throw "Credential and CredentialPath are mutually exclusive."
     }
 }
 
@@ -259,6 +328,10 @@ function Assert-HyperVPrerequisites {
         "Get-VMProcessor",
         "Get-VMFirmware",
         "Get-VMSecurity",
+        "Get-VMDvdDrive",
+        "Get-CimInstance",
+        "Get-CimAssociatedInstance",
+        "Invoke-CimMethod",
         "Start-VM",
         "Stop-VM",
         "Get-VMSwitch",
@@ -318,6 +391,193 @@ function Get-CheckpointMarkerPath {
     )
 
     return Join-Path (Get-OwnedMarkerRoot -ResolvedVhdPath $ResolvedVhdPath -OwnedVmName $OwnedVmName) ("checkpoint.{0}.owner.json" -f $OwnedCheckpointName)
+}
+
+function Get-UnattendPaths {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$ResolvedVhdPath
+    )
+
+    $ownedRoot = Get-OwnedMarkerRoot -ResolvedVhdPath $ResolvedVhdPath -OwnedVmName $VMName
+    $unattendRoot = Join-Path $ownedRoot "unattend"
+    $credentialRoot = Join-Path $ownedRoot "credentials"
+    return [pscustomobject]@{
+        OwnedRoot = $ownedRoot
+        StatePath = Join-Path $ownedRoot "unattend.owner.json"
+        UnattendRoot = $unattendRoot
+        StagingPath = Join-Path $unattendRoot "staging"
+        AnswerFilePath = Join-Path (Join-Path $unattendRoot "staging") "AutoUnattend.xml"
+        AnswerIsoPath = Join-Path $unattendRoot "openclaw-unattend.iso"
+        SetupCredentialPath = Join-Path $credentialRoot "setup.clixml"
+        SetupCredentialMetadataPath = Join-Path $credentialRoot "setup.owner.json"
+        FinalCredentialPath = Join-Path $credentialRoot "guest.clixml"
+        FinalCredentialMetadataPath = Join-Path $credentialRoot "guest.owner.json"
+    }
+}
+
+function Get-UnattendedComputerName {
+    $sha256 = [Security.Cryptography.SHA256]::Create()
+    try {
+        $hash = $sha256.ComputeHash([Text.Encoding]::UTF8.GetBytes($VMName))
+        $suffix = ([BitConverter]::ToString($hash, 0, 4)).Replace("-", "")
+        return "OCW-$suffix"
+    } finally {
+        $sha256.Dispose()
+    }
+}
+
+function Write-UnattendState {
+    param(
+        [Parameter(Mandatory = $true)]
+        [object]$State,
+        [Parameter(Mandatory = $true)]
+        [object]$Paths
+    )
+
+    New-Item -ItemType Directory -Force -Path $Paths.OwnedRoot | Out-Null
+    $State.updatedUtc = [DateTime]::UtcNow.ToString("o")
+    $State | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $Paths.StatePath -Encoding UTF8
+}
+
+function Read-OwnedUnattendState {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$ResolvedVhdPath,
+        [Parameter(Mandatory = $true)]
+        [object]$Paths
+    )
+
+    if (-not (Test-Path -LiteralPath $Paths.StatePath -PathType Leaf)) {
+        throw "Owned unattended-install marker is missing."
+    }
+    $state = Get-Content -LiteralPath $Paths.StatePath -Raw | ConvertFrom-Json
+    if (
+        $state.schema -cne $script:UnattendMarkerSchema -or
+        -not (Test-StringEquals -Left ([string]$state.vmName) -Right $VMName) -or
+        -not (Test-StringEquals -Left ([string]$state.ownerId) -Right $OwnerId) -or
+        (Normalize-ComparisonPath ([string]$state.vhdPath)) -ne
+            (Normalize-ComparisonPath $ResolvedVhdPath) -or
+        (Normalize-ComparisonPath ([string]$state.answerIsoPath)) -ne
+            (Normalize-ComparisonPath $Paths.AnswerIsoPath) -or
+        (Normalize-ComparisonPath ([string]$state.ownedRoot)) -ne
+            (Normalize-ComparisonPath $Paths.OwnedRoot) -or
+        (Normalize-ComparisonPath ([string]$state.setupCredentialPath)) -ne
+            (Normalize-ComparisonPath $Paths.SetupCredentialPath) -or
+        (Normalize-ComparisonPath ([string]$state.finalCredentialPath)) -ne
+            (Normalize-ComparisonPath $Paths.FinalCredentialPath) -or
+        [int]$state.imageIndex -ne $script:ExpectedWindowsImageIndex -or
+        [string]$state.imageName -cne $script:ExpectedWindowsImageName -or
+        [string]$state.computerName -cne (Get-UnattendedComputerName)
+    ) {
+        throw "Owned unattended-install marker does not match this VM, owner, VHD, or media path."
+    }
+    if ([string]$state.expectedIsoSha256 -cne $ExpectedIsoSha256.ToUpperInvariant()) {
+        throw "Owned unattended-install marker ISO hash does not match ExpectedIsoSha256."
+    }
+    return $state
+}
+
+function Assert-UnattendStateMatchesVmMarker {
+    param(
+        [Parameter(Mandatory = $true)]
+        [object]$State,
+        [Parameter(Mandatory = $true)]
+        [object]$VmObject
+    )
+
+    $vmMarker = Get-VMNoteMarker -VmObject $VmObject
+    if (
+        $null -eq $vmMarker -or
+        -not $vmMarker.PSObject.Properties["isoPath"] -or
+        (Normalize-ComparisonPath ([string]$vmMarker.isoPath)) -ne
+            (Normalize-ComparisonPath ([string]$State.windowsIsoPath))
+    ) {
+        throw "Owned unattended-install marker Windows ISO does not match the VM ownership marker."
+    }
+}
+
+function New-UnattendState {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$ResolvedVhdPath,
+        [Parameter(Mandatory = $true)]
+        [string]$ResolvedIsoPath,
+        [Parameter(Mandatory = $true)]
+        [object]$Paths,
+        [Parameter(Mandatory = $true)]
+        [string]$ComputerName
+    )
+
+    return [pscustomobject][ordered]@{
+        schema = $script:UnattendMarkerSchema
+        vmName = $VMName
+        ownerId = $OwnerId
+        vhdPath = $ResolvedVhdPath
+        ownedRoot = $Paths.OwnedRoot
+        windowsIsoPath = $ResolvedIsoPath
+        expectedIsoSha256 = $ExpectedIsoSha256.ToUpperInvariant()
+        answerIsoPath = $Paths.AnswerIsoPath
+        setupCredentialPath = $Paths.SetupCredentialPath
+        finalCredentialPath = $Paths.FinalCredentialPath
+        guestAdministratorName = $GuestAdministratorName
+        computerName = $ComputerName
+        imageIndex = $script:ExpectedWindowsImageIndex
+        imageName = $script:ExpectedWindowsImageName
+        status = "initializing"
+        createdUtc = [DateTime]::UtcNow.ToString("o")
+        updatedUtc = [DateTime]::UtcNow.ToString("o")
+    }
+}
+
+function Set-UnattendStateStatus {
+    param(
+        [Parameter(Mandatory = $true)]
+        [object]$State,
+        [Parameter(Mandatory = $true)]
+        [object]$Paths,
+        [Parameter(Mandatory = $true)]
+        [string]$Status
+    )
+
+    $State.status = $Status
+    Write-UnattendState -State $State -Paths $Paths
+}
+
+function Assert-WindowsIsoHash {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$ResolvedIsoPath
+    )
+
+    Write-Step "Verifying the official Windows ISO SHA256"
+    $actualHash = (Get-CleanWindowsFileSha256 -Path $ResolvedIsoPath).ToUpperInvariant()
+    $expectedHash = $ExpectedIsoSha256.ToUpperInvariant()
+    if ($actualHash -cne $expectedHash) {
+        throw "Windows ISO SHA256 does not match ExpectedIsoSha256. Refusing to create the VM."
+    }
+    Write-InfoLine "Windows ISO SHA256 verified before VM creation."
+}
+
+function Resolve-OperationCredential {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$ResolvedVhdPath
+    )
+
+    if ($null -ne $Credential) {
+        return $Credential
+    }
+    $paths = Get-UnattendPaths -ResolvedVhdPath $ResolvedVhdPath
+    $resolvedCredentialPath = [IO.Path]::GetFullPath($CredentialPath)
+    $metadataPath = [IO.Path]::ChangeExtension($resolvedCredentialPath, "owner.json")
+    return Import-CleanWindowsCredential `
+        -CredentialPath $resolvedCredentialPath `
+        -MetadataPath $metadataPath `
+        -OwnedRoot $paths.OwnedRoot `
+        -VMName $VMName `
+        -OwnerId $OwnerId `
+        -ExpectedKind "final"
 }
 
 function New-OwnerMarkerObject {
@@ -800,6 +1060,550 @@ function Open-GuestSession {
     throw "PowerShell Direct to VM '$VMName' did not become ready within $TimeoutSec seconds."
 }
 
+function Invoke-UnattendedOpticalBootKey {
+    param(
+        [Parameter(Mandatory = $true)]
+        [object]$VmObject
+    )
+
+    $vmId = ([Guid]$VmObject.Id).ToString("D")
+    $deadline = [DateTime]::UtcNow.AddSeconds($script:OpticalBootKeyWindowSec)
+    $computerSystem = $null
+    $keyboard = $null
+    $pulseCount = 0
+    $successfulDeliveries = 0
+    $lastCimError = $null
+    $lastDiagnostic = "The Hyper-V synthetic keyboard was not available."
+    Start-Sleep -Milliseconds $script:OpticalBootInitialDelayMilliseconds
+    do {
+        $pulseCount++
+        try {
+            if ($null -eq $computerSystem) {
+                $computerSystem = @(
+                    Get-CimInstance `
+                        -Namespace "root\virtualization\v2" `
+                        -ClassName "Msvm_ComputerSystem" `
+                        -Filter ("Name = '{0}'" -f $vmId) `
+                        -OperationTimeoutSec 1 `
+                        -ErrorAction Stop
+                ) | Select-Object -First 1
+            }
+            if ($null -eq $computerSystem) {
+                $lastDiagnostic = "The VM CIM computer system was not available."
+            } else {
+                if ($null -eq $keyboard) {
+                    $keyboard = @(
+                        Get-CimAssociatedInstance `
+                            -InputObject $computerSystem `
+                            -Association "Msvm_SystemDevice" `
+                            -ResultClassName "Msvm_Keyboard" `
+                            -OperationTimeoutSec 1 `
+                            -ErrorAction Stop
+                    ) | Select-Object -First 1
+                }
+                if ($null -ne $keyboard) {
+                    $typeKeyResult = Invoke-CimMethod `
+                        -InputObject $keyboard `
+                        -MethodName "TypeKey" `
+                        -Arguments @{ keyCode = [uint32]0x20 } `
+                        -OperationTimeoutSec 1 `
+                        -ErrorAction Stop
+                    $returnValue = [uint32]$typeKeyResult.ReturnValue
+                    if ($returnValue -eq 0) {
+                        $successfulDeliveries++
+                    } else {
+                        $lastDiagnostic = "TypeKey returned Hyper-V status code '$returnValue'."
+                    }
+                } else {
+                    $lastDiagnostic = "The Hyper-V synthetic keyboard was not available."
+                }
+            }
+        } catch {
+            $lastCimError = $_
+            $errorType = $_.Exception.GetType().Name
+            $errorCategory = [string]$_.CategoryInfo.Category
+            $errorId = [string]$_.FullyQualifiedErrorId
+            $lastDiagnostic = "CIM error type '$errorType', category '$errorCategory', id '$errorId'."
+            $computerSystem = $null
+            $keyboard = $null
+        }
+
+        if ($pulseCount -lt $script:OpticalBootMaxPulseCount) {
+            $remainingMilliseconds = [int][Math]::Floor(($deadline - [DateTime]::UtcNow).TotalMilliseconds)
+            if ($remainingMilliseconds -lt $script:OpticalBootPulseIntervalMilliseconds) {
+                break
+            }
+            Start-Sleep -Milliseconds $script:OpticalBootPulseIntervalMilliseconds
+        }
+    } while (
+        $pulseCount -lt $script:OpticalBootMaxPulseCount -and
+        [DateTime]::UtcNow -lt $deadline
+    )
+
+    if ($successfulDeliveries -eq 0) {
+        $safeLastError = if ($null -eq $lastCimError) {
+            "No CIM exception was recorded."
+        } else {
+            "type '{0}', category '{1}', id '{2}'." -f
+                $lastCimError.Exception.GetType().Name,
+                [string]$lastCimError.CategoryInfo.Category,
+                [string]$lastCimError.FullyQualifiedErrorId
+        }
+        throw (
+            "Hyper-V CIM did not accept any optical boot space-key pulse within the fixed boot window. " +
+            "Safe diagnostic: $lastDiagnostic Last CIM error: $safeLastError"
+        )
+    }
+
+    Write-InfoLine (
+        "Delivered {0} of {1} optical boot space-key pulses through Microsoft Hyper-V CIM within the fixed boot window." -f
+        $successfulDeliveries,
+        $pulseCount
+    )
+}
+
+function Detach-OwnedInstallationMedia {
+    param(
+        [Parameter(Mandatory = $true)]
+        [object]$State,
+        [switch]$RequireBoth
+    )
+
+    $expectedMedia = @(
+        (Normalize-ComparisonPath ([string]$State.windowsIsoPath)),
+        (Normalize-ComparisonPath ([string]$State.answerIsoPath))
+    )
+    $detached = @{}
+    foreach ($drive in @(Get-VMDvdDrive -VMName $VMName -ErrorAction Stop)) {
+        $drivePath = Normalize-ComparisonPath ([string]$drive.Path)
+        if ($expectedMedia -contains $drivePath) {
+            Set-VMDvdDrive `
+                -VMName $VMName `
+                -ControllerNumber $drive.ControllerNumber `
+                -ControllerLocation $drive.ControllerLocation `
+                -Path $null | Out-Null
+            $detached[$drivePath] = $true
+        }
+    }
+    if ($RequireBoth) {
+        foreach ($expectedPath in $expectedMedia) {
+            if (-not $detached.ContainsKey($expectedPath)) {
+                throw "Expected owned installation media was not attached. Refusing to report successful detach."
+            }
+        }
+    }
+    foreach ($drive in @(Get-VMDvdDrive -VMName $VMName -ErrorAction Stop)) {
+        if ($expectedMedia -contains (Normalize-ComparisonPath ([string]$drive.Path))) {
+            throw "Owned installation media remained attached after the detach operation."
+        }
+    }
+}
+
+function Remove-OwnedUnattendMedia {
+    param(
+        [Parameter(Mandatory = $true)]
+        [object]$Paths
+    )
+
+    [void](Assert-CleanWindowsPathUnderRoot -Path $Paths.UnattendRoot -OwnedRoot $Paths.OwnedRoot)
+    [void](Assert-CleanWindowsPathUnderRoot -Path $Paths.AnswerIsoPath -OwnedRoot $Paths.OwnedRoot)
+    [void](Assert-CleanWindowsPathUnderRoot -Path $Paths.AnswerFilePath -OwnedRoot $Paths.OwnedRoot)
+    if (Test-Path -LiteralPath $Paths.UnattendRoot) {
+        Remove-Item -LiteralPath $Paths.UnattendRoot -Recurse -Force
+    }
+}
+
+function Remove-SetupCredentialMaterial {
+    param(
+        [Parameter(Mandatory = $true)]
+        [object]$Paths
+    )
+
+    foreach ($path in @($Paths.SetupCredentialPath, $Paths.SetupCredentialMetadataPath)) {
+        [void](Assert-CleanWindowsPathUnderRoot -Path $path -OwnedRoot $Paths.OwnedRoot)
+        if (Test-Path -LiteralPath $path) {
+            Remove-Item -LiteralPath $path -Force
+        }
+    }
+}
+
+function Invoke-GuestInstallationVerification {
+    param(
+        [Parameter(Mandatory = $true)]
+        [Management.Automation.Runspaces.PSSession]$Session,
+        [Parameter(Mandatory = $true)]
+        [string]$LocalAccountName
+    )
+
+    return Invoke-GuestCommandWithTimeout `
+        -Session $Session `
+        -OperationName "Verifying unattended Windows installation" `
+        -TimeoutSec 300 `
+        -ScriptBlock {
+            param($ExpectedLocalAccountName)
+
+            $operatingSystem = Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop
+            $currentVersion = Get-ItemProperty `
+                -LiteralPath "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion" `
+                -ErrorAction Stop
+            $setup = Get-ItemProperty -LiteralPath "HKLM:\SYSTEM\Setup" -ErrorAction Stop
+            $setupState = Get-ItemProperty `
+                -LiteralPath "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Setup\State" `
+                -ErrorAction Stop
+
+            if ([string]$operatingSystem.Caption -notlike "*Windows 11 Enterprise Evaluation") {
+                throw "Installed OS caption is not Windows 11 Enterprise Evaluation."
+            }
+            if ([string]$currentVersion.EditionID -cne "EnterpriseEval") {
+                throw "Installed Windows EditionID is not EnterpriseEval."
+            }
+            $buildNumber = 0
+            if (
+                -not [int]::TryParse(
+                    [string]$operatingSystem.BuildNumber,
+                    [ref]$buildNumber
+                ) -or
+                $buildNumber -lt 22000
+            ) {
+                throw "Installed Windows build is not a valid Windows 11 build."
+            }
+            if (
+                -not [Environment]::Is64BitOperatingSystem -or
+                [Environment]::GetEnvironmentVariable("PROCESSOR_ARCHITECTURE") -cne "AMD64" -or
+                [string]$operatingSystem.OSArchitecture -notmatch "64"
+            ) {
+                throw "Installed Windows architecture is not x64/AMD64."
+            }
+
+            foreach ($propertyName in @(
+                "SystemSetupInProgress",
+                "OOBEInProgress",
+                "SetupPhase",
+                "SetupType"
+            )) {
+                $property = $setup.PSObject.Properties[$propertyName]
+                if ($null -eq $property -or [int]$property.Value -ne 0) {
+                    throw "Windows setup property '$propertyName' is missing or not complete."
+                }
+            }
+            if (-not [string]::IsNullOrWhiteSpace([string]$setup.CmdLine)) {
+                throw "Windows setup still has a pending setup command."
+            }
+            if ([string]$setupState.ImageState -cne "IMAGE_STATE_COMPLETE") {
+                throw "Windows image state is not complete."
+            }
+
+            $localUser = Get-LocalUser -Name $ExpectedLocalAccountName -ErrorAction Stop
+            if (-not $localUser.Enabled) {
+                throw "The unattended local administrator is disabled."
+            }
+            $administratorsSid = New-Object Security.Principal.SecurityIdentifier("S-1-5-32-544")
+            $administratorsGroup = Get-LocalGroup -SID $administratorsSid -ErrorAction Stop
+            $administratorMembers = @(Get-LocalGroupMember -Group $administratorsGroup -ErrorAction Stop)
+            if (
+                -not @(
+                    $administratorMembers |
+                        Where-Object { $_.SID.Value -eq $localUser.SID.Value }
+                )
+            ) {
+                throw "The unattended local account is not a member of Administrators."
+            }
+
+            $winlogon = Get-ItemProperty `
+                -LiteralPath "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon" `
+                -ErrorAction Stop
+            if (
+                [string]$winlogon.AutoAdminLogon -eq "1" -or
+                $null -ne $winlogon.PSObject.Properties["DefaultPassword"]
+            ) {
+                throw "Automatic logon is enabled or a default logon password is stored."
+            }
+
+            [pscustomobject]@{
+                caption = [string]$operatingSystem.Caption
+                productName = [string]$currentVersion.ProductName
+                editionId = [string]$currentVersion.EditionID
+                displayVersion = [string]$currentVersion.DisplayVersion
+                buildNumber = [string]$operatingSystem.BuildNumber
+                architecture = "AMD64"
+                powershellDirect = $true
+                localAdministrator = $ExpectedLocalAccountName
+                setupComplete = $true
+                oobeComplete = $true
+                autoLogon = $false
+            }
+        } `
+        -ArgumentList @($LocalAccountName)
+}
+
+function Remove-GuestUnattendCache {
+    param(
+        [Parameter(Mandatory = $true)]
+        [Management.Automation.Runspaces.PSSession]$Session
+    )
+
+    Invoke-GuestCommandWithTimeout `
+        -Session $Session `
+        -OperationName "Removing cached unattended setup material" `
+        -TimeoutSec 300 `
+        -ScriptBlock {
+            $cachedPaths = @(
+                "C:\Windows\Panther\unattend.xml",
+                "C:\Windows\Panther\Unattend",
+                "C:\Windows\System32\Sysprep\unattend.xml",
+                "C:\Windows\System32\Sysprep\Panther\unattend.xml"
+            )
+            foreach ($path in $cachedPaths) {
+                if (Test-Path -LiteralPath $path) {
+                    Remove-Item -LiteralPath $path -Recurse -Force
+                }
+            }
+            foreach ($path in $cachedPaths) {
+                if (Test-Path -LiteralPath $path) {
+                    throw "Cached unattended setup material remains in the guest."
+                }
+            }
+        } | Out-Null
+}
+
+function Set-GuestCredential {
+    param(
+        [Parameter(Mandatory = $true)]
+        [Management.Automation.Runspaces.PSSession]$Session,
+        [Parameter(Mandatory = $true)]
+        [string]$LocalAccountName,
+        [Parameter(Mandatory = $true)]
+        [Security.SecureString]$NewPassword
+    )
+
+    Invoke-GuestCommandWithTimeout `
+        -Session $Session `
+        -OperationName "Rotating the guest administrator credential" `
+        -TimeoutSec 120 `
+        -ScriptBlock {
+            param($ExpectedLocalAccountName, $FinalSecurePassword)
+            if ($FinalSecurePassword -isnot [Security.SecureString]) {
+                throw "Final credential was not transferred as a SecureString."
+            }
+            $localUser = Get-LocalUser -Name $ExpectedLocalAccountName -ErrorAction Stop
+            Set-LocalUser -InputObject $localUser -Password $FinalSecurePassword -ErrorAction Stop
+        } `
+        -ArgumentList @($LocalAccountName, $NewPassword) | Out-Null
+}
+
+function Assert-OldCredentialRejected {
+    param(
+        [Parameter(Mandatory = $true)]
+        [Management.Automation.PSCredential]$OldCredential,
+        [Parameter(Mandatory = $true)]
+        [Management.Automation.PSCredential]$FinalCredential,
+        [Parameter(Mandatory = $true)]
+        [Management.Automation.Runspaces.PSSession]$VerifiedFinalSession,
+        [ValidateRange(10, 120)]
+        [int]$TimeoutSec = 30
+    )
+
+    if ($OldCredential.UserName -cne $FinalCredential.UserName) {
+        throw "Old and final credentials must target the same guest account."
+    }
+    if ([string]$VerifiedFinalSession.State -cne "Opened") {
+        throw "Final credential PowerShell Direct session is not open."
+    }
+    $verifiedUserName = Invoke-GuestCommandWithTimeout `
+        -Session $VerifiedFinalSession `
+        -OperationName "Confirming final credential PowerShell Direct availability" `
+        -TimeoutSec 30 `
+        -ScriptBlock { [Environment]::UserName }
+    if (
+        -not [string]::Equals(
+            [string]($verifiedUserName | Select-Object -Last 1),
+            $FinalCredential.UserName,
+            [StringComparison]::OrdinalIgnoreCase
+        )
+    ) {
+        throw "Final credential PowerShell Direct session does not match the guest account."
+    }
+
+    $probeScript = {
+        param($TargetVmName, $CandidateCredential)
+        $candidateSession = $null
+        try {
+            $candidateSession = New-PSSession `
+                -VMName $TargetVmName `
+                -Credential $CandidateCredential `
+                -ErrorAction Stop
+            [pscustomobject]@{
+                connected = $true
+                message = ""
+                fullyQualifiedErrorId = ""
+                category = ""
+            }
+        } catch {
+            $messages = @(
+                [string]$_.Exception.Message,
+                [string]$_.ErrorDetails.Message
+            )
+            $innerException = $_.Exception.InnerException
+            while ($null -ne $innerException) {
+                $messages += [string]$innerException.Message
+                $innerException = $innerException.InnerException
+            }
+            [pscustomobject]@{
+                connected = $false
+                message = ($messages -join " ")
+                fullyQualifiedErrorId = [string]$_.FullyQualifiedErrorId
+                category = [string]$_.CategoryInfo.Category
+            }
+        } finally {
+            if ($null -ne $candidateSession) {
+                Remove-PSSession -Session $candidateSession -ErrorAction SilentlyContinue
+            }
+        }
+    }
+    $probe = [Management.Automation.PowerShell]::Create()
+    [void]$probe.AddScript($probeScript.ToString())
+    [void]$probe.AddArgument($VMName)
+    [void]$probe.AddArgument($OldCredential)
+    $asyncResult = $null
+    try {
+        $asyncResult = $probe.BeginInvoke()
+        if (-not $asyncResult.AsyncWaitHandle.WaitOne([TimeSpan]::FromSeconds($TimeoutSec))) {
+            $probe.Stop()
+            throw "Old credential verification timed out without authentication-rejection proof."
+        }
+        $result = @($probe.EndInvoke($asyncResult)) | Select-Object -Last 1
+        if ($null -eq $result) {
+            throw "Old credential verification returned no result."
+        }
+        if ([bool]$result.connected) {
+            throw "The setup credential remained valid after credential rotation."
+        }
+        $isAuthenticationRejection = Test-CleanWindowsCredentialAuthenticationRejection `
+            -Message ([string]$result.message) `
+            -FullyQualifiedErrorId ([string]$result.fullyQualifiedErrorId) `
+            -Category ([string]$result.category)
+        if (-not $isAuthenticationRejection) {
+            throw "Old credential attempt failed for a non-authentication reason. Refusing to treat it as rotation proof."
+        }
+    } finally {
+        if ($null -ne $asyncResult) {
+            $asyncResult.AsyncWaitHandle.Close()
+        }
+        $probe.Dispose()
+    }
+}
+
+function Write-UnattendedResult {
+    param(
+        [Parameter(Mandatory = $true)]
+        [object]$Paths,
+        [Parameter(Mandatory = $true)]
+        [object]$Verification,
+        [Parameter(Mandatory = $true)]
+        [string]$Status
+    )
+
+    return [pscustomobject][ordered]@{
+        command = "Create"
+        createMode = "Unattended"
+        status = $Status
+        vmName = $VMName
+        ownerId = $OwnerId
+        CredentialPath = $Paths.FinalCredentialPath
+        edition = [string]$Verification.editionId
+        osName = [string]$Verification.caption
+        build = [string]$Verification.buildNumber
+        architecture = [string]$Verification.architecture
+        powershellDirect = [bool]$Verification.powershellDirect
+        localAdministrator = [string]$Verification.localAdministrator
+        setupComplete = [bool]$Verification.setupComplete
+        oobeComplete = [bool]$Verification.oobeComplete
+        installationMediaAttached = $false
+        autoLogon = $false
+    }
+}
+
+function Complete-UnattendedInstallation {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$ResolvedVhdPath,
+        [Parameter(Mandatory = $true)]
+        [object]$Paths,
+        [Parameter(Mandatory = $true)]
+        [object]$State,
+        [Parameter(Mandatory = $true)]
+        [Management.Automation.PSCredential]$SetupCredential,
+        [switch]$RequireAttachedMedia
+    )
+
+    if (
+        -not [string]::Equals(
+            $SetupCredential.UserName,
+            [string]$State.guestAdministratorName,
+            [StringComparison]::Ordinal
+        )
+    ) {
+        throw "Setup credential username does not match the owned unattended-install marker."
+    }
+
+    Write-Step "Waiting for unattended Windows setup and PowerShell Direct"
+    $setupSession = Open-GuestSession `
+        -GuestCredential $SetupCredential `
+        -TimeoutSec $UnattendedInstallTimeoutSec
+    try {
+        Set-UnattendStateStatus -State $State -Paths $Paths -Status "powershell-direct-ready"
+        Write-Step "Detaching owned installation media"
+        Detach-OwnedInstallationMedia -State $State -RequireBoth:$RequireAttachedMedia
+        Remove-OwnedUnattendMedia -Paths $Paths
+        Set-UnattendStateStatus -State $State -Paths $Paths -Status "installation-media-removed"
+
+        $verification = Invoke-GuestInstallationVerification `
+            -Session $setupSession `
+            -LocalAccountName ([string]$State.guestAdministratorName)
+        Remove-GuestUnattendCache -Session $setupSession
+        Set-UnattendStateStatus -State $State -Paths $Paths -Status "guest-verified"
+
+        $finalCredential = New-CleanWindowsTestCredential `
+            -UserName ([string]$State.guestAdministratorName)
+        Export-CleanWindowsCredential `
+            -Credential $finalCredential `
+            -CredentialPath $Paths.FinalCredentialPath `
+            -MetadataPath $Paths.FinalCredentialMetadataPath `
+            -OwnedRoot $Paths.OwnedRoot `
+            -VMName $VMName `
+            -OwnerId $OwnerId `
+            -Kind "final" | Out-Null
+        Set-UnattendStateStatus -State $State -Paths $Paths -Status "final-credential-persisted"
+
+        Set-GuestCredential `
+            -Session $setupSession `
+            -LocalAccountName ([string]$State.guestAdministratorName) `
+            -NewPassword $finalCredential.Password
+        Set-UnattendStateStatus -State $State -Paths $Paths -Status "credential-rotated"
+    } finally {
+        if ($null -ne $setupSession) {
+            Remove-PSSession -Session $setupSession -ErrorAction SilentlyContinue
+        }
+    }
+
+    $finalSession = Open-GuestSession -GuestCredential $finalCredential -TimeoutSec 120
+    try {
+        $verification = Invoke-GuestInstallationVerification `
+            -Session $finalSession `
+            -LocalAccountName ([string]$State.guestAdministratorName)
+        Assert-OldCredentialRejected `
+            -OldCredential $SetupCredential `
+            -FinalCredential $finalCredential `
+            -VerifiedFinalSession $finalSession `
+            -TimeoutSec 30
+    } finally {
+        Remove-PSSession -Session $finalSession -ErrorAction SilentlyContinue
+    }
+    Remove-SetupCredentialMaterial -Paths $Paths
+    Set-UnattendStateStatus -State $State -Paths $Paths -Status "complete"
+    return Write-UnattendedResult -Paths $Paths -Verification $verification -Status "complete"
+}
+
 function Invoke-GuestCommandWithTimeout {
     param(
         [Parameter(Mandatory = $true)]
@@ -1029,7 +1833,9 @@ function Ensure-GuestPowerShell7Installed {
 function Prepare-GuestPrerequisites {
     param(
         [Parameter(Mandatory = $true)]
-        [System.Management.Automation.Runspaces.PSSession]$Session
+        [System.Management.Automation.Runspaces.PSSession]$Session,
+        [Parameter(Mandatory = $true)]
+        [System.Management.Automation.PSCredential]$GuestCredential
     )
 
     Write-Step "Preparing guest prerequisites"
@@ -1069,7 +1875,7 @@ function Prepare-GuestPrerequisites {
     $activeSession = $Session
     if ($null -ne $parsedWslResult -and $parsedWslResult.needsRestart) {
         Write-InfoLine "Guest restart is required to complete WSL prerequisites."
-        $activeSession = Restart-GuestAndReconnect -Session $Session -GuestCredential $Credential
+        $activeSession = Restart-GuestAndReconnect -Session $Session -GuestCredential $GuestCredential
     }
 
     Ensure-GuestGitInstalled -Session $activeSession
@@ -1150,6 +1956,8 @@ function Invoke-PreparedGuestOperation {
         [Parameter(Mandatory = $true)]
         [string]$ExpectedOwnerId,
         [Parameter(Mandatory = $true)]
+        [System.Management.Automation.PSCredential]$GuestCredential,
+        [Parameter(Mandatory = $true)]
         [scriptblock]$Action
     )
 
@@ -1157,7 +1965,7 @@ function Invoke-PreparedGuestOperation {
     Ensure-VMRunning
     $session = $null
     try {
-        $session = Open-GuestSession -GuestCredential $Credential -TimeoutSec $PowerShellDirectTimeoutSec
+        $session = Open-GuestSession -GuestCredential $GuestCredential -TimeoutSec $PowerShellDirectTimeoutSec
         & $Action $session
     } finally {
         if ($null -ne $session) {
@@ -1184,71 +1992,288 @@ function Resolve-HostArtifactPath {
     return (Join-Path $script:RepoRoot ("TestResults\CleanWindowsHyperV\{0}\{1}" -f $VMName, $timestamp))
 }
 
-function Invoke-CreateCommand {
-    $resolvedIsoPath = Resolve-ExistingLiteralPath -Path $IsoPath -Label "ISO path"
-    $resolvedVhdPath = Resolve-FullPath -Path $VhdPath
-
-    Write-Step "Creating owned Hyper-V VM"
-    $existingVm = Get-VM -Name $VMName -ErrorAction SilentlyContinue
-    if ($null -ne $existingVm) {
-        throw "VM '$VMName' already exists. Create only works on a new VM."
+function Get-EffectiveSwitchName {
+    if (-not [string]::IsNullOrWhiteSpace($SwitchName)) {
+        return $SwitchName
     }
-
-    if (Test-Path -LiteralPath $resolvedVhdPath) {
-        throw "VHD path already exists. Refusing to modify or delete it: $resolvedVhdPath"
+    $defaultSwitch = Get-VMSwitch -Name "Default Switch" -ErrorAction SilentlyContinue
+    if ($null -eq $defaultSwitch) {
+        throw "No Hyper-V switch was provided and 'Default Switch' was not found. Rerun with -SwitchName."
     }
+    return $defaultSwitch.Name
+}
 
-    $vmDirectory = Split-Path -Parent $resolvedVhdPath
+function New-OwnedHyperVVm {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$ResolvedVhdPath,
+        [Parameter(Mandatory = $true)]
+        [string]$ResolvedIsoPath,
+        [string]$AnswerIsoPath
+    )
+
+    $vmDirectory = Split-Path -Parent $ResolvedVhdPath
     New-Item -ItemType Directory -Force -Path $vmDirectory | Out-Null
-
-    $effectiveSwitchName = $SwitchName
-    if ([string]::IsNullOrWhiteSpace($effectiveSwitchName)) {
-        $defaultSwitch = Get-VMSwitch -Name "Default Switch" -ErrorAction SilentlyContinue
-        if ($null -eq $defaultSwitch) {
-            throw "No Hyper-V switch was provided and 'Default Switch' was not found. Rerun with -SwitchName."
-        }
-
-        $effectiveSwitchName = $defaultSwitch.Name
-    }
-
     $memoryBytes = [Int64]$StartupMemoryGB * 1GB
     $vhdBytes = [Int64]$VhdSizeGB * 1GB
-
     $vm = New-VM `
         -Name $VMName `
         -Generation 2 `
         -MemoryStartupBytes $memoryBytes `
-        -NewVHDPath $resolvedVhdPath `
+        -NewVHDPath $ResolvedVhdPath `
         -NewVHDSizeBytes $vhdBytes `
         -Path $vmDirectory `
-        -SwitchName $effectiveSwitchName
+        -SwitchName (Get-EffectiveSwitchName)
 
-    Set-VM -VMName $VMName -AutomaticCheckpointsEnabled $false -CheckpointType Standard -AutomaticStopAction ShutDown | Out-Null
-    Set-VMProcessor -VMName $VMName -Count $ProcessorCount -ExposeVirtualizationExtensions $true | Out-Null
-    Add-VMDvdDrive -VMName $VMName -Path $resolvedIsoPath | Out-Null
-
-    $dvdDrive = Get-VMDvdDrive -VMName $VMName | Select-Object -First 1
-    if ($null -eq $dvdDrive) {
-        throw "The Windows 11 ISO could not be attached to '$VMName'."
+    Set-VMOwnershipMarker `
+        -VmObject $vm `
+        -ResolvedVhdPath $ResolvedVhdPath `
+        -OwnedOwnerId $OwnerId `
+        -ResolvedIsoPath $ResolvedIsoPath | Out-Null
+    Set-VM `
+        -VMName $VMName `
+        -AutomaticCheckpointsEnabled $false `
+        -CheckpointType Standard `
+        -AutomaticStopAction ShutDown | Out-Null
+    Set-VMProcessor `
+        -VMName $VMName `
+        -Count $ProcessorCount `
+        -ExposeVirtualizationExtensions $true | Out-Null
+    Add-VMDvdDrive -VMName $VMName -Path $ResolvedIsoPath | Out-Null
+    if (-not [string]::IsNullOrWhiteSpace($AnswerIsoPath)) {
+        Add-VMDvdDrive -VMName $VMName -Path $AnswerIsoPath | Out-Null
     }
 
-    Set-VMFirmware -VMName $VMName -EnableSecureBoot On -SecureBootTemplate "Microsoft Windows" -FirstBootDevice $dvdDrive | Out-Null
+    $windowsDvdDrive = @(
+        Get-VMDvdDrive -VMName $VMName |
+            Where-Object {
+                (Normalize-ComparisonPath ([string]$_.Path)) -eq
+                    (Normalize-ComparisonPath $ResolvedIsoPath)
+            }
+    ) | Select-Object -First 1
+    if ($null -eq $windowsDvdDrive) {
+        throw "The verified Windows 11 ISO could not be attached to '$VMName'."
+    }
+    if (
+        -not [string]::IsNullOrWhiteSpace($AnswerIsoPath) -and
+        -not @(
+            Get-VMDvdDrive -VMName $VMName |
+                Where-Object {
+                    (Normalize-ComparisonPath ([string]$_.Path)) -eq
+                        (Normalize-ComparisonPath $AnswerIsoPath)
+                }
+        )
+    ) {
+        throw "The owned answer ISO could not be attached to '$VMName'."
+    }
+
+    Set-VMFirmware `
+        -VMName $VMName `
+        -EnableSecureBoot On `
+        -SecureBootTemplate "Microsoft Windows" `
+        -FirstBootDevice $windowsDvdDrive | Out-Null
     Set-VMKeyProtector -VMName $VMName -NewLocalKeyProtector | Out-Null
     Enable-VMTPM -VMName $VMName | Out-Null
-
     $vm = Get-VM -Name $VMName -ErrorAction Stop
-    Set-VMOwnershipMarker -VmObject $vm -ResolvedVhdPath $resolvedVhdPath -OwnedOwnerId $OwnerId -ResolvedIsoPath $resolvedIsoPath | Out-Null
     Verify-HostVmConfiguration -VmObject $vm
+    return $vm
+}
 
-    Start-VM -Name $VMName -Confirm:$false | Out-Null
-    Write-InfoLine "VM '$VMName' was created and started."
-    Write-InfoLine "Complete Windows setup in the guest, then rerun Prepare with -Credential and -ConfirmOwnedAction."
+function Invoke-CleanupUnattendCommand {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$ResolvedVhdPath
+    )
+
+    $paths = Get-UnattendPaths -ResolvedVhdPath $ResolvedVhdPath
+    $state = Read-OwnedUnattendState -ResolvedVhdPath $ResolvedVhdPath -Paths $paths
+    $vm = Get-VM -Name $VMName -ErrorAction SilentlyContinue
+    if ($null -ne $vm) {
+        $vm = Assert-OwnedVM -ResolvedVhdPath $ResolvedVhdPath -ExpectedOwnerId $OwnerId
+        Assert-UnattendStateMatchesVmMarker -State $state -VmObject $vm
+        Detach-OwnedInstallationMedia -State $state
+    }
+    Remove-OwnedUnattendMedia -Paths $paths
+    Remove-SetupCredentialMaterial -Paths $paths
+    Set-UnattendStateStatus -State $state -Paths $paths -Status "unattend-cleaned"
+
+    if (
+        $null -eq $vm -and
+        -not (Test-Path -LiteralPath $ResolvedVhdPath) -and
+        (Test-Path -LiteralPath $paths.OwnedRoot)
+    ) {
+        Remove-Item -LiteralPath $paths.OwnedRoot -Recurse -Force
+    }
+    return [pscustomobject][ordered]@{
+        command = "Create"
+        createMode = "Unattended"
+        status = "unattend-cleaned"
+        vmName = $VMName
+        ownerId = $OwnerId
+        vmDeleted = $false
+        vhdDeleted = $false
+    }
+}
+
+function Invoke-ResumeUnattendedCommand {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$ResolvedVhdPath
+    )
+
+    $paths = Get-UnattendPaths -ResolvedVhdPath $ResolvedVhdPath
+    $state = Read-OwnedUnattendState -ResolvedVhdPath $ResolvedVhdPath -Paths $paths
+    $vm = Assert-OwnedVM -ResolvedVhdPath $ResolvedVhdPath -ExpectedOwnerId $OwnerId
+    Assert-UnattendStateMatchesVmMarker -State $state -VmObject $vm
+    Verify-HostVmConfiguration -VmObject $vm
+    Ensure-VMRunning
+
+    if (Test-Path -LiteralPath $paths.FinalCredentialPath -PathType Leaf) {
+        $finalCredential = Import-CleanWindowsCredential `
+            -CredentialPath $paths.FinalCredentialPath `
+            -MetadataPath $paths.FinalCredentialMetadataPath `
+            -OwnedRoot $paths.OwnedRoot `
+            -VMName $VMName `
+            -OwnerId $OwnerId `
+            -ExpectedKind "final"
+        if ($finalCredential.UserName -cne [string]$state.guestAdministratorName) {
+            throw "Final credential username does not match the owned unattended-install marker."
+        }
+        $finalSession = $null
+        try {
+            $finalSession = Open-GuestSession -GuestCredential $finalCredential -TimeoutSec 60
+        } catch {
+            $finalSession = $null
+        }
+        if ($null -ne $finalSession) {
+            try {
+                Detach-OwnedInstallationMedia -State $state
+                Remove-OwnedUnattendMedia -Paths $paths
+                Remove-GuestUnattendCache -Session $finalSession
+                $verification = Invoke-GuestInstallationVerification `
+                    -Session $finalSession `
+                    -LocalAccountName ([string]$state.guestAdministratorName)
+            } finally {
+                Remove-PSSession -Session $finalSession -ErrorAction SilentlyContinue
+            }
+            Remove-SetupCredentialMaterial -Paths $paths
+            Set-UnattendStateStatus -State $state -Paths $paths -Status "complete"
+            return Write-UnattendedResult -Paths $paths -Verification $verification -Status "complete"
+        }
+    }
+
+    $setupCredential = Import-CleanWindowsCredential `
+        -CredentialPath $paths.SetupCredentialPath `
+        -MetadataPath $paths.SetupCredentialMetadataPath `
+        -OwnedRoot $paths.OwnedRoot `
+        -VMName $VMName `
+        -OwnerId $OwnerId `
+        -ExpectedKind "setup"
+    return Complete-UnattendedInstallation `
+        -ResolvedVhdPath $ResolvedVhdPath `
+        -Paths $paths `
+        -State $state `
+        -SetupCredential $setupCredential
+}
+
+function Invoke-CreateCommand {
+    $resolvedVhdPath = Resolve-FullPath -Path $VhdPath
+    if ($CleanupUnattend) {
+        return Invoke-CleanupUnattendCommand -ResolvedVhdPath $resolvedVhdPath
+    }
+    if ($ResumeUnattended) {
+        return Invoke-ResumeUnattendedCommand -ResolvedVhdPath $resolvedVhdPath
+    }
+
+    $resolvedIsoPath = Resolve-ExistingLiteralPath -Path $IsoPath -Label "ISO path"
+    Assert-WindowsIsoHash -ResolvedIsoPath $resolvedIsoPath
+    Write-Step "Creating owned Hyper-V VM"
+    if ($null -ne (Get-VM -Name $VMName -ErrorAction SilentlyContinue)) {
+        throw "VM '$VMName' already exists. Fresh Create only works on a new VM. Use -ResumeUnattended or -CleanupUnattend with -ConfirmOwnedAction for an owned partial installation."
+    }
+    if (Test-Path -LiteralPath $resolvedVhdPath) {
+        throw "VHD path already exists. Refusing to modify or delete it: $resolvedVhdPath"
+    }
+
+    if ($CreateMode -eq "Manual") {
+        $vm = New-OwnedHyperVVm `
+            -ResolvedVhdPath $resolvedVhdPath `
+            -ResolvedIsoPath $resolvedIsoPath
+        Start-VM -Name $VMName -Confirm:$false | Out-Null
+        Write-InfoLine "VM '$VMName' was created and started in safe manual setup mode."
+        Write-InfoLine "Complete Windows setup, then rerun Prepare with -Credential or -CredentialPath and -ConfirmOwnedAction."
+        return
+    }
+
+    $paths = Get-UnattendPaths -ResolvedVhdPath $resolvedVhdPath
+    if (Test-Path -LiteralPath $paths.OwnedRoot) {
+        throw "Owned marker directory already exists. Use confirmed ResumeUnattended or CleanupUnattend instead of overwriting partial state."
+    }
+    $computerName = Get-UnattendedComputerName
+    $state = New-UnattendState `
+        -ResolvedVhdPath $resolvedVhdPath `
+        -ResolvedIsoPath $resolvedIsoPath `
+        -Paths $paths `
+        -ComputerName $computerName
+    Write-UnattendState -State $state -Paths $paths
+
+    try {
+        Protect-CleanWindowsOwnedDirectory `
+            -Path $paths.UnattendRoot `
+            -OwnedRoot $paths.OwnedRoot | Out-Null
+        $setupCredential = New-CleanWindowsTestCredential -UserName $GuestAdministratorName
+        Export-CleanWindowsCredential `
+            -Credential $setupCredential `
+            -CredentialPath $paths.SetupCredentialPath `
+            -MetadataPath $paths.SetupCredentialMetadataPath `
+            -OwnedRoot $paths.OwnedRoot `
+            -VMName $VMName `
+            -OwnerId $OwnerId `
+            -Kind "setup" | Out-Null
+        New-CleanWindowsAnswerFile `
+            -Path $paths.AnswerFilePath `
+            -OwnedRoot $paths.OwnedRoot `
+            -Credential $setupCredential `
+            -ComputerName $computerName | Out-Null
+        New-CleanWindowsAnswerIso `
+            -StagingPath $paths.StagingPath `
+            -IsoPath $paths.AnswerIsoPath `
+            -OwnedRoot $paths.OwnedRoot | Out-Null
+        Test-CleanWindowsAnswerIsoMount `
+            -IsoPath $paths.AnswerIsoPath `
+            -ExpectedAnswerFilePath $paths.AnswerFilePath `
+            -Credential $setupCredential `
+            -ExpectedComputerName $computerName `
+            -TimeoutSec 30 | Out-Null
+        Set-UnattendStateStatus -State $state -Paths $paths -Status "answer-media-validated"
+
+        $vm = New-OwnedHyperVVm `
+            -ResolvedVhdPath $resolvedVhdPath `
+            -ResolvedIsoPath $resolvedIsoPath `
+            -AnswerIsoPath $paths.AnswerIsoPath
+        Set-UnattendStateStatus -State $state -Paths $paths -Status "vm-created"
+        Start-VM -Name $VMName -Confirm:$false | Out-Null
+        Invoke-UnattendedOpticalBootKey -VmObject $vm
+        Set-UnattendStateStatus -State $state -Paths $paths -Status "installing"
+        return Complete-UnattendedInstallation `
+            -ResolvedVhdPath $resolvedVhdPath `
+            -Paths $paths `
+            -State $state `
+            -SetupCredential $setupCredential `
+            -RequireAttachedMedia
+    } catch {
+        if (Test-Path -LiteralPath $paths.StatePath -PathType Leaf) {
+            Set-UnattendStateStatus -State $state -Paths $paths -Status "partial-failure"
+        }
+        throw
+    }
 }
 
 function Invoke-PrepareCommand {
     $resolvedVhdPath = Resolve-FullPath -Path $VhdPath
     $vm = Assert-OwnedVM -ResolvedVhdPath $resolvedVhdPath -ExpectedOwnerId $OwnerId
     Verify-HostVmConfiguration -VmObject $vm
+    $operationCredential = Resolve-OperationCredential -ResolvedVhdPath $resolvedVhdPath
 
     $cleanCheckpoint = Get-SingleCheckpoint -OwnedCheckpointName $script:CleanCheckpointName
     if ($null -eq $cleanCheckpoint) {
@@ -1256,7 +2281,7 @@ function Invoke-PrepareCommand {
         Ensure-VMRunning
         $initialSession = $null
         try {
-            $initialSession = Open-GuestSession -GuestCredential $Credential -TimeoutSec $PowerShellDirectTimeoutSec
+            $initialSession = Open-GuestSession -GuestCredential $operationCredential -TimeoutSec $PowerShellDirectTimeoutSec
         } finally {
             if ($null -ne $initialSession) {
                 Stop-VMGracefully -Session $initialSession -TimeoutSec $GuestShutdownTimeoutSec
@@ -1277,8 +2302,8 @@ function Invoke-PrepareCommand {
 
     $session = $null
     try {
-        $session = Open-GuestSession -GuestCredential $Credential -TimeoutSec $PowerShellDirectTimeoutSec
-        $session = Prepare-GuestPrerequisites -Session $session
+        $session = Open-GuestSession -GuestCredential $operationCredential -TimeoutSec $PowerShellDirectTimeoutSec
+        $session = Prepare-GuestPrerequisites -Session $session -GuestCredential $operationCredential
     } catch {
         if ($null -ne $session) {
             Stop-VMGracefully -Session $session -TimeoutSec $GuestShutdownTimeoutSec
@@ -1308,10 +2333,15 @@ function Invoke-VerifyCommand {
     $resolvedVhdPath = Resolve-FullPath -Path $VhdPath
     $vm = Assert-OwnedVM -ResolvedVhdPath $resolvedVhdPath -ExpectedOwnerId $OwnerId
     Verify-HostVmConfiguration -VmObject $vm
+    $operationCredential = Resolve-OperationCredential -ResolvedVhdPath $resolvedVhdPath
     Assert-OwnedCheckpoint -ResolvedVhdPath $resolvedVhdPath -ExpectedOwnerId $OwnerId -OwnedCheckpointName $script:CleanCheckpointName | Out-Null
     Assert-OwnedCheckpoint -ResolvedVhdPath $resolvedVhdPath -ExpectedOwnerId $OwnerId -OwnedCheckpointName $script:PreparedCheckpointName | Out-Null
 
-    Invoke-PreparedGuestOperation -ResolvedVhdPath $resolvedVhdPath -ExpectedOwnerId $OwnerId -Action {
+    Invoke-PreparedGuestOperation `
+        -ResolvedVhdPath $resolvedVhdPath `
+        -ExpectedOwnerId $OwnerId `
+        -GuestCredential $operationCredential `
+        -Action {
         param($Session)
         $verifyResult = Invoke-GuestCommandWithTimeout -Session $Session -OperationName "Verifying guest readiness" -TimeoutSec $GuestCommandTimeoutSec -ScriptBlock {
             $windowsSdkPath = "${env:ProgramFiles(x86)}\Windows Kits\10\Include"
@@ -1363,10 +2393,15 @@ function Invoke-SmokeCommand {
 
     Assert-OwnedVM -ResolvedVhdPath $resolvedVhdPath -ExpectedOwnerId $OwnerId | Out-Null
     Assert-OwnedCheckpoint -ResolvedVhdPath $resolvedVhdPath -ExpectedOwnerId $OwnerId -OwnedCheckpointName $script:PreparedCheckpointName | Out-Null
+    $operationCredential = Resolve-OperationCredential -ResolvedVhdPath $resolvedVhdPath
 
     $guestArtifactName = if ($ValidationLane -eq "Upgrade") { "upgrade-smoke" } else { "installed-smoke" }
     $guestArtifacts = Join-Path $GuestRoot "artifacts\$guestArtifactName"
-    Invoke-PreparedGuestOperation -ResolvedVhdPath $resolvedVhdPath -ExpectedOwnerId $OwnerId -Action {
+    Invoke-PreparedGuestOperation `
+        -ResolvedVhdPath $resolvedVhdPath `
+        -ExpectedOwnerId $OwnerId `
+        -GuestCredential $operationCredential `
+        -Action {
         param($Session)
 
         Copy-RepoToGuest -Session $Session

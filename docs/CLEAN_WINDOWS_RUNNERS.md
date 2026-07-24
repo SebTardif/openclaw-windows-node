@@ -15,7 +15,8 @@ macOS, Parallels, or a Linux lease as Windows proof.
 - Windows 11 Pro, Enterprise, or Education with Hyper-V enabled.
 - An elevated Windows PowerShell 5.1 or newer session.
 - Hardware virtualization enabled in firmware.
-- A Windows 11 ISO, an unused VHDX path, and a guest administrator credential.
+- The verified Microsoft Windows 11 Enterprise Evaluation ISO described below
+  and an unused VHDX path.
 - At least 8 GB guest memory, 80 GB free disk, and four logical processors by
   default.
 
@@ -34,26 +35,192 @@ The VM marker is stored in Hyper-V VM notes and beside the VHD under
 `.openclaw-clean-windows\<vm-name>`. Checkpoint marker files bind the checkpoint
 name, Hyper-V snapshot ID, creation time, VM ID, VHD path, and owner ID.
 
-### Create the VM
+### Create the VM unattended by default
+
+`Create` defaults to `-CreateMode Unattended`. The known input used by the
+local clean runner is shown below. A fresh unattended Create also requires
+`-GenerateCredential` as explicit consent to create and persist the per-VM
+credentials. That switch is rejected for manual Create, `-ResumeUnattended`,
+and `-CleanupUnattend`.
+
+| Property | Verified value |
+|---|---|
+| ISO | `D:\isos\Win11_Enterprise_Eval_25H2_en-us_x64.iso` |
+| ISO size | `7,092,807,680` bytes |
+| ISO SHA256 | `A61ADEAB895EF5A4DB436E0A7011C92A2FF17BB0357F58B13BBC4062E535E7B9` |
+| `install.wim` image | Index `1`, `Windows 11 Enterprise Evaluation` |
+| Switch | `Default Switch` |
+| VM | `OpenClaw-Clean-Windows` |
+| Owner | `openclaw-clean-runner-bkudiess` |
+| VHD | `D:\Hyper-V\OpenClaw-Clean-Windows\os.vhdx` |
+| VM resources | 8 processors, 16 GB startup RAM, 120 GB VHD |
 
 ```powershell
 $vmName = "OpenClaw-Clean-Windows"
 $ownerId = "openclaw-clean-runner-bkudiess"
-$iso = "D:\isos\Windows11.iso"
+$iso = "D:\isos\Win11_Enterprise_Eval_25H2_en-us_x64.iso"
 $vhd = "D:\Hyper-V\OpenClaw-Clean-Windows\os.vhdx"
-$guestAccount = Get-Credential
 
+$createResult = .\scripts\clean-windows\Invoke-CleanWindowsHyperV.ps1 `
+  -Command Create `
+  -VMName $vmName `
+  -OwnerId $ownerId `
+  -IsoPath $iso `
+  -VhdPath $vhd `
+  -GenerateCredential `
+  -SwitchName "Default Switch" `
+  -ProcessorCount 8 `
+  -StartupMemoryGB 16 `
+  -VhdSizeGB 120
+
+$credentialPath = $createResult.CredentialPath
+```
+
+`ExpectedIsoSha256` defaults to the exact digest in the table. The controller
+hashes the original ISO and fails before `New-VM` when it does not match. An
+unattended operation refuses an alternate digest because its image contract is
+pinned to this Enterprise Evaluation media. Safe manual mode may use a
+different explicit expected digest. The Microsoft ISO is attached read-only
+and is never rebuilt, copied, or mutated.
+
+For unattended mode, the controller:
+
+1. Requires `-GenerateCredential`, then generates a high-entropy per-VM setup
+   credential in process.
+2. builds `AutoUnattend.xml` with `XmlDocument` APIs and validates it;
+3. creates a small data ISO with the Windows IMAPI2 API, with no ADK,
+   `oscdimg`, or third-party utility;
+4. mounts the answer ISO read-only, reads and hashes its root
+   `AutoUnattend.xml`, reruns strict XML validation, dismounts it, and fails
+   closed before any VM or VHD creation if validation fails;
+5. attaches the original Microsoft ISO and the validated answer ISO as separate DVD
+   drives, then boots from the original ISO;
+6. immediately after the initial fresh unattended `Start-VM`, clears the Gen2
+   optical `Press any key to boot from CD or DVD` prompt by calling
+   `Msvm_Keyboard.TypeKey` with space (`0x20`) through Microsoft's
+   `root\virtualization\v2` Hyper-V CIM provider, selecting the VM by its
+   trusted VM ID;
+7. sends up to nine space-key pulses at 750 ms intervals after a 750 ms delay,
+   stops unconditionally within a fixed 7-second boot-only window, requires at
+   least one successful CIM delivery, and reports a safe last-error diagnostic
+   if none succeeds. It does not inject keys during resume, setup, or later
+   reboots;
+8. waits a bounded time for PowerShell Direct;
+9. immediately detaches both ISO drives and removes the answer XML, staging
+   directory, and answer ISO;
+10. verifies Windows 11 Enterprise Evaluation, build, x64/AMD64 architecture,
+   the enabled local administrator, PowerShell Direct, completed setup/OOBE,
+   completed image state, and no pending setup command;
+11. removes known cached guest answer-file locations;
+12. rotates the setup password to a newly generated final credential, opens
+    and probes a final-credential PowerShell Direct session, then accepts old
+    credential rejection only for a classified authentication failure within
+    a bounded check; and
+13. returns the nonsecret `CredentialPath`.
+
+The synthetic keyboard step is Microsoft Hyper-V CIM, not desktop automation
+and not manual Setup. Host prerequisite checks require `Get-CimInstance`,
+`Get-CimAssociatedInstance`, and `Invoke-CimMethod`. The controller never
+interpolates `VMName` into WQL.
+
+The answer file uses the supported `install.wim` index selector for image `1`.
+The pinned ISO digest binds that index to the verified name
+`Windows 11 Enterprise Evaluation`, and post-install verification checks the
+actual Enterprise Evaluation edition. It uses en-US and a UEFI/GPT layout:
+260 MB FAT32 EFI, 16 MB MSR, then an extending NTFS Windows partition. It
+wipes only the fresh VHD created by this `Create` operation. It supplies no
+product key, contains no setup scripts or commands, and suppresses disposable
+Enterprise Evaluation OOBE.
+
+The answer file necessarily contains the temporary setup password in
+plaintext. It exists only in an inheritance-disabled owned media directory
+restricted to the current user, SYSTEM, and Administrators. Credentials stored
+on the host use current-user DPAPI `PSCredential` CLIXML in a separately
+protected owned directory with the same restrictive ACL. No password is
+accepted on a command line or written to logs, repository files, result
+objects, or proof artifacts.
+
+> [!warning]
+> Answer media contains a transient plaintext secret. Even after detaching,
+> deleting cached answer files, and rotating the account, the setup password
+> may remain recoverable from VM disk sectors or Windows setup logs until those
+> sectors are overwritten. A snapshot created before rotation can retain the
+> old state. DPAPI ties the credential file to the same Windows host and user.
+> Treat the VM, VHD, setup logs, pre-rotation snapshots, and owned partial-state
+> directory as sensitive.
+
+No plaintext autologon is configured. PowerShell Direct does not require an
+interactive login. A successful unattended install intentionally leaves the
+native desktop at the Windows sign-in screen. Later screenshot or computer-use
+proof requires an explicit interactive sign-in with the final credential. Do
+not add stored autologon to automate desktop proof.
+
+Safe manual setup remains available:
+
+```powershell
 .\scripts\clean-windows\Invoke-CleanWindowsHyperV.ps1 `
   -Command Create `
+  -CreateMode Manual `
   -VMName $vmName `
   -OwnerId $ownerId `
   -IsoPath $iso `
   -VhdPath $vhd
 ```
 
-Complete Windows setup interactively in the new VM. Install Windows updates and
-confirm the supplied credential can open a PowerShell Direct session. Do not
-install OpenClaw prerequisites manually.
+Manual mode still verifies the explicit ISO SHA256 before creating the VM. It
+attaches only the Microsoft ISO and leaves Windows setup to the operator.
+
+### Resume or clean an owned partial unattended install
+
+A failed unattended operation never deletes its VM or VHD. Before PowerShell
+Direct readiness, it retains the owned state marker, DPAPI setup credential,
+answer XML, staging directory, and answer ISO for diagnosis. Inspect the VM,
+VHD, DVD paths, and
+`.openclaw-clean-windows\OpenClaw-Clean-Windows\unattend.owner.json`.
+
+Resume only the exact owned VM:
+
+```powershell
+.\scripts\clean-windows\Invoke-CleanWindowsHyperV.ps1 `
+  -Command Create `
+  -ResumeUnattended `
+  -VMName $vmName `
+  -OwnerId $ownerId `
+  -VhdPath $vhd `
+  -ConfirmOwnedAction
+```
+
+If the partial install should not continue, detach exact owned installation
+media and remove only owned unattended media and the temporary setup
+credential:
+
+```powershell
+.\scripts\clean-windows\Invoke-CleanWindowsHyperV.ps1 `
+  -Command Create `
+  -CleanupUnattend `
+  -VMName $vmName `
+  -OwnerId $ownerId `
+  -VhdPath $vhd `
+  -ConfirmOwnedAction
+```
+
+Both operations validate the unattended marker and, when a VM exists, the
+ordinary VM note/file ownership markers. They refuse mismatches. Cleanup never
+deletes or unregisters a VM or VHD. If failure happened after PowerShell
+Direct readiness, successful media cleanup may already have removed the
+answer media as required.
+
+Validate answer XML, DPAPI/ACL behavior, IMAPI generation, a read-only mount,
+and cleanup without creating a VM or requiring Hyper-V elevation:
+
+```powershell
+.\scripts\clean-windows\Test-CleanWindowsUnattendMedia.ps1 `
+  -Command ValidateMedia
+```
+
+The helper accepts only a new owned child of
+`TestResults\CleanWindowsUnattend`, prints a nonsecret JSON proof, dismounts
+the ISO, validates its nonce-bound marker, and removes the generated root.
 
 ### Prepare checkpoints
 
@@ -63,14 +230,15 @@ install OpenClaw prerequisites manually.
   -VMName $vmName `
   -OwnerId $ownerId `
   -VhdPath $vhd `
-  -Credential $guestAccount `
+  -CredentialPath $credentialPath `
   -ConfirmOwnedAction
 ```
 
 `Prepare` creates `clean-windows`, restores it, enables WSL2 prerequisites, runs
 `scripts\setup-dev.ps1` inside the guest, and creates
 `openclaw-prerequisites`. Guest commands and PowerShell Direct readiness have
-bounded timeouts.
+bounded timeouts. `-Credential` remains available for operator-managed manual
+mode. Unattended mode should use the returned DPAPI `-CredentialPath`.
 
 ### Verify and smoke
 
@@ -80,7 +248,7 @@ bounded timeouts.
   -VMName $vmName `
   -OwnerId $ownerId `
   -VhdPath $vhd `
-  -Credential $guestAccount `
+  -CredentialPath $credentialPath `
   -ConfirmOwnedAction
 
 .\scripts\clean-windows\Invoke-CleanWindowsHyperV.ps1 `
@@ -88,7 +256,7 @@ bounded timeouts.
   -VMName $vmName `
   -OwnerId $ownerId `
   -VhdPath $vhd `
-  -Credential $guestAccount `
+  -CredentialPath $credentialPath `
   -HostArtifactRoot "TestResults\CleanWindows\HyperV" `
   -ConfirmOwnedAction
 ```
@@ -110,7 +278,7 @@ upgrade lane with an exact official release tag and x64 installer SHA-256:
   -VMName $vmName `
   -OwnerId $ownerId `
   -VhdPath $vhd `
-  -Credential $guestAccount `
+  -CredentialPath $credentialPath `
   -HostArtifactRoot "TestResults\CleanWindows\HyperV\Upgrade" `
   -ConfirmOwnedAction
 ```
