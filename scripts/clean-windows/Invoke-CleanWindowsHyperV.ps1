@@ -18,8 +18,8 @@
     - Prepare: capture clean-windows, install guest prerequisites, capture
       openclaw-prerequisites
     - Verify: restore openclaw-prerequisites and verify host plus guest readiness
-    - Smoke: restore openclaw-prerequisites, copy the repo, run
-      scripts\validate-installed-inno-smoke.ps1, retrieve artifacts, then restore
+    - Smoke: restore openclaw-prerequisites, copy the repo, run the typed
+      Installed or Upgrade validation lane, retrieve artifacts, then restore
     - Restore: restore a named owned checkpoint
 #>
 
@@ -53,6 +53,13 @@ param(
     [string]$GuestRoot = "C:\OpenClawRunner",
 
     [string]$HostArtifactRoot,
+
+    [ValidateSet("Installed", "Upgrade")]
+    [string]$ValidationLane = "Installed",
+
+    [string]$PreviousRelease = "",
+
+    [string]$PreviousInstallerSha256 = "",
 
     [ValidateRange(2, 64)]
     [int]$ProcessorCount = 4,
@@ -134,6 +141,20 @@ function Assert-RequiredParameters {
         "Smoke" {
             if ($null -eq $Credential) {
                 throw "Credential is required for Smoke."
+            }
+
+            if ($ValidationLane -eq "Upgrade") {
+                if ($PreviousRelease -notmatch '^v[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$') {
+                    throw "Upgrade validation requires -PreviousRelease as an exact tag-like SemVer such as v0.6.12."
+                }
+                if ($PreviousInstallerSha256 -notmatch '^[0-9A-Fa-f]{64}$') {
+                    throw "Upgrade validation requires -PreviousInstallerSha256 as exactly 64 hexadecimal characters."
+                }
+            } elseif (
+                -not [string]::IsNullOrWhiteSpace($PreviousRelease) -or
+                -not [string]::IsNullOrWhiteSpace($PreviousInstallerSha256)
+            ) {
+                throw "PreviousRelease and PreviousInstallerSha256 are accepted only with -ValidationLane Upgrade."
             }
         }
     }
@@ -1314,7 +1335,8 @@ function Invoke-SmokeCommand {
     Assert-OwnedVM -ResolvedVhdPath $resolvedVhdPath -ExpectedOwnerId $OwnerId | Out-Null
     Assert-OwnedCheckpoint -ResolvedVhdPath $resolvedVhdPath -ExpectedOwnerId $OwnerId -OwnedCheckpointName $script:PreparedCheckpointName | Out-Null
 
-    $guestArtifacts = Join-Path $GuestRoot "artifacts\installed-smoke"
+    $guestArtifactName = if ($ValidationLane -eq "Upgrade") { "upgrade-smoke" } else { "installed-smoke" }
+    $guestArtifacts = Join-Path $GuestRoot "artifacts\$guestArtifactName"
     Invoke-PreparedGuestOperation -ResolvedVhdPath $resolvedVhdPath -ExpectedOwnerId $OwnerId -Action {
         param($Session)
 
@@ -1322,32 +1344,122 @@ function Invoke-SmokeCommand {
         $guestRepoRoot = Get-GuestRepoRoot
 
         Invoke-GuestCommandWithTimeout -Session $Session -OperationName "Guest smoke preflight" -TimeoutSec $GuestCommandTimeoutSec -ScriptBlock {
-            param($RemoteRepoRoot)
+            param($RemoteRepoRoot, $RemoteValidationLane)
             Set-Location $RemoteRepoRoot
             & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $RemoteRepoRoot "scripts\setup-dev.ps1") -CheckOnly
             if ($LASTEXITCODE -ne 0) {
                 throw "setup-dev.ps1 -CheckOnly failed with exit code $LASTEXITCODE."
             }
-        } -ArgumentList @($guestRepoRoot) | Out-Null
+            if ($RemoteValidationLane -eq "Upgrade" -and -not (Get-Command pwsh.exe -ErrorAction SilentlyContinue)) {
+                throw "The Upgrade validation lane requires PowerShell 7 (pwsh.exe)."
+            }
+        } -ArgumentList @($guestRepoRoot, $ValidationLane) | Out-Null
 
         $smokeFailed = $true
         try {
-            Invoke-GuestCommandWithTimeout -Session $Session -OperationName "Running validate-installed-inno-smoke.ps1" -TimeoutSec $GuestCommandTimeoutSec -ScriptBlock {
-                param($RemoteRepoRoot, $RemoteArtifactRoot)
+            Invoke-GuestCommandWithTimeout -Session $Session -OperationName "Running $ValidationLane validation lane" -TimeoutSec $GuestCommandTimeoutSec -ScriptBlock {
+                param(
+                    $RemoteRepoRoot,
+                    $RemoteArtifactRoot,
+                    $RemoteValidationLane,
+                    $RemotePreviousRelease,
+                    $RemotePreviousInstallerSha256
+                )
                 if (Test-Path -LiteralPath $RemoteArtifactRoot) {
                     Remove-Item -LiteralPath $RemoteArtifactRoot -Recurse -Force
                 }
 
                 New-Item -ItemType Directory -Force -Path (Split-Path -Parent $RemoteArtifactRoot) | Out-Null
                 Set-Location $RemoteRepoRoot
-                & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $RemoteRepoRoot "scripts\validate-installed-inno-smoke.ps1") -RepoRoot $RemoteRepoRoot -ArtifactRoot $RemoteArtifactRoot
-                if ($LASTEXITCODE -ne 0) {
-                    throw "validate-installed-inno-smoke.ps1 failed with exit code $LASTEXITCODE."
+                if ($RemoteValidationLane -eq "Upgrade") {
+                    $validationScript = Join-Path $RemoteRepoRoot "scripts\validate-inno-upgrade-smoke.ps1"
+                    $validationEngine = (Get-Command pwsh.exe -ErrorAction Stop).Source
+                    $validationArguments = @(
+                        "-NoProfile",
+                        "-File", $validationScript,
+                        "-RepoRoot", $RemoteRepoRoot,
+                        "-ArtifactRoot", $RemoteArtifactRoot,
+                        "-PreviousRelease", $RemotePreviousRelease,
+                        "-PreviousInstallerSha256", $RemotePreviousInstallerSha256,
+                        "-ConfirmCleanMachineReleaseIdentity"
+                    )
+                } else {
+                    $validationScript = Join-Path $RemoteRepoRoot "scripts\validate-installed-inno-smoke.ps1"
+                    $validationEngine = "powershell.exe"
+                    $validationArguments = @(
+                        "-NoProfile",
+                        "-ExecutionPolicy", "Bypass",
+                        "-File", $validationScript,
+                        "-RepoRoot", $RemoteRepoRoot,
+                        "-ArtifactRoot", $RemoteArtifactRoot
+                    )
                 }
-            } -ArgumentList @($guestRepoRoot, $guestArtifacts) | Out-Null
+
+                if (-not (Test-Path -LiteralPath $validationScript -PathType Leaf)) {
+                    throw "$RemoteValidationLane validation script does not exist: $validationScript"
+                }
+
+                & $validationEngine @validationArguments
+                if ($LASTEXITCODE -ne 0) {
+                    throw "$RemoteValidationLane validation lane failed with exit code $LASTEXITCODE."
+                }
+
+                $phaseStatusPath = Join-Path $RemoteArtifactRoot "phase-status.json"
+                if (-not (Test-Path -LiteralPath $phaseStatusPath -PathType Leaf)) {
+                    throw "$RemoteValidationLane validation lane did not produce phase-status.json."
+                }
+
+                if ($RemoteValidationLane -eq "Upgrade") {
+                    $phaseStatus = Get-Content -LiteralPath $phaseStatusPath -Raw | ConvertFrom-Json
+                    if ([int]$phaseStatus.exitCode -ne 0 -or -not [bool]$phaseStatus.cleanupCompleted) {
+                        throw "Upgrade phase-status.json does not report successful cleanup."
+                    }
+                    foreach ($phase in @(
+                        "preflight",
+                        "acquire-previous",
+                        "prepare-current",
+                        "install-previous",
+                        "seed-state",
+                        "upgrade-current",
+                        "state-preservation",
+                        "installed-payload",
+                        "roundtrip",
+                        "cleanup"
+                    )) {
+                        if ([string]$phaseStatus.phases.$phase -ne "passed") {
+                            throw "Upgrade phase '$phase' did not pass."
+                        }
+                    }
+
+                    foreach ($requiredArtifact in @(
+                        "upgrade-smoke.log",
+                        "upgrade-smoke.done",
+                        "inno-install-previous.log",
+                        "inno-install-current.log",
+                        "installed-runtime-proof\phase-status.json"
+                    )) {
+                        if (-not (Test-Path -LiteralPath (Join-Path $RemoteArtifactRoot $requiredArtifact) -PathType Leaf)) {
+                            throw "Upgrade artifacts are missing $requiredArtifact."
+                        }
+                    }
+
+                    $runtimeStatusPath = Join-Path $RemoteArtifactRoot "installed-runtime-proof\phase-status.json"
+                    $runtimeStatus = Get-Content -LiteralPath $runtimeStatusPath -Raw | ConvertFrom-Json
+                    if ([int]$runtimeStatus.exitCode -ne 0) {
+                        throw "Upgrade installed-runtime-proof did not report exitCode 0."
+                    }
+                }
+            } -ArgumentList @(
+                $guestRepoRoot,
+                $guestArtifacts,
+                $ValidationLane,
+                $PreviousRelease,
+                $PreviousInstallerSha256.ToLowerInvariant()
+            ) | Out-Null
 
             $smokeFailed = $false
         } finally {
+            $artifactRetrievalError = $null
             try {
                 $exists = Invoke-GuestCommandWithTimeout -Session $Session -OperationName "Checking guest artifact path" -TimeoutSec 120 -ScriptBlock {
                     param($RemoteArtifactRoot)
@@ -1359,10 +1471,17 @@ function Invoke-SmokeCommand {
                 }
             } catch {
                 Write-InfoLine "Artifact retrieval did not complete: $($_.Exception.Message)"
+                if (-not $smokeFailed) {
+                    $smokeFailed = $true
+                    $artifactRetrievalError = $_
+                }
             }
 
             $manifest = [ordered]@{
                 command = "Smoke"
+                validationLane = $ValidationLane
+                previousRelease = if ($ValidationLane -eq "Upgrade") { $PreviousRelease } else { "" }
+                previousInstallerSha256 = if ($ValidationLane -eq "Upgrade") { $PreviousInstallerSha256.ToLowerInvariant() } else { "" }
                 vmName = $VMName
                 ownerId = $OwnerId
                 guestArtifactRoot = $guestArtifacts
@@ -1371,6 +1490,9 @@ function Invoke-SmokeCommand {
                 timestampUtc = [DateTime]::UtcNow.ToString("o")
             }
             $manifest | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $hostArtifacts "host-smoke-manifest.json") -Encoding UTF8
+            if ($null -ne $artifactRetrievalError) {
+                throw $artifactRetrievalError
+            }
         }
     }
 

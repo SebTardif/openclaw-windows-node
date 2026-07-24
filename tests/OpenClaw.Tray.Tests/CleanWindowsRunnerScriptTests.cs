@@ -43,6 +43,18 @@ public sealed class CleanWindowsRunnerScriptTests
         Assert.Contains("LastBootUpTime.ToUniversalTime().Ticks", script);
         Assert.Contains("if ([Int64]$currentBootTicks -gt [Int64]$previousBootTicks)", script);
         Assert.Contains("validate-installed-inno-smoke.ps1", script);
+        Assert.Contains("[ValidateSet(\"Installed\", \"Upgrade\")]", script);
+        Assert.Contains("validate-inno-upgrade-smoke.ps1", script);
+        Assert.Contains("\"-PreviousRelease\", $RemotePreviousRelease", script);
+        Assert.Contains("\"-PreviousInstallerSha256\", $RemotePreviousInstallerSha256", script);
+        Assert.Contains("\"-ConfirmCleanMachineReleaseIdentity\"", script);
+        Assert.Contains("$validationArguments", script);
+        Assert.Contains("installed-runtime-proof\\phase-status.json", script);
+        Assert.Contains("\"upgrade-smoke.log\"", script);
+        Assert.Contains("\"upgrade-smoke.done\"", script);
+        Assert.Contains("\"inno-install-previous.log\"", script);
+        Assert.Contains("\"inno-install-current.log\"", script);
+        Assert.Contains("cleanupCompleted", script);
         Assert.Contains("finally {", script);
         Assert.Contains("Restore-OwnedCheckpoint -ResolvedVhdPath $ResolvedVhdPath", script);
     }
@@ -139,6 +151,90 @@ public sealed class CleanWindowsRunnerScriptTests
     }
 
     [Fact]
+    public void CrabboxUpgradePlan_UsesTypedCombinedLaneAndExactArtifactContract()
+    {
+        var artifactRoot = Path.Combine(Path.GetTempPath(), $"openclaw-crabbox-upgrade-plan-{Guid.NewGuid():N}");
+        var sha256 = new string('a', 64);
+        try
+        {
+            var result = RunCrabboxPlan(
+                "CombinedInstalledSmoke",
+                artifactRoot,
+                "publisher:offer:sku:version",
+                "Upgrade",
+                "v0.6.12",
+                sha256);
+
+            Assert.Equal(0, result.ExitCode);
+            using var manifest = JsonDocument.Parse(File.ReadAllText(
+                Path.Combine(artifactRoot, "crabbox-smoke-manifest.json")));
+            var root = manifest.RootElement;
+            Assert.Equal("Upgrade", root.GetProperty("validationLane").GetString());
+            Assert.Equal("v0.6.12", root.GetProperty("previousRelease").GetString());
+            Assert.Equal(sha256, root.GetProperty("previousInstallerSha256").GetString());
+            Assert.Equal(
+                "combined-native-desktop-wsl2-upgrade-smoke",
+                root.GetProperty("proofClass").GetString());
+
+            var remoteScript = File.ReadAllText(root.GetProperty("remoteScriptPath").GetString()!);
+            Assert.Contains("validate-inno-upgrade-smoke.ps1", remoteScript);
+            Assert.Contains("Get-Command pwsh.exe", remoteScript);
+            Assert.Contains("\"-PreviousRelease\", \"v0.6.12\"", remoteScript);
+            Assert.Contains($"\"-PreviousInstallerSha256\", \"{sha256}\"", remoteScript);
+            Assert.Contains("\"-ConfirmCleanMachineReleaseIdentity\"", remoteScript);
+            Assert.Contains("cleanupCompleted", remoteScript);
+            Assert.Contains("\"acquire-previous\"", remoteScript);
+            Assert.Contains("\"state-preservation\"", remoteScript);
+            Assert.Contains("installed-runtime-proof\\phase-status.json", remoteScript);
+            Assert.Contains("\"upgrade-smoke.log\"", remoteScript);
+            Assert.Contains("\"upgrade-smoke.done\"", remoteScript);
+            Assert.Contains("\"inno-install-previous.log\"", remoteScript);
+            Assert.Contains("\"inno-install-current.log\"", remoteScript);
+            Assert.DoesNotContain("PreviousInstallerPath", remoteScript);
+        }
+        finally
+        {
+            Directory.Delete(artifactRoot, recursive: true);
+        }
+    }
+
+    [Theory]
+    [InlineData("CombinedInstalledSmoke", "", "", "requires -PreviousRelease")]
+    [InlineData("CombinedInstalledSmoke", "v0.6.12", "bad-sha", "requires -PreviousInstallerSha256")]
+    [InlineData("NativeDesktopComponent", "v0.6.12", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "requires CombinedInstalledSmoke")]
+    [InlineData("Wsl2Component", "v0.6.12", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "requires CombinedInstalledSmoke")]
+    public void CrabboxUpgradePlan_FailsClosedForMissingInputsOrComponentMode(
+        string mode,
+        string previousRelease,
+        string previousInstallerSha256,
+        string expectedError)
+    {
+        var artifactRoot = Path.Combine(Path.GetTempPath(), $"openclaw-crabbox-invalid-upgrade-{Guid.NewGuid():N}");
+        try
+        {
+            var azureImage = mode == "CombinedInstalledSmoke" ? "publisher:offer:sku:version" : null;
+            var result = RunCrabboxPlan(
+                mode,
+                artifactRoot,
+                azureImage,
+                "Upgrade",
+                previousRelease,
+                previousInstallerSha256);
+
+            Assert.NotEqual(0, result.ExitCode);
+            Assert.Contains(expectedError, result.Stderr);
+            Assert.False(File.Exists(Path.Combine(artifactRoot, "crabbox-smoke-manifest.json")));
+        }
+        finally
+        {
+            if (Directory.Exists(artifactRoot))
+            {
+                Directory.Delete(artifactRoot, recursive: true);
+            }
+        }
+    }
+
+    [Fact]
     public void CrabboxCombinedPlan_RequiresExplicitManagedImage()
     {
         var artifactRoot = Path.Combine(Path.GetTempPath(), $"openclaw-crabbox-plan-{Guid.NewGuid():N}");
@@ -192,13 +288,23 @@ public sealed class CleanWindowsRunnerScriptTests
         Assert.Contains("primary acceptance consumer", docs);
         Assert.Contains(@"HKCU:\Software\Classes\openclaw", docs);
         Assert.Contains("Never delete or pre-clean", docs);
+        Assert.Contains("-ValidationLane Upgrade", docs);
+        Assert.Contains("-ConfirmCleanMachineReleaseIdentity", docs);
+        Assert.Contains("installed-runtime-proof\\phase-status.json", docs);
+        Assert.Contains("does not expose", docs);
         Assert.DoesNotContain("parallels-windows-vm", docs, StringComparison.OrdinalIgnoreCase);
     }
 
     private static string ReadScript(string name) =>
         File.ReadAllText(Path.Combine(Root, "scripts", "clean-windows", name));
 
-    private static ProcessResult RunCrabboxPlan(string mode, string artifactRoot, string? azureImage = null)
+    private static ProcessResult RunCrabboxPlan(
+        string mode,
+        string artifactRoot,
+        string? azureImage = null,
+        string? validationLane = null,
+        string? previousRelease = null,
+        string? previousInstallerSha256 = null)
     {
         Directory.CreateDirectory(artifactRoot);
         var script = Path.Combine(Root, "scripts", "clean-windows", "Invoke-CrabboxWindowsSmoke.ps1");
@@ -232,6 +338,21 @@ public sealed class CleanWindowsRunnerScriptTests
         {
             arguments.Add("-AzureImage");
             arguments.Add(azureImage);
+        }
+        if (validationLane is not null)
+        {
+            arguments.Add("-ValidationLane");
+            arguments.Add(validationLane);
+        }
+        if (previousRelease is not null)
+        {
+            arguments.Add("-PreviousRelease");
+            arguments.Add(previousRelease);
+        }
+        if (previousInstallerSha256 is not null)
+        {
+            arguments.Add("-PreviousInstallerSha256");
+            arguments.Add(previousInstallerSha256);
         }
 
         foreach (var argument in arguments)

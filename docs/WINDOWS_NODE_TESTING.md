@@ -408,6 +408,12 @@ The noninteractive previous-to-current Inno upgrade smoke is a primary
 acceptance consumer for this baseline after its branch is integrated. Its guest
 user profile must predate OpenClaw protocol registration; refuse existing
 `HKCU:\Software\Classes\openclaw` state instead of deleting it.
+Use the clean controllers' typed `-ValidationLane Upgrade` with explicit
+`-PreviousRelease` and `-PreviousInstallerSha256`. The controllers add
+`-ConfirmCleanMachineReleaseIdentity` only after restoring or verifying the
+owned clean host and require the full upgrade plus nested installed-runtime
+phase contract. Crabbox permits this lane only on a combined native Windows and
+WSL2 image, never on component-only or split-host proof.
 
 ## Remaining Work (Roadmap)
 

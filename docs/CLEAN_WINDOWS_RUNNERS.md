@@ -94,9 +94,32 @@ bounded timeouts.
 ```
 
 The controller transports the checkout with PowerShell Direct
-`Copy-Item -ToSession`, runs the installed Inno smoke, and retrieves artifacts
-with `Copy-Item -FromSession`. The VM is stopped and restored to
+`Copy-Item -ToSession`, runs the typed `Installed` validation lane by default,
+and retrieves artifacts with `Copy-Item -FromSession`. The VM is stopped and restored to
 `openclaw-prerequisites` in a `finally` path on success or failure.
+
+After `scripts\validate-inno-upgrade-smoke.ps1` is integrated, run the typed
+upgrade lane with an exact official release tag and x64 installer SHA-256:
+
+```powershell
+.\scripts\clean-windows\Invoke-CleanWindowsHyperV.ps1 `
+  -Command Smoke `
+  -ValidationLane Upgrade `
+  -PreviousRelease v0.6.12 `
+  -PreviousInstallerSha256 "<official-x64-sha256>" `
+  -VMName $vmName `
+  -OwnerId $ownerId `
+  -VhdPath $vhd `
+  -Credential $guestAccount `
+  -HostArtifactRoot "TestResults\CleanWindows\HyperV\Upgrade" `
+  -ConfirmOwnedAction
+```
+
+The controller restores and verifies its owned `openclaw-prerequisites`
+checkpoint before it invokes `pwsh`. It builds a PowerShell argument array and
+adds `-ConfirmCleanMachineReleaseIdentity` itself. It does not accept arbitrary
+script text, arbitrary arguments, an offline installer path, or a direct-install
+fallback.
 
 ### Restore explicitly
 
@@ -151,7 +174,7 @@ Crabbox configuration, or print credentials.
 
 | Mode | Contract | Valid claim |
 |---|---|---|
-| `CombinedInstalledSmoke` | One x64 native Windows desktop lease from an explicit prebaked Azure image, with WSL2 and Ubuntu verified on that same host | Full installed DEV Inno smoke |
+| `CombinedInstalledSmoke` | One x64 native Windows desktop lease from an explicit prebaked Azure image, with WSL2 and Ubuntu verified on that same host | Full installed DEV or previous-to-current release upgrade smoke selected by `ValidationLane` |
 | `NativeDesktopComponent` | Native Windows plus managed desktop/VNC | Native desktop component proof only |
 | `Wsl2Component` | POSIX execution inside Crabbox-managed WSL2 | WSL2 component proof only |
 
@@ -197,9 +220,40 @@ same host reports all of the following:
 - an Ubuntu kernel that identifies WSL2.
 
 Only after that gate does `crabbox run` execute
-`validate-installed-inno-smoke.ps1`. The remote artifact folder is compressed,
-downloaded with `crabbox cp`, expanded locally, and required to contain
-`phase-status.json`.
+the selected `Installed` or `Upgrade` validation lane. The remote artifact
+folder is compressed, downloaded with `crabbox cp`, expanded locally, and
+checked against the lane-specific `phase-status.json` contract.
+
+The upgrade lane is valid only with `CombinedInstalledSmoke`; component modes
+fail closed instead of downgrading it to package-only or split-host proof:
+
+```powershell
+.\scripts\clean-windows\Invoke-CrabboxWindowsSmoke.ps1 `
+  -CrabboxPath $crabbox `
+  -Provider azure `
+  -Mode CombinedInstalledSmoke `
+  -ValidationLane Upgrade `
+  -PreviousRelease v0.6.12 `
+  -PreviousInstallerSha256 "<official-x64-sha256>" `
+  -AzureImage "<managed-image-urn-or-resource-id>" `
+  -RequireFullInstalledSmoke
+```
+
+The controller safely supplies the exact release and SHA-256 to
+`validate-inno-upgrade-smoke.ps1`, runs it with PowerShell 7, and adds
+`-ConfirmCleanMachineReleaseIdentity` only after the combined image contract
+passes. It retrieves the complete upgrade artifact root and requires:
+
+- `exitCode` 0 and `cleanupCompleted` true;
+- `preflight`, `acquire-previous`, `prepare-current`, `install-previous`,
+  `seed-state`, `upgrade-current`, `state-preservation`, `installed-payload`,
+  `roundtrip`, and `cleanup` all exactly `passed`;
+- `installed-runtime-proof\phase-status.json` with exit code 0; and
+- the upgrade done/log and previous/current Inno installer logs.
+
+The automated clean lane intentionally does not expose
+`-PreviousInstallerPath`. It uses the official exact tag plus expected SHA-256
+contract unless a separate reviewed offline workflow is designed later.
 
 Prepare stable machine capability in a trusted source lease, then capture it as
 an Azure managed image or native checkpoint. Azure native Windows checkpoints

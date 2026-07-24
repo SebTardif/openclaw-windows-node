@@ -22,6 +22,13 @@ param(
     [ValidateSet("CombinedInstalledSmoke", "NativeDesktopComponent", "Wsl2Component")]
     [string]$Mode,
 
+    [ValidateSet("Installed", "Upgrade")]
+    [string]$ValidationLane = "Installed",
+
+    [string]$PreviousRelease = "",
+
+    [string]$PreviousInstallerSha256 = "",
+
     [string]$AzureImage = "",
 
     [string]$RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path,
@@ -104,7 +111,12 @@ function Get-WindowsModeValue {
 
 function Get-ProofClass {
     switch ($Mode) {
-        "CombinedInstalledSmoke" { return "combined-native-desktop-wsl2-installed-smoke" }
+        "CombinedInstalledSmoke" {
+            if ($ValidationLane -eq "Upgrade") {
+                return "combined-native-desktop-wsl2-upgrade-smoke"
+            }
+            return "combined-native-desktop-wsl2-installed-smoke"
+        }
         "NativeDesktopComponent" { return "native-desktop-component-only" }
         "Wsl2Component" { return "wsl2-component-only" }
         default { throw "Unsupported mode '$Mode'." }
@@ -113,7 +125,7 @@ function Get-ProofClass {
 
 function Get-ModeArtifactName {
     switch ($Mode) {
-        "CombinedInstalledSmoke" { return "combined-installed-smoke" }
+        "CombinedInstalledSmoke" { return "combined-$($ValidationLane.ToLowerInvariant())-smoke" }
         "NativeDesktopComponent" { return "native-desktop-component" }
         "Wsl2Component" { return "wsl2-component" }
         default { throw "Unsupported mode '$Mode'." }
@@ -309,19 +321,76 @@ function Get-RemoteArtifactPathFromOutput {
     return $values[0]
 }
 
+function Assert-ValidationArtifactContract {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$ValidationArtifactRoot,
+        [Parameter(Mandatory = $true)]
+        [ValidateSet("Installed", "Upgrade")]
+        [string]$Lane
+    )
+
+    $phaseStatusPath = Join-Path $ValidationArtifactRoot "phase-status.json"
+    if (-not (Test-Path -LiteralPath $phaseStatusPath -PathType Leaf)) {
+        throw "Retrieved Crabbox artifacts are missing phase-status.json."
+    }
+    if ($Lane -ne "Upgrade") {
+        return
+    }
+
+    $phaseStatus = Get-Content -LiteralPath $phaseStatusPath -Raw | ConvertFrom-Json
+    if ([int]$phaseStatus.exitCode -ne 0 -or -not [bool]$phaseStatus.cleanupCompleted) {
+        throw "Retrieved upgrade phase status does not report successful cleanup."
+    }
+    foreach ($phase in @(
+        "preflight",
+        "acquire-previous",
+        "prepare-current",
+        "install-previous",
+        "seed-state",
+        "upgrade-current",
+        "state-preservation",
+        "installed-payload",
+        "roundtrip",
+        "cleanup"
+    )) {
+        $phaseProperty = $phaseStatus.phases.PSObject.Properties[$phase]
+        if ($null -eq $phaseProperty -or [string]$phaseProperty.Value -ne "passed") {
+            throw "Retrieved upgrade phase '$phase' did not pass."
+        }
+    }
+
+    foreach ($requiredArtifact in @(
+        "upgrade-smoke.log",
+        "upgrade-smoke.done",
+        "inno-install-previous.log",
+        "inno-install-current.log",
+        "installed-runtime-proof\phase-status.json"
+    )) {
+        if (-not (Test-Path -LiteralPath (Join-Path $ValidationArtifactRoot $requiredArtifact) -PathType Leaf)) {
+            throw "Retrieved upgrade artifacts are missing $requiredArtifact."
+        }
+    }
+    $runtimeStatus = Get-Content -LiteralPath (Join-Path $ValidationArtifactRoot "installed-runtime-proof\phase-status.json") -Raw | ConvertFrom-Json
+    if ([int]$runtimeStatus.exitCode -ne 0) {
+        throw "Retrieved upgrade installed-runtime-proof did not report exitCode 0."
+    }
+}
+
 function New-RemoteScriptContent {
     switch ($Mode) {
         "CombinedInstalledSmoke" {
-            return @'
+            $combinedScript = @'
 $ErrorActionPreference = "Stop"
 $repoRoot = (Get-Location).Path
-$artifactRoot = Join-Path $repoRoot "TestResults\CrabboxCombinedInstalledSmoke"
+$validationLane = "__VALIDATION_LANE__"
+$artifactRoot = Join-Path $repoRoot "__ARTIFACT_ROOT__"
 $env:OPENCLAW_REPO_ROOT = $repoRoot
 if ($env:PROCESSOR_ARCHITECTURE -ne "AMD64") {
-    throw "Combined installed smoke requires an x64 Windows host."
+    throw "Combined validation requires an x64 Windows host."
 }
 if ($env:CRABBOX_DESKTOP -ne "1") {
-    throw "Combined installed smoke requires the native desktop capability."
+    throw "Combined validation requires the native desktop capability."
 }
 if (-not (Get-Command wsl.exe -ErrorAction SilentlyContinue)) {
     throw "Combined image contract requires wsl.exe."
@@ -344,22 +413,98 @@ if ($LASTEXITCODE -ne 0 -or $kernel -notmatch '(?i)(microsoft-standard-WSL2|WSL2
 Write-Output "combinedImageContract=passed"
 Write-Output "combinedImageUbuntu=$($ubuntu[0])"
 Write-Output "combinedImageKernel=$kernel"
-& powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $repoRoot "scripts\validate-installed-inno-smoke.ps1") -RepoRoot $repoRoot -ArtifactRoot $artifactRoot
+if ($validationLane -eq "Upgrade") {
+    $validationScript = Join-Path $repoRoot "scripts\validate-inno-upgrade-smoke.ps1"
+    $validationEngine = (Get-Command pwsh.exe -ErrorAction Stop).Source
+    $validationArguments = @(
+        "-NoProfile",
+        "-File", $validationScript,
+        "-RepoRoot", $repoRoot,
+        "-ArtifactRoot", $artifactRoot,
+        "-PreviousRelease", "__PREVIOUS_RELEASE__",
+        "-PreviousInstallerSha256", "__PREVIOUS_INSTALLER_SHA256__",
+        "-ConfirmCleanMachineReleaseIdentity"
+    )
+} else {
+    $validationScript = Join-Path $repoRoot "scripts\validate-installed-inno-smoke.ps1"
+    $validationEngine = "powershell.exe"
+    $validationArguments = @(
+        "-NoProfile",
+        "-ExecutionPolicy", "Bypass",
+        "-File", $validationScript,
+        "-RepoRoot", $repoRoot,
+        "-ArtifactRoot", $artifactRoot
+    )
+}
+if (-not (Test-Path -LiteralPath $validationScript -PathType Leaf)) {
+    throw "$validationLane validation script does not exist: $validationScript"
+}
+& $validationEngine @validationArguments
 if ($LASTEXITCODE -ne 0) {
     exit $LASTEXITCODE
 }
 $phaseStatus = Join-Path $artifactRoot "phase-status.json"
 if (-not (Test-Path -LiteralPath $phaseStatus)) {
-    throw "Installed smoke did not produce phase-status.json."
+    throw "$validationLane validation did not produce phase-status.json."
 }
-$archivePath = Join-Path $repoRoot "openclaw-installed-smoke-artifacts.zip"
+if ($validationLane -eq "Upgrade") {
+    $status = Get-Content -LiteralPath $phaseStatus -Raw | ConvertFrom-Json
+    if ([int]$status.exitCode -ne 0 -or -not [bool]$status.cleanupCompleted) {
+        throw "Upgrade phase-status.json does not report successful cleanup."
+    }
+    foreach ($phase in @(
+        "preflight",
+        "acquire-previous",
+        "prepare-current",
+        "install-previous",
+        "seed-state",
+        "upgrade-current",
+        "state-preservation",
+        "installed-payload",
+        "roundtrip",
+        "cleanup"
+    )) {
+        $phaseProperty = $status.phases.PSObject.Properties[$phase]
+        if ($null -eq $phaseProperty -or [string]$phaseProperty.Value -ne "passed") {
+            throw "Upgrade phase '$phase' did not pass."
+        }
+    }
+    foreach ($requiredArtifact in @(
+        "upgrade-smoke.log",
+        "upgrade-smoke.done",
+        "inno-install-previous.log",
+        "inno-install-current.log",
+        "installed-runtime-proof\phase-status.json"
+    )) {
+        if (-not (Test-Path -LiteralPath (Join-Path $artifactRoot $requiredArtifact) -PathType Leaf)) {
+            throw "Upgrade artifacts are missing $requiredArtifact."
+        }
+    }
+    $runtimeStatus = Get-Content -LiteralPath (Join-Path $artifactRoot "installed-runtime-proof\phase-status.json") -Raw | ConvertFrom-Json
+    if ([int]$runtimeStatus.exitCode -ne 0) {
+        throw "Upgrade installed-runtime-proof did not report exitCode 0."
+    }
+}
+$archivePath = Join-Path $repoRoot "__ARCHIVE_NAME__"
 Remove-Item -LiteralPath $archivePath -Force -ErrorAction SilentlyContinue
 Compress-Archive -Path (Join-Path $artifactRoot "*") -DestinationPath $archivePath -CompressionLevel Optimal
 if (-not (Test-Path -LiteralPath $archivePath)) {
-    throw "Installed smoke artifact archive was not created."
+    throw "$validationLane artifact archive was not created."
 }
 Write-Output "artifactArchive=$archivePath"
 '@
+            $artifactDirectory = if ($ValidationLane -eq "Upgrade") {
+                "TestResults\CrabboxCombinedUpgradeSmoke"
+            } else {
+                "TestResults\CrabboxCombinedInstalledSmoke"
+            }
+            $archiveName = "openclaw-$($ValidationLane.ToLowerInvariant())-smoke-artifacts.zip"
+            $combinedScript = $combinedScript.Replace("__VALIDATION_LANE__", $ValidationLane)
+            $combinedScript = $combinedScript.Replace("__ARTIFACT_ROOT__", $artifactDirectory)
+            $combinedScript = $combinedScript.Replace("__PREVIOUS_RELEASE__", $PreviousRelease)
+            $combinedScript = $combinedScript.Replace("__PREVIOUS_INSTALLER_SHA256__", $PreviousInstallerSha256.ToLowerInvariant())
+            $combinedScript = $combinedScript.Replace("__ARCHIVE_NAME__", $archiveName)
+            return $combinedScript
         }
         "NativeDesktopComponent" {
             return @'
@@ -424,6 +569,27 @@ if ($Mode -ne "CombinedInstalledSmoke" -and -not [string]::IsNullOrWhiteSpace($A
     throw "AzureImage is accepted only for CombinedInstalledSmoke."
 }
 
+if ($ValidationLane -eq "Upgrade") {
+    if ($Mode -ne "CombinedInstalledSmoke") {
+        throw "Upgrade validation requires CombinedInstalledSmoke on one native Windows plus WSL2 host."
+    }
+    if ($PreviousRelease -notmatch '^v[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$') {
+        throw "Upgrade validation requires -PreviousRelease as an exact tag-like SemVer such as v0.6.12."
+    }
+    if ($PreviousInstallerSha256 -notmatch '^[0-9A-Fa-f]{64}$') {
+        throw "Upgrade validation requires -PreviousInstallerSha256 as exactly 64 hexadecimal characters."
+    }
+    $upgradeScriptPath = Join-Path $resolvedRepoRoot "scripts\validate-inno-upgrade-smoke.ps1"
+    if (-not $PlanOnly -and -not (Test-Path -LiteralPath $upgradeScriptPath -PathType Leaf)) {
+        throw "Upgrade validation script does not exist in this checkout: $upgradeScriptPath"
+    }
+} elseif (
+    -not [string]::IsNullOrWhiteSpace($PreviousRelease) -or
+    -not [string]::IsNullOrWhiteSpace($PreviousInstallerSha256)
+) {
+    throw "PreviousRelease and PreviousInstallerSha256 are accepted only with -ValidationLane Upgrade."
+}
+
 if (-not [string]::IsNullOrWhiteSpace($AzureImage) -and $AzureImage -match '[\x00-\x1f]') {
     throw "AzureImage must not contain control characters."
 }
@@ -464,7 +630,7 @@ if ($Mode -eq "Wsl2Component") {
     $remoteScriptContent = $remoteScriptContent -replace "`r`n", "`n"
 }
 switch ($Mode) {
-    "CombinedInstalledSmoke" { $remoteScriptFileName = "remote-combined-installed-smoke.ps1" }
+    "CombinedInstalledSmoke" { $remoteScriptFileName = "remote-combined-$($ValidationLane.ToLowerInvariant())-smoke.ps1" }
     "NativeDesktopComponent" { $remoteScriptFileName = "remote-native-desktop-component.ps1" }
     "Wsl2Component" { $remoteScriptFileName = "remote-wsl2-component.sh" }
 }
@@ -485,7 +651,8 @@ if ($Mode -in @("CombinedInstalledSmoke", "NativeDesktopComponent")) {
 $stopArguments = @("stop", "--provider", $Provider, "--target", "windows", "--windows-mode", $windowsMode, "<lease-id>")
 $listArguments = @("list", "--provider", $Provider, "--target", "windows", "--windows-mode", $windowsMode, "--json")
 $resultsArguments = @("results", "<run-id>")
-$copyArguments = @("cp", "--provider", $Provider, "--id", "<lease-id>", "SANDBOX:<remote-artifact-archive>", (Join-Path $resolvedArtifactRoot "remote-artifacts\openclaw-installed-smoke-artifacts.zip"))
+$validationArtifactName = "$($ValidationLane.ToLowerInvariant())-smoke"
+$copyArguments = @("cp", "--provider", $Provider, "--id", "<lease-id>", "SANDBOX:<remote-artifact-archive>", (Join-Path $resolvedArtifactRoot "remote-artifacts\openclaw-$validationArtifactName-artifacts.zip"))
 
 $manifestPath = Join-Path $resolvedArtifactRoot "crabbox-smoke-manifest.json"
 $manifest = [ordered]@{
@@ -494,6 +661,9 @@ $manifest = [ordered]@{
     provider = $Provider
     target = "windows"
     mode = $Mode
+    validationLane = $ValidationLane
+    previousRelease = if ($ValidationLane -eq "Upgrade") { $PreviousRelease } else { "" }
+    previousInstallerSha256 = if ($ValidationLane -eq "Upgrade") { $PreviousInstallerSha256.ToLowerInvariant() } else { "" }
     windowsMode = $windowsMode
     proofClass = $proofClass
     repoRoot = $resolvedRepoRoot
@@ -635,7 +805,7 @@ try {
                 throw "Combined image contract marker is missing from remote proof output."
             }
         $remoteArtifactPath = Get-RemoteArtifactPathFromOutput -Text $capturedRemoteStdout
-        $localArchivePath = Join-Path $resolvedArtifactRoot "remote-artifacts\openclaw-installed-smoke-artifacts.zip"
+        $localArchivePath = Join-Path $resolvedArtifactRoot "remote-artifacts\openclaw-$validationArtifactName-artifacts.zip"
         New-Item -ItemType Directory -Force -Path (Split-Path -Parent $localArchivePath) | Out-Null
 
         $effectiveCopyArguments = @()
@@ -661,11 +831,9 @@ try {
             throw "Crabbox artifact retrieval failed. Inspect $($copyResult.CombinedPath)."
         }
 
-        $expandedArtifactPath = Join-Path $resolvedArtifactRoot "remote-artifacts\installed-smoke"
+        $expandedArtifactPath = Join-Path $resolvedArtifactRoot "remote-artifacts\$validationArtifactName"
         Expand-Archive -LiteralPath $localArchivePath -DestinationPath $expandedArtifactPath -Force
-        if (-not (Test-Path -LiteralPath (Join-Path $expandedArtifactPath "phase-status.json") -PathType Leaf)) {
-            throw "Retrieved Crabbox artifacts are missing phase-status.json."
-        }
+        Assert-ValidationArtifactContract -ValidationArtifactRoot $expandedArtifactPath -Lane $ValidationLane
         }
         "NativeDesktopComponent" {
             if ($capturedRemoteStdout -notmatch '(?m)^nativeDesktopComponent=passed$') {
