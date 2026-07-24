@@ -23,6 +23,7 @@ namespace OpenClaw.E2ETests.Setup;
 public sealed class E2ESetupFixture : IAsyncLifetime
 {
     private readonly Action<Dictionary<string, object>>? _settingsPatch;
+    private readonly bool _captureRuntimeArtifacts;
 
     /// <summary>
     /// Persistent artifact directory that survives test cleanup.
@@ -53,13 +54,16 @@ public sealed class E2ESetupFixture : IAsyncLifetime
     private Process? _trayProcess;
 
     public E2ESetupFixture()
-        : this(settingsPatch: null)
+        : this(settingsPatch: null, captureRuntimeArtifacts: true)
     {
     }
 
-    internal E2ESetupFixture(Action<Dictionary<string, object>>? settingsPatch)
+    internal E2ESetupFixture(
+        Action<Dictionary<string, object>>? settingsPatch,
+        bool captureRuntimeArtifacts = true)
     {
         _settingsPatch = settingsPatch;
+        _captureRuntimeArtifacts = captureRuntimeArtifacts;
 
         if (!E2ETestGate.IsEnabled)
         {
@@ -208,7 +212,9 @@ public sealed class E2ESetupFixture : IAsyncLifetime
             Log($"Warning: uninstall threw: {ex.Message}");
         }
 
-        // 4. Copy logs from data dir to artifact dir before deleting
+        // 4. Copy logs from data dir to artifact dir before deleting.
+        // Secret-gated live lanes disable this because runtime logs can contain
+        // model or channel message content.
         CopyDataDirLogs();
 
         // 5. Delete temp data dirs (best-effort)
@@ -470,11 +476,18 @@ public sealed class E2ESetupFixture : IAsyncLifetime
         var p = Process.Start(psi)
             ?? throw new InvalidOperationException("Failed to start tray app process");
 
-        // Capture stdout/stderr to artifact files asynchronously
-        var stdoutPath = Path.Combine(ArtifactDir, "tray-stdout.log");
-        var stderrPath = Path.Combine(ArtifactDir, "tray-stderr.log");
-        _ = CaptureStreamAsync(p.StandardOutput, stdoutPath);
-        _ = CaptureStreamAsync(p.StandardError, stderrPath);
+        if (_captureRuntimeArtifacts)
+        {
+            var stdoutPath = Path.Combine(ArtifactDir, "tray-stdout.log");
+            var stderrPath = Path.Combine(ArtifactDir, "tray-stderr.log");
+            _ = CaptureStreamAsync(p.StandardOutput, stdoutPath);
+            _ = CaptureStreamAsync(p.StandardError, stderrPath);
+        }
+        else
+        {
+            _ = DrainStreamAsync(p.StandardOutput);
+            _ = DrainStreamAsync(p.StandardError);
+        }
 
         return p;
     }
@@ -483,10 +496,12 @@ public sealed class E2ESetupFixture : IAsyncLifetime
         string command,
         TimeSpan? timeout = null,
         IReadOnlyDictionary<string, string>? environment = null,
-        bool inputViaStdin = false)
+        bool inputViaStdin = false,
+        bool logCommandAndOutput = true)
     {
         command = command.Replace("\r", "");
-        Log($"WSL command: {SanitizeForLog(command)}");
+        if (logCommandAndOutput)
+            Log($"WSL command: {SanitizeForLog(command)}");
 
         var psi = new ProcessStartInfo
         {
@@ -550,7 +565,12 @@ public sealed class E2ESetupFixture : IAsyncLifetime
         sw.Stop();
 
         var result = new OpenClaw.SetupEngine.CommandResult(timedOut ? -1 : process.ExitCode, stdout, stderr, sw.Elapsed, timedOut);
-        Log($"WSL result: exit={result.ExitCode}, timedOut={result.TimedOut}, stdout={SanitizeForLog(stdout.Trim())}, stderr={SanitizeForLog(stderr.Trim())}");
+        if (logCommandAndOutput)
+        {
+            Log(
+                $"WSL result: exit={result.ExitCode}, timedOut={result.TimedOut}, " +
+                $"stdout={SanitizeForLog(stdout.Trim())}, stderr={SanitizeForLog(stderr.Trim())}");
+        }
         return result;
     }
 
@@ -766,12 +786,27 @@ public sealed class E2ESetupFixture : IAsyncLifetime
         catch { /* process exited — expected */ }
     }
 
+    private static async Task DrainStreamAsync(System.IO.StreamReader reader)
+    {
+        try
+        {
+            while (await reader.ReadLineAsync() is not null)
+            {
+            }
+        }
+        // slopwatch-ignore: SW003 Test cleanup or fixture teardown is best-effort and must not hide the test outcome.
+        catch { /* process exited - expected */ }
+    }
+
     /// <summary>
     /// Copies any log files from the data dir to the artifact dir
     /// so they're available even after temp cleanup.
     /// </summary>
     private void CopyDataDirLogs()
     {
+        if (!_captureRuntimeArtifacts)
+            return;
+
         try
         {
             CopyLogsFrom(DataDir, "data-dir");

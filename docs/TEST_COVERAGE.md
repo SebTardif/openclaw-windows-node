@@ -28,7 +28,7 @@ method counts because some `[Theory]` tests expand into multiple cases.
 | `OpenClaw.WinNode.Cli.Tests` | Windows node CLI argument parsing, command behavior, JSON output, uninstall flow | 89 |
 | `OpenClaw.SetupEngine.Tests` | Setup engine, WSL gateway installation, setup-code, and local setup policy coverage | 284 |
 | `OpenClawTray.FunctionalUI.Tests` | Functional UI smoke coverage | 10 |
-| `OpenClaw.E2ETests` | Gateway-mediated setup/connect, revocation recovery, and network recovery suites | 21 |
+| `OpenClaw.E2ETests` | Gateway-mediated setup/connect, revocation recovery, and network recovery suites, plus secret-gated live model and real Discord channel parity lanes (see below) | 88 |
 | `OpenClaw.Tray.IntegrationTests` | Real-process tray/MCP integration tests gated by `OPENCLAW_RUN_INTEGRATION=1` | 18 |
 
 The method inventory is a source scan of `[Fact]`, `[Theory]`, and repo custom xUnit attributes such as `[E2EFact]`, `[MxcE2EFact]`, and `[IntegrationFact]`. Use `dotnet test` for authoritative runtime totals.
@@ -59,7 +59,7 @@ The method inventory is a source scan of `[Fact]`, `[Theory]`, and repo custom x
 - **OpenClaw.WinNode.Cli.Tests** covers the standalone Windows node CLI contract.
 - **OpenClaw.SetupEngine.Tests** covers gateway setup and local WSL installation policy.
 - **OpenClawTray.FunctionalUI.Tests** covers newer UI surfaces outside the main tray test project.
-- **OpenClaw.E2ETests** uses custom `[E2EFact]` / `[MxcE2EFact]` attributes that inherit xUnit `FactAttribute`; CI exercises them with shard filters.
+- **OpenClaw.E2ETests** uses custom `[E2EFact]` / `[MxcE2EFact]` attributes that inherit xUnit `FactAttribute`; CI exercises them with shard filters. Its `LiveParity` folder adds two independently-gated, opt-in lanes (`[LiveModelE2EFact]` / `[RealChannelE2EFact]`, both requiring `OPENCLAW_RUN_E2E=1` plus their own variable) that are never enabled by normal CI; only their secretless contract tests run in CI. See `docs/LIVE_PARITY_TESTING.md`.
 - **OpenClaw.Tray.IntegrationTests** uses custom `[IntegrationFact]` attributes and runs only when `OPENCLAW_RUN_INTEGRATION=1`.
 - **PackagingTests** is a PowerShell-script lane under `tests\PackagingTests\`, not a dotnet test project.
 
@@ -75,6 +75,7 @@ required closeout lane for code changes.
 | Accessibility scan | `dotnet test .\tests\OpenClaw.Tray.UITests\OpenClaw.Tray.UITests.csproj -r win-x64 --filter Category=Accessibility` | UI changes and CI quality gate; runs real-process Axe.Windows scans; see `docs\ACCESSIBILITY.md` |
 | Local E2E | `OPENCLAW_RUN_E2E=1` with `OpenClaw.E2ETests` | Gateway setup/connect, recovery, or pairing changes that need real WSL Gateway coverage |
 | Local MXC E2E | `.\scripts\validate-mxc-e2e.ps1` | MXC sandboxing, `system.run`, exec approvals, Windows node command execution, gateway setup/connect changes that affect MXC |
+| Local live parity E2E | `.\scripts\validate-live-parity-e2e.ps1 -Lane LiveModel\|RealChannel\|All` | Opt-in, secret-gated proof that a real configured model provider or a real Discord bot round-trips through the published gateway; requires real credentials and an explicit profile, never runs unattended in hosted CI; see `docs/LIVE_PARITY_TESTING.md` |
 | Product WSL setup validation | `.\scripts\validate-wsl-gateway.ps1` | Tray onboarding/setup-engine changes that must prove the product WSL install path |
 | Packaging script checks | `powershell -File .\tests\PackagingTests\Test-InnoUninstallOrdering.ps1` | Installer script changes that affect uninstall or cleanup ordering |
 | Windows desktop proof | `.\scripts\capture-windows-desktop-proof.ps1 -ArtifactRoot <path>` | UI/desktop changes that need a repeatable, fail-closed screenshot and manifest of a real running tray; see `.agents\skills\windows-computer-use-proof\SKILL.md` |
@@ -120,6 +121,10 @@ first so `dotnet test --no-restore` cannot no-op before `bin\` exists.
 
 - Real shell tray hover/click behavior against Explorer.
 - Full live gateway/node pairing against a remote gateway.
+- Real configured model provider replies and real Discord bot round-trips are
+  covered only by the opt-in, secret-gated lanes in
+  `docs/LIVE_PARITY_TESTING.md`; normal CI proves gate/profile/redaction
+  contracts only, never a live provider or Discord call.
 - Long-running soak behavior for reconnects, high-frequency activity updates,
   and memory usage over multi-day sessions.
 - Manual visual acceptance for complex WinUI surfaces where screenshot

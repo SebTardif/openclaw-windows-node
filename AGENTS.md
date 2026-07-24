@@ -46,6 +46,22 @@ When changing MXC sandboxing, `system.run`, exec approvals, Windows node command
 
 The script sets `OPENCLAW_RUN_E2E` and `OPENCLAW_RUN_MXC_E2E` itself, then runs the real WSL Gateway -> Windows node -> `system.run` MXC E2E proofs. It fails if the MXC proof skips. Use `-AllowSkip` only to document that the current host is not MXC-capable; do not report an `-AllowSkip` run as merge validation for MXC-related work.
 
+### Live model / real Discord channel parity
+
+When changing the `tests\OpenClaw.E2ETests\LiveParity` helpers, the live model or real Discord channel lanes, `scripts\validate-live-parity-e2e.ps1`, or the CI shard that runs their contract tests, first run the ordinary secretless contract tests (no live fixture, no secrets, safe in any environment):
+
+```powershell
+dotnet test .\tests\OpenClaw.E2ETests\OpenClaw.E2ETests.csproj --no-restore --filter "FullyQualifiedName~OpenClaw.E2ETests.LiveParity.LiveParityGateContractTests|FullyQualifiedName~OpenClaw.E2ETests.LiveParity.LiveParityProfileContractTests|FullyQualifiedName~OpenClaw.E2ETests.LiveParity.LiveParitySupportContractTests"
+```
+
+Only run the live proof lanes themselves when you have real credentials to spend and intend to prove the actual round trip:
+
+```powershell
+.\scripts\validate-live-parity-e2e.ps1 -Lane LiveModel   # or RealChannel, or All
+```
+
+Both lanes require an explicit absolute profile path and real credentials; they are opt-in and never run unattended in hosted CI. See `docs/LIVE_PARITY_TESTING.md` for the exact profile schema, environment variables, cost/rate-limit caveats, and cleanup/security behavior.
+
 ## UI, MCP, and PR Proof
 
 Use `.agents/skills/openclaw-proof-validation/SKILL.md` when a change touches tray UX, Settings, onboarding, chat/canvas, Command Center, Windows node capabilities, MCP, gateway connection/pairing, permissions, diagnostics, or agent-facing instructions.

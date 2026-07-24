@@ -238,6 +238,30 @@ Artifacts are under `TestResults\E2E\<run-id>`:
 - `published-gateway-service-status.log`: systemd active/substate and restart status.
 - `e2e-fixture.log`, setup/uninstall JSONL, and isolated tray logs.
 
+### Live model and real Discord channel parity
+
+The `LiveParity` folder in `OpenClaw.E2ETests` adds two independent, opt-in
+lanes that reuse this same published gateway and native tray MCP setup to
+prove real behavior beyond the deterministic mock above: a configured LLM
+provider actually answering one bounded chat turn, and a real Discord bot
+actually receiving a mention and replying through the gateway. Both lanes:
+
+- Require an explicit absolute profile path (`OPENCLAW_LIVE_MODEL_PROFILE` /
+  `OPENCLAW_REAL_CHANNEL_PROFILE`) plus `OPENCLAW_RUN_E2E=1` and their own
+  variable (`OPENCLAW_RUN_LIVE_MODEL_E2E` / `OPENCLAW_RUN_REAL_CHANNEL_E2E`).
+  When explicitly enabled they never skip for a missing profile or
+  credential; they fail closed and name only the missing variable.
+- Stage credentials into the WSL gateway using OpenClaw's SecretRef CLI
+  (`--ref-provider default --ref-source env --ref-id <NAME>`), never a
+  literal secret value, and restore the gateway config/environment in
+  `DisposeAsync`.
+- Never print prompt, reply, model, provider, token, or Discord message
+  content to console/log/TRX output; only counts and coarse state.
+
+This lane requires real API/Discord credentials and network access it never
+runs in normal CI. See `docs/LIVE_PARITY_TESTING.md` for the full profile
+schema, exact environment variables, and `scripts\validate-live-parity-e2e.ps1`.
+
 ### Installed DEV Inno smoke
 
 Run the installed-app proof directly from Windows PowerShell:

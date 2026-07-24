@@ -354,7 +354,14 @@ jobs:
             filter: FullyQualifiedName~OpenClaw.E2ETests.Setup.RevocationAndRecoveryTests
           - name: network-recovery
             timeout_minutes: 25
-            filter: FullyQualifiedName~OpenClaw.E2ETests.Setup.NetworkRecoveryTests
+            # Live parity contract/unit tests are secretless and fixtureless
+            # (no WSL gateway, no live model/Discord fixture) so they are
+            # safe to piggyback on this shard. Only the *ContractTests
+            # classes are listed here by exact class name: the live proof
+            # classes (LiveModelE2ETests, RealChannelE2ETests) are
+            # deliberately NOT included in any normal CI filter, since they
+            # require real secrets/profiles that normal CI never provides.
+            filter: "FullyQualifiedName~OpenClaw.E2ETests.Setup.NetworkRecoveryTests|FullyQualifiedName~OpenClaw.E2ETests.LiveParity.LiveParityGateContractTests|FullyQualifiedName~OpenClaw.E2ETests.LiveParity.LiveParityProfileContractTests|FullyQualifiedName~OpenClaw.E2ETests.LiveParity.LiveParitySupportContractTests"
     steps:
     - name: Fail if repo hygiene failed
       if: ${{ needs.repo-hygiene.result != 'success' }}
