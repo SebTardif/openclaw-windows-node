@@ -348,7 +348,7 @@ jobs:
         include:
           - name: setup-connect
             timeout_minutes: 45
-            filter: "FullyQualifiedName~OpenClaw.E2ETests.Setup.SetupAndConnectTests|FullyQualifiedName~OpenClaw.E2ETests.Setup.MxcSetupAndConnectTests"
+            filter: "FullyQualifiedName~OpenClaw.E2ETests.Setup.SetupAndConnectTests|FullyQualifiedName~OpenClaw.E2ETests.Setup.MxcSetupAndConnectTests|FullyQualifiedName~OpenClaw.E2ETests.Setup.PublishedGatewayNativeChatTests"
           - name: revocation-recovery
             timeout_minutes: 25
             filter: FullyQualifiedName~OpenClaw.E2ETests.Setup.RevocationAndRecoveryTests
@@ -418,6 +418,18 @@ jobs:
           exit 1
         }
         if ("${{ matrix.name }}" -eq "setup-connect") {
+          $publishedGatewayProofName = "RealPublishedGateway_DeviceInfo_AndNativeChat_Roundtrip"
+          $publishedGatewayProof = @($trx.TestRun.Results.UnitTestResult | Where-Object { $_.testName -like "*$publishedGatewayProofName*" }) | Select-Object -First 1
+          if ($null -eq $publishedGatewayProof) {
+            Write-Error "E2E shard '${{ matrix.name }}' did not report the published gateway proof '$publishedGatewayProofName'. Check the setup-connect filter before merging."
+            exit 1
+          }
+          if ([string]$publishedGatewayProof.outcome -ne "Passed") {
+            Write-Error "Published gateway proof '$publishedGatewayProofName' must pass and cannot be skipped. Outcome: '$($publishedGatewayProof.outcome)'."
+            exit 1
+          }
+          Write-Host "Published gateway E2E proof passed: $publishedGatewayProofName"
+
           $mxcProofNames = @(
             "RealGateway_SystemRun_ExecutesThroughWindowsNodeMxcSandbox",
             "RealGateway_SystemRun_BlocksWritesToTrayDataDirectoryInMxcSandbox"

@@ -178,7 +178,7 @@ function Write-Results {
         notes        = $Notes
         started_at   = $script:startedAt
         finished_at  = (Get-Date).ToString("o")
-        installer    = $script:installerPath
+        installer    = $script:resolvedInstallerPath
         temp_dir     = $script:tempInstallPath
         output_dir   = $OutputDir
         steps        = @($script:steps)
@@ -195,7 +195,7 @@ function Write-Results {
         "|-----------|-------|",
         "| Verdict   | $Verdict |",
         "| ExitCode  | $ExitCode |",
-        "| Installer | $($script:installerPath) |",
+        "| Installer | $($script:resolvedInstallerPath) |",
         "| OutputDir | $OutputDir |",
         "| Date      | 2026-05-07 |",
         "",
@@ -365,7 +365,7 @@ function Invoke-WslCleanupCheck {
 # MAIN
 # ---------------------------------------------------------------------------
 $script:startedAt      = (Get-Date).ToString("o")
-$script:installerPath  = ""
+$script:resolvedInstallerPath = ""
 $script:tempInstallPath = ""
 $script:appDirPattern  = ""
 
@@ -397,7 +397,7 @@ try {
         exit $EXIT_SKIP
     }
 
-    $script:installerPath = $foundInstaller
+    $script:resolvedInstallerPath = $foundInstaller
     Add-Step "locate-installer" "Passed" "Installer found: $foundInstaller"
     Write-Info "Installer: $foundInstaller"
 

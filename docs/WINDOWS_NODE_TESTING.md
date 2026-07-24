@@ -195,6 +195,79 @@ Local MCP clients also see MCP-only `app.*` commands such as `app.navigate`, `ap
   - `openclaw-tray.log` contains `[mxc] system.run sandbox result` with `containment=mxc` for both the successful execution and the denied write.
 - E2E artifacts are written under `TestResults\E2E\<run-id>` and skip known secret-bearing files such as gateway records and settings.
 
+### Published Gateway native chat and Windows node proof
+
+`PublishedGatewayNativeChatTests.RealPublishedGateway_DeviceInfo_AndNativeChat_Roundtrip`
+is the standard non-MXC runtime smoke. It keeps the pinned published/LKG gateway from
+the setup fixture and proves all of these paths in one isolated run:
+
+1. The tray operator and Windows node are Ready.
+2. `openclaw health --deep --json` succeeds, and the tray-generated dashboard URL
+   returns an HTTP 2xx response without token/authentication errors.
+3. A real gateway `node.invoke` of `device.info` returns Windows device metadata.
+4. Local MCP `app.chat.send` drives the native tray chat provider.
+5. The published gateway calls a dependency-free OpenAI Responses-compatible mock
+   inside the isolated WSL distro.
+6. `app.chat.snapshot` reports the exact synthetic User marker followed later in
+   timeline order by the exact deterministic Assistant reply with `turnActive=false`.
+7. The gateway config is restored, the exact transient mock systemd unit is stopped,
+   and the app/node return to Ready.
+
+The fixture backs up the existing published-gateway config before adding the mock
+provider. It restores the file in async disposal even when the proof fails. Mock logs
+contain only method/path, byte and item counts, model id, request count, and synthetic
+test markers. They never contain request bodies, prompts, authorization headers, or
+tokens.
+
+```powershell
+$env:OPENCLAW_REPO_ROOT = (Get-Location).Path
+$env:OPENCLAW_RUN_E2E = "1"
+dotnet build .\src\OpenClaw.Tray.WinUI\OpenClaw.Tray.WinUI.csproj -c Debug -r win-x64
+dotnet test .\tests\OpenClaw.E2ETests\OpenClaw.E2ETests.csproj `
+  --no-restore `
+  --filter "FullyQualifiedName~OpenClaw.E2ETests.Setup.PublishedGatewayNativeChatTests" `
+  --logger "console;verbosity=normal" `
+  -r win-x64
+```
+
+The test must report exactly one executed, passed test. CI's `setup-connect` shard
+also reads the TRX and fails when this named proof is missing, skipped, or not passed.
+Artifacts are under `TestResults\E2E\<run-id>`:
+
+- `published-gateway-mock.log`: sanitized mock request summaries.
+- `published-gateway-service-status.log`: systemd active/substate and restart status.
+- `e2e-fixture.log`, setup/uninstall JSONL, and isolated tray logs.
+
+### Installed DEV Inno smoke
+
+Run the installed-app proof directly from Windows PowerShell:
+
+```powershell
+.\scripts\validate-installed-inno-smoke.ps1
+```
+
+The command creates its own timestamped artifact directory, builds an x64 DEV Inno
+installer, silently installs it into a throwaway directory, verifies the installed
+executable hash matches the installer payload, and runs the same named
+published-gateway proof with `OPENCLAW_E2E_TRAY_EXE` pinned to the installed
+executable. It then silently uninstalls and verifies there is no DEV registration,
+installed tray, DEV data directory, or `OpenClawGateway-Dev` distro left behind.
+
+This proves the installed tray runtime payload, including its operator, local MCP,
+Windows node, and native chat paths. The fixture's headless WSL gateway setup is
+still orchestrated in-process by the source-built E2E test harness. The smoke does
+not exercise the installed UI setup entrypoint itself.
+
+The smoke refuses to start if existing DEV install/data/distro state is present. It
+does not inspect, overwrite, uninstall, or clean release identity state. Every phase
+must report `passed`; a missing or skipped install, installed-payload check, roundtrip,
+or cleanup is a failure.
+
+Artifacts are written to `TestResults\InstalledSmoke\<timestamp>`. The command prints
+the exact artifact path. `phase-status.json` is the phase gate; the folder also
+includes `installed-smoke.log`, `installed-smoke.done`, `installed-smoke.pid`, Inno
+install/uninstall logs, one log per phase, the TRX, and the nested E2E artifacts.
+
 ## Remaining Work (Roadmap)
 
 1. ~~**system.run + exec approvals**~~ ✅ Implemented

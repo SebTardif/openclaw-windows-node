@@ -82,7 +82,10 @@ public sealed class E2ESetupFixture : IAsyncLifetime
 
         // Artifact dir under repo TestResults — persists after cleanup for CI upload
         var repoRoot = FindRepoRoot();
-        ArtifactDir = Path.Combine(repoRoot, "TestResults", "E2E", runId);
+        var artifactRoot = Environment.GetEnvironmentVariable("OPENCLAW_E2E_ARTIFACT_ROOT");
+        if (string.IsNullOrWhiteSpace(artifactRoot))
+            artifactRoot = Path.Combine(repoRoot, "TestResults", "E2E");
+        ArtifactDir = Path.Combine(Path.GetFullPath(artifactRoot), runId);
         Directory.CreateDirectory(ArtifactDir);
 
         GatewayPort = FindFreePort();
@@ -276,6 +279,7 @@ public sealed class E2ESetupFixture : IAsyncLifetime
             merged[kvp.Key] = kvp.Value;
         merged["EnableMcpServer"] = true;
         merged["HasSeenActivityStreamTip"] = true;
+        merged["HasInjectedFirstRunBootstrap"] = true;
         merged["ShowNotifications"] = false;
         merged["GlobalHotkeyEnabled"] = false;
         _settingsPatch?.Invoke(merged);
@@ -650,6 +654,8 @@ public sealed class E2ESetupFixture : IAsyncLifetime
         throw new InvalidDataException($"Active gateway identity file is missing DeviceId: {identityPath}");
     }
 
+    public void CaptureArtifacts() => CopyDataDirLogs();
+
     public async Task<(bool HasOperatorToken, bool HasNodeToken, bool HasBootstrapToken, string IdentityDir)> WaitForDurablePairedCredentialsAsync(TimeSpan? timeout = null)
     {
         var deadline = DateTime.UtcNow.Add(timeout ?? TimeSpan.FromSeconds(45));
@@ -734,7 +740,7 @@ public sealed class E2ESetupFixture : IAsyncLifetime
         return false;
     }
 
-    private static string SanitizeForLog(string value)
+    internal static string SanitizeForLog(string value)
     {
         if (string.IsNullOrEmpty(value))
             return value;
@@ -816,6 +822,20 @@ public sealed class E2ESetupFixture : IAsyncLifetime
 
     private static string LocateTrayExe()
     {
+        var overridePath = Environment.GetEnvironmentVariable("OPENCLAW_E2E_TRAY_EXE");
+        if (!string.IsNullOrWhiteSpace(overridePath))
+        {
+            var resolved = Path.GetFullPath(overridePath);
+            if (!File.Exists(resolved))
+                throw new FileNotFoundException("OPENCLAW_E2E_TRAY_EXE does not exist.", resolved);
+
+            var identityMarker = Path.Combine(Path.GetDirectoryName(resolved)!, "app-identity.txt");
+            if (!File.Exists(identityMarker))
+                throw new FileNotFoundException("Installed tray override is missing app-identity.txt.", identityMarker);
+
+            return resolved;
+        }
+
         var rid = RuntimeInformation.ProcessArchitecture switch
         {
             Architecture.Arm64 => "win-arm64",
