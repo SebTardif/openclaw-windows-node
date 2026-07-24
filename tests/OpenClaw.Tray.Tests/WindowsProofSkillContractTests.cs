@@ -35,6 +35,142 @@ public sealed class WindowsProofSkillContractTests
     }
 
     [Fact]
+    public void WindowsNodeTestingSkill_CoversInstalledAndCleanMachineUpgradeContracts()
+    {
+        var skill = Read(".agents", "skills", "windows-node-testing", "SKILL.md");
+
+        Assert.Contains(@".\scripts\validate-installed-inno-smoke.ps1", skill);
+        Assert.Contains(@".\scripts\validate-inno-upgrade-smoke.ps1", skill);
+        Assert.Contains("-PreviousRelease v0.6.12", skill);
+        Assert.Contains("-PreviousInstallerSha256 <official-x64-installer-sha256>", skill);
+        Assert.Contains("-ConfirmCleanMachineReleaseIdentity", skill);
+        Assert.Contains("disposable Windows VM or clean runner", skill);
+        Assert.Contains("docs/WINDOWS_NODE_TESTING.md", skill);
+    }
+
+    [Fact]
+    public void WindowsNodeTestingSkill_RoutesLiveParityWithoutNormalCiCredentials()
+    {
+        var skill = Read(".agents", "skills", "windows-node-testing", "SKILL.md");
+
+        Assert.Contains(@"tests\OpenClaw.E2ETests\LiveParity", skill);
+        Assert.Contains(@".\scripts\validate-live-parity-e2e.ps1 -Lane LiveModel", skill);
+        Assert.Contains(@".\scripts\validate-live-parity-e2e.ps1 -Lane RealChannel", skill);
+        Assert.Contains("docs/LIVE_PARITY_TESTING.md", skill);
+        Assert.Contains("secretless gate, profile, and", skill);
+        Assert.Contains("redaction contract tests", skill);
+        Assert.Contains("must never", skill);
+        Assert.Contains("run in normal hosted CI", skill);
+        Assert.Contains("LiveModelE2ETests", skill);
+        Assert.Contains("RealChannelE2ETests", skill);
+        Assert.DoesNotContain("There is no separate\n\"live\" test project", skill);
+        Assert.DoesNotContain("There is no separate \"live\" test project", skill);
+    }
+
+    [Fact]
+    public void WindowsNodeTestingSkill_RoutesCleanRunnerControllersAndProofTaxonomy()
+    {
+        var skill = Read(".agents", "skills", "windows-node-testing", "SKILL.md");
+
+        Assert.Contains("docs/CLEAN_WINDOWS_RUNNERS.md", skill);
+        Assert.Contains(@".\scripts\clean-windows\Invoke-CleanWindowsHyperV.ps1", skill);
+        Assert.Contains(@".\scripts\clean-windows\Install-Crabbox.ps1", skill);
+        Assert.Contains(@".\scripts\clean-windows\Invoke-CrabboxWindowsSmoke.ps1", skill);
+        Assert.Contains("NativeDesktopComponent", skill);
+        Assert.Contains("Wsl2Component", skill);
+        Assert.Contains("CombinedInstalledSmoke", skill);
+        Assert.Contains("require elevation", skill);
+        Assert.Contains("Azure RBAC", skill);
+        Assert.Contains("exact", skill);
+        Assert.Contains("lease-id capture and cleanup", skill);
+    }
+
+    [Fact]
+    public void WindowsNodeTestingSkill_KeepsDesktopAndProofValidationContractsLinked()
+    {
+        var skill = Read(".agents", "skills", "windows-node-testing", "SKILL.md");
+
+        Assert.Contains(".agents/skills/windows-computer-use-proof/SKILL.md", skill);
+        Assert.Contains(".agents/skills/openclaw-proof-validation/SKILL.md", skill);
+        Assert.Contains("[self-hosted, windows, openclaw-desktop-proof]", skill);
+        Assert.Contains("active,", skill);
+        Assert.Contains("interactive desktop", skill);
+        Assert.Contains("fails closed", skill);
+    }
+
+    [Fact]
+    public void WindowsNodeTestingSkill_RoutesLocalCleanMachineProofToHyperVSkill()
+    {
+        var skill = Read(".agents", "skills", "windows-node-testing", "SKILL.md");
+
+        Assert.Contains(".agents/skills/openclaw-hyperv-smoke/SKILL.md", skill);
+        Assert.Contains("local Hyper-V clean-machine", skill);
+        Assert.Contains("fixed-checkpoint", skill);
+        Assert.Contains("restore-in-finally", skill);
+    }
+
+    [Fact]
+    public void HyperVSmokeSkill_DefinesOwnedLifecycleAndWindowsNativeTransport()
+    {
+        var skill = Read(".agents", "skills", "openclaw-hyperv-smoke", "SKILL.md");
+
+        Assert.Contains("name: openclaw-hyperv-smoke", skill);
+        Assert.Contains("Get-VM", skill);
+        Assert.Contains("Get-VMSnapshot", skill);
+        Assert.Contains("Checkpoint-VM", skill);
+        Assert.Contains("Restore-VMSnapshot", skill);
+        Assert.Contains("Start-VM", skill);
+        Assert.Contains("Stop-VM", skill);
+        Assert.Contains("Invoke-Command -VMName", skill);
+        Assert.Contains("Copy-Item -ToSession", skill);
+        Assert.Contains("Copy-Item -FromSession", skill);
+        Assert.Contains("clean-windows", skill);
+        Assert.Contains("openclaw-prerequisites", skill);
+        Assert.Contains("-ConfirmOwnedAction", skill);
+        Assert.Contains("Generation 2 x64", skill);
+        Assert.Contains("nested virtualization", skill);
+        Assert.Contains("WSL2", skill);
+        Assert.Contains("Ubuntu", skill);
+        Assert.DoesNotContain("prlctl", skill, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("Parallels", skill, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("macOS", skill, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void HyperVSmokeSkill_GuardsCommandsPhasesOwnershipAndRelationships()
+    {
+        var skill = Read(".agents", "skills", "openclaw-hyperv-smoke", "SKILL.md");
+
+        foreach (var command in new[] { "Create", "Prepare", "Verify", "Smoke", "Restore" })
+        {
+            Assert.Contains($"-Command {command}", skill);
+        }
+
+        Assert.Contains("-ValidationLane Installed", skill);
+        Assert.Contains("-ValidationLane Upgrade", skill);
+        Assert.Contains("-PreviousRelease v0.6.12", skill);
+        Assert.Contains("-PreviousInstallerSha256", skill);
+        Assert.Contains("-ConfirmCleanMachineReleaseIdentity", skill);
+        Assert.Contains("Never report it as", skill);
+        Assert.Contains("upgrade proof", skill);
+        Assert.Contains("Never delete or unregister a VM, VHD, or checkpoint", skill);
+        Assert.Contains("Never modify, restore,", skill);
+        Assert.Contains("start, or stop an unowned", skill);
+        Assert.Contains("restore", skill);
+        Assert.Contains("`openclaw-prerequisites` in a `finally` path", skill);
+        Assert.Contains("phase-status.json", skill);
+        Assert.Contains("cleanupCompleted: true", skill);
+        Assert.Contains("non-elevated", skill, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("missing ISO", skill, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("missing credential", skill, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("active conflicting VM", skill, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains(".agents/skills/windows-node-testing/SKILL.md", skill);
+        Assert.Contains(".agents/skills/openclaw-proof-validation/SKILL.md", skill);
+        Assert.Contains(".agents/skills/windows-computer-use-proof/SKILL.md", skill);
+        Assert.Contains(".agents/skills/crabbox/SKILL.md", skill);
+    }
+
+    [Fact]
     public void ComputerUseProofSkill_DefinesOracleCurationAndFailClosedContracts()
     {
         var skill = Read(".agents", "skills", "windows-computer-use-proof", "SKILL.md");

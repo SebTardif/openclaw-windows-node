@@ -64,6 +64,14 @@ dotnet test tests\OpenClaw.Tray.UITests --no-build -c Debug -r win-x64 --filter 
 Prefer extending `AccessibilityAppFixture` and its `NavigateAsync`/marker
 pattern over inventing a parallel UI automation stack.
 
+For current-head visible screenshot or video evidence, follow
+`.agents/skills/windows-computer-use-proof/SKILL.md` and the broader
+`.agents/skills/openclaw-proof-validation/SKILL.md` closeout package. The
+manual desktop workflow is fixed to
+`[self-hosted, windows, openclaw-desktop-proof]`; it requires an active,
+interactive desktop and fails closed when the deterministic UI oracle or
+curated capture artifact is missing.
+
 ## 3. Accessibility lane
 
 Real-process Axe.Windows scans of each page, matching the CI quality gate:
@@ -111,7 +119,7 @@ For gateway setup/connect/pairing changes, `OpenClaw.E2ETests` covers the real
 WSL Gateway path (`OPENCLAW_RUN_E2E=1`); see `docs/WINDOWS_NODE_TESTING.md` for
 the exact `PublishedGatewayNativeChatTests` invocation and expected artifacts.
 
-## 6. Installed Inno lane
+## 6. Installed Inno lane and release upgrade lane
 
 Proves the installed tray runtime payload end to end, including a real Inno
 install/uninstall cycle. This is this repository's closest analog to the
@@ -130,15 +138,48 @@ phase must report `passed`; a missing or skipped phase is a failure. Artifacts
 land under `TestResults\InstalledSmoke\<timestamp>`, with `phase-status.json`
 as the phase gate.
 
+Previous-to-current release upgrade proof is a separate, clean-machine-only
+lane. Run it only in a disposable Windows VM or clean runner with PowerShell 7,
+an exact official previous release tag, and that release's official x64
+installer SHA-256:
+
+```powershell
+pwsh -File .\scripts\validate-inno-upgrade-smoke.ps1 `
+  -PreviousRelease v0.6.12 `
+  -PreviousInstallerSha256 <official-x64-installer-sha256> `
+  -ConfirmCleanMachineReleaseIdentity
+```
+
+Do not remove or bypass `-ConfirmCleanMachineReleaseIdentity` to make a
+developer workstation pass. A safety-only preflight is not upgrade proof.
+The full lane must pass every acquisition, previous install, state seed,
+current upgrade, state-preservation, installed-payload, roundtrip, and cleanup
+phase. See `docs/WINDOWS_NODE_TESTING.md` for the exact release identity,
+artifact, offline-input, and phase contracts.
+
 ## 7. Live lane
 
-"Live" validation exercises the running product against a real dependency
-that cannot be faked: a real WSL Gateway, a real installed app, or (for
-desktop-proof work) a real interactive Windows session. This repository's live
-lanes are the MXC E2E, published-gateway E2E, and installed-Inno lanes above,
-plus manual smoke against `.\run-app-local.ps1 -Isolated` per
-`.agents/skills/openclaw-proof-validation/SKILL.md`. There is no separate
-"live" test project; treat lanes 5 and 6 as the live lanes for this repo.
+Credentialed model-provider and Discord parity tests live under
+`tests\OpenClaw.E2ETests\LiveParity`. Run them through the fail-closed wrapper:
+
+```powershell
+.\scripts\validate-live-parity-e2e.ps1 -Lane LiveModel
+.\scripts\validate-live-parity-e2e.ps1 -Lane RealChannel
+```
+
+These lanes require `OPENCLAW_RUN_E2E=1`, their lane-specific opt-in gate, an
+absolute profile path, and the credential environment variables named by that
+profile. Once explicitly enabled, missing or invalid configuration is a
+failure, not a skip. They spend real provider or Discord budget and must never
+run in normal hosted CI. Normal CI runs only the secretless gate, profile, and
+redaction contract tests, never `LiveModelE2ETests` or
+`RealChannelE2ETests`.
+
+See `docs/LIVE_PARITY_TESTING.md` for profiles, gates, redaction, bounded
+timeouts, and the never-normal-CI rule. The MXC, published-gateway,
+installed-Inno, and interactive desktop proofs remain additional live
+behavior lanes. For an isolated manual tray proof and the complete evidence
+package, follow `.agents/skills/openclaw-proof-validation/SKILL.md`.
 
 ## 8. Performance lane
 
@@ -171,22 +212,42 @@ real, Windows-appropriate threshold.
 
 A "clean runner" is a host with no prior OpenClaw state: no `%APPDATA%\
 OpenClawTray[-Dev]`, no `OpenClawGateway[-Dev]` WSL distro, no dev-build
-identity marker. Two entry points cover this:
+identity marker. Start with `docs/CLEAN_WINDOWS_RUNNERS.md`; it defines the
+ownership, lease, artifact, and proof taxonomy for both supported controllers.
+Route local Hyper-V clean-machine, installed-smoke, and release-upgrade
+requests through `.agents/skills/openclaw-hyperv-smoke/SKILL.md`. It owns the
+inventory, fixed-checkpoint, PowerShell Direct, restore-in-finally, and blocker
+runbook.
 
 ```powershell
 # Diagnose/repair missing local prerequisites on a fresh machine or agent host.
 .\scripts\setup-dev.ps1 -CheckOnly
 
-# Full clean-runner proof: the installed-Inno smoke refuses to start on a host
-# with existing DEV state, so a passing run is itself clean-runner evidence.
-.\scripts\validate-installed-inno-smoke.ps1
+# Local operator-owned Hyper-V VM and checkpoint controller.
+.\scripts\clean-windows\Invoke-CleanWindowsHyperV.ps1 -Command <Create|Prepare|Verify|Smoke|Restore> ...
+
+# Install the pinned Crabbox client, then run a disposable Azure Windows lease.
+.\scripts\clean-windows\Install-Crabbox.ps1
+.\scripts\clean-windows\Invoke-CrabboxWindowsSmoke.ps1 -Mode <NativeDesktopComponent|Wsl2Component|CombinedInstalledSmoke> ...
 ```
 
-GitHub-hosted `windows-latest` CI runners are clean by construction for every
-job; that is why `ci.yml` can run the full Accessibility/UI/Shared/Tray suites
-without isolation setup beyond `OPENCLAW_TRAY_DATA_DIR`/isolated flags. When
-validating locally, prefer isolated/dev flows (see `run-app-local.ps1`) over
-touching real `%APPDATA%` state.
+`NativeDesktopComponent` proves only native Windows desktop capability.
+`Wsl2Component` proves only the WSL2 component. Separate component leases must
+never be combined into a full installed-app claim. `CombinedInstalledSmoke`
+requires one explicit x64 Azure Windows image whose same lease proves native
+desktop, WSL2, Ubuntu, and the selected installed or upgrade smoke.
+
+Hyper-V operations require elevation, hardware virtualization, and exact
+VM/checkpoint ownership markers plus `-ConfirmOwnedAction`. Crabbox requires
+interactive Azure authentication, an approved image, Azure RBAC, and exact
+lease-id capture and cleanup. Missing elevation, RBAC, image preparation, or
+lease proof is an external blocker, never a reason to weaken ownership or
+success-shape separate component evidence.
+
+GitHub-hosted `windows-latest` CI runners are clean by construction for normal
+automated suites, but they do not replace the controller-specific clean-machine
+proof above. When validating locally, prefer isolated/dev flows (see
+`run-app-local.ps1`) over touching real `%APPDATA%` state.
 
 ## Fail-closed guidance
 
@@ -196,8 +257,9 @@ touching real `%APPDATA%` state.
   proof. Confirm a non-zero test count actually ran.
 - Prefer the script/tool's own fail-closed exit code and manifest over
   eyeballing console output. Scripts in this repo (`validate-mxc-e2e.ps1`,
-  `validate-installed-inno-smoke.ps1`, `capture-windows-desktop-proof.ps1`)
-  are designed to exit non-zero and write a failure record rather than a
+  `validate-installed-inno-smoke.ps1`, `validate-inno-upgrade-smoke.ps1`,
+  `validate-live-parity-e2e.ps1`, `capture-windows-desktop-proof.ps1`) are
+  designed to exit non-zero and write a failure record rather than a
   success-shaped status when any required artifact or check is missing.
 - Never point a validation lane's isolated data directory, WSL distro, or
   artifact root at real `%APPDATA%`/`%LOCALAPPDATA%` OpenClaw folders.
