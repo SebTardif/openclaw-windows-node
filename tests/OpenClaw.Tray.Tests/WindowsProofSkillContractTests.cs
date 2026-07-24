@@ -78,6 +78,7 @@ public sealed class WindowsProofSkillContractTests
         Assert.True(copyFromScreenIndex >= 0, "Expected the existing screen-copy fallback.");
         Assert.True(printWindowIndex < copyFromScreenIndex, "PrintWindow must be attempted before screen-copy fallback.");
         Assert.Contains("LastScreenshotCaptureMethod = \"PrintWindow\"", fixture);
+        Assert.Contains("HasMeaningfulVisualContent", fixture);
         Assert.Contains("AttachThreadInput(currentThreadId, foregroundThreadId, attach: true)", fixture);
         Assert.Contains("return GetForegroundWindow() == HubWindowHandle", fixture);
     }

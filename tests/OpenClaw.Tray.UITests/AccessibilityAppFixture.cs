@@ -110,17 +110,17 @@ public sealed class AccessibilityAppFixture : IDisposable
 
         var path = Path.GetFullPath(configuredPath, Environment.CurrentDirectory);
         Directory.CreateDirectory(Path.GetDirectoryName(path)!);
-        using var bitmap = new Bitmap(width, height, PixelFormat.Format32bppArgb);
+        using var bitmap = new Bitmap(width, height, PixelFormat.Format32bppRgb);
 
         LastScreenshotCaptureMethod = null;
-        if (TryCaptureWindow(bitmap) && HasVisualContent(bitmap))
+        if (TryCaptureWindow(bitmap) && HasMeaningfulVisualContent(bitmap))
         {
             LastScreenshotCaptureMethod = "PrintWindow";
         }
         else
         {
             CaptureForegroundWindow(bitmap, left, top);
-            if (!HasVisualContent(bitmap))
+            if (!HasMeaningfulVisualContent(bitmap))
                 throw new InvalidOperationException("Hub screenshot capture was blank or near-uniform.");
             LastScreenshotCaptureMethod = "CopyFromScreen";
         }
@@ -202,17 +202,32 @@ public sealed class AccessibilityAppFixture : IDisposable
         }
     }
 
-    private static bool HasVisualContent(Bitmap bitmap)
+    internal static bool HasMeaningfulVisualContent(Bitmap bitmap)
     {
-        var sampledColors = new HashSet<int>();
-        var stepX = Math.Max(1, bitmap.Width / 32);
-        var stepY = Math.Max(1, bitmap.Height / 32);
-        for (var y = 0; y < bitmap.Height && sampledColors.Count < 8; y += stepY)
+        // Ignore window chrome so title-bar controls cannot make an otherwise
+        // blank client area look like meaningful application content.
+        var left = bitmap.Width / 20;
+        var top = bitmap.Height / 8;
+        var right = bitmap.Width - left;
+        var bottom = bitmap.Height - (bitmap.Height / 20);
+        var stepX = Math.Max(1, (right - left) / 128);
+        var stepY = Math.Max(1, (bottom - top) / 128);
+        var sampledColors = new Dictionary<int, int>();
+        var sampleCount = 0;
+        for (var y = top; y < bottom; y += stepY)
         {
-            for (var x = 0; x < bitmap.Width && sampledColors.Count < 8; x += stepX)
-                sampledColors.Add(bitmap.GetPixel(x, y).ToArgb());
+            for (var x = left; x < right; x += stepX)
+            {
+                var rgb = bitmap.GetPixel(x, y).ToArgb() & 0x00FFFFFF;
+                sampledColors[rgb] = sampledColors.GetValueOrDefault(rgb) + 1;
+                sampleCount++;
+            }
         }
-        return sampledColors.Count >= 3;
+        if (sampledColors.Count < 3 || sampleCount == 0)
+            return false;
+
+        var dominantColorSamples = sampledColors.Values.Max();
+        return dominantColorSamples < sampleCount * 0.997;
     }
 
     private async Task WaitForPageMarkerAsync(string pageTag, string automationId)

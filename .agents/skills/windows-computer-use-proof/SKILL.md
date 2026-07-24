@@ -106,8 +106,10 @@ collide and sort chronologically. Inside that folder:
   `PrintWindow` API. If that app-scoped capture is unavailable or blank, the
   runner falls back to `CopyFromScreen` only after confirming the Hub is the
   foreground window, and still clips to the Hub bounds. It never captures the
-  full desktop or taskbar. Inspect the image before publication and redact any
-  unexpected system overlay that appeared inside the app bounds.
+  full desktop or taskbar. The capture is rejected when the client area is
+  blank or near-uniform, even if window chrome contains several colors.
+  Inspect the image before publication and redact any unexpected system
+  overlay that appeared inside the app bounds.
 - The isolated tray runs against synthetic/deterministic data only (a fresh
   temp data directory and the built-in Connection page route). It never
   reads or writes real gateway tokens, device keys, settings, or prompts.
