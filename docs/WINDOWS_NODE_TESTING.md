@@ -393,6 +393,14 @@ GitHub-hosted Windows runners are intentionally unsupported because they do
 not guarantee compositor-backed app-window capture. The workflow uploads its
 curated artifacts unconditionally.
 
+### Clean Windows hosts
+
+For reusable local Windows 11 Hyper-V checkpoints and disposable Azure Windows
+leases through Crabbox, see [Clean Windows runners](CLEAN_WINDOWS_RUNNERS.md).
+Both paths reuse the installed DEV Inno smoke above and preserve its phase gate.
+The Crabbox WSL2 mode is documented separately and is never treated as native
+Windows or visible UI proof.
+
 ## Remaining Work (Roadmap)
 
 1. ~~**system.run + exec approvals**~~ ✅ Implemented
