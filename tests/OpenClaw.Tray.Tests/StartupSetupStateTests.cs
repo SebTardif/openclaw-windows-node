@@ -475,12 +475,13 @@ public class StartupSetupStateTests
     }
 
     [Theory]
-    [InlineData("Local (Windows)", null, true)]
-    [InlineData("Local (OpenClawGateway)", "OpenClawGateway", true)]
-    [InlineData("Manual local", null, false)]
+    [InlineData("Renamed Windows gateway", null, "OpenClaw Gateway (OpenClawGateway)", true)]
+    [InlineData("Local (OpenClawGateway)", "OpenClawGateway", null, true)]
+    [InlineData("Manual local", null, null, false)]
     public void IsSetupManagedLocalGateway_AcceptsNativeAndWslRecords(
         string friendlyName,
         string? managedDistro,
+        string? managedNativeTask,
         bool expected)
     {
         var record = new GatewayRecord
@@ -490,6 +491,7 @@ public class StartupSetupStateTests
             FriendlyName = friendlyName,
             IsLocal = true,
             SetupManagedDistroName = managedDistro,
+            SetupManagedNativeTaskName = managedNativeTask,
         };
 
         Assert.Equal(expected, SetupExistingGatewayClassifier.IsSetupManagedLocalGateway(record));

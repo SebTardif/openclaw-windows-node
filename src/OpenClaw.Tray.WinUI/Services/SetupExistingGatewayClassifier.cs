@@ -86,9 +86,8 @@ public static class SetupExistingGatewayClassifier
         if (WslKeepAlivePolicy.IsSetupManagedLocalRecord(record))
             return true;
 
-        return record.IsLocal
-            && LocalGatewayUrlClassifier.IsLocalGatewayUrl(record.Url)
-            && string.Equals(record.FriendlyName, "Local (Windows)", StringComparison.Ordinal);
+        return !string.IsNullOrWhiteSpace(record.SetupManagedNativeTaskName)
+            && (record.IsLocal || LocalGatewayUrlClassifier.IsLocalGatewayUrl(record.Url));
     }
 
     private static async Task<bool> HasAppOwnedLocalWslGatewayAsync(

@@ -12,7 +12,6 @@ namespace OpenClaw.SetupEngine.UI.Pages;
 
 public sealed partial class WelcomePage : Page
 {
-    private const string InstallButtonText = "Install a local gateway (WSL)";
     private const string CheckingButtonText = "Checking existing setup...";
     private SetupConfig? _config;
     private bool _installSelected = true; // default selection
@@ -125,9 +124,7 @@ public sealed partial class WelcomePage : Page
     {
         var config = _config ?? throw new InvalidOperationException("Setup configuration has not been loaded.");
 
-        config.InstallMode = installMode;
-        if (installMode == GatewayInstallMode.NativeWindows)
-            config.Tailscale.Enabled = false;
+        config.ApplyInstallMode(installMode);
         GatewayLkgVersion.ApplyToConfig(config);
         SetupWindow.Active?.NavigateToCapabilities();
         return Task.CompletedTask;
@@ -142,7 +139,7 @@ public sealed partial class WelcomePage : Page
         config.InstallMode = _installMode;
 
         NextButton.IsEnabled = false;
-        InstallTitle.Text = CheckingButtonText;
+        NextButton.Content = CheckingButtonText;
         var navigating = false;
         try
         {
@@ -172,7 +169,7 @@ public sealed partial class WelcomePage : Page
         {
             if (!navigating && setupWindow is { IsClosed: false })
             {
-                InstallTitle.Text = InstallButtonText;
+                NextButton.Content = "Next";
                 NextButton.IsEnabled = true;
             }
         }

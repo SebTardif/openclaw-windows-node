@@ -53,7 +53,7 @@ The installer also creates a Start Menu group with shortcuts for **OpenClaw Comp
 On first launch, Molty opens the onboarding wizard when there is no usable saved gateway connection. The wizard offers two managed local gateway modes:
 
 - **WSL 2 (recommended)** — creates a locked-down app-owned `OpenClawGateway` Ubuntu instance for the safest local boundary and maximum Linux compatibility. Requires WSL 2 and virtualization.
-- **Native Windows** — installs the pinned OpenClaw CLI into an app-owned LocalAppData prefix with the official PowerShell installer and runs an isolated gateway profile as a per-user Windows Scheduled Task. Existing global OpenClaw installs and the default profile are preserved; it runs directly in the Windows user context.
+- **Native Windows** — installs a SHA-256-pinned, app-private Node runtime and the pinned OpenClaw CLI under LocalAppData, then runs an isolated gateway profile as a supervised per-user Windows Scheduled Task. It does not install or replace system Node, modify persistent PATH, or alter global OpenClaw installs and the default profile; it runs directly in the Windows user context.
 
 1. **Security notice** — Confirms this is a trusted PC before local setup starts.
 

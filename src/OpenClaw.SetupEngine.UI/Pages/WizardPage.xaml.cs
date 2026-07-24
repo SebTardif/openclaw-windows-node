@@ -1348,7 +1348,11 @@ public sealed partial class WizardPage : Page
 
         try
         {
-            new GatewayTerminalLauncher(NullLogger.Instance).Open(_hostAccessPlan);
+            var localDataDir = SetupWindow.Active?.LocalDataDir ?? SetupContext.ResolveLocalDataDir();
+            new GatewayTerminalLauncher(
+                NullLogger.Instance,
+                GatewayCliRunner.GetManagedNativeCliPrefix(localDataDir),
+                GatewayCliRunner.GetManagedNativeNodeDirectory(localDataDir)).Open(_hostAccessPlan);
             StatusText.Text = $"Opened a terminal in {_hostAccessPlan.DistroName}. Install the tool, then choose Restart gateway.";
         }
         catch (Exception ex)
@@ -1375,6 +1379,7 @@ public sealed partial class WizardPage : Page
         // us. SetBusy disables the primary/secondary buttons and collapses the recovery
         // panel (which hosts the Restart/Open-terminal buttons), so they stop hit-testing.
         var generation = AdvanceOperationGeneration();
+        _stepHistory.Clear();
         _errorState = false;
         ErrorText.Visibility = Visibility.Collapsed;
         SetBusy($"Restarting {distro}...");

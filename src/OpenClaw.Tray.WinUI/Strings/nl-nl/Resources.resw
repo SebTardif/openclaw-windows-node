@@ -6089,19 +6089,19 @@ Controleer of de gateway actief is.</value>
     <value>Run openclaw gateway start</value>
   </data>
   <data name="ConnectionPage_GatewayHostStartButton.[using:Microsoft.UI.Xaml.Automation]AutomationProperties.Name" xml:space="preserve">
-    <value>Start local gateway</value>
+    <value>Lokale gateway starten</value>
   </data>
   <data name="ConnectionPage_GatewayHostStopButton.[using:Microsoft.UI.Xaml.Controls]ToolTipService.ToolTip" xml:space="preserve">
     <value>Run openclaw gateway stop</value>
   </data>
   <data name="ConnectionPage_GatewayHostStopButton.[using:Microsoft.UI.Xaml.Automation]AutomationProperties.Name" xml:space="preserve">
-    <value>Stop local gateway</value>
+    <value>Lokale gateway stoppen</value>
   </data>
   <data name="ConnectionPage_GatewayHostRestartButton.[using:Microsoft.UI.Xaml.Controls]ToolTipService.ToolTip" xml:space="preserve">
     <value>Run openclaw gateway restart</value>
   </data>
   <data name="ConnectionPage_GatewayHostRestartButton.[using:Microsoft.UI.Xaml.Automation]AutomationProperties.Name" xml:space="preserve">
-    <value>Restart local gateway</value>
+    <value>Lokale gateway opnieuw starten</value>
   </data>
   <data name="AgentEventsPage_Status_Live" xml:space="preserve">
     <value>Actueel</value>
@@ -6644,7 +6644,7 @@ Het binaire bestand wxc-exec is niet gevonden. {1} Als dit een ontwikkelaarsbuil
     <value>Open a shell or manage the local gateway service in {0}.</value>
   </data>
   <data name="ConnectionPage_GatewayHostControlsNativeDescription_Format" xml:space="preserve">
-    <value>Open a shell or manage the native Windows gateway task {0}.</value>
+    <value>Open een shell of beheer de systeemeigen Windows-gatewaytaak {0}.</value>
   </data>
   <data name="CronPage_JobCompleted" xml:space="preserve">
     <value>Job completed</value>
@@ -6677,7 +6677,7 @@ Het binaire bestand wxc-exec is niet gevonden. {1} Als dit een ontwikkelaarsbuil
     <value>Open a terminal in the {0} WSL gateway.</value>
   </data>
   <data name="GatewayHostAccess_OpenTerminalNativeTooltip_Format" xml:space="preserve">
-    <value>Open a Windows terminal for the native gateway task {0}.</value>
+    <value>Open een Windows-terminal voor de systeemeigen gatewaytaak {0}.</value>
   </data>
   <data name="GatewayHostAccess_OpenTerminalLabel" xml:space="preserve">
     <value>Open terminal</value>

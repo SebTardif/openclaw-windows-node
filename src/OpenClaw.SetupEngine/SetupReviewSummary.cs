@@ -82,6 +82,7 @@ public static class SetupReviewSummaryBuilder
         var gatewayPort = config.GatewayPort;
         var installUrl = config.Gateway.WindowsInstallUrl ?? GatewayLkgVersion.DefaultWindowsInstallUrl;
         var installerHost = TryGetHttpsHost(installUrl);
+        var usesManagedRuntime = GatewayLkgVersion.ShouldUseManagedWindowsInstaller(installUrl);
         var gatewayDataPath = Path.Combine(dataDir ?? SetupContext.ResolveDataDir(), "gateways.json");
         var openClawStatePath = GatewayCliRunner.GetManagedNativeStateDir(config);
         var openClawCliPrefix = GatewayCliRunner.GetManagedNativeCliPrefix(SetupContext.ResolveLocalDataDir());
@@ -94,10 +95,12 @@ public static class SetupReviewSummaryBuilder
         return new SetupReviewSummary(
             DistroTitle: "Install directly on Windows",
             DistroDescription: "No WSL or virtual machine. OpenClaw runs under your Windows account and stores its gateway state in your user profile.",
-            InstallerDescription: installerHost is null
+            InstallerDescription: usesManagedRuntime
+                ? $"App-private Node {GatewayLkgVersion.ManagedNodeVersion} and OpenClaw {GatewayLkgVersion.LkgVersion}; downloads are version-pinned and SHA-256 verified."
+                : installerHost is null
                 ? "Installer URL is not HTTPS; setup will stop before downloading anything."
                 : $"Official PowerShell installer fetched over HTTPS from {installerHost}; installs Node.js when needed and keeps the OpenClaw CLI app-owned.",
-            InstallerBadge: installerHost is null ? "Invalid URL" : "HTTPS",
+            InstallerBadge: usesManagedRuntime ? "App-private" : installerHost is null ? "Invalid URL" : "HTTPS",
             GatewayDescription: isLanBind
                 ? "LAN bind enabled — reachable from this PC and your local network according to Windows firewall/routing."
                 : "Loopback only — not reachable from your network or the internet.",

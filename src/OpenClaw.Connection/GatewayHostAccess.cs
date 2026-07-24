@@ -1,4 +1,5 @@
 using System;
+using OpenClaw.Shared;
 
 namespace OpenClaw.Connection;
 
@@ -69,8 +70,9 @@ public static class GatewayHostAccessClassifier
         var distroName = Normalize(record.SetupManagedDistroName);
         var sshUser = Normalize(record.SshTunnel?.User);
         var sshHost = Normalize(record.SshTunnel?.Host);
+        var isManagedLocal = record.IsLocal || LocalGatewayUrlClassifier.IsLocalGatewayUrl(record.Url);
 
-        if (distroName is not null)
+        if (isManagedLocal && record.SshTunnel is null && distroName is not null)
         {
             return new GatewayHostAccessPlan(
                 record.Id,
@@ -86,7 +88,7 @@ public static class GatewayHostAccessClassifier
         }
 
         var nativeTaskName = Normalize(record.SetupManagedNativeTaskName);
-        if (record.IsLocal && nativeTaskName is not null)
+        if (isManagedLocal && record.SshTunnel is null && nativeTaskName is not null)
         {
             return new GatewayHostAccessPlan(
                 record.Id,

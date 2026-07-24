@@ -27,7 +27,10 @@ $resultPath = Join-Path $AppRoot 'uninstall-gateway-result.json'
 $errorPath = Join-Path $AppRoot 'uninstall-gateway-error.log'
 $wslLogPath = Join-Path $AppRoot 'uninstall-gateway-wsl.log'
 $cleanupWarnings = New-Object 'System.Collections.Generic.List[string]'
-$script:installedGatewayMode = 'Wsl'
+$script:installedGatewayMode = 'None'
+$script:ownsNativeGateway = $false
+$script:ownsWslGateway = $false
+$script:hasForeignOwnership = $false
 
 if ($DataDirectoryName -notmatch '^[A-Za-z0-9._-]+$') {
     throw "Invalid data directory name '$DataDirectoryName'."
@@ -505,30 +508,35 @@ function Resolve-AppDataDir {
         if (Test-Path -LiteralPath $nativeOwnershipPath -PathType Leaf) {
             $nativeOwnership = Read-JsonFile $nativeOwnershipPath
             if (Test-NativeOwnershipMatches -Ownership $nativeOwnership) {
+                $script:ownsNativeGateway = $true
                 return 'NativeWindows'
             }
-            throw 'Native ownership marker belongs to a different profile or Scheduled Task; refusing destructive cleanup.'
+            $script:hasForeignOwnership = $true
+            return 'ForeignNative'
         }
 
         $profileOwnershipPath = Join-Path $LocalDataDir 'native-gateway-profile-owner.json'
         if (Test-Path -LiteralPath $profileOwnershipPath -PathType Leaf) {
             $profileOwnership = Read-JsonFile $profileOwnershipPath
             if (Test-NativeOwnershipMatches -Ownership $profileOwnership) {
+                $script:ownsNativeGateway = $true
                 return 'NativeWindows'
             }
-            throw 'Native profile ownership marker belongs to a different profile or Scheduled Task; refusing destructive cleanup.'
+            $script:hasForeignOwnership = $true
+            return 'ForeignNative'
         }
 
         $state = Read-JsonFile (Join-Path $LocalDataDir 'setup-state.json')
         $persistedMode = [string](Get-JsonPropertyValue $state 'InstallMode')
         if ([string]::Equals($persistedMode, 'NativeWindows', [StringComparison]::OrdinalIgnoreCase)) {
-            return 'NativeWindows'
+            $script:hasForeignOwnership = $true
+            return 'ForeignNative'
         }
-        if ([string]::Equals($persistedMode, 'Wsl', [StringComparison]::OrdinalIgnoreCase)) {
+        if ($script:ownsWslGateway -and [string]::Equals($persistedMode, 'Wsl', [StringComparison]::OrdinalIgnoreCase)) {
             return 'Wsl'
         }
 
-        return 'Wsl'
+        return 'None'
     }
 
     function Get-NativeGatewayRecordId {
@@ -559,6 +567,83 @@ function Resolve-AppDataDir {
         $taskName = [string](Get-JsonPropertyValue $Ownership 'TaskName')
         return [string]::Equals($profileName, (Get-NativeGatewayProfile), [StringComparison]::Ordinal) -and
             [string]::Equals($taskName, $GatewayTaskName, [StringComparison]::Ordinal)
+    }
+
+    function Test-WslOwnershipMatches {
+        param(
+            [object]$Ownership,
+            [string]$LocalDataDir
+        )
+
+        if ($null -eq $Ownership) {
+            return $false
+        }
+
+        $installMode = [string](Get-JsonPropertyValue $Ownership 'InstallMode')
+        $distroName = [string](Get-JsonPropertyValue $Ownership 'DistroName')
+        $installPath = [string](Get-JsonPropertyValue $Ownership 'InstallPath')
+        if (-not [string]::Equals($installMode, 'Wsl', [StringComparison]::OrdinalIgnoreCase) -or
+            -not [string]::Equals($distroName, $DistroName, [StringComparison]::Ordinal) -or
+            [string]::IsNullOrWhiteSpace($installPath)) {
+            return $false
+        }
+
+        try {
+            $expectedPath = [IO.Path]::GetFullPath((Join-Path $LocalDataDir "wsl\$DistroName"))
+            return [string]::Equals(
+                [IO.Path]::GetFullPath($installPath),
+                $expectedPath,
+                [StringComparison]::OrdinalIgnoreCase)
+        } catch {
+            return $false
+        }
+    }
+
+    function Test-LegacyWslOwnership {
+        param(
+            [string]$DataDir,
+            [string]$LocalDataDir
+        )
+
+        $state = Read-JsonFile (Join-Path $LocalDataDir 'setup-state.json')
+        if (-not [string]::Equals(
+                [string](Get-JsonPropertyValue $state 'InstallMode'),
+                'Wsl',
+                [StringComparison]::OrdinalIgnoreCase)) {
+            return $false
+        }
+
+        $installPath = Join-Path $LocalDataDir "wsl\$DistroName"
+        if (-not (Test-Path -LiteralPath $installPath)) {
+            return $false
+        }
+
+        $gatewayState = Read-JsonFile (Join-Path $DataDir 'gateways.json')
+        foreach ($record in @((Get-JsonPropertyValue $gatewayState 'gateways'))) {
+            if (Test-SetupManagedLocalRecord -Record $record -InstallMode 'Wsl' -OwnedNativeRecordId $null) {
+                return $true
+            }
+        }
+        return $false
+    }
+
+    function Test-WslOwnership {
+        param(
+            [string]$DataDir,
+            [string]$LocalDataDir
+        )
+
+        $ownershipPath = Join-Path $LocalDataDir 'wsl-gateway-install.json'
+        if (Test-Path -LiteralPath $ownershipPath -PathType Leaf) {
+            $ownership = Read-JsonFile $ownershipPath
+            if (Test-WslOwnershipMatches -Ownership $ownership -LocalDataDir $LocalDataDir) {
+                return $true
+            }
+            $script:hasForeignOwnership = $true
+            return $false
+        }
+
+        return Test-LegacyWslOwnership -DataDir $DataDir -LocalDataDir $LocalDataDir
     }
 
     function Resolve-NativeOpenClawCli {
@@ -928,7 +1013,11 @@ function Resolve-AppDataDir {
     function Remove-WindowsGatewayArtifacts {
         $dataDir = Resolve-AppDataDir
         $localDataDir = Resolve-LocalDataDir
-        $ownedNativeRecordId = Get-NativeGatewayRecordId -LocalDataDir $localDataDir
+        $ownedNativeRecordId = if ($script:ownsNativeGateway) {
+            Get-NativeGatewayRecordId -LocalDataDir $localDataDir
+        } else {
+            $null
+        }
 
         Write-GatewayLog "Cleaning Windows-side local gateway artifacts. AppData='$dataDir'; LocalData='$localDataDir'."
 
@@ -945,13 +1034,21 @@ function Resolve-AppDataDir {
             -InstallMode $script:installedGatewayMode `
             -OwnedNativeRecordId $ownedNativeRecordId
         $profileOwnerPath = Join-Path $localDataDir 'native-gateway-profile-owner.json'
-        $profileOwnership = Read-JsonFile $profileOwnerPath
-        if (Test-NativeOwnershipMatches -Ownership $profileOwnership) {
-            Remove-OwnedDirectoryStrict -Path (Get-NativeGatewayStateDir) -Label 'app-owned native gateway profile'
+        if ($script:ownsNativeGateway) {
+            $profileOwnership = Read-JsonFile $profileOwnerPath
+            if (Test-NativeOwnershipMatches -Ownership $profileOwnership) {
+                Remove-OwnedDirectoryStrict -Path (Get-NativeGatewayStateDir) -Label 'app-owned native gateway profile'
+            }
+            Remove-OwnedDirectoryStrict -Path (Join-Path $localDataDir 'native-cli') -Label 'app-owned native CLI'
+            Remove-FileIfExists -Path (Join-Path $localDataDir 'native-gateway-install.json') -Label 'native gateway ownership marker'
+            Remove-FileIfExists -Path $profileOwnerPath -Label 'native gateway profile ownership marker'
+            Remove-FileIfExists -Path (Join-Path $localDataDir 'native-gateway-user-stopped.json') -Label 'native gateway stop-intent marker'
+        } else {
+            Write-GatewayLog 'Native ownership was not proven; preserved native profile, CLI, and ownership markers.'
         }
-        Remove-OwnedDirectoryStrict -Path (Join-Path $localDataDir 'native-cli') -Label 'app-owned native CLI'
-        Remove-FileIfExists -Path (Join-Path $localDataDir 'native-gateway-install.json') -Label 'native gateway ownership marker'
-        Remove-FileIfExists -Path $profileOwnerPath -Label 'native gateway profile ownership marker'
+        if ($script:ownsWslGateway) {
+            Remove-FileIfExists -Path (Join-Path $localDataDir 'wsl-gateway-install.json') -Label 'WSL gateway ownership marker'
+        }
         if ($registryCleanup.HasExternalGateways) {
             Write-GatewayLog 'External gateway records remain; preserving root device tokens.'
         } else {
@@ -1117,6 +1214,7 @@ try {
 
     $dataDir = Resolve-AppDataDir
     $localDataDir = Resolve-LocalDataDir
+    $script:ownsWslGateway = Test-WslOwnership -DataDir $dataDir -LocalDataDir $localDataDir
     $installMode = Get-InstalledGatewayMode -DataDir $dataDir -LocalDataDir $localDataDir
     # Installer uninstall is destructive for every app-owned local runtime, even
     # when a mode switch preserved the inactive runtime for later reuse.
@@ -1127,6 +1225,17 @@ try {
         Remove-NativeGatewayService -GatewayPort $nativeGatewayPort
         Remove-NativeGatewayConfig -LocalDataDir $localDataDir
         Write-GatewayLog 'Local native Windows gateway removed; checking for preserved app-owned WSL data.'
+    } elseif ($installMode -eq 'ForeignNative') {
+        Write-GatewayLog 'Native ownership could not be proven; preserving the native runtime and continuing non-destructive app cleanup.'
+    }
+
+    if (-not $script:ownsWslGateway) {
+        $message = if ($installMode -eq 'NativeWindows') {
+            'Local native Windows gateway removed; no app-owned WSL gateway was found.'
+        } else {
+            'No app-owned local gateway runtime could be proven; preserved existing runtimes.'
+        }
+        Complete-GatewayCleanup -Message $message
     }
 
     $script:WslPath = Get-WslExePath

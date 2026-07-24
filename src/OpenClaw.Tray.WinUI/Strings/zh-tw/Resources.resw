@@ -6088,19 +6088,19 @@
     <value>Run openclaw gateway start</value>
   </data>
   <data name="ConnectionPage_GatewayHostStartButton.[using:Microsoft.UI.Xaml.Automation]AutomationProperties.Name" xml:space="preserve">
-    <value>Start local gateway</value>
+    <value>啟動本機閘道</value>
   </data>
   <data name="ConnectionPage_GatewayHostStopButton.[using:Microsoft.UI.Xaml.Controls]ToolTipService.ToolTip" xml:space="preserve">
     <value>Run openclaw gateway stop</value>
   </data>
   <data name="ConnectionPage_GatewayHostStopButton.[using:Microsoft.UI.Xaml.Automation]AutomationProperties.Name" xml:space="preserve">
-    <value>Stop local gateway</value>
+    <value>停止本機閘道</value>
   </data>
   <data name="ConnectionPage_GatewayHostRestartButton.[using:Microsoft.UI.Xaml.Controls]ToolTipService.ToolTip" xml:space="preserve">
     <value>Run openclaw gateway restart</value>
   </data>
   <data name="ConnectionPage_GatewayHostRestartButton.[using:Microsoft.UI.Xaml.Automation]AutomationProperties.Name" xml:space="preserve">
-    <value>Restart local gateway</value>
+    <value>重新啟動本機閘道</value>
   </data>
   <data name="AgentEventsPage_Status_Live" xml:space="preserve">
     <value>即時</value>
@@ -6643,7 +6643,7 @@
     <value>Open a shell or manage the local gateway service in {0}.</value>
   </data>
   <data name="ConnectionPage_GatewayHostControlsNativeDescription_Format" xml:space="preserve">
-    <value>Open a shell or manage the native Windows gateway task {0}.</value>
+    <value>開啟命令殼層或管理原生 Windows 閘道工作 {0}。</value>
   </data>
   <data name="CronPage_JobCompleted" xml:space="preserve">
     <value>Job completed</value>
@@ -6676,7 +6676,7 @@
     <value>Open a terminal in the {0} WSL gateway.</value>
   </data>
   <data name="GatewayHostAccess_OpenTerminalNativeTooltip_Format" xml:space="preserve">
-    <value>Open a Windows terminal for the native gateway task {0}.</value>
+    <value>為原生閘道工作 {0} 開啟 Windows 終端機。</value>
   </data>
   <data name="GatewayHostAccess_OpenTerminalLabel" xml:space="preserve">
     <value>Open terminal</value>

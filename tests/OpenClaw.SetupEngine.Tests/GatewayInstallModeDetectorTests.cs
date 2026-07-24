@@ -21,8 +21,8 @@ public sealed class GatewayInstallModeDetectorTests : IDisposable
         {
             Id = "native",
             Url = "ws://127.0.0.1:18789",
-            FriendlyName = "Local (Windows)",
             IsLocal = true,
+            SetupManagedNativeTaskName = "OpenClaw Gateway (OpenClawGateway)",
         });
 
         var result = GatewayInstallModeDetector.Detect(_dataDir, GatewayInstallMode.Wsl);
@@ -192,6 +192,7 @@ public sealed class GatewayInstallModeDetectorTests : IDisposable
             _dataDir,
             _localDataDir,
             config));
+        Assert.NotNull(GatewayInstallModeDetector.GetUninstallOwnershipError(_localDataDir, config));
     }
 
     [Fact]
@@ -253,6 +254,68 @@ public sealed class GatewayInstallModeDetectorTests : IDisposable
                 _localDataDir,
                 GatewayInstallMode.Wsl));
         Assert.True(GatewayInstallModeDetector.HasManagedNativeInstallation(_dataDir, _localDataDir));
+    }
+
+    [Fact]
+    public async Task HasManagedWslInstallation_AcceptsOwnedMarker()
+    {
+        var config = new SetupConfig { DistroName = "owned-wsl" };
+        await GatewayInstallModeDetector.WriteWslOwnershipMarkerAsync(
+            _localDataDir,
+            config,
+            "gateway-record",
+            CancellationToken.None);
+
+        Assert.True(GatewayInstallModeDetector.HasManagedWslInstallation(
+            _dataDir,
+            _localDataDir,
+            config));
+        Assert.Null(GatewayInstallModeDetector.GetUninstallOwnershipError(_localDataDir, config));
+    }
+
+    [Fact]
+    public void HasManagedWslInstallation_RejectsForeignMarker()
+    {
+        var config = new SetupConfig { DistroName = "owned-wsl" };
+        Directory.CreateDirectory(_localDataDir);
+        File.WriteAllText(
+            GatewayInstallModeDetector.GetWslOwnershipPath(_localDataDir),
+            """
+            {
+              "InstallMode": "Wsl",
+              "DistroName": "foreign-wsl",
+              "InstallPath": "C:\\foreign"
+            }
+            """);
+
+        Assert.False(GatewayInstallModeDetector.HasManagedWslInstallation(
+            _dataDir,
+            _localDataDir,
+            config));
+        Assert.NotNull(GatewayInstallModeDetector.GetUninstallOwnershipError(_localDataDir, config));
+    }
+
+    [Fact]
+    public void HasManagedWslInstallation_LegacyFallbackRequiresStatePathAndRecord()
+    {
+        var config = new SetupConfig { DistroName = "legacy-wsl" };
+        var installPath = Path.Combine(_localDataDir, "wsl", config.DistroName);
+        Directory.CreateDirectory(installPath);
+        File.WriteAllText(
+            Path.Combine(_localDataDir, "setup-state.json"),
+            """{"InstallMode":"Wsl"}""");
+        SaveActive(new GatewayRecord
+        {
+            Id = "legacy",
+            Url = "ws://127.0.0.1:18789",
+            IsLocal = true,
+            SetupManagedDistroName = config.DistroName,
+        });
+
+        Assert.True(GatewayInstallModeDetector.HasManagedWslInstallation(
+            _dataDir,
+            _localDataDir,
+            config));
     }
 
     [Theory]

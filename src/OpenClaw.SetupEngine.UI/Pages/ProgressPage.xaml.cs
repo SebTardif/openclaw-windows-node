@@ -344,7 +344,7 @@ public sealed partial class ProgressPage : Page
                 ("install-cli", "Install OpenClaw", ["install-native-cli"]),
                 ("cleanup", "Finish switching local gateway mode", ["native-service-cleanup", "cleanup-gateway"]),
                 ("port", "Check gateway port", ["preflight-port"]),
-                ("configure", "Prepare gateway", ["configure-gateway", "install-service"]),
+                ("configure", "Prepare gateway", ["configure-gateway", "install-service", "harden-native-task"]),
                 ("start", "Start gateway", ["start-gateway", "mint-token"]),
                 ("pairing", "Pair this app", ["pair-operator", "pair-node", "verify-e2e"]),
             ]
@@ -354,7 +354,7 @@ public sealed partial class ProgressPage : Page
                 ("cleanup", "Removing existing gateway", ["stop-conflicting-gateways", "native-service-cleanup", "cleanup-distro", "cleanup-gateway"]),
                 ("port", "Checking gateway port", ["preflight-port"]),
                 ("wsl-create", "Installing clean WSL gateway", ["wsl-create"]),
-                ("wsl-configure", "Configuring instance", ["wsl-configure", "validate-wsl-lockdown", "sync-ca-certs"]),
+                ("wsl-configure", "Configuring instance", ["wsl-configure", "validate-wsl-lockdown"]),
                 ("install-cli", "Installing OpenClaw", ["install-cli"]),
                 ("tailscale-auth", "Connecting Tailscale", ["install-tailscale", "authorize-tailscale"]),
                 ("configure", "Preparing gateway", ["configure-gateway", "install-service"]),

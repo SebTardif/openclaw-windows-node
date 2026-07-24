@@ -155,7 +155,11 @@ public sealed class InstallerIssAssertionTests
         var nativeCleanupBranch = script[
             script.LastIndexOf("if ($installMode -eq 'NativeWindows') {", StringComparison.Ordinal)..
             script.LastIndexOf("$script:WslPath = Get-WslExePath", StringComparison.Ordinal)];
-        Assert.DoesNotContain("Complete-GatewayCleanup", nativeCleanupBranch);
+        Assert.True(
+            nativeCleanupBranch.IndexOf("if (-not $script:ownsWslGateway)", StringComparison.Ordinal)
+            < nativeCleanupBranch.IndexOf("Complete-GatewayCleanup", StringComparison.Ordinal));
+        Assert.Contains("wsl-gateway-install.json", script);
+        Assert.Contains("Test-WslOwnershipMatches", script);
         Assert.Contains("Complete-GatewayCleanup -Message 'Local native Windows gateway removed.'", script);
         var modeDetection = script[
             script.IndexOf("function Get-InstalledGatewayMode", StringComparison.Ordinal)..

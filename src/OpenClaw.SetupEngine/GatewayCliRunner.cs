@@ -42,6 +42,18 @@ internal static partial class GatewayCliRunner
     internal static string GetManagedNativeCliPrefix(string localDataDir) =>
         Path.Combine(localDataDir, "native-cli");
 
+    internal static string GetManagedNativeNodeDirectory(string localDataDir) =>
+        Path.Combine(GetManagedNativeCliPrefix(localDataDir), "tools", "node");
+
+    internal static string GetManagedNativeNodePath(string localDataDir) =>
+        Path.Combine(GetManagedNativeNodeDirectory(localDataDir), "node.exe");
+
+    internal static string GetManagedNativeNpmCliPath(string localDataDir) =>
+        Path.Combine(GetManagedNativeNodeDirectory(localDataDir), "node_modules", "npm", "bin", "npm-cli.js");
+
+    internal static string GetManagedNativeOpenClawEntryPath(string localDataDir) =>
+        Path.Combine(GetManagedNativeNodeDirectory(localDataDir), "node_modules", "openclaw", "dist", "entry.js");
+
     /// <summary>
     /// Resolves the launcher for the app-owned native CLI under the managed prefix,
     /// preferring the PowerShell shim. Returns null when the managed CLI is absent.
@@ -134,7 +146,7 @@ internal static partial class GatewayCliRunner
             if (!commandEnvironment.ContainsKey(selector))
                 commandEnvironment[selector] = defaultValue;
         }
-        commandEnvironment["PATH"] = GetRefreshedNativePath();
+        commandEnvironment["PATH"] = GetManagedNativePath(ctx.LocalDataDir);
         commandEnvironment[CliPathEnvironmentVariable] = cliPath;
 
         var command = "& $env:" + CliPathEnvironmentVariable;
@@ -176,11 +188,18 @@ internal static partial class GatewayCliRunner
                 Environment.GetEnvironmentVariable("PATH", EnvironmentVariableTarget.User),
                 processPath);
         }
+
         catch (Exception ex) when (ex is PlatformNotSupportedException or System.Security.SecurityException)
         {
             return processPath ?? "";
         }
     }
+
+    internal static string GetManagedNativePath(string localDataDir) =>
+        MergeNativePaths(
+            GetManagedNativeNodeDirectory(localDataDir),
+            GetManagedNativeCliPrefix(localDataDir),
+            GetRefreshedNativePath());
 
     public static string? TryResolveNativeCliPath(string? localDataDir = null)
     {

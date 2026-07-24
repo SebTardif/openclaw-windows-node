@@ -12,6 +12,7 @@ public class GatewayTerminalLaunchCommandBuilderTests
         {
             Id = "local",
             Url = "ws://127.0.0.1:18789",
+            IsLocal = true,
             SetupManagedDistroName = "OpenClawGateway",
         });
 
@@ -36,6 +37,7 @@ public class GatewayTerminalLaunchCommandBuilderTests
         {
             Id = "local",
             Url = "ws://127.0.0.1:18789",
+            IsLocal = true,
             SetupManagedDistroName = "OpenClawGateway",
         });
 
@@ -76,7 +78,11 @@ public class GatewayTerminalLaunchCommandBuilderTests
             SetupManagedNativeTaskName = "OpenClaw Gateway (OpenClawGateway)",
         });
 
-        var command = GatewayTerminalLaunchCommandBuilder.Build(access, windowsTerminalPath: null);
+        var command = GatewayTerminalLaunchCommandBuilder.Build(
+            access,
+            windowsTerminalPath: null,
+            managedNativeCliPrefix: @"D:\isolated\OpenClawTray-Dev\native-cli",
+            managedNativeNodeDirectory: @"D:\isolated\OpenClawTray-Dev\native-cli\tools\node");
 
         Assert.Equal("powershell.exe", command.FileName);
         Assert.False(command.UsesWindowsTerminal);
@@ -85,7 +91,8 @@ public class GatewayTerminalLaunchCommandBuilderTests
         var script = DecodePowerShellEncodedCommand(command.Arguments);
         Assert.Contains("Use: openclaw gateway status --json", script);
         Assert.Contains("$env:OPENCLAW_PROFILE = $profile", script);
-        Assert.Contains("OpenClawTray\\native-cli", script);
+        Assert.Contains(@"D:\isolated\OpenClawTray-Dev\native-cli", script);
+        Assert.Contains(@"D:\isolated\OpenClawTray-Dev\native-cli\tools\node", script);
         Assert.Contains("Set-Location -LiteralPath $stateDir", script);
         Assert.Contains("OpenClawGateway", script);
     }
@@ -101,7 +108,11 @@ public class GatewayTerminalLaunchCommandBuilderTests
             SetupManagedNativeTaskName = "OpenClaw Gateway (OpenClawGateway)",
         });
 
-        var command = GatewayTerminalLaunchCommandBuilder.Build(access, @"C:\Users\me\AppData\Local\Microsoft\WindowsApps\wt.exe");
+        var command = GatewayTerminalLaunchCommandBuilder.Build(
+            access,
+            @"C:\Users\me\AppData\Local\Microsoft\WindowsApps\wt.exe",
+            @"D:\isolated\OpenClawTray-Dev\native-cli",
+            @"D:\isolated\OpenClawTray-Dev\native-cli\tools\node");
 
         Assert.Equal(@"C:\Users\me\AppData\Local\Microsoft\WindowsApps\wt.exe", command.FileName);
         Assert.True(command.UsesWindowsTerminal);
@@ -146,6 +157,7 @@ public class GatewayTerminalLaunchCommandBuilderTests
         {
             Id = "local",
             Url = "ws://127.0.0.1:18789",
+            IsLocal = true,
             SetupManagedDistroName = "OpenClawGateway",
         });
 
@@ -179,6 +191,7 @@ public class GatewayTerminalLaunchCommandBuilderTests
         {
             Id = "local",
             Url = "ws://127.0.0.1:18789",
+            IsLocal = true,
             SetupManagedDistroName = "OpenClawGateway",
         });
 

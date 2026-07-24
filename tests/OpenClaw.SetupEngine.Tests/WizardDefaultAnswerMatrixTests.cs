@@ -60,14 +60,14 @@ public class WizardDefaultAnswerMatrixTests
                 options,
                 initialValue: "restart",
                 title: "Choose an option",
-                message: "Gateway service already installed",
+                message: "Wording may change without changing the RPC step",
                 stepId: "gateway-service-runtime"));
         Assert.Equal(
             "skip",
             WizardSelection.DesktopAutoSelectAnswer(
                 options,
                 title: "Choose an option",
-                message: "Gateway service already installed",
+                message: "Wording may change without changing the RPC step",
                 stepId: "gateway-service-runtime"));
     }
 

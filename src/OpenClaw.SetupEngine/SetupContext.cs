@@ -47,8 +47,18 @@ public sealed class SetupConfig
     public PairingConfig Pairing { get; set; } = new();
     public WindowsNodeContextConfig WindowsNodeContext { get; set; } = new();
     public TailscaleConfig Tailscale { get; set; } = new();
+    [JsonIgnore]
+    public bool? TailscaleIntent { get; set; }
 
     public string EffectiveGatewayUrl => GatewayUrl ?? $"ws://localhost:{GatewayPort}";
+
+    public void ApplyInstallMode(GatewayInstallMode installMode)
+    {
+        TailscaleIntent ??= Tailscale.Enabled;
+        InstallMode = installMode;
+        Tailscale.Enabled = installMode == GatewayInstallMode.Wsl
+            && TailscaleIntent == true;
+    }
 
     public static SetupConfig LoadFromFile(string path)
     {
@@ -481,8 +491,12 @@ public sealed class SetupContext
     internal ReplacedGatewaysSnapshot? ReplacedGateways { get; set; }
     internal NativeGatewayRollbackState? PreviousNativeGateway { get; set; }
     internal NativeOwnershipMarkerRollbackState? PreviousNativeOwnershipMarker { get; set; }
+    internal NativeTaskHardeningRollbackState? PreviousNativeTaskHardening { get; set; }
     internal WslGatewayRollbackState? PreviousWslGateway { get; set; }
     internal ActiveGatewayRollbackState? ActiveGatewayBeforePairing { get; set; }
+    internal string? NativeProfileStagingDir { get; set; }
+    internal string? NativeCliPrefixStagingDir { get; set; }
+    internal bool NativeCliInstallMutated { get; set; }
     internal bool IsUninstalling { get; set; }
 
     // Data directory for gateway registry and identity files
@@ -552,7 +566,16 @@ internal sealed record NativeGatewayRollbackState(
     bool WasRunning,
     string? OwnershipMarkerPath = null,
     bool OwnershipMarkerExisted = false,
-    byte[]? OwnershipMarkerContents = null);
+    byte[]? OwnershipMarkerContents = null,
+    IReadOnlyList<NativeServiceFileSnapshot>? ServiceFileSnapshots = null);
+
+internal sealed record NativeServiceFileSnapshot(string Path, byte[] Contents);
+
+internal sealed record NativeTaskHardeningRollbackState(
+    string TaskName,
+    string TaskXml,
+    string VbsPath,
+    byte[] VbsContents);
 
 internal sealed record NativeOwnershipMarkerRollbackState(
     NativeOwnershipMarkerFileRollbackState Active,

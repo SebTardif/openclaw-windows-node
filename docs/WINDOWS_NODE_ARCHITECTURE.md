@@ -514,7 +514,7 @@ The native onboarding path validates the supported gateway version and uses the 
 
 ### 3. What about the service lifecycle on Windows?
 
-On macOS: launchd plist. On Linux: systemd unit. On Windows, OpenClaw uses a per-user Scheduled Task with a Startup-folder fallback. Earlier options considered were:
+On macOS: launchd plist. On Linux: systemd unit. On Windows, OpenClaw uses a per-user Scheduled Task with a Startup-folder fallback. Companion setup hardens the owned task so its hidden launcher waits for the gateway process, propagates its exit code, and applies bounded restart-on-failure. Earlier options considered were:
 
 - **Windows Service** (via [node-windows](https://github.com/coreybutler/node-windows) or .NET service host)
 - **Task Scheduler** (run at logon)
@@ -599,7 +599,7 @@ The node protocol requires a stable device identity (`device.id`) derived from a
 - [x] Test `openclaw gateway` on Windows (Node.js native)
 - [x] Fix required platform-specific service lifecycle issues
 - [x] Per-user Scheduled Task integration for daemon mode
-- [ ] Tray app: "Start/Stop/Restart Gateway" menu items (parity with Mac menubar)
+- [x] Tray app: "Start/Stop/Restart Gateway" controls (parity with Mac menubar)
 - [x] Native Windows gateway install/configure/start through companion onboarding
 - [x] Document Windows-native gateway setup
 

@@ -38,6 +38,8 @@ public sealed record StepProgressEvent(string StepId, string DisplayName, StepOu
 
 public static class SetupStepFactory
 {
+    internal const string UninstallOwnershipValidationStepId = "validate-install-ownership";
+
     public static List<SetupStep> BuildWizardOnlySteps() =>
     [
         new RunGatewayWizardStep(),
@@ -60,6 +62,7 @@ public static class SetupStepFactory
                 new PreflightPortStep(),
                 new ConfigureGatewayStep(),
                 new InstallGatewayServiceStep(),
+                new NativeGatewayTaskHardeningStep(),
                 new StartGatewayStep(),
                 new MintBootstrapTokenStep(),
                 new PairOperatorStep(),
@@ -180,6 +183,10 @@ public sealed class SetupPipeline
            !string.Equals(
                result.FailedStepId,
                ValidateDistroInstallPathStep.StepId,
+               StringComparison.Ordinal) &&
+           !string.Equals(
+               result.FailedStepId,
+               SetupStepFactory.UninstallOwnershipValidationStepId,
                StringComparison.Ordinal);
 
     public async Task<PipelineResult> RunAsync(SetupContext ctx)
@@ -279,10 +286,50 @@ public sealed class SetupPipeline
             return new PipelineResult(PipelineOutcome.Failed, step.Id, result.Message);
         }
 
+        CommitNativeStaging(ctx);
         pipelineSw.Stop();
         ctx.Journal.RecordPipelineEvent("pipeline_completed", $"elapsed={pipelineSw.Elapsed.TotalSeconds:F1}s");
         ctx.Logger.Info($"Pipeline completed successfully in {pipelineSw.Elapsed.TotalSeconds:F1}s");
         return new PipelineResult(PipelineOutcome.Success);
+    }
+
+    internal static void CommitNativeStaging(SetupContext ctx)
+    {
+        CommitStagingDirectory(
+            ctx.NativeProfileStagingDir,
+            () => ctx.NativeProfileStagingDir = null,
+            "native profile",
+            ctx.Logger);
+        CommitStagingDirectory(
+            ctx.NativeCliPrefixStagingDir,
+            () =>
+            {
+                ctx.NativeCliPrefixStagingDir = null;
+                ctx.NativeCliInstallMutated = false;
+            },
+            "native CLI",
+            ctx.Logger);
+    }
+
+    private static void CommitStagingDirectory(
+        string? path,
+        Action clear,
+        string label,
+        SetupLogger logger)
+    {
+        if (string.IsNullOrWhiteSpace(path))
+            return;
+
+        try
+        {
+            AtomicFile.DeleteDirectoryStrict(path);
+            clear();
+            logger.Info($"Committed {label} update and removed rollback staging");
+        }
+        catch (Exception ex) when (ex is IOException or InvalidOperationException or UnauthorizedAccessException)
+        {
+            logger.Warn($"Could not remove {label} rollback staging '{path}': {ex.Message}");
+        }
     }
 
     private async Task<PipelineResult> CancelAndRollbackAsync(SetupContext ctx, SetupStep? currentStep)
@@ -358,7 +405,20 @@ public sealed class SetupPipeline
         _completedSteps.Clear();
         var ct = ctx.CancellationToken;
 
-        if (!DistroInstallPathPolicy.TryGetManagedInstallPath(
+        if (GatewayInstallModeDetector.GetUninstallOwnershipError(ctx.LocalDataDir, ctx.Config) is { } ownershipError)
+        {
+            ctx.Logger.Error(ownershipError);
+            return new PipelineResult(
+                PipelineOutcome.Failed,
+                FailedStepId: SetupStepFactory.UninstallOwnershipValidationStepId,
+                Message: ownershipError);
+        }
+
+        var modeScopedSteps = _steps.OfType<InstallModeUninstallStep>().ToArray();
+        var includesWslUninstall = modeScopedSteps.Length == 0
+            || modeScopedSteps.Any(step => step.InstallMode == GatewayInstallMode.Wsl);
+        if (includesWslUninstall &&
+            !DistroInstallPathPolicy.TryGetManagedInstallPath(
                 ctx.LocalDataDir,
                 ctx.DistroName,
                 out _,

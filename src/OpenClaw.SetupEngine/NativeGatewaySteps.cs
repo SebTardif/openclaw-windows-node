@@ -1,6 +1,7 @@
 using System.Text.Json;
 using System.Text;
 using System.Text.RegularExpressions;
+using System.Xml.Linq;
 
 namespace OpenClaw.SetupEngine;
 
@@ -37,46 +38,86 @@ public sealed class InstallNativeCliStep : SetupStep
         if (skip is not null)
             return skip;
 
-        string script;
-        try
+        var staging = StageManagedCliForUpgrade(ctx);
+        if (!staging.IsSuccess)
+            return staging;
+        ctx.NativeCliInstallMutated = true;
+        ctx.NativeCliPath = null;
+
+        string? cliPath;
+        if (GatewayLkgVersion.ShouldUseManagedWindowsInstaller(installUrl))
         {
-            script = BuildInstallScript(installUrl, ctx.Config.Gateway.Version);
+            if (string.IsNullOrWhiteSpace(requestedVersion))
+                return StepResult.Fail("A pinned OpenClaw version is required for the managed Windows install.");
+
+            var nodeResult = await ManagedNodeRuntimeInstaller.EnsureInstalledAsync(ctx, ct);
+            if (!nodeResult.IsSuccess)
+                return nodeResult;
+
+            var installResult = await InstallPinnedPackageWithManagedNodeAsync(
+                ctx,
+                requestedVersion!,
+                ct);
+            if (installResult.ExitCode != 0)
+                return StepResult.Fail(
+                    $"Native CLI install failed (exit {installResult.ExitCode}): {FirstUsefulLine(installResult)}");
+            try
+            {
+                WriteManagedLaunchers(ctx.LocalDataDir);
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                return StepResult.Fail($"Could not create managed OpenClaw launchers: {ex.Message}");
+            }
+            cliPath = GatewayCliRunner.TryResolveManagedNativeCliPath(ctx.LocalDataDir);
         }
-        catch (ArgumentException ex)
+        else
         {
-            return StepResult.Fail(ex.Message);
+            string script;
+            try
+            {
+                script = BuildInstallScript(installUrl, requestedVersion);
+            }
+            catch (ArgumentException ex)
+            {
+                return StepResult.Fail(ex.Message);
+            }
+
+            var encodedScript = EncodePowerShellScript(script);
+            var cliPrefix = GatewayCliRunner.GetManagedNativeCliPrefix(ctx.LocalDataDir);
+            var installEnvironment = new Dictionary<string, string>(
+                GatewayCliRunner.GetManagedNativeEnvironmentDefaults(ctx.Config))
+            {
+                [CliPrefixEnvironmentVariable] = cliPrefix,
+                ["NPM_CONFIG_PREFIX"] = cliPrefix,
+                ["npm_config_prefix"] = cliPrefix,
+                ["Path"] = GatewayCliRunner.GetRefreshedNativePath(),
+            };
+            var result = await ctx.Commands.RunAsync(
+                "powershell.exe",
+                ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-EncodedCommand", encodedScript],
+                TimeSpan.FromMinutes(10),
+                installEnvironment,
+                ct: ct);
+            if (result.ExitCode != 0)
+                return StepResult.Fail($"Native CLI install failed (exit {result.ExitCode}): {FirstUsefulLine(result)}");
+
+            // Custom installer URLs retain the advanced, caller-owned bootstrap path.
+            if (result.Stderr.Contains(
+                    "proceeding without the Windows PowerShell 5 quoting workaround",
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                ctx.Logger.Warn(
+                    "Custom OpenClaw installer SQLite probe was not found in the expected form.");
+            }
+
+            cliPath = result.Stdout
+                .Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries)
+                .Select(line => line.Trim())
+                .FirstOrDefault(line => line.StartsWith(CliPathMarker, StringComparison.Ordinal))
+                ?[CliPathMarker.Length..];
         }
 
-        var encodedScript = EncodePowerShellScript(script);
-        var cliPrefix = GatewayCliRunner.GetManagedNativeCliPrefix(ctx.LocalDataDir);
-        var installEnvironment = new Dictionary<string, string>(
-            GatewayCliRunner.GetManagedNativeEnvironmentDefaults(ctx.Config))
-        {
-            [CliPrefixEnvironmentVariable] = cliPrefix,
-            ["NPM_CONFIG_PREFIX"] = cliPrefix,
-            ["npm_config_prefix"] = cliPrefix,
-            ["Path"] = GatewayCliRunner.GetRefreshedNativePath(),
-        };
-        var result = await ctx.Commands.RunAsync(
-            "powershell.exe",
-            ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-EncodedCommand", encodedScript],
-            TimeSpan.FromMinutes(10),
-            installEnvironment,
-            ct: ct);
-        if (result.ExitCode != 0)
-            return StepResult.Fail($"Native CLI install failed (exit {result.ExitCode}): {FirstUsefulLine(result)}");
-
-        // The installer emits this on stderr when it proceeds without the PowerShell 5
-        // SQLite-probe quoting workaround. Surface it on the success path so the
-        // best-effort decision stays diagnosable.
-        if (result.Stderr.Contains("proceeding without the Windows PowerShell 5 quoting workaround", StringComparison.OrdinalIgnoreCase))
-            ctx.Logger.Warn("OpenClaw installer SQLite probe not found in the expected form; installed without the PowerShell 5 quoting workaround.");
-
-        var cliPath = result.Stdout
-            .Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries)
-            .Select(line => line.Trim())
-            .FirstOrDefault(line => line.StartsWith(CliPathMarker, StringComparison.Ordinal))
-            ?[CliPathMarker.Length..];
         if (string.IsNullOrWhiteSpace(cliPath) || !File.Exists(cliPath))
             return StepResult.Fail("OpenClaw installed, but its Windows command launcher could not be located.");
 
@@ -93,6 +134,58 @@ public sealed class InstallNativeCliStep : SetupStep
         }
 
         return StepResult.Ok($"CLI installed: {verify.Stdout.Trim()}");
+    }
+
+    internal static Task<CommandResult> InstallPinnedPackageWithManagedNodeAsync(
+        SetupContext ctx,
+        string requestedVersion,
+        CancellationToken ct)
+    {
+        var nodePath = GatewayCliRunner.GetManagedNativeNodePath(ctx.LocalDataDir);
+        var npmCliPath = GatewayCliRunner.GetManagedNativeNpmCliPath(ctx.LocalDataDir);
+        var nodeDirectory = GatewayCliRunner.GetManagedNativeNodeDirectory(ctx.LocalDataDir);
+        var environment = new Dictionary<string, string>(
+            GatewayCliRunner.GetManagedNativeEnvironmentDefaults(ctx.Config))
+        {
+            ["NPM_CONFIG_PREFIX"] = nodeDirectory,
+            ["npm_config_prefix"] = nodeDirectory,
+            ["NPM_CONFIG_UPDATE_NOTIFIER"] = "false",
+            ["Path"] = GatewayCliRunner.GetManagedNativePath(ctx.LocalDataDir),
+        };
+        return ctx.Commands.RunAsync(
+            nodePath,
+            [
+                npmCliPath,
+                "install",
+                "--global",
+                $"openclaw@{requestedVersion.Trim()}",
+                "--prefix",
+                nodeDirectory,
+                "--no-audit",
+                "--no-fund",
+            ],
+            TimeSpan.FromMinutes(10),
+            environment,
+            ct: ct);
+    }
+
+    internal static void WriteManagedLaunchers(string localDataDir)
+    {
+        var cliPrefix = GatewayCliRunner.GetManagedNativeCliPrefix(localDataDir);
+        var nodePath = GatewayCliRunner.GetManagedNativeNodePath(localDataDir);
+        var entryPath = GatewayCliRunner.GetManagedNativeOpenClawEntryPath(localDataDir);
+        if (!File.Exists(nodePath) || !File.Exists(entryPath))
+            throw new IOException("Managed Node or OpenClaw entry point is missing after npm install.");
+
+        Directory.CreateDirectory(cliPrefix);
+        var powerShellNode = "'" + nodePath.Replace("'", "''") + "'";
+        var powerShellEntry = "'" + entryPath.Replace("'", "''") + "'";
+        AtomicFile.WriteAllText(
+            Path.Combine(cliPrefix, "openclaw.ps1"),
+            $"& {powerShellNode} {powerShellEntry} @args\r\nexit $LASTEXITCODE\r\n");
+        AtomicFile.WriteAllText(
+            Path.Combine(cliPrefix, "openclaw.cmd"),
+            $"@echo off\r\n\"{nodePath.Replace("%", "%%")}\" \"{entryPath.Replace("%", "%%")}\" %*\r\nexit /b %errorlevel%\r\n");
     }
 
     /// <summary>
@@ -137,10 +230,32 @@ public sealed class InstallNativeCliStep : SetupStep
 
     public override Task RollbackAsync(SetupContext ctx, CancellationToken ct)
     {
-        if (!ctx.IsUninstalling)
-            return Task.CompletedTask;
-
         var cliPrefix = GatewayCliRunner.GetManagedNativeCliPrefix(ctx.LocalDataDir);
+        if (ctx.NativeCliPrefixStagingDir is { } stagingDir)
+        {
+            AtomicFile.DeleteDirectoryStrict(cliPrefix);
+            if (!Directory.Exists(stagingDir))
+                throw new InvalidOperationException($"Native CLI staging directory is missing: '{stagingDir}'.");
+            AtomicFile.MoveDirectory(stagingDir, cliPrefix);
+            ctx.NativeCliPrefixStagingDir = null;
+            ctx.NativeCliInstallMutated = false;
+            ctx.NativeCliPath = GatewayCliRunner.TryResolveManagedNativeCliPath(ctx.LocalDataDir);
+            ctx.Logger.Info("Restored previous native CLI prefix after rollback");
+            return Task.CompletedTask;
+        }
+
+        if (!ctx.IsUninstalling)
+        {
+            if (ctx.NativeCliInstallMutated)
+            {
+                AtomicFile.DeleteDirectoryStrict(cliPrefix);
+                ctx.NativeCliInstallMutated = false;
+                ctx.NativeCliPath = null;
+                ctx.Logger.Info("Removed native CLI prefix created by the failed setup run");
+            }
+            return Task.CompletedTask;
+        }
+
         if (!Directory.Exists(cliPrefix))
             return Task.CompletedTask;
         if (new DirectoryInfo(cliPrefix).Attributes.HasFlag(FileAttributes.ReparsePoint))
@@ -153,7 +268,55 @@ public sealed class InstallNativeCliStep : SetupStep
         return Task.CompletedTask;
     }
 
-    internal static string BuildInstallScript(string installUrl, string? requestedVersion)
+    internal static StepResult StageManagedCliForUpgrade(SetupContext ctx)
+    {
+        var cliPrefix = GatewayCliRunner.GetManagedNativeCliPrefix(ctx.LocalDataDir);
+        var stagingDir = cliPrefix + ".setup-backup";
+
+        if (ctx.NativeCliInstallMutated && ctx.NativeCliPrefixStagingDir is null)
+        {
+            AtomicFile.DeleteDirectoryStrict(cliPrefix);
+            return StepResult.Ok("Removed partial native CLI from the previous install attempt");
+        }
+
+        if (ctx.NativeCliPrefixStagingDir is not null)
+        {
+            AtomicFile.DeleteDirectoryStrict(cliPrefix);
+            return StepResult.Ok("Native CLI retry will reuse the staged previous prefix");
+        }
+
+        if (Directory.Exists(stagingDir))
+        {
+            if (Directory.Exists(cliPrefix))
+            {
+                return StepResult.Fail(
+                    $"Both the native CLI prefix and its rollback staging directory exist. " +
+                    $"Repair or remove '{stagingDir}' before retrying setup.");
+            }
+
+            ctx.NativeCliPrefixStagingDir = stagingDir;
+            return StepResult.Ok("Recovered native CLI rollback staging from an interrupted setup");
+        }
+
+        if (!Directory.Exists(cliPrefix))
+            return StepResult.Ok("No previous native CLI prefix requires staging");
+
+        try
+        {
+            AtomicFile.MoveDirectory(cliPrefix, stagingDir);
+            ctx.NativeCliPrefixStagingDir = stagingDir;
+            ctx.Logger.Info("Staged existing native CLI prefix before upgrade");
+            return StepResult.Ok("Previous native CLI staged for rollback");
+        }
+        catch (Exception ex) when (ex is IOException or InvalidOperationException or UnauthorizedAccessException)
+        {
+            return StepResult.Fail($"Could not stage native CLI prefix before upgrade: {ex.Message}");
+        }
+    }
+
+    internal static string BuildInstallScript(
+        string installUrl,
+        string? requestedVersion)
     {
         if (requestedVersion?.IndexOfAny(['\r', '\n']) >= 0)
             throw new ArgumentException("Gateway version cannot contain newlines.");
@@ -182,6 +345,20 @@ public sealed class InstallNativeCliStep : SetupStep
             # The upstream installer currently removes a git-method wrapper and may
             # persist its npm prefix on PATH. Preserve those user-owned surfaces while
             # still reusing its supported Node/Git bootstrap and package install flow.
+            $userEnvironmentKey = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Environment', $true)
+            if ($null -eq $userEnvironmentKey) {
+                throw 'Could not open the current user environment registry key.'
+            }
+            $userPathWasPresent = @($userEnvironmentKey.GetValueNames()) -contains 'Path'
+            $originalUserPathKind = if ($userPathWasPresent) { $userEnvironmentKey.GetValueKind('Path') } else { $null }
+            $originalUserPathRaw = if ($userPathWasPresent) {
+                [string]$userEnvironmentKey.GetValue(
+                    'Path',
+                    $null,
+                    [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+            } else {
+                $null
+            }
             $gitWrapper = Join-Path (Join-Path $env:USERPROFILE '.local\bin') 'openclaw.cmd'
             $gitWrapperExisted = Test-Path -LiteralPath $gitWrapper -PathType Leaf
             $gitWrapperBytes = if ($gitWrapperExisted) { [IO.File]::ReadAllBytes($gitWrapper) } else { $null }
@@ -201,8 +378,14 @@ public sealed class InstallNativeCliStep : SetupStep
                 $escapedOldSqliteProbeAssignment = '$sqliteProbe = ''require(\"node:sqlite\"); const db = new DatabaseSync(\":memory:\"); try { process.stdout.write(String(db.prepare(\"SELECT sqlite_version() AS version\").get().version)); } finally { db.close(); }'''
                 if ($installer.Contains($oldSqliteProbeAssignment)) {
                     $installer = $installer.Replace($oldSqliteProbeAssignment, $escapedOldSqliteProbeAssignment)
-                } else {
+                } elseif (-not $installer.Contains('$sqliteVersion = ($sqliteProbe | & $nodePath -')) {
                     [Console]::Error.WriteLine('OpenClaw installer SQLite probe not found in the expected form; proceeding without the Windows PowerShell 5 quoting workaround.')
+                }
+                # npm 11 protects `config get globalconfig --global`. The pinned installer
+                # already checks NPM_CONFIG_GLOBALCONFIG; skip only this redundant probe.
+                $protectedGlobalConfigProbe = '$detectedGlobalConfig = (Invoke-NpmCommand -Arguments @("config", "get", "globalconfig", "--global") 2>$null)'
+                if ($installer.Contains($protectedGlobalConfigProbe)) {
+                    $installer = $installer.Replace($protectedGlobalConfigProbe, '$detectedGlobalConfig = $null')
                 }
                 & ([ScriptBlock]::Create($installer)) -NoOnboard{{tagArgument}}
                 $powerShellCandidate = Join-Path $prefix 'openclaw.ps1'
@@ -215,16 +398,50 @@ public sealed class InstallNativeCliStep : SetupStep
                 [Console]::Error.WriteLine($_.Exception.Message)
                 exit 1
             } finally {
-                $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
-                $filteredUserPath = (@($userPath -split ';') |
-                    Where-Object { -not [string]::IsNullOrWhiteSpace($_) -and $_ -ine $prefix }) -join ';'
-                [Environment]::SetEnvironmentVariable('Path', $filteredUserPath, 'User')
-                if ($gitWrapperExisted) {
-                    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $gitWrapper) | Out-Null
-                    [IO.File]::WriteAllBytes($gitWrapper, $gitWrapperBytes)
-                } elseif (Test-Path -LiteralPath $gitWrapper -PathType Leaf) {
-                    Remove-Item -LiteralPath $gitWrapper -Force
+                $pathCleanupError = $null
+                try {
+                    $currentUserPathRaw = if (@($userEnvironmentKey.GetValueNames()) -contains 'Path') {
+                        [string]$userEnvironmentKey.GetValue(
+                            'Path',
+                            $null,
+                            [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+                    } else {
+                        $originalUserPathRaw
+                    }
+                    $filteredUserPath = (@($currentUserPathRaw -split ';') |
+                        Where-Object { -not [string]::IsNullOrWhiteSpace($_) -and $_ -ine $prefix }) -join ';'
+                    if (-not [string]::Equals($currentUserPathRaw, $filteredUserPath, [StringComparison]::Ordinal)) {
+                        if (-not $userPathWasPresent -and [string]::IsNullOrWhiteSpace($filteredUserPath)) {
+                            $userEnvironmentKey.DeleteValue('Path', $false)
+                        } else {
+                            $pathKind = if ($userPathWasPresent) {
+                                $originalUserPathKind
+                            } else {
+                                $userEnvironmentKey.GetValueKind('Path')
+                            }
+                            $userEnvironmentKey.SetValue('Path', $filteredUserPath, $pathKind)
+                        }
+                    }
+                } catch {
+                    $pathCleanupError = $_
+                } finally {
+                    $userEnvironmentKey.Dispose()
                 }
+
+                $wrapperCleanupError = $null
+                try {
+                    if ($gitWrapperExisted) {
+                        New-Item -ItemType Directory -Force -Path (Split-Path -Parent $gitWrapper) | Out-Null
+                        [IO.File]::WriteAllBytes($gitWrapper, $gitWrapperBytes)
+                    } elseif (Test-Path -LiteralPath $gitWrapper -PathType Leaf) {
+                        Remove-Item -LiteralPath $gitWrapper -Force
+                    }
+                } catch {
+                    $wrapperCleanupError = $_
+                }
+
+                if ($null -ne $pathCleanupError) { throw $pathCleanupError }
+                if ($null -ne $wrapperCleanupError) { throw $wrapperCleanupError }
             }
             """;
     }
@@ -408,26 +625,6 @@ public sealed class StopConflictingLocalGatewaysStep : SetupStep
                 ctx.Logger.Warn("Managed native gateway CLI is unavailable; setup will verify its Scheduled Task before switching modes");
             }
 
-            // The official Windows installer refreshes every loaded gateway service.
-            // Remove the captured app-managed task before upgrading the CLI so rollback
-            // remains anchored to the pre-installer config and service state.
-            if (ctx.Config.InstallMode == GatewayInstallMode.NativeWindows
-                && nativeCli is not null
-                && ctx.PreviousNativeGateway is { ServiceInstalled: true })
-            {
-                var uninstall = await GatewayCliRunner.RunNativeAsync(
-                    ctx,
-                    ["gateway", "uninstall"],
-                    TimeSpan.FromSeconds(30),
-                    ct: ct);
-                if (uninstall.ExitCode != 0 && !InstallGatewayServiceStep.IsMissingWslService(uninstall))
-                {
-                    return StepResult.Fail(
-                        $"Could not prepare the existing native gateway for upgrade (exit {uninstall.ExitCode}).");
-                }
-
-                ctx.Logger.Info("Removed existing native gateway service before CLI upgrade");
-            }
         }
         else if (!canManageNativeGateway && nativeCli is not null)
         {
@@ -476,6 +673,12 @@ public sealed class StopConflictingLocalGatewaysStep : SetupStep
                 {
                     File.Delete(ownershipPath);
                 }
+            }
+
+            foreach (var snapshot in previousNative.ServiceFileSnapshots ?? [])
+            {
+                Directory.CreateDirectory(Path.GetDirectoryName(snapshot.Path)!);
+                await AtomicFile.WriteAllBytesAsync(snapshot.Path, snapshot.Contents, ct);
             }
 
             if (previousNative.ServiceInstalled)
@@ -554,6 +757,10 @@ public sealed class StopConflictingLocalGatewaysStep : SetupStep
         var wasRunning = serviceInstalled
             && ((status.ExitCode == 0 && NativeGatewayServiceCleanupStep.IsServiceRunning(status.Stdout))
                 || await IsGatewayReachableAsync(ctx.Config.GatewayPort, ct));
+        var serviceFileSnapshots = NativeGatewayServiceCleanupStep.GetManagedServiceFiles(ctx.Config)
+            .Where(File.Exists)
+            .Select(path => new NativeServiceFileSnapshot(path, File.ReadAllBytes(path)))
+            .ToArray();
 
         ctx.PreviousNativeGateway = new NativeGatewayRollbackState(
             configPath,
@@ -563,7 +770,8 @@ public sealed class StopConflictingLocalGatewaysStep : SetupStep
             wasRunning,
             ownershipMarkerPath,
             ownershipMarkerExisted,
-            ownershipMarkerContents);
+            ownershipMarkerContents,
+            serviceFileSnapshots);
     }
 
     private static async Task<bool> IsNativeServiceInstalledAsync(
@@ -749,6 +957,7 @@ public sealed class NativeGatewayServiceCleanupStep : SetupStep
         var ownershipPath = GatewayInstallModeDetector.GetNativeOwnershipPath(ctx.LocalDataDir);
         if (File.Exists(ownershipPath))
             File.Delete(ownershipPath);
+        GatewayInstallModeDetector.DeleteNativeStopIntent(ctx.LocalDataDir);
 
         return StepResult.Ok("Native gateway service and setup-managed configuration removed");
     }
@@ -758,6 +967,30 @@ public sealed class NativeGatewayServiceCleanupStep : SetupStep
         CancellationToken ct)
     {
         var stateDirectory = GatewayCliRunner.GetManagedNativeStateDir(ctx.Config);
+        var stagingDirectory = stateDirectory + ".setup-backup";
+
+        if (ctx.NativeProfileStagingDir is not null)
+        {
+            if (!Directory.Exists(ctx.NativeProfileStagingDir))
+                return StepResult.Fail($"Native profile staging directory is missing: '{ctx.NativeProfileStagingDir}'.");
+            AtomicFile.DeleteDirectoryStrict(stateDirectory);
+            return StepResult.Ok("Native profile retry will reuse the staged previous profile");
+        }
+
+        if (Directory.Exists(stagingDirectory))
+        {
+            if (Directory.Exists(stateDirectory))
+            {
+                return StepResult.Fail(
+                    $"Both the native profile and its rollback staging directory exist. " +
+                    $"Repair or remove '{stagingDirectory}' before retrying setup.");
+            }
+
+            ctx.NativeProfileStagingDir = stagingDirectory;
+            ctx.Logger.Info("Recovered native profile rollback staging from an interrupted setup");
+            return StepResult.Ok("Native profile rollback staging recovered");
+        }
+
         if (!Directory.Exists(stateDirectory))
             return StepResult.Ok("No native profile state to reset");
 
@@ -769,9 +1002,11 @@ public sealed class NativeGatewayServiceCleanupStep : SetupStep
 
         try
         {
-            await ConfigureGatewayStep.DeleteManagedNativeProfileAsync(stateDirectory, ct);
-            ctx.Logger.Info("Deleted app-owned native gateway profile for clean reinstall");
-            return StepResult.Ok("Native profile state removed for clean reinstall");
+            ct.ThrowIfCancellationRequested();
+            AtomicFile.MoveDirectory(stateDirectory, stagingDirectory);
+            ctx.NativeProfileStagingDir = stagingDirectory;
+            ctx.Logger.Info("Staged app-owned native gateway profile for clean reinstall");
+            return StepResult.Ok("Native profile state staged for clean reinstall");
         }
         catch (Exception ex) when (ex is IOException or InvalidOperationException or UnauthorizedAccessException)
         {
@@ -779,31 +1014,68 @@ public sealed class NativeGatewayServiceCleanupStep : SetupStep
         }
     }
 
-    public override Task RollbackAsync(SetupContext ctx, CancellationToken ct) => Task.CompletedTask;
+    public override Task RollbackAsync(SetupContext ctx, CancellationToken ct)
+    {
+        if (ctx.NativeProfileStagingDir is not { } stagingDirectory)
+            return Task.CompletedTask;
+
+        var stateDirectory = GatewayCliRunner.GetManagedNativeStateDir(ctx.Config);
+        AtomicFile.DeleteDirectoryStrict(stateDirectory);
+        if (!Directory.Exists(stagingDirectory))
+            throw new InvalidOperationException($"Native profile staging directory is missing: '{stagingDirectory}'.");
+        AtomicFile.MoveDirectory(stagingDirectory, stateDirectory);
+        ctx.NativeProfileStagingDir = null;
+        ctx.Logger.Info("Restored previous native gateway profile after rollback");
+        return Task.CompletedTask;
+    }
 
     internal static async Task<bool?> TryGetManagedTaskInstalledAsync(
         SetupContext ctx,
         CancellationToken ct)
     {
-        var windowsDirectory = Environment.GetFolderPath(Environment.SpecialFolder.Windows);
-        var schtasks = string.IsNullOrWhiteSpace(windowsDirectory)
-            ? "schtasks.exe"
-            : Path.Combine(windowsDirectory, "System32", "schtasks.exe");
-        var query = await ctx.Commands.RunAsync(
-            schtasks,
-            ["/Query", "/TN", GatewayCliRunner.GetManagedNativeTaskName(ctx.Config)],
+        var probe = await ctx.Commands.RunAsync(
+            "powershell.exe",
+            [
+                "-NoProfile",
+                "-NonInteractive",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-EncodedCommand",
+                InstallNativeCliStep.EncodePowerShellScript(
+                    BuildManagedTaskProbeScript(GatewayCliRunner.GetManagedNativeTaskName(ctx.Config))),
+            ],
             TimeSpan.FromSeconds(15),
             ct: ct);
-        if (query.ExitCode == 0)
-            return true;
+        return probe.ExitCode switch
+        {
+            0 => true,
+            3 => false,
+            _ => null,
+        };
+    }
 
-        var output = $"{query.Stderr}\n{query.Stdout}";
-        return output.Contains("cannot find the file specified", StringComparison.OrdinalIgnoreCase)
-            || output.Contains("system cannot find", StringComparison.OrdinalIgnoreCase)
-            || output.Contains("task name", StringComparison.OrdinalIgnoreCase)
-                && output.Contains("does not exist", StringComparison.OrdinalIgnoreCase)
-            ? false
-            : null;
+    internal static string BuildManagedTaskProbeScript(string taskName)
+    {
+        var quotedTaskName = "'" + taskName.Replace("'", "''") + "'";
+        return $$"""
+            $ErrorActionPreference = 'Stop'
+            try {
+                $service = New-Object -ComObject 'Schedule.Service'
+                $service.Connect()
+                $folder = $service.GetFolder('\')
+                [void]$folder.GetTask({{quotedTaskName}})
+                exit 0
+            } catch [System.Runtime.InteropServices.COMException] {
+                if ($_.Exception.HResult -eq -2147024894) {
+                    exit 3
+                }
+                [Console]::Error.WriteLine($_.Exception.Message)
+                exit 4
+            } catch {
+                [Console]::Error.WriteLine($_.Exception.Message)
+                exit 4
+            }
+            """;
     }
 
     internal static async Task RemoveManagedServiceWithoutCliAsync(

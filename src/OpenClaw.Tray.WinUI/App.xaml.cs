@@ -53,6 +53,7 @@ public partial class App : Application, OpenClawTray.Services.IAppCommands
     private TrayIconCoordinator? _trayIconCoordinator;
     private GatewayConnectionManager? _connectionManager;
     private GatewayRegistry? _gatewayRegistry;
+    private NativeGatewayLifecycleCoordinator? _nativeGatewayLifecycle;
     private OpenClawTray.Chat.OpenClawChatCoordinator? _chatCoordinator;
 
     /// <summary>
@@ -96,6 +97,11 @@ public partial class App : Application, OpenClawTray.Services.IAppCommands
     internal SettingsManager Settings => _settings ?? throw new InvalidOperationException("Settings are not initialized.");
     internal SettingsManager? SettingsOrNull => _settings;
     internal string DataDirectoryPath => DataPath;
+    internal NativeGatewayLifecycleCoordinator NativeGatewayLifecycle =>
+        _nativeGatewayLifecycle ??= new NativeGatewayLifecycleCoordinator(
+            new ManagedNativeGatewayController(
+                AppIdentity.ResolveRoamingDataDirectory(),
+                AppIdentity.ResolveSetupLocalDataDirectory()));
 
     /// <summary>The active hub window, exposed so pages can obtain an HWND for file pickers.</summary>
     internal Microsoft.UI.Xaml.Window? ActiveHubWindow => _hubWindow;
@@ -827,7 +833,9 @@ public partial class App : Application, OpenClawTray.Services.IAppCommands
         // runs detached from the tray — see WslDistroKeepAlive in LocalGatewaySetup.cs.
         var wslKeepAlive = new WslGatewayKeepAliveService(() => _settings, () => _gatewayRegistry);
         _ = Task.Run(wslKeepAlive.TryEnsureAsync);
-        var nativeKeepAlive = new NativeGatewayKeepAliveService(() => _gatewayRegistry);
+        var nativeKeepAlive = new NativeGatewayKeepAliveService(
+            () => _gatewayRegistry,
+            NativeGatewayLifecycle);
         _ = Task.Run(nativeKeepAlive.TryEnsureAsync);
         InitializeGatewayClient();
 
@@ -3833,10 +3841,7 @@ public partial class App : Application, OpenClawTray.Services.IAppCommands
                 taskName = activeGateway.SetupManagedNativeTaskName
             });
 
-            var controller = new ManagedNativeGatewayController(
-                AppIdentity.ResolveRoamingDataDirectory(),
-                AppIdentity.ResolveSetupLocalDataDirectory());
-            var result = await controller.RunAsync(
+            var result = await NativeGatewayLifecycle.RunAsync(
                 activeGateway.SetupManagedNativeTaskName,
                 NativeGatewayControlAction.Restart);
 

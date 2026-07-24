@@ -240,13 +240,9 @@ public class LocalizationValidationTests
         // Scheduled Task name as {0}. Both are formatted in ConnectionPage.xaml.cs.
         "ConnectionPage_GatewayHostControlsTitle.Text",
         "ConnectionPage_GatewayHostControlsDescription_Format",
-        "ConnectionPage_GatewayHostControlsNativeDescription_Format",
         "ConnectionPage_GatewayHostStartButton.[using:Microsoft.UI.Xaml.Controls]ToolTipService.ToolTip",
-        "ConnectionPage_GatewayHostStartButton.[using:Microsoft.UI.Xaml.Automation]AutomationProperties.Name",
         "ConnectionPage_GatewayHostStopButton.[using:Microsoft.UI.Xaml.Controls]ToolTipService.ToolTip",
-        "ConnectionPage_GatewayHostStopButton.[using:Microsoft.UI.Xaml.Automation]AutomationProperties.Name",
         "ConnectionPage_GatewayHostRestartButton.[using:Microsoft.UI.Xaml.Controls]ToolTipService.ToolTip",
-        "ConnectionPage_GatewayHostRestartButton.[using:Microsoft.UI.Xaml.Automation]AutomationProperties.Name",
         // GatewayHostAccess plan strings (terminal label / tooltip / disabled
         // reasons). Resolved in the classifier via LocalizationHelper so the
         // OpenTerminal button and any consumers of DisabledReason show
@@ -254,7 +250,6 @@ public class LocalizationValidationTests
         "GatewayHostAccess_OpenTerminalLabel",
         "GatewayHostAccess_OpenSshTerminalLabel",
         "GatewayHostAccess_OpenTerminalInWslTooltip_Format",
-        "GatewayHostAccess_OpenTerminalNativeTooltip_Format",
         "GatewayHostAccess_OpenSshTerminalTooltip_Format",
         "GatewayHostAccess_NoTerminalAccess",
         "GatewayHostAccess_NoWslOrSshDisabled",

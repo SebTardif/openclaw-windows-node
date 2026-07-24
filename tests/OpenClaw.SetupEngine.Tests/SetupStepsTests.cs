@@ -1317,8 +1317,8 @@ public class SetupStepsTests : IDisposable
     public async Task NativeServiceCleanup_AfterCliRepairRemovesCapturedService()
     {
         var commands = new FakeCommandRunner(args =>
-            args.Contains("/Query")
-                ? Fail("ERROR: The system cannot find the file specified.")
+            IsManagedTaskProbe(args)
+                ? TaskProbeAbsent()
                 : Ok());
         var ctx = CreateContext(
             new SetupConfig
@@ -1341,7 +1341,7 @@ public class SetupStepsTests : IDisposable
 
         Assert.True(result.IsSuccess);
         Assert.Contains(commands.Calls, call => call.Arguments[^1].Contains("'gateway' 'uninstall'", StringComparison.Ordinal));
-        Assert.Contains(commands.Calls, call => call.Arguments.Contains("/Query"));
+        Assert.Contains(commands.Calls, call => IsManagedTaskProbe(call.Arguments));
     }
 
     [Fact]
@@ -1365,8 +1365,8 @@ public class SetupStepsTests : IDisposable
         await File.WriteAllTextAsync(configPath, "{ gateway: { port: 18789, }, }");
         await File.WriteAllTextAsync(fallbackPath, "@echo off");
         var commands = new FakeCommandRunner(args =>
-            args.Contains("/Query")
-                ? Fail("ERROR: The system cannot find the file specified.")
+            IsManagedTaskProbe(args)
+                ? TaskProbeAbsent()
                 : Fail("unexpected command"));
         var ctx = CreateContext(config, commands);
         ctx.PreviousNativeGateway = new NativeGatewayRollbackState(
@@ -1413,8 +1413,8 @@ public class SetupStepsTests : IDisposable
         Directory.CreateDirectory(Path.GetDirectoryName(configPath)!);
         await File.WriteAllTextAsync(configPath, "{ providers: { preserve: true } }");
         var commands = new FakeCommandRunner(args =>
-            args.Contains("/Query")
-                ? Fail("ERROR: The system cannot find the file specified.")
+            IsManagedTaskProbe(args)
+                ? TaskProbeAbsent()
                 : Fail("unexpected command"));
         var ctx = CreateContext(config, commands);
         ctx.PreviousNativeGateway = new NativeGatewayRollbackState(
@@ -1473,7 +1473,7 @@ public class SetupStepsTests : IDisposable
     public async Task InstallGatewayService_RollbackPropagatesUninstallFailure()
     {
         var commands = new FakeCommandRunner(args =>
-            args.Contains("/Query") ? Ok() : Fail());
+            IsManagedTaskProbe(args) ? Ok() : Fail());
         var ctx = CreateContext(
             new SetupConfig
             {
@@ -1494,8 +1494,8 @@ public class SetupStepsTests : IDisposable
     public async Task InstallGatewayService_RollbackTreatsMissingCliAndTaskAsAlreadyRemoved()
     {
         var commands = new FakeCommandRunner(args =>
-            args.Contains("/Query")
-                ? Fail("ERROR: The system cannot find the file specified.")
+            IsManagedTaskProbe(args)
+                ? TaskProbeAbsent()
                 : args.Contains("-EncodedCommand")
                     ? Ok()
                 : Fail("OpenClaw CLI was not found"));
@@ -1511,8 +1511,9 @@ public class SetupStepsTests : IDisposable
 
         await new InstallGatewayServiceStep().RollbackAsync(ctx, CancellationToken.None);
 
-        Assert.Contains(commands.Calls, call => call.Arguments.Contains("/Query"));
-        var encodedCall = Assert.Single(commands.Calls, call => call.Arguments.Contains("-EncodedCommand"));
+        Assert.Contains(commands.Calls, call => IsManagedTaskProbe(call.Arguments));
+        var encodedCall = Assert.Single(commands.Calls, call =>
+            call.Arguments.Contains("-EncodedCommand") && !IsManagedTaskProbe(call.Arguments));
         var encoded = encodedCall.Arguments[Array.IndexOf(encodedCall.Arguments, "-EncodedCommand") + 1];
         var cleanupScript = System.Text.Encoding.Unicode.GetString(Convert.FromBase64String(encoded));
         Assert.Contains("process ownership cannot be proven", cleanupScript);
@@ -1555,8 +1556,8 @@ public class SetupStepsTests : IDisposable
     public async Task InstallGatewayService_RollbackSkipsAbsentNativeServiceAfterInterruptedSetup()
     {
         var commands = new FakeCommandRunner(args =>
-            args.Contains("/Query")
-                ? Fail("ERROR: The system cannot find the file specified.")
+            IsManagedTaskProbe(args)
+                ? TaskProbeAbsent()
                 : Ok("""{"service":{"loaded":false,"command":null}}"""));
         var ctx = CreateContext(
             new SetupConfig
@@ -4126,6 +4127,27 @@ public class SetupStepsTests : IDisposable
 
     private static CommandResult Ok(string stdout = "", string stderr = "")
         => new(0, stdout, stderr, TimeSpan.Zero, TimedOut: false);
+
+    private static CommandResult TaskProbeAbsent()
+        => new(3, "", "", TimeSpan.Zero, TimedOut: false);
+
+    private static bool IsManagedTaskProbe(string[] arguments)
+    {
+        var encodedIndex = Array.IndexOf(arguments, "-EncodedCommand");
+        if (encodedIndex < 0 || encodedIndex + 1 >= arguments.Length)
+            return false;
+
+        try
+        {
+            var script = System.Text.Encoding.Unicode.GetString(
+                Convert.FromBase64String(arguments[encodedIndex + 1]));
+            return script.Contains("Schedule.Service", StringComparison.Ordinal);
+        }
+        catch (FormatException)
+        {
+            return false;
+        }
+    }
 
     private static CommandResult Fail(string stderr = "")
         => new(1, "", stderr, TimeSpan.Zero, TimedOut: false);

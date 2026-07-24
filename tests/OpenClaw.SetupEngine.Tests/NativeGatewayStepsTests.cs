@@ -1,3 +1,6 @@
+using System.IO.Compression;
+using System.Security.Cryptography;
+
 namespace OpenClaw.SetupEngine.Tests;
 
 public class NativeGatewayStepsTests
@@ -244,12 +247,25 @@ public class NativeGatewayStepsTests
         // Missing probe is best-effort: proceed unpatched rather than fail loudly,
         // so a newer `node -v` installer that drops the probe cannot break setup.
         Assert.Contains("proceeding without the Windows PowerShell 5 quoting workaround", script);
+    }
+
+    [Fact]
+    public void BuildInstallScript_PreservesRawUserPathRegistryKind()
+    {
+        var script = InstallNativeCliStep.BuildInstallScript(
+            "https://contoso.example/install.ps1",
+            "custom");
+
+        Assert.Contains("RegistryValueOptions]::DoNotExpandEnvironmentNames", script);
+        Assert.Contains("$originalUserPathKind", script);
+        Assert.Contains("$userEnvironmentKey.SetValue('Path', $filteredUserPath, $pathKind)", script);
+        Assert.DoesNotContain("[Environment]::SetEnvironmentVariable('Path'", script);
+        Assert.Contains("$wrapperCleanupError", script);
         Assert.DoesNotContain("OpenClaw installer SQLite probe shape changed", script);
         Assert.DoesNotContain("throw 'OpenClaw installer SQLite probe", script);
         Assert.Contains(@"require(\""node:sqlite\"")", script);
         Assert.Contains("$gitWrapperBytes", script);
         Assert.Contains("[IO.File]::WriteAllBytes($gitWrapper, $gitWrapperBytes)", script);
-        Assert.Contains("SetEnvironmentVariable('Path', $filteredUserPath, 'User')", script);
         Assert.DoesNotContain("Get-Command openclaw", script);
         Assert.Contains("OPENCLAW_CLI_PATH=", script);
         Assert.DoesNotContain("iwr -useb", script);
@@ -264,6 +280,9 @@ public class NativeGatewayStepsTests
 
         Assert.Contains("$installer.Contains($oldSqliteProbeAssignment)", script);
         Assert.DoesNotContain("$installer.Contains($sqliteProbe)", script);
+        Assert.Contains("$sqliteVersion = ($sqliteProbe | & $nodePath -", script);
+        Assert.Contains("$protectedGlobalConfigProbe", script);
+        Assert.Contains("$detectedGlobalConfig = $null", script);
     }
 
     [Theory]
@@ -351,6 +370,186 @@ public class NativeGatewayStepsTests
         Assert.Equal(Path.Combine(localDataDir, "native-cli"), prefix);
     }
 
+    [Fact]
+    public async Task ManagedNodeRuntime_ExtractsOnlyAfterHashVerification()
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"managed-node-{Guid.NewGuid():N}");
+        var archive = CreateManagedNodeArchive();
+        var hash = Convert.ToHexString(SHA256.HashData(archive)).ToLowerInvariant();
+        var package = new ManagedNodePackage(
+            "test",
+            "x64",
+            new Uri("https://nodejs.org/test.zip"),
+            hash);
+        var logger = new SetupLogger(filePath: null, LogLevel.Trace);
+        var ctx = new SetupContext(
+            new SetupConfig { InstallMode = GatewayInstallMode.NativeWindows },
+            logger,
+            new TransactionJournal(filePath: null),
+            new CommandRunner(logger),
+            CancellationToken.None,
+            dataDir: Path.Combine(root, "data"),
+            localDataDir: Path.Combine(root, "local"));
+
+        try
+        {
+            var result = await ManagedNodeRuntimeInstaller.EnsureInstalledAsync(
+                ctx,
+                CancellationToken.None,
+                (_, destination, ct) => destination.WriteAsync(archive, ct).AsTask(),
+                package);
+
+            Assert.True(result.IsSuccess, result.Message);
+            Assert.True(File.Exists(GatewayCliRunner.GetManagedNativeNodePath(ctx.LocalDataDir)));
+            Assert.True(File.Exists(GatewayCliRunner.GetManagedNativeNpmCliPath(ctx.LocalDataDir)));
+        }
+        finally
+        {
+            if (Directory.Exists(root))
+                Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task ManagedNodeRuntime_RejectsHashMismatch()
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"managed-node-hash-{Guid.NewGuid():N}");
+        var archive = CreateManagedNodeArchive();
+        var package = new ManagedNodePackage(
+            "test",
+            "x64",
+            new Uri("https://nodejs.org/test.zip"),
+            new string('0', 64));
+        var logger = new SetupLogger(filePath: null, LogLevel.Trace);
+        var ctx = new SetupContext(
+            new SetupConfig { InstallMode = GatewayInstallMode.NativeWindows },
+            logger,
+            new TransactionJournal(filePath: null),
+            new CommandRunner(logger),
+            CancellationToken.None,
+            dataDir: Path.Combine(root, "data"),
+            localDataDir: Path.Combine(root, "local"));
+
+        try
+        {
+            var result = await ManagedNodeRuntimeInstaller.EnsureInstalledAsync(
+                ctx,
+                CancellationToken.None,
+                (_, destination, ct) => destination.WriteAsync(archive, ct).AsTask(),
+                package);
+
+            Assert.False(result.IsSuccess);
+            Assert.Contains("SHA-256", result.Message);
+            Assert.False(File.Exists(GatewayCliRunner.GetManagedNativeNodePath(ctx.LocalDataDir)));
+        }
+        finally
+        {
+            if (Directory.Exists(root))
+                Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task InstallNativeCli_ManagedNpmInstallsBesideItsRuntime()
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"managed-node-prefix-{Guid.NewGuid():N}");
+        using var logger = new SetupLogger(filePath: null, LogLevel.Trace);
+        var runner = new CapturingCommandRunner(
+            new CommandResult(0, "", "", TimeSpan.Zero, false));
+        var ctx = new SetupContext(
+            new SetupConfig { InstallMode = GatewayInstallMode.NativeWindows },
+            logger,
+            new TransactionJournal(filePath: null),
+            runner,
+            CancellationToken.None,
+            dataDir: Path.Combine(root, "data"),
+            localDataDir: Path.Combine(root, "local"));
+
+        await InstallNativeCliStep.InstallPinnedPackageWithManagedNodeAsync(
+            ctx,
+            "2026.7.1",
+            CancellationToken.None);
+
+        var nodeDirectory = GatewayCliRunner.GetManagedNativeNodeDirectory(ctx.LocalDataDir);
+        Assert.Equal(GatewayCliRunner.GetManagedNativeNodePath(ctx.LocalDataDir), runner.Executable);
+        Assert.Contains(GatewayCliRunner.GetManagedNativeNpmCliPath(ctx.LocalDataDir), runner.Arguments);
+        Assert.Contains(nodeDirectory, runner.Arguments);
+        Assert.Equal(nodeDirectory, runner.Environment["NPM_CONFIG_PREFIX"]);
+        Assert.NotEqual(
+            GatewayCliRunner.GetManagedNativeCliPrefix(ctx.LocalDataDir),
+            runner.Environment["NPM_CONFIG_PREFIX"]);
+    }
+
+    [Fact]
+    public void InstallNativeCli_ManagedLaunchersUsePrivateNodeAndEntryPoint()
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"managed-launchers-{Guid.NewGuid():N}");
+        var localDataDir = Path.Combine(root, "local");
+        var nodePath = GatewayCliRunner.GetManagedNativeNodePath(localDataDir);
+        var entryPath = GatewayCliRunner.GetManagedNativeOpenClawEntryPath(localDataDir);
+        Directory.CreateDirectory(Path.GetDirectoryName(entryPath)!);
+        File.WriteAllText(nodePath, "");
+        File.WriteAllText(entryPath, "");
+
+        try
+        {
+            InstallNativeCliStep.WriteManagedLaunchers(localDataDir);
+
+            var prefix = GatewayCliRunner.GetManagedNativeCliPrefix(localDataDir);
+            var powerShellLauncher = File.ReadAllText(Path.Combine(prefix, "openclaw.ps1"));
+            var cmdLauncher = File.ReadAllText(Path.Combine(prefix, "openclaw.cmd"));
+            Assert.Contains(nodePath, powerShellLauncher);
+            Assert.Contains(entryPath, powerShellLauncher);
+            Assert.Contains(nodePath, cmdLauncher);
+            Assert.Contains(entryPath, cmdLauncher);
+            Assert.Equal(
+                Path.Combine(prefix, "openclaw.ps1"),
+                GatewayCliRunner.TryResolveManagedNativeCliPath(localDataDir));
+        }
+        finally
+        {
+            if (Directory.Exists(root))
+                Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void NativeTaskHardening_WaitsForGatewayAndPropagatesExitCode()
+    {
+        const string source =
+            "CreateObject(\"WScript.Shell\").Run \"\"\"C:\\Users\\me\\.openclaw-test\\gateway.cmd\"\"\", 0, False";
+
+        var hardened = NativeGatewayTaskHardeningStep.BuildHardenedVbs(source);
+
+        Assert.Contains(", 0, True)", hardened);
+        Assert.Contains("WScript.Quit exitCode", hardened);
+        Assert.Contains("WScript.Sleep 60000", hardened);
+        Assert.Contains("If attempts >= 5", hardened);
+        Assert.Contains("If elapsed >= 900 Then attempts = 0", hardened);
+        Assert.DoesNotContain(", 0, False", hardened);
+    }
+
+    [Fact]
+    public void NativeTaskHardening_AddsBoundedRestartPolicy()
+    {
+        const string source =
+            """
+            <?xml version="1.0" encoding="UTF-16"?>
+            <Task xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+              <Settings>
+                <ExecutionTimeLimit>PT72H</ExecutionTimeLimit>
+              </Settings>
+            </Task>
+            """;
+
+        var hardened = NativeGatewayTaskHardeningStep.BuildHardenedTaskXml(source);
+
+        Assert.Contains("<StartWhenAvailable>true</StartWhenAvailable>", hardened);
+        Assert.Contains("<ExecutionTimeLimit>PT0S</ExecutionTimeLimit>", hardened);
+        Assert.Contains("<Interval>PT1M</Interval>", hardened);
+        Assert.Contains("<Count>5</Count>", hardened);
+    }
+
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
@@ -382,6 +581,98 @@ public class NativeGatewayStepsTests
         }
         finally
         {
+            if (Directory.Exists(root))
+                Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task InstallNativeCli_StagingRollbackRestoresPreviousPrefixOverPartialInstall()
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"native-cli-stage-{Guid.NewGuid():N}");
+        var localDataDir = Path.Combine(root, "local");
+        var prefix = GatewayCliRunner.GetManagedNativeCliPrefix(localDataDir);
+        Directory.CreateDirectory(prefix);
+        await File.WriteAllTextAsync(Path.Combine(prefix, "old.txt"), "old");
+        var logger = new SetupLogger(filePath: null, LogLevel.Trace);
+        var ctx = new SetupContext(
+            new SetupConfig { InstallMode = GatewayInstallMode.NativeWindows },
+            logger,
+            new TransactionJournal(filePath: null),
+            new CommandRunner(logger),
+            CancellationToken.None,
+            dataDir: Path.Combine(root, "data"),
+            localDataDir: localDataDir);
+
+        try
+        {
+            Assert.True(InstallNativeCliStep.StageManagedCliForUpgrade(ctx).IsSuccess);
+            Assert.False(Directory.Exists(prefix));
+            Directory.CreateDirectory(prefix);
+            await File.WriteAllTextAsync(Path.Combine(prefix, "partial.txt"), "partial");
+
+            await new InstallNativeCliStep().RollbackAsync(ctx, CancellationToken.None);
+
+            Assert.True(File.Exists(Path.Combine(prefix, "old.txt")));
+            Assert.False(File.Exists(Path.Combine(prefix, "partial.txt")));
+            Assert.Null(ctx.NativeCliPrefixStagingDir);
+        }
+        finally
+        {
+            if (Directory.Exists(root))
+                Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task NativeServiceCleanup_StagingRollbackRestoresCompleteProfile()
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"native-profile-stage-{Guid.NewGuid():N}");
+        var profile = $"Rollback-{Guid.NewGuid():N}";
+        var config = new SetupConfig
+        {
+            InstallMode = GatewayInstallMode.NativeWindows,
+            DistroName = profile,
+        };
+        var stateDirectory = GatewayCliRunner.GetManagedNativeStateDir(config);
+        var logger = new SetupLogger(filePath: null, LogLevel.Trace);
+        var ctx = new SetupContext(
+            config,
+            logger,
+            new TransactionJournal(filePath: null),
+            new CommandRunner(logger),
+            CancellationToken.None,
+            dataDir: Path.Combine(root, "data"),
+            localDataDir: Path.Combine(root, "local"));
+        Directory.CreateDirectory(stateDirectory);
+        await File.WriteAllTextAsync(Path.Combine(stateDirectory, "device-key.json"), "old-key");
+        Directory.CreateDirectory(Path.Combine(stateDirectory, "plugins"));
+        await File.WriteAllTextAsync(Path.Combine(stateDirectory, "plugins", "state.json"), "old-state");
+        await ConfigureGatewayStep.WriteNativeOwnershipMarkerAsync(ctx, CancellationToken.None);
+
+        try
+        {
+            var staged = await NativeGatewayServiceCleanupStep.ResetManagedNativeProfileForCleanInstallAsync(
+                ctx,
+                CancellationToken.None);
+            Assert.True(staged.IsSuccess, staged.Message);
+            Assert.False(Directory.Exists(stateDirectory));
+
+            Directory.CreateDirectory(stateDirectory);
+            await File.WriteAllTextAsync(Path.Combine(stateDirectory, "partial.json"), "partial");
+            await new NativeGatewayServiceCleanupStep().RollbackAsync(ctx, CancellationToken.None);
+
+            Assert.Equal("old-key", await File.ReadAllTextAsync(Path.Combine(stateDirectory, "device-key.json")));
+            Assert.Equal("old-state", await File.ReadAllTextAsync(Path.Combine(stateDirectory, "plugins", "state.json")));
+            Assert.False(File.Exists(Path.Combine(stateDirectory, "partial.json")));
+            Assert.Null(ctx.NativeProfileStagingDir);
+        }
+        finally
+        {
+            if (Directory.Exists(stateDirectory))
+                Directory.Delete(stateDirectory, recursive: true);
+            if (Directory.Exists(stateDirectory + ".setup-backup"))
+                Directory.Delete(stateDirectory + ".setup-backup", recursive: true);
             if (Directory.Exists(root))
                 Directory.Delete(root, recursive: true);
         }
@@ -798,6 +1089,17 @@ public class NativeGatewayStepsTests
                 port = config.GatewayPort,
             },
         });
+    }
+
+    private static byte[] CreateManagedNodeArchive()
+    {
+        using var memory = new MemoryStream();
+        using (var archive = new ZipArchive(memory, ZipArchiveMode.Create, leaveOpen: true))
+        {
+            archive.CreateEntry("node-test/node.exe");
+            archive.CreateEntry("node-test/node_modules/npm/bin/npm-cli.js");
+        }
+        return memory.ToArray();
     }
 
     private sealed class CapturingCommandRunner(CommandResult result) : ICommandRunner

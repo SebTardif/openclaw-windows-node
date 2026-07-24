@@ -1038,6 +1038,7 @@ public sealed class CreateWslInstanceStep : SetupStep
         var cleanupError = await CleanupPartialInstall(ctx, distro, vhdDir, ct);
         if (cleanupError.Length > 0)
             throw new IOException($"[Uninstall] Refusing unsafe WSL rollback cleanup.{cleanupError}");
+        GatewayInstallModeDetector.DeleteWslOwnershipMarker(ctx.LocalDataDir);
 
         if (!DistroInstallPathPolicy.TryGetManagedInstallPath(
                 ctx.LocalDataDir,
@@ -1734,6 +1735,7 @@ public sealed class ConfigureGatewayStep : SetupStep
                     File.Delete(markerPath);
             }
             ctx.Logger.Info("[Uninstall] Deleted native gateway ownership markers");
+            GatewayInstallModeDetector.DeleteNativeStopIntent(ctx.LocalDataDir);
             return;
         }
 
@@ -1759,6 +1761,8 @@ public sealed class ConfigureGatewayStep : SetupStep
             File.Delete(ownershipPath);
             ctx.Logger.Info("[Uninstall] Deleted native gateway ownership marker");
         }
+        if (ctx.IsUninstalling)
+            GatewayInstallModeDetector.DeleteNativeStopIntent(ctx.LocalDataDir);
     }
 
     internal static async Task DeleteManagedNativeProfileAsync(string stateDirectory, CancellationToken ct)
@@ -2324,6 +2328,7 @@ public sealed class StartGatewayStep : SetupStep
                     var ownership = await VerifyManagedNativeGatewayOwnershipAsync(ctx, ct);
                     if (!ownership.IsSuccess)
                         return ownership;
+                    GatewayInstallModeDetector.DeleteNativeStopIntent(ctx.LocalDataDir);
                     return StepResult.Ok("Gateway running");
                 }
 
@@ -4376,6 +4381,14 @@ public sealed class VerifyEndToEndStep : SetupStep
 
         var json = System.Text.Json.JsonSerializer.Serialize(state, SetupConfig.JsonWriteOptions);
         await AtomicFile.WriteAllTextAsync(statePath, json, ct);
+        if (ctx.Config.InstallMode == GatewayInstallMode.Wsl)
+        {
+            await GatewayInstallModeDetector.WriteWslOwnershipMarkerAsync(
+                ctx.LocalDataDir,
+                ctx.Config,
+                ctx.GatewayRecordId,
+                ct);
+        }
         ctx.Logger.Info($"Wrote setup-state.json: InstallMode={ctx.Config.InstallMode}, DistroName={state.DistroName ?? "none"}");
     }
 

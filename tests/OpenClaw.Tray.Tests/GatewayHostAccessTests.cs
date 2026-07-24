@@ -63,7 +63,7 @@ public class GatewayHostAccessTests
     }
 
     [Fact]
-    public void Classify_PrefersWslTerminal_WhenRecordHasWslAndSshMetadata()
+    public void Classify_PrefersSshTerminal_WhenRecordHasStaleWslAndSshMetadata()
     {
         var record = new GatewayRecord
         {
@@ -75,9 +75,9 @@ public class GatewayHostAccessTests
 
         var access = GatewayHostAccessClassifier.Classify(record);
 
-        Assert.Equal(GatewayTerminalTarget.Wsl, access.TerminalTarget);
-        Assert.True(access.CanControlWslGateway);
-        Assert.Equal("OpenClawGateway", access.DistroName);
+        Assert.Equal(GatewayTerminalTarget.Ssh, access.TerminalTarget);
+        Assert.False(access.CanControlWslGateway);
+        Assert.Equal("alice", access.SshUser);
     }
 
     [Fact]
@@ -96,5 +96,40 @@ public class GatewayHostAccessTests
         Assert.False(access.CanControlWslGateway);
         Assert.False(access.CanControlNativeGateway);
         Assert.NotNull(access.DisabledReason);
+    }
+
+    [Fact]
+    public void Classify_DisablesManagedControls_WhenRemoteRecordRetainsStaleMetadata()
+    {
+        var record = new GatewayRecord
+        {
+            Id = "remote-stale",
+            Url = "wss://gateway.example.test",
+            SetupManagedDistroName = "OpenClawGateway",
+            SetupManagedNativeTaskName = "OpenClaw Gateway (OpenClawGateway)",
+        };
+
+        var access = GatewayHostAccessClassifier.Classify(record);
+
+        Assert.Equal(GatewayTerminalTarget.None, access.TerminalTarget);
+        Assert.False(access.CanControlWslGateway);
+        Assert.False(access.CanControlNativeGateway);
+    }
+
+    [Fact]
+    public void Classify_RepairsAccessForLegacyNativeRecordWithLocalUrl()
+    {
+        var record = new GatewayRecord
+        {
+            Id = "native-legacy",
+            Url = "ws://127.0.0.1:18789",
+            IsLocal = false,
+            SetupManagedNativeTaskName = "OpenClaw Gateway (OpenClawGateway)",
+        };
+
+        var access = GatewayHostAccessClassifier.Classify(record);
+
+        Assert.Equal(GatewayTerminalTarget.Native, access.TerminalTarget);
+        Assert.True(access.CanControlNativeGateway);
     }
 }

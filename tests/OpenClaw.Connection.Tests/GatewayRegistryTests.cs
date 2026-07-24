@@ -434,11 +434,71 @@ public class GatewayRegistryTests : IDisposable
         {
             Id = "gw-1",
             Url = "ws://127.0.0.1:18789",
-            IsLocal = true,
         }.PreserveAdvancedFields(existing);
 
+        Assert.True(rebuilt.IsLocal);
         Assert.Equal("OpenClawGateway", rebuilt.SetupManagedDistroName);
         Assert.Equal("OpenClaw Gateway (OpenClawGateway)", rebuilt.SetupManagedNativeTaskName);
+    }
+
+    [Fact]
+    public void PreserveAdvancedFields_ClearsManagedMetadata_WhenLocalRecordBecomesRemote()
+    {
+        var existing = MakeRecord("gw-1", "ws://127.0.0.1:18789") with
+        {
+            IsLocal = true,
+            SetupManagedDistroName = "OpenClawGateway",
+            SetupManagedNativeTaskName = "OpenClaw Gateway (OpenClawGateway)",
+        };
+
+        var rebuilt = new GatewayRecord
+        {
+            Id = existing.Id,
+            Url = "wss://remote.example.test",
+        }.PreserveAdvancedFields(existing);
+
+        Assert.False(rebuilt.IsLocal);
+        Assert.Null(rebuilt.SetupManagedDistroName);
+        Assert.Null(rebuilt.SetupManagedNativeTaskName);
+    }
+
+    [Fact]
+    public void PreserveAdvancedFields_RepairsLegacyNativeRecordWithLocalUrl()
+    {
+        var existing = MakeRecord("gw-1", "ws://127.0.0.1:18789") with
+        {
+            IsLocal = false,
+            SetupManagedNativeTaskName = "OpenClaw Gateway (OpenClawGateway)",
+        };
+
+        var rebuilt = new GatewayRecord
+        {
+            Id = existing.Id,
+            Url = existing.Url,
+        }.PreserveAdvancedFields(existing);
+
+        Assert.True(rebuilt.IsLocal);
+        Assert.Equal(existing.SetupManagedNativeTaskName, rebuilt.SetupManagedNativeTaskName);
+    }
+
+    [Fact]
+    public void PreserveAdvancedFields_ClearsManagedMetadata_WhenRecordUsesSsh()
+    {
+        var existing = MakeRecord("gw-1", "ws://127.0.0.1:18789") with
+        {
+            IsLocal = true,
+            SetupManagedDistroName = "OpenClawGateway",
+        };
+
+        var rebuilt = new GatewayRecord
+        {
+            Id = existing.Id,
+            Url = existing.Url,
+            SshTunnel = new SshTunnelConfig("user", "host", 18789, 18789),
+        }.PreserveAdvancedFields(existing);
+
+        Assert.False(rebuilt.IsLocal);
+        Assert.Null(rebuilt.SetupManagedDistroName);
     }
 
     [Fact]

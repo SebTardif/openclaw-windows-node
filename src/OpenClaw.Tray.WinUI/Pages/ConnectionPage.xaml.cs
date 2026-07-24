@@ -42,7 +42,6 @@ public sealed partial class ConnectionPage : Page
     private global::Windows.UI.ViewManagement.AccessibilitySettings? _accessibilitySettings;
     private IGatewayTerminalLauncher? _terminalLauncher;
     private WslGatewayController? _wslGatewayController;
-    private ManagedNativeGatewayController? _nativeGatewayController;
 
     // ─── UI state ───
     private UserIntent _userIntent = UserIntent.None;
@@ -97,17 +96,15 @@ public sealed partial class ConnectionPage : Page
     }
 
     private IGatewayTerminalLauncher TerminalLauncher =>
-        _terminalLauncher ??= new GatewayTerminalLauncher(new OpenClawTray.AppLogger());
+        _terminalLauncher ??= new GatewayTerminalLauncher(
+            new OpenClawTray.AppLogger(),
+            Path.Combine(AppIdentity.ResolveSetupLocalDataDirectory(), "native-cli"),
+            Path.Combine(AppIdentity.ResolveSetupLocalDataDirectory(), "native-cli", "tools", "node"));
 
     private WslGatewayController WslGatewayController =>
         _wslGatewayController ??= new WslGatewayController(
             new WslExeCommandRunner(new OpenClawTray.AppLogger()),
             new OpenClawTray.AppLogger());
-
-    private ManagedNativeGatewayController NativeGatewayController =>
-        _nativeGatewayController ??= new ManagedNativeGatewayController(
-            AppIdentity.ResolveRoamingDataDirectory(),
-            AppIdentity.ResolveSetupLocalDataDirectory());
 
     // ─── Initialization ───────────────────────────────────────────────
 
@@ -2161,18 +2158,6 @@ public sealed partial class ConnectionPage : Page
 
         try
         {
-            if (action == WslGatewayControlAction.Stop && _connectionManager != null)
-            {
-                try
-                {
-                    await _connectionManager.DisconnectAsync();
-                }
-                catch (Exception ex) when (!cancellationToken.IsCancellationRequested)
-                {
-                    Services.Logger.Warn($"[ConnectionPage] Disconnect before WSL gateway stop failed; continuing stop: {ex.Message}");
-                }
-            }
-
             cancellationToken.ThrowIfCancellationRequested();
             var result = await WslGatewayController.RunAsync(accessPlan.DistroName!, action, cancellationToken);
             cancellationToken.ThrowIfCancellationRequested();
@@ -2187,6 +2172,7 @@ public sealed partial class ConnectionPage : Page
 
             if (action == WslGatewayControlAction.Stop)
             {
+                await DisconnectAfterSuccessfulStopAsync("WSL", cancellationToken);
                 SetGatewayHostActionStatus("Gateway stopped.");
                 RefreshFromSnapshot(_connectionManager?.CurrentSnapshot ?? _lastSnapshot);
                 return;
@@ -2245,20 +2231,11 @@ public sealed partial class ConnectionPage : Page
 
         try
         {
-            if (action == NativeGatewayControlAction.Stop && _connectionManager != null)
-            {
-                try
-                {
-                    await _connectionManager.DisconnectAsync();
-                }
-                catch (Exception ex) when (!cancellationToken.IsCancellationRequested)
-                {
-                    Services.Logger.Warn($"[ConnectionPage] Disconnect before native gateway stop failed; continuing stop: {ex.Message}");
-                }
-            }
-
             cancellationToken.ThrowIfCancellationRequested();
-            var result = await NativeGatewayController.RunAsync(accessPlan.NativeTaskName!, action, cancellationToken);
+            var result = await CurrentApp.NativeGatewayLifecycle.RunAsync(
+                accessPlan.NativeTaskName!,
+                action,
+                cancellationToken);
             cancellationToken.ThrowIfCancellationRequested();
             if (!result.Success)
             {
@@ -2271,13 +2248,12 @@ public sealed partial class ConnectionPage : Page
 
             if (action == NativeGatewayControlAction.Stop)
             {
-                NativeGatewayKeepAliveService.RecordUserStopped(accessPlan.NativeTaskName!);
+                await DisconnectAfterSuccessfulStopAsync("native", cancellationToken);
                 SetGatewayHostActionStatus("OpenClaw gateway stopped.");
                 RefreshFromSnapshot(_connectionManager?.CurrentSnapshot ?? _lastSnapshot);
                 return;
             }
 
-            NativeGatewayKeepAliveService.ClearUserStopped();
             SetGatewayHostActionStatus($"OpenClaw gateway {PastTense(action)}. Reconnecting…");
             BeginReconnectMask();
             ((IAppCommands)CurrentApp).Reconnect();
@@ -2303,6 +2279,22 @@ public sealed partial class ConnectionPage : Page
             {
                 ApplyGatewayHostAccess(_currentPlan);
             }
+        }
+    }
+
+    private async Task DisconnectAfterSuccessfulStopAsync(string gatewayKind, CancellationToken cancellationToken)
+    {
+        if (_connectionManager is null)
+            return;
+
+        try
+        {
+            await _connectionManager.DisconnectAsync();
+        }
+        catch (Exception ex) when (!cancellationToken.IsCancellationRequested)
+        {
+            Services.Logger.Warn(
+                $"[ConnectionPage] Disconnect after successful {gatewayKind} gateway stop failed: {ex.Message}");
         }
     }
 

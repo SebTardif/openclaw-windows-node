@@ -181,8 +181,7 @@ public static class Program
         }
         Console.WriteLine();
 
-        if (!uninstall &&
-            !wizardOnly &&
+        if (ShouldValidateDistroInstallPath(config.InstallMode, uninstall, wizardOnly) &&
             !DistroInstallPathPolicy.TryGetNewInstallPath(
                 localDataDir ?? SetupContext.ResolveLocalDataDir(),
                 config.DistroName,
@@ -329,6 +328,12 @@ public static class Program
 
     private static List<SetupStep> BuildSteps(SetupConfig config)
         => SetupStepFactory.BuildDefaultSteps(config);
+
+    internal static bool ShouldValidateDistroInstallPath(
+        GatewayInstallMode installMode,
+        bool uninstall,
+        bool wizardOnly) =>
+        installMode == GatewayInstallMode.Wsl && !uninstall && !wizardOnly;
 
     internal static bool ShouldDetectInstalledMode(
         bool uninstall,

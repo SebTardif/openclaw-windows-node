@@ -66,9 +66,7 @@ public static class WizardSelection
             return "later";
         }
 
-        var promptText = $"{title} {message} {stepId}";
-        if (promptText.Contains("gateway service", StringComparison.OrdinalIgnoreCase)
-            && promptText.Contains("already installed", StringComparison.OrdinalIgnoreCase)
+        if (string.Equals(stepId, "gateway-service-runtime", StringComparison.OrdinalIgnoreCase)
             && options.Any(option => string.Equals(option.Value, "skip", StringComparison.OrdinalIgnoreCase)))
         {
             return "skip";

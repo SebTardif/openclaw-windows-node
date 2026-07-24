@@ -68,8 +68,8 @@ public sealed partial class CapabilitiesPage : Page
             : "~200 MB";
         var supportsTailscale = _config.InstallMode == GatewayInstallMode.Wsl;
         TailscaleCard.Visibility = supportsTailscale ? Visibility.Visible : Visibility.Collapsed;
-        if (!supportsTailscale)
-            _config.Tailscale.Enabled = false;
+        _config.TailscaleIntent ??= _config.Tailscale.Enabled;
+        _config.Tailscale.Enabled = supportsTailscale && _config.TailscaleIntent == true;
         // The tray always registers device.info/status with Node Mode. Keep the
         // setup declaration and gateway allowlist aligned with that runtime contract.
         _config.Capabilities.Device = true;
@@ -95,7 +95,7 @@ public sealed partial class CapabilitiesPage : Page
         if (_setupWindow is not null)
             _setupWindow.Activated += SetupWindow_Activated;
         ApplySetupReviewSummary(_config);
-        TailscaleToggle.IsOn = _config.Tailscale.Enabled;
+        TailscaleToggle.IsOn = _config.TailscaleIntent == true;
         TailscaleTrustAuthToggle.IsOn = _config.Tailscale.TrustTailscaleAuth;
         TailscaleAuthModeSelector.SelectedIndex = _config.Tailscale.AuthMode == TailscaleAuthMode.AuthKey ? 1 : 0;
         UpdateTailscaleOptions();
@@ -219,8 +219,9 @@ public sealed partial class CapabilitiesPage : Page
             }
         }
         config.Settings.ApplyCapabilities(caps);
+        config.TailscaleIntent = TailscaleToggle.IsOn == true;
         config.Tailscale.Enabled = config.InstallMode == GatewayInstallMode.Wsl
-            && TailscaleToggle.IsOn == true;
+            && config.TailscaleIntent == true;
         config.Tailscale.TrustTailscaleAuth = TailscaleTrustAuthToggle.IsOn == true;
         config.Tailscale.AuthMode = TailscaleAuthModeSelector.SelectedIndex == 1
             ? TailscaleAuthMode.AuthKey
@@ -250,7 +251,9 @@ public sealed partial class CapabilitiesPage : Page
         UpdateTailscaleOptions();
         if (_config is not null)
         {
-            _config.Tailscale.Enabled = TailscaleToggle.IsOn == true;
+            _config.TailscaleIntent = TailscaleToggle.IsOn == true;
+            _config.Tailscale.Enabled = _config.InstallMode == GatewayInstallMode.Wsl
+                && _config.TailscaleIntent == true;
             ApplySetupReviewSummary(_config);
         }
     }

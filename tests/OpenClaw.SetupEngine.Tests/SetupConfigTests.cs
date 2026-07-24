@@ -72,6 +72,24 @@ public class SetupConfigTests : IDisposable
     }
 
     [Fact]
+    public void ApplyInstallMode_PreservesTailscaleIntentAcrossNativeNavigation()
+    {
+        var config = new SetupConfig
+        {
+            InstallMode = GatewayInstallMode.Wsl,
+            Tailscale = new TailscaleConfig { Enabled = true },
+        };
+
+        config.ApplyInstallMode(GatewayInstallMode.NativeWindows);
+        Assert.False(config.Tailscale.Enabled);
+        Assert.True(config.TailscaleIntent);
+
+        config.ApplyInstallMode(GatewayInstallMode.Wsl);
+        Assert.True(config.Tailscale.Enabled);
+        Assert.True(config.TailscaleIntent);
+    }
+
+    [Fact]
     public void EffectiveGatewayUrl_UsesPort()
     {
         var config = new SetupConfig { GatewayPort = 9999 };

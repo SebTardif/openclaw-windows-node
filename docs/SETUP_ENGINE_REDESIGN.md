@@ -185,7 +185,7 @@ Executed sequentially. The native and WSL pipelines share configuration, pairing
 
 | Runtime | Runtime-specific work |
 |---|---|
-| Native Windows | Official HTTPS PowerShell installer with app-owned npm prefix, native CLI routing, per-user gateway Scheduled Task, native health check |
+| Native Windows | SHA-256-pinned app-private Node runtime, app-owned npm prefix, native CLI routing, supervised per-user gateway Scheduled Task, native health check |
 | WSL 2 | WSL preflight, isolated distro creation/lockdown, Linux CLI install, systemd gateway service, WSL keepalive |
 
 The WSL pipeline includes these stages:

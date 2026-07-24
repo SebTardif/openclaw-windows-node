@@ -19,7 +19,11 @@ public sealed record GatewayTerminalLaunchCommand(
 
 public static class GatewayTerminalLaunchCommandBuilder
 {
-    public static GatewayTerminalLaunchCommand Build(GatewayHostAccessPlan accessPlan, string? windowsTerminalPath)
+    public static GatewayTerminalLaunchCommand Build(
+        GatewayHostAccessPlan accessPlan,
+        string? windowsTerminalPath,
+        string? managedNativeCliPrefix = null,
+        string? managedNativeNodeDirectory = null)
     {
         if (!accessPlan.CanOpenTerminal)
         {
@@ -30,7 +34,11 @@ public static class GatewayTerminalLaunchCommandBuilder
         {
             GatewayTerminalTarget.Wsl => BuildWslCommand(accessPlan, windowsTerminalPath),
             GatewayTerminalTarget.Ssh => BuildSshCommand(accessPlan, windowsTerminalPath),
-            GatewayTerminalTarget.Native => BuildNativeCommand(accessPlan, windowsTerminalPath),
+            GatewayTerminalTarget.Native => BuildNativeCommand(
+                accessPlan,
+                windowsTerminalPath,
+                managedNativeCliPrefix,
+                managedNativeNodeDirectory),
             _ => throw new InvalidOperationException("Gateway terminal access is not available.")
         };
     }
@@ -140,13 +148,23 @@ public static class GatewayTerminalLaunchCommandBuilder
             false);
     }
 
-    private static GatewayTerminalLaunchCommand BuildNativeCommand(GatewayHostAccessPlan accessPlan, string? windowsTerminalPath)
+    private static GatewayTerminalLaunchCommand BuildNativeCommand(
+        GatewayHostAccessPlan accessPlan,
+        string? windowsTerminalPath,
+        string? managedNativeCliPrefix,
+        string? managedNativeNodeDirectory)
     {
         var taskName = RequireValue(accessPlan.NativeTaskName, "Native gateway task name is required.");
+        var cliPrefix = RequireValue(managedNativeCliPrefix, "Managed native CLI prefix is required.");
+        var nodeDirectory = RequireValue(
+            managedNativeNodeDirectory,
+            "Managed native Node directory is required.");
         var profile = TryGetProfileFromTaskName(taskName) ?? "default";
         const string shell = "powershell.exe";
         var title = taskName;
-        var encodedScript = Convert.ToBase64String(Encoding.Unicode.GetBytes(BuildNativeTerminalScript(profile, taskName)));
+        var encodedScript = Convert.ToBase64String(
+            Encoding.Unicode.GetBytes(
+                BuildNativeTerminalScript(profile, taskName, cliPrefix, nodeDirectory)));
         var arguments = new ReadOnlyCollection<string>([
             "-NoExit",
             "-EncodedCommand",
@@ -170,14 +188,19 @@ public static class GatewayTerminalLaunchCommandBuilder
         return new GatewayTerminalLaunchCommand(shell, arguments, false);
     }
 
-    private static string BuildNativeTerminalScript(string profile, string taskName)
+    private static string BuildNativeTerminalScript(
+        string profile,
+        string taskName,
+        string managedNativeCliPrefix,
+        string managedNativeNodeDirectory)
     {
         var quotedProfile = PowerShellQuote(profile);
         var quotedTaskName = PowerShellQuote(taskName);
         return
             "$profile = " + quotedProfile + "; " +
             "$stateDir = if ($profile -ieq 'default') { Join-Path $env:USERPROFILE '.openclaw' } else { Join-Path $env:USERPROFILE ('.openclaw-' + $profile) }; " +
-            "$managedCli = Join-Path $env:LOCALAPPDATA 'OpenClawTray\\native-cli'; " +
+            "$managedCli = " + PowerShellQuote(managedNativeCliPrefix) + "; " +
+            "$managedNode = " + PowerShellQuote(managedNativeNodeDirectory) + "; " +
             "$env:OPENCLAW_PROFILE = $profile; " +
             "$env:OPENCLAW_STATE_DIR = $stateDir; " +
             "$env:OPENCLAW_CONFIG_PATH = Join-Path $stateDir 'openclaw.json'; " +
@@ -186,7 +209,8 @@ public static class GatewayTerminalLaunchCommandBuilder
             "$env:OPENCLAW_GATEWAY_PORT = ''; " +
             "$env:OPENCLAW_GATEWAY_URL = ''; " +
             "$env:OPENCLAW_WRAPPER = ''; " +
-            "if (Test-Path -LiteralPath $managedCli) { $env:PATH = $managedCli + [IO.Path]::PathSeparator + $env:PATH }; " +
+            "$managedPath = @($managedCli, $managedNode) | Where-Object { Test-Path -LiteralPath $_ }; " +
+            "if ($managedPath.Count -gt 0) { $env:PATH = ($managedPath -join [IO.Path]::PathSeparator) + [IO.Path]::PathSeparator + $env:PATH }; " +
             "New-Item -ItemType Directory -Force -Path $stateDir | Out-Null; " +
             "Set-Location -LiteralPath $stateDir; " +
             "Write-Host 'OpenClaw native gateway terminal'; " +
@@ -210,12 +234,19 @@ public static class GatewayTerminalLaunchCommandBuilder
     }
 }
 
-public sealed class GatewayTerminalLauncher(IOpenClawLogger logger) : IGatewayTerminalLauncher
+public sealed class GatewayTerminalLauncher(
+    IOpenClawLogger logger,
+    string? managedNativeCliPrefix = null,
+    string? managedNativeNodeDirectory = null) : IGatewayTerminalLauncher
 {
     public void Open(GatewayHostAccessPlan accessPlan)
     {
         var terminalPath = TryFindWindowsTerminalPath();
-        var command = GatewayTerminalLaunchCommandBuilder.Build(accessPlan, terminalPath);
+        var command = GatewayTerminalLaunchCommandBuilder.Build(
+            accessPlan,
+            terminalPath,
+            managedNativeCliPrefix,
+            managedNativeNodeDirectory);
 
         try
         {
@@ -224,7 +255,11 @@ public sealed class GatewayTerminalLauncher(IOpenClawLogger logger) : IGatewayTe
         catch (Exception ex) when (command.UsesWindowsTerminal)
         {
             logger.Warn($"Windows Terminal launch failed; falling back to direct terminal process: {ex.Message}");
-            Start(GatewayTerminalLaunchCommandBuilder.Build(accessPlan, null));
+            Start(GatewayTerminalLaunchCommandBuilder.Build(
+                accessPlan,
+                null,
+                managedNativeCliPrefix,
+                managedNativeNodeDirectory));
         }
     }
 

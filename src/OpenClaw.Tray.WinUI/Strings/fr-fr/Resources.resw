@@ -6088,19 +6088,19 @@ Assurez-vous que la passerelle est en cours d'exécution.</value>
     <value>Run openclaw gateway start</value>
   </data>
   <data name="ConnectionPage_GatewayHostStartButton.[using:Microsoft.UI.Xaml.Automation]AutomationProperties.Name" xml:space="preserve">
-    <value>Start local gateway</value>
+    <value>Démarrer la passerelle locale</value>
   </data>
   <data name="ConnectionPage_GatewayHostStopButton.[using:Microsoft.UI.Xaml.Controls]ToolTipService.ToolTip" xml:space="preserve">
     <value>Run openclaw gateway stop</value>
   </data>
   <data name="ConnectionPage_GatewayHostStopButton.[using:Microsoft.UI.Xaml.Automation]AutomationProperties.Name" xml:space="preserve">
-    <value>Stop local gateway</value>
+    <value>Arrêter la passerelle locale</value>
   </data>
   <data name="ConnectionPage_GatewayHostRestartButton.[using:Microsoft.UI.Xaml.Controls]ToolTipService.ToolTip" xml:space="preserve">
     <value>Run openclaw gateway restart</value>
   </data>
   <data name="ConnectionPage_GatewayHostRestartButton.[using:Microsoft.UI.Xaml.Automation]AutomationProperties.Name" xml:space="preserve">
-    <value>Restart local gateway</value>
+    <value>Redémarrer la passerelle locale</value>
   </data>
   <data name="AgentEventsPage_Status_Live" xml:space="preserve">
     <value>En direct</value>
@@ -6643,7 +6643,7 @@ Le binaire wxc-exec est introuvable. {1} S'il s'agit d'une build développeur, c
     <value>Open a shell or manage the local gateway service in {0}.</value>
   </data>
   <data name="ConnectionPage_GatewayHostControlsNativeDescription_Format" xml:space="preserve">
-    <value>Open a shell or manage the native Windows gateway task {0}.</value>
+    <value>Ouvrez un terminal ou gérez la tâche de passerelle Windows native {0}.</value>
   </data>
   <data name="CronPage_JobCompleted" xml:space="preserve">
     <value>Job completed</value>
@@ -6676,7 +6676,7 @@ Le binaire wxc-exec est introuvable. {1} S'il s'agit d'une build développeur, c
     <value>Open a terminal in the {0} WSL gateway.</value>
   </data>
   <data name="GatewayHostAccess_OpenTerminalNativeTooltip_Format" xml:space="preserve">
-    <value>Open a Windows terminal for the native gateway task {0}.</value>
+    <value>Ouvrez un terminal Windows pour la tâche de passerelle native {0}.</value>
   </data>
   <data name="GatewayHostAccess_OpenTerminalLabel" xml:space="preserve">
     <value>Open terminal</value>

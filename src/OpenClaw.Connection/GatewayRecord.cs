@@ -1,3 +1,5 @@
+using OpenClaw.Shared;
+
 namespace OpenClaw.Connection;
 
 /// <summary>
@@ -67,14 +69,29 @@ public static class GatewayRecordEditing
     /// value is preserved. Currently scoped to <see cref="GatewayRecord.BrowserControlPort"/>.
     /// </summary>
     public static GatewayRecord PreserveAdvancedFields(this GatewayRecord rebuilt, GatewayRecord? existing)
-        => existing is null
-            ? rebuilt
-            : rebuilt with
-            {
-                BrowserControlPort = rebuilt.BrowserControlPort ?? existing.BrowserControlPort,
-                SetupManagedDistroName = rebuilt.SetupManagedDistroName ?? existing.SetupManagedDistroName,
-                SetupManagedNativeTaskName = rebuilt.SetupManagedNativeTaskName ?? existing.SetupManagedNativeTaskName,
-            };
+    {
+        if (existing is null)
+            return rebuilt;
+
+        var sameEndpoint = string.Equals(rebuilt.Url, existing.Url, StringComparison.OrdinalIgnoreCase);
+        var hasManagedMetadata = !string.IsNullOrWhiteSpace(existing.SetupManagedDistroName)
+            || !string.IsNullOrWhiteSpace(existing.SetupManagedNativeTaskName);
+        var hasLocalUrl = LocalGatewayUrlClassifier.IsLocalGatewayUrl(rebuilt.Url);
+        var remainsManagedLocal = rebuilt.SshTunnel is null
+            && ((existing.IsLocal && sameEndpoint)
+                || (hasLocalUrl && (existing.IsLocal || hasManagedMetadata)));
+        return rebuilt with
+        {
+            IsLocal = remainsManagedLocal,
+            BrowserControlPort = rebuilt.BrowserControlPort ?? existing.BrowserControlPort,
+            SetupManagedDistroName = remainsManagedLocal
+                ? rebuilt.SetupManagedDistroName ?? existing.SetupManagedDistroName
+                : null,
+            SetupManagedNativeTaskName = remainsManagedLocal
+                ? rebuilt.SetupManagedNativeTaskName ?? existing.SetupManagedNativeTaskName
+                : null,
+        };
+    }
 }
 
 /// <summary>Per-gateway SSH tunnel configuration.</summary>

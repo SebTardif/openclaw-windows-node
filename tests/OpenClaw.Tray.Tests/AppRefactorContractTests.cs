@@ -790,14 +790,14 @@ public sealed class AppRefactorContractTests
         var source = File.ReadAllText(Path.Combine(root, "src", "OpenClaw.SetupEngine.UI", "Pages", "WelcomePage.xaml.cs"));
         var method = ExtractMethod(source, "StartInstallAsync");
 
-        Assert.Contains("config.InstallMode = installMode", method);
+        Assert.Contains("config.ApplyInstallMode(installMode)", method);
         Assert.Contains("GatewayLkgVersion.ApplyToConfig(config)", method);
         Assert.Contains("SetupWindow.Active?.NavigateToCapabilities()", method);
         Assert.DoesNotContain("ExistingConfigDetector.Detect", method);
         Assert.DoesNotContain("ContentDialog", method);
         AssertInOrder(
             method,
-            "config.InstallMode = installMode",
+            "config.ApplyInstallMode(installMode)",
             "GatewayLkgVersion.ApplyToConfig(config)",
             "SetupWindow.Active?.NavigateToCapabilities()");
     }
@@ -846,6 +846,7 @@ public sealed class AppRefactorContractTests
         Assert.Contains("SecondaryButton.Visibility = Visibility.Collapsed", showError);
         Assert.Contains("ShowRecoveryActions()", showError);
         Assert.DoesNotContain("SecondaryButton.Content = \"Skip wizard\"", showError);
+        Assert.Contains("_stepHistory.Clear()", restart);
         Assert.Contains("StartWizardAsync(clearTranscript: false)", restart);
     }
 

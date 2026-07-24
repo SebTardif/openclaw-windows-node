@@ -14,7 +14,14 @@ public class SetupPipelineTests
         var logger = CreateLogger();
         var journal = new TransactionJournal(filePath: null);
         var commands = new CommandRunner(logger);
-        return new SetupContext(cfg, logger, journal, commands, ct, dataDir, localDataDir);
+        return new SetupContext(
+            cfg,
+            logger,
+            journal,
+            commands,
+            ct,
+            dataDir ?? Path.Combine(Path.GetTempPath(), $"setup-pipeline-data-{Guid.NewGuid():N}"),
+            localDataDir ?? Path.Combine(Path.GetTempPath(), $"setup-pipeline-local-{Guid.NewGuid():N}"));
     }
 
     // A mock step for testing
@@ -145,6 +152,11 @@ public class SetupPipelineTests
         Assert.True(intentIndex < cleanupIndex);
         Assert.Contains(steps, step => step is StopConflictingLocalGatewaysStep);
         Assert.Contains(steps, step => step is NativeGatewayServiceCleanupStep);
+        var serviceIndex = steps.FindIndex(step => step is InstallGatewayServiceStep);
+        var hardeningIndex = steps.FindIndex(step => step is NativeGatewayTaskHardeningStep);
+        var startIndex = steps.FindIndex(step => step is StartGatewayStep);
+        Assert.True(serviceIndex < hardeningIndex);
+        Assert.True(hardeningIndex < startIndex);
         Assert.Contains(steps, step => step is RunGatewayWizardStep);
         Assert.DoesNotContain(steps, step => step is WindowsNodeBootstrapContextStep);
         Assert.DoesNotContain(steps, step => step is PreflightWslStep);
@@ -158,7 +170,7 @@ public class SetupPipelineTests
         var config = new SetupConfig();
         var dataDir = Path.Combine(Path.GetTempPath(), $"uninstall-data-{Guid.NewGuid():N}");
         var localDataDir = Path.Combine(Path.GetTempPath(), $"uninstall-local-{Guid.NewGuid():N}");
-        Directory.CreateDirectory(Path.Combine(localDataDir, "wsl", "OpenClawGateway"));
+        WriteOwnedWslMarker(localDataDir, config);
         File.WriteAllText(
             GatewayInstallModeDetector.GetNativeOwnershipPath(localDataDir),
             $$"""{"ProfileName":"{{GatewayCliRunner.GetManagedNativeProfile(config)}}","TaskName":"{{GatewayCliRunner.GetManagedNativeTaskName(config)}}"}""");
@@ -207,8 +219,9 @@ public class SetupPipelineTests
     {
         var dataDir = Path.Combine(Path.GetTempPath(), $"uninstall-data-{Guid.NewGuid():N}");
         var localDataDir = Path.Combine(Path.GetTempPath(), $"uninstall-local-{Guid.NewGuid():N}");
-        Directory.CreateDirectory(Path.Combine(localDataDir, "wsl", "OpenClawGateway"));
-        var ctx = CreateContext(dataDir: dataDir, localDataDir: localDataDir);
+        var config = new SetupConfig();
+        WriteOwnedWslMarker(localDataDir, config);
+        var ctx = CreateContext(config, dataDir: dataDir, localDataDir: localDataDir);
 
         var steps = SetupStepFactory.BuildUninstallSteps(ctx)
             .Cast<InstallModeUninstallStep>()
@@ -633,6 +646,61 @@ public class SetupPipelineTests
     }
 
     [Fact]
+    public async Task UninstallAsync_NativeOnlySkipsWslDistroPathValidation()
+    {
+        var rollbackCalled = false;
+        var config = new SetupConfig
+        {
+            ConfirmDestructive = true,
+            InstallMode = GatewayInstallMode.NativeWindows,
+            DistroName = @"..\..",
+        };
+        var ctx = CreateContext(config);
+        var pipeline = new SetupPipeline(
+        [
+            new InstallModeUninstallStep(
+                new MockStep(
+                    "native",
+                    (_, _) => Task.FromResult(StepResult.Ok()),
+                    (_, _) =>
+                    {
+                        rollbackCalled = true;
+                        return Task.CompletedTask;
+                    }),
+                GatewayInstallMode.NativeWindows),
+        ]);
+
+        var result = await pipeline.UninstallAsync(ctx);
+
+        Assert.Equal(PipelineOutcome.Success, result.Outcome);
+        Assert.True(rollbackCalled);
+    }
+
+    [Fact]
+    public async Task UninstallAsync_ForeignNativeMarkerFailsWithoutTrayCleanup()
+    {
+        var localDataDir = Path.Combine(Path.GetTempPath(), $"foreign-native-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(localDataDir);
+        File.WriteAllText(
+            GatewayInstallModeDetector.GetNativeOwnershipPath(localDataDir),
+            """{"ProfileName":"foreign","TaskName":"OpenClaw Gateway (foreign)"}""");
+        var config = new SetupConfig
+        {
+            ConfirmDestructive = true,
+            InstallMode = GatewayInstallMode.NativeWindows,
+        };
+        var ctx = CreateContext(config, localDataDir: localDataDir);
+        var pipeline = new SetupPipeline([]);
+
+        var result = await pipeline.UninstallAsync(ctx);
+
+        Assert.Equal(PipelineOutcome.Failed, result.Outcome);
+        Assert.Equal(SetupStepFactory.UninstallOwnershipValidationStepId, result.FailedStepId);
+        Assert.Contains("ownership markers", result.Message);
+        Assert.False(SetupPipeline.ShouldRunTrayArtifactCleanup(result, dryRun: false));
+    }
+
+    [Fact]
     public void TrayArtifactCleanup_RunsOnlyAfterValidatedLiveUninstall()
     {
         var validationFailure = new PipelineResult(
@@ -738,5 +806,50 @@ public class SetupPipelineTests
         var result = await pipeline.UninstallAsync(ctx);
         Assert.Equal(PipelineOutcome.Success, result.Outcome);
         Assert.False(rollbackCalled);
+    }
+
+    [Fact]
+    public void CommitNativeStaging_RemovesBackupsAfterSuccessfulPipeline()
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"native-commit-{Guid.NewGuid():N}");
+        var profileBackup = Path.Combine(root, "profile.setup-backup");
+        var cliBackup = Path.Combine(root, "cli.setup-backup");
+        Directory.CreateDirectory(profileBackup);
+        Directory.CreateDirectory(cliBackup);
+        var ctx = CreateContext();
+        ctx.NativeProfileStagingDir = profileBackup;
+        ctx.NativeCliPrefixStagingDir = cliBackup;
+        ctx.NativeCliInstallMutated = true;
+
+        try
+        {
+            SetupPipeline.CommitNativeStaging(ctx);
+
+            Assert.False(Directory.Exists(profileBackup));
+            Assert.False(Directory.Exists(cliBackup));
+            Assert.Null(ctx.NativeProfileStagingDir);
+            Assert.Null(ctx.NativeCliPrefixStagingDir);
+            Assert.False(ctx.NativeCliInstallMutated);
+        }
+        finally
+        {
+            if (Directory.Exists(root))
+                Directory.Delete(root, recursive: true);
+        }
+    }
+
+    private static void WriteOwnedWslMarker(string localDataDir, SetupConfig config)
+    {
+        var installPath = Path.GetFullPath(Path.Combine(localDataDir, "wsl", config.DistroName));
+        Directory.CreateDirectory(localDataDir);
+        File.WriteAllText(
+            GatewayInstallModeDetector.GetWslOwnershipPath(localDataDir),
+            $$"""
+              {
+                "InstallMode": "Wsl",
+                "DistroName": "{{config.DistroName}}",
+                "InstallPath": "{{installPath.Replace("\\", "\\\\")}}"
+              }
+              """);
     }
 }
