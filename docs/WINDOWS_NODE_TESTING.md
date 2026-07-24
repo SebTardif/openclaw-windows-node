@@ -361,8 +361,13 @@ fails closed if the app, route marker, or any required artifact is missing.
 See `.agents/skills/windows-computer-use-proof/SKILL.md` for the full
 contract, manifest schema, and PR proof content. A manual-only
 `workflow_dispatch` GitHub Actions lane (`.github/workflows/windows-desktop-proof.yml`)
-runs the same script on a hosted `windows-latest` runner and uploads its
-artifacts unconditionally.
+runs the same script only on `[self-hosted, windows,
+openclaw-desktop-proof]`. That fixed label must identify a runner launched
+interactively in an unlocked, `qwinsta` `Active` desktop session, never as a
+Windows service, in Session 0, or in a disconnected RDP session. Generic
+GitHub-hosted Windows runners are intentionally unsupported because they do
+not guarantee compositor-backed app-window capture. The workflow uploads its
+curated artifacts unconditionally.
 
 ## Remaining Work (Roadmap)
 

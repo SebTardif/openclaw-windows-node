@@ -192,6 +192,20 @@ public sealed class WindowsProofSkillContractTests
         Assert.Contains("if-no-files-found: error", workflow);
     }
 
+    [Fact]
+    public void Workflow_RequiresFixedDesktopCapableSelfHostedRunner()
+    {
+        var workflow = Read(".github", "workflows", "windows-desktop-proof.yml");
+
+        Assert.Contains("runs-on: [self-hosted, windows, openclaw-desktop-proof]", workflow);
+        Assert.DoesNotContain("runs-on: windows-latest", workflow);
+        Assert.DoesNotContain("${{ inputs.runner", workflow);
+        Assert.Contains("$sessionId -eq 0", workflow);
+        Assert.Contains("[Environment]::UserInteractive", workflow);
+        Assert.Contains("qwinsta.exe", workflow);
+        Assert.Contains(@"-notmatch '(?im)\bActive\b'", workflow);
+    }
+
     private static string Read(params string[] parts) =>
         File.ReadAllText(Path.Combine(new[] { Root }.Concat(parts).ToArray()));
 }

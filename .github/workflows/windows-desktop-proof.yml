@@ -1,9 +1,9 @@
 name: Windows Desktop Proof (manual)
 
 # Manual-only proof lane. This workflow never runs on push or pull_request,
-# so it cannot affect required PR/merge CI. It exists to let a maintainer
-# capture a fresh, fail-closed screenshot/manifest proof of the tray's
-# Connection page on a real GitHub-hosted windows-latest runner, on demand.
+# so it cannot affect required PR/merge CI. It targets a fixed self-hosted
+# label reserved for an unlocked, interactive Windows desktop. Generic hosted
+# runners do not guarantee compositor-backed app-window capture.
 on:
   workflow_dispatch:
     inputs:
@@ -21,8 +21,21 @@ permissions:
 
 jobs:
   desktop-proof:
-    runs-on: windows-latest
+    runs-on: [self-hosted, windows, openclaw-desktop-proof]
     steps:
+    - name: Verify active interactive desktop
+      shell: pwsh
+      run: |
+        $sessionId = [Diagnostics.Process]::GetCurrentProcess().SessionId
+        if ($sessionId -eq 0 -or -not [Environment]::UserInteractive) {
+          throw "Desktop proof requires an interactive non-Session-0 runner process."
+        }
+
+        $session = & "$env:SystemRoot\System32\qwinsta.exe" $sessionId 2>&1 | Out-String
+        if ($LASTEXITCODE -ne 0 -or $session -notmatch '(?im)\bActive\b') {
+          throw "Desktop proof requires an active, connected desktop session. qwinsta output: $session"
+        }
+
     - uses: actions/checkout@v7
 
     - name: Setup .NET 10

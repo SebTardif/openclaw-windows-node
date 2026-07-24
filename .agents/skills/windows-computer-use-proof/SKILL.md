@@ -243,6 +243,37 @@ capture must stay app-scoped to the Hub window even during recovery, and a
 disconnected-session run should be reported as a blocker with the exact
 per-method diagnostics rather than retried with a broader capture.
 
+## Desktop-capable runner contract
+
+The manual workflow `.github/workflows/windows-desktop-proof.yml` targets only
+the fixed labels `[self-hosted, windows, openclaw-desktop-proof]`. Do not
+replace them with `windows-latest`, another generic hosted label, or a
+workflow input that lets callers choose arbitrary runner labels. A proof
+runner must:
+
+1. Run the GitHub Actions runner interactively as the logged-on user, not as a
+   Windows service or in Session 0.
+2. Have an unlocked, compositor-backed Windows desktop in the same session as
+   the runner process.
+3. Report `Active` for that session in `qwinsta`; `Disc` and `Conn` are not
+   proof-capable states.
+4. Use a clean isolated checkout or Crabbox/Hyper-V lease with no real
+   OpenClaw tray data.
+
+For a local or Crabbox/Hyper-V run, connect the desktop first, verify the
+session is `Active`, then run:
+
+```powershell
+$env:OPENCLAW_REPO_ROOT = (Get-Location).Path
+.\scripts\capture-windows-desktop-proof.ps1 -ArtifactRoot <isolated-artifact-path>
+```
+
+The workflow performs the Session 0, `UserInteractive`, and `qwinsta Active`
+preflight before checkout/build. The proof script still requires the
+UIAutomation oracle and nonblank app-window screenshot, so a lock,
+disconnection, WGC timeout, blank frame, or missing artifact remains a
+nonzero fail-closed result. Never substitute a full-desktop screenshot.
+
 ## PR `## Real behavior proof` content
 
 After a passing run, paste into the PR body:
