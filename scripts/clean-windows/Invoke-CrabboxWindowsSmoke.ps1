@@ -4,9 +4,9 @@
     Plans or runs focused Crabbox Windows validation against the current checkout.
 
 .DESCRIPTION
-    Creates a new Azure Windows Crabbox lease for either NativeDesktop or Wsl2,
-    runs the appropriate focused proof, captures local artifacts, and stops only
-    the lease created by this invocation.
+    Creates a new Azure Windows Crabbox lease for a combined installed smoke or
+    a component-only native desktop or WSL2 probe. Captures local artifacts and
+    stops only the lease created by this invocation.
 #>
 
 [CmdletBinding()]
@@ -19,8 +19,10 @@ param(
     [string]$Provider = "azure",
 
     [Parameter(Mandatory = $true)]
-    [ValidateSet("NativeDesktop", "Wsl2")]
+    [ValidateSet("CombinedInstalledSmoke", "NativeDesktopComponent", "Wsl2Component")]
     [string]$Mode,
+
+    [string]$AzureImage = "",
 
     [string]$RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path,
 
@@ -36,9 +38,7 @@ param(
 
     [switch]$RequestUiProof,
 
-    [switch]$RequireNativeProof,
-
-    [switch]$RequireCombinedNativeDesktopAndWsl2OnOneLease
+    [switch]$RequireFullInstalledSmoke
 )
 
 Set-StrictMode -Version Latest
@@ -95,24 +95,27 @@ function Format-CommandPreview {
 
 function Get-WindowsModeValue {
     switch ($Mode) {
-        "NativeDesktop" { return "normal" }
-        "Wsl2" { return "wsl2" }
+        "CombinedInstalledSmoke" { return "normal" }
+        "NativeDesktopComponent" { return "normal" }
+        "Wsl2Component" { return "wsl2" }
         default { throw "Unsupported mode '$Mode'." }
     }
 }
 
 function Get-ProofClass {
     switch ($Mode) {
-        "NativeDesktop" { return "native-desktop-installed-smoke" }
-        "Wsl2" { return "wsl2-capability-probe" }
+        "CombinedInstalledSmoke" { return "combined-native-desktop-wsl2-installed-smoke" }
+        "NativeDesktopComponent" { return "native-desktop-component-only" }
+        "Wsl2Component" { return "wsl2-component-only" }
         default { throw "Unsupported mode '$Mode'." }
     }
 }
 
 function Get-ModeArtifactName {
     switch ($Mode) {
-        "NativeDesktop" { return "native-desktop" }
-        "Wsl2" { return "wsl2" }
+        "CombinedInstalledSmoke" { return "combined-installed-smoke" }
+        "NativeDesktopComponent" { return "native-desktop-component" }
+        "Wsl2Component" { return "wsl2-component" }
         default { throw "Unsupported mode '$Mode'." }
     }
 }
@@ -308,12 +311,39 @@ function Get-RemoteArtifactPathFromOutput {
 
 function New-RemoteScriptContent {
     switch ($Mode) {
-        "NativeDesktop" {
+        "CombinedInstalledSmoke" {
             return @'
 $ErrorActionPreference = "Stop"
 $repoRoot = (Get-Location).Path
-$artifactRoot = Join-Path $repoRoot "TestResults\CrabboxNativeDesktop"
+$artifactRoot = Join-Path $repoRoot "TestResults\CrabboxCombinedInstalledSmoke"
 $env:OPENCLAW_REPO_ROOT = $repoRoot
+if ($env:PROCESSOR_ARCHITECTURE -ne "AMD64") {
+    throw "Combined installed smoke requires an x64 Windows host."
+}
+if ($env:CRABBOX_DESKTOP -ne "1") {
+    throw "Combined installed smoke requires the native desktop capability."
+}
+if (-not (Get-Command wsl.exe -ErrorAction SilentlyContinue)) {
+    throw "Combined image contract requires wsl.exe."
+}
+& wsl.exe --status | Out-Null
+if ($LASTEXITCODE -ne 0) {
+    throw "Combined image contract requires operational WSL."
+}
+$distros = @(& wsl.exe --list --quiet 2>$null) |
+    ForEach-Object { ($_ -replace '\x00', '').Trim() } |
+    Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+$ubuntu = @($distros | Where-Object { $_ -match '^Ubuntu(?:-|$)' } | Select-Object -First 1)
+if ($ubuntu.Count -ne 1) {
+    throw "Combined image contract requires a prepared Ubuntu WSL distribution."
+}
+$kernel = (& wsl.exe --distribution $ubuntu[0] --exec uname -r 2>&1 | Out-String).Trim()
+if ($LASTEXITCODE -ne 0 -or $kernel -notmatch '(?i)(microsoft-standard-WSL2|WSL2)') {
+    throw "Combined image contract requires a running WSL2 Ubuntu distribution."
+}
+Write-Output "combinedImageContract=passed"
+Write-Output "combinedImageUbuntu=$($ubuntu[0])"
+Write-Output "combinedImageKernel=$kernel"
 & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $repoRoot "scripts\validate-installed-inno-smoke.ps1") -RepoRoot $repoRoot -ArtifactRoot $artifactRoot
 if ($LASTEXITCODE -ne 0) {
     exit $LASTEXITCODE
@@ -331,7 +361,23 @@ if (-not (Test-Path -LiteralPath $archivePath)) {
 Write-Output "artifactArchive=$archivePath"
 '@
         }
-        "Wsl2" {
+        "NativeDesktopComponent" {
+            return @'
+$ErrorActionPreference = "Stop"
+if ($env:PROCESSOR_ARCHITECTURE -ne "AMD64") {
+    throw "Native desktop component proof requires an x64 Windows host."
+}
+if ($env:CRABBOX_DESKTOP -ne "1") {
+    throw "Native desktop component proof requires the desktop capability."
+}
+if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) {
+    throw "Native desktop component proof is not running on Windows."
+}
+Write-Output "nativeDesktopComponent=passed"
+Write-Output "nativeDesktopComputer=$env:COMPUTERNAME"
+'@
+        }
+        "Wsl2Component" {
             return @'
 set -euo pipefail
 osrelease="$(cat /proc/sys/kernel/osrelease)"
@@ -370,16 +416,24 @@ if ($TtlMinutes -lt $IdleTimeoutMinutes) {
     throw "TtlMinutes must be greater than or equal to IdleTimeoutMinutes."
 }
 
-if ($RequireCombinedNativeDesktopAndWsl2OnOneLease) {
-    throw "Combined NativeDesktop and Wsl2 on one lease is not supported. Crabbox leases cannot gain both capabilities after acquisition."
+if ($Mode -eq "CombinedInstalledSmoke" -and [string]::IsNullOrWhiteSpace($AzureImage)) {
+    throw "CombinedInstalledSmoke requires -AzureImage for an x64 native Windows image prebaked with WSL2, Ubuntu, and OpenClaw prerequisites."
 }
 
-if ($Mode -eq "Wsl2" -and $RequestUiProof) {
-    throw "Wsl2 mode cannot satisfy a UI proof request. Use NativeDesktop for UI proof."
+if ($Mode -ne "CombinedInstalledSmoke" -and -not [string]::IsNullOrWhiteSpace($AzureImage)) {
+    throw "AzureImage is accepted only for CombinedInstalledSmoke."
 }
 
-if ($Mode -eq "Wsl2" -and $RequireNativeProof) {
-    throw "Wsl2 mode cannot be labeled as native proof. Use NativeDesktop for native Windows proof."
+if (-not [string]::IsNullOrWhiteSpace($AzureImage) -and $AzureImage -match '[\x00-\x1f]') {
+    throw "AzureImage must not contain control characters."
+}
+
+if ($Mode -eq "Wsl2Component" -and $RequestUiProof) {
+    throw "Wsl2Component cannot satisfy a UI proof request. Use NativeDesktopComponent or CombinedInstalledSmoke."
+}
+
+if ($RequireFullInstalledSmoke -and $Mode -ne "CombinedInstalledSmoke") {
+    throw "Only CombinedInstalledSmoke can be labeled as full installed-app proof."
 }
 
 if (-not [IO.Path]::IsPathRooted($CrabboxPath)) {
@@ -406,26 +460,30 @@ New-Item -ItemType Directory -Force -Path $resolvedArtifactRoot | Out-Null
 $windowsMode = Get-WindowsModeValue
 $proofClass = Get-ProofClass
 $remoteScriptContent = New-RemoteScriptContent
-if ($Mode -eq "Wsl2") {
+if ($Mode -eq "Wsl2Component") {
     $remoteScriptContent = $remoteScriptContent -replace "`r`n", "`n"
 }
-if ($Mode -eq "NativeDesktop") {
-    $remoteScriptFileName = "remote-native-desktop.ps1"
-} else {
-    $remoteScriptFileName = "remote-wsl2-probe.sh"
+switch ($Mode) {
+    "CombinedInstalledSmoke" { $remoteScriptFileName = "remote-combined-installed-smoke.ps1" }
+    "NativeDesktopComponent" { $remoteScriptFileName = "remote-native-desktop-component.ps1" }
+    "Wsl2Component" { $remoteScriptFileName = "remote-wsl2-component.sh" }
 }
 $remoteScriptPath = Join-Path $resolvedArtifactRoot $remoteScriptFileName
 $remoteScriptContent | Set-Content -LiteralPath $remoteScriptPath -Encoding UTF8
 
 $doctorArguments = @("doctor", "--provider", $Provider, "--target", "windows")
-$warmupArguments = @("warmup", "--provider", $Provider, "--target", "windows", "--windows-mode", $windowsMode, "--keep", "--idle-timeout", ("{0}m" -f $IdleTimeoutMinutes), "--ttl", ("{0}m" -f $TtlMinutes), "--timing-json")
-if ($Mode -eq "NativeDesktop") {
+$warmupArguments = @("warmup", "--provider", $Provider, "--target", "windows", "--windows-mode", $windowsMode, "--arch", "amd64", "--azure-os-disk", "managed", "--keep", "--idle-timeout", ("{0}m" -f $IdleTimeoutMinutes), "--ttl", ("{0}m" -f $TtlMinutes), "--timing-json")
+if ($Mode -in @("CombinedInstalledSmoke", "NativeDesktopComponent")) {
     $warmupArguments += "--desktop"
 }
 
 $runArtifactDirectory = Join-Path $resolvedArtifactRoot "run"
 $runArguments = @("run", "--provider", $Provider, "--target", "windows", "--windows-mode", $windowsMode, "--id", "<lease-id>", "--preflight", "--timing-json", "--capture-stdout", (Join-Path $runArtifactDirectory "remote-stdout.txt"), "--capture-stderr", (Join-Path $runArtifactDirectory "remote-stderr.txt"), "--script-stdin", "--")
+if ($Mode -in @("CombinedInstalledSmoke", "NativeDesktopComponent")) {
+    $runArguments = @("run", "--provider", $Provider, "--target", "windows", "--windows-mode", $windowsMode, "--desktop", "--id", "<lease-id>", "--preflight", "--timing-json", "--capture-stdout", (Join-Path $runArtifactDirectory "remote-stdout.txt"), "--capture-stderr", (Join-Path $runArtifactDirectory "remote-stderr.txt"), "--script-stdin", "--")
+}
 $stopArguments = @("stop", "--provider", $Provider, "--target", "windows", "--windows-mode", $windowsMode, "<lease-id>")
+$listArguments = @("list", "--provider", $Provider, "--target", "windows", "--windows-mode", $windowsMode, "--json")
 $resultsArguments = @("results", "<run-id>")
 $copyArguments = @("cp", "--provider", $Provider, "--id", "<lease-id>", "SANDBOX:<remote-artifact-archive>", (Join-Path $resolvedArtifactRoot "remote-artifacts\openclaw-installed-smoke-artifacts.zip"))
 
@@ -442,14 +500,21 @@ $manifest = [ordered]@{
     artifactRoot = $resolvedArtifactRoot
     crabboxPath = $resolvedCrabboxPath
     requestUiProof = [bool]$RequestUiProof
-    requireNativeProof = [bool]$RequireNativeProof
+    requireFullInstalledSmoke = [bool]$RequireFullInstalledSmoke
+    acquisition = [ordered]@{
+        architecture = "amd64"
+        azureOsDisk = "managed"
+        azureImage = $AzureImage
+        combinedImageRequired = ($Mode -eq "CombinedInstalledSmoke")
+    }
     remoteScriptPath = $remoteScriptPath
     commands = [ordered]@{
         doctor = Format-CommandPreview -FilePath $resolvedCrabboxPath -Arguments $doctorArguments
         warmup = Format-CommandPreview -FilePath $resolvedCrabboxPath -Arguments $warmupArguments
         run = Format-CommandPreview -FilePath $resolvedCrabboxPath -Arguments $runArguments -StdInPath $remoteScriptPath
-        copyArtifacts = if ($Mode -eq "NativeDesktop") { Format-CommandPreview -FilePath $resolvedCrabboxPath -Arguments $copyArguments } else { "Not applicable for the WSL2 capability probe." }
+        copyArtifacts = if ($Mode -eq "CombinedInstalledSmoke") { Format-CommandPreview -FilePath $resolvedCrabboxPath -Arguments $copyArguments } else { "Not applicable for component-only proof." }
         stop = Format-CommandPreview -FilePath $resolvedCrabboxPath -Arguments $stopArguments
+        listAfterStop = Format-CommandPreview -FilePath $resolvedCrabboxPath -Arguments $listArguments
         results = Format-CommandPreview -FilePath $resolvedCrabboxPath -Arguments $resultsArguments
     }
     execution = [ordered]@{
@@ -468,6 +533,7 @@ $manifest = [ordered]@{
             stderrPath = ""
             combinedPath = ""
             note = "Not attempted yet."
+            verification = $null
         }
     }
 }
@@ -485,6 +551,10 @@ $leaseId = ""
 $runId = ""
 $runFailed = $true
 $stopFailure = $false
+$originalAzureImage = $env:CRABBOX_AZURE_IMAGE
+if ($Mode -eq "CombinedInstalledSmoke") {
+    $env:CRABBOX_AZURE_IMAGE = $AzureImage
+}
 
 try {
     $doctorResult = Invoke-CrabboxCommand -ResolvedCrabboxPath $resolvedCrabboxPath -Arguments $doctorArguments -WorkingDirectory $resolvedRepoRoot -ArtifactDirectory (Join-Path $resolvedArtifactRoot "doctor")
@@ -552,12 +622,18 @@ try {
         throw "Crabbox run failed. Inspect $($runResult.CombinedPath)."
     }
 
-    if ($Mode -eq "NativeDesktop") {
-        $capturedRemoteStdoutPath = Join-Path $runArtifactDirectory "remote-stdout.txt"
-        if (-not (Test-Path -LiteralPath $capturedRemoteStdoutPath -PathType Leaf)) {
-            throw "Crabbox did not create the requested remote stdout capture: $capturedRemoteStdoutPath"
-        }
-        $capturedRemoteStdout = Get-Content -LiteralPath $capturedRemoteStdoutPath -Raw
+    $capturedRemoteStdoutPath = Join-Path $runArtifactDirectory "remote-stdout.txt"
+    if (-not (Test-Path -LiteralPath $capturedRemoteStdoutPath -PathType Leaf)) {
+        throw "Crabbox did not create the requested remote stdout capture: $capturedRemoteStdoutPath"
+    }
+    $capturedRemoteStdout = Get-Content -LiteralPath $capturedRemoteStdoutPath -Raw
+    $capturedRemoteStdout = $capturedRemoteStdout -replace "`r`n", "`n"
+
+    switch ($Mode) {
+        "CombinedInstalledSmoke" {
+            if ($capturedRemoteStdout -notmatch '(?m)^combinedImageContract=passed$') {
+                throw "Combined image contract marker is missing from remote proof output."
+            }
         $remoteArtifactPath = Get-RemoteArtifactPathFromOutput -Text $capturedRemoteStdout
         $localArchivePath = Join-Path $resolvedArtifactRoot "remote-artifacts\openclaw-installed-smoke-artifacts.zip"
         New-Item -ItemType Directory -Force -Path (Split-Path -Parent $localArchivePath) | Out-Null
@@ -589,6 +665,17 @@ try {
         Expand-Archive -LiteralPath $localArchivePath -DestinationPath $expandedArtifactPath -Force
         if (-not (Test-Path -LiteralPath (Join-Path $expandedArtifactPath "phase-status.json") -PathType Leaf)) {
             throw "Retrieved Crabbox artifacts are missing phase-status.json."
+        }
+        }
+        "NativeDesktopComponent" {
+            if ($capturedRemoteStdout -notmatch '(?m)^nativeDesktopComponent=passed$') {
+                throw "Native desktop component proof marker is missing."
+            }
+        }
+        "Wsl2Component" {
+            if ($capturedRemoteStdout -notmatch '(?m)^WSL2 capability probe passed$') {
+                throw "WSL2 component proof marker is missing."
+            }
         }
     }
 
@@ -668,6 +755,22 @@ try {
 
             if ($stopResult.ExitCode -ne 0) {
                 $stopFailure = $true
+            } else {
+                $listResult = Invoke-CrabboxCommand -ResolvedCrabboxPath $resolvedCrabboxPath -Arguments $listArguments -WorkingDirectory $resolvedRepoRoot -ArtifactDirectory (Join-Path $resolvedArtifactRoot "list-after-stop")
+                $leasePattern = [regex]::Escape($leaseId)
+                $leaseStillListed = $listResult.Combined -match $leasePattern
+                $manifest.execution.stop.verification = [ordered]@{
+                    exitCode = $listResult.ExitCode
+                    stdoutPath = $listResult.StdoutPath
+                    stderrPath = $listResult.StderrPath
+                    combinedPath = $listResult.CombinedPath
+                    leaseAbsent = (-not $leaseStillListed)
+                }
+                if ($listResult.ExitCode -ne 0 -or $leaseStillListed) {
+                    $stopFailure = $true
+                    $manifest.execution.stop.succeeded = $false
+                    $manifest.execution.stop.note = "Lease stop could not be verified by list."
+                }
             }
         } catch {
             $stopFailure = $true
@@ -683,6 +786,11 @@ try {
         }
     }
 
+    if ($null -eq $originalAzureImage) {
+        Remove-Item -LiteralPath "Env:\CRABBOX_AZURE_IMAGE" -ErrorAction SilentlyContinue
+    } else {
+        [Environment]::SetEnvironmentVariable("CRABBOX_AZURE_IMAGE", $originalAzureImage, "Process")
+    }
     Write-Manifest -ManifestObject $manifest -Path $manifestPath
 }
 

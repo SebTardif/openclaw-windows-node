@@ -400,6 +400,14 @@ leases through Crabbox, see [Clean Windows runners](CLEAN_WINDOWS_RUNNERS.md).
 Both paths reuse the installed DEV Inno smoke above and preserve its phase gate.
 The Crabbox WSL2 mode is documented separately and is never treated as native
 Windows or visible UI proof.
+These direct controllers do not register GitHub Actions runners. A static
+Crabbox Windows host is not clean-machine proof; any future Actions integration
+must hydrate from a pre-registration image/checkpoint, use ephemeral runner
+identity for one bounded job, and always destroy the VM and credentials.
+The noninteractive previous-to-current Inno upgrade smoke is a primary
+acceptance consumer for this baseline after its branch is integrated. Its guest
+user profile must predate OpenClaw protocol registration; refuse existing
+`HKCU:\Software\Classes\openclaw` state instead of deleting it.
 
 ## Remaining Work (Roadmap)
 

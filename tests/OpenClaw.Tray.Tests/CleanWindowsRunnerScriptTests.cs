@@ -48,17 +48,21 @@ public sealed class CleanWindowsRunnerScriptTests
     }
 
     [Theory]
-    [InlineData("NativeDesktop", "normal", true)]
-    [InlineData("Wsl2", "wsl2", false)]
+    [InlineData("CombinedInstalledSmoke", "normal", true, "combined-native-desktop-wsl2-installed-smoke", true)]
+    [InlineData("NativeDesktopComponent", "normal", true, "native-desktop-component-only", false)]
+    [InlineData("Wsl2Component", "wsl2", false, "wsl2-component-only", false)]
     public void CrabboxPlan_UsesExplicitAzureWindowsContract(
         string mode,
         string windowsMode,
-        bool expectsDesktop)
+        bool expectsDesktop,
+        string proofClass,
+        bool expectsImage)
     {
         var artifactRoot = Path.Combine(Path.GetTempPath(), $"openclaw-crabbox-plan-{Guid.NewGuid():N}");
         try
         {
-            var result = RunCrabboxPlan(mode, artifactRoot);
+            var azureImage = expectsImage ? "publisher:offer:sku:version" : null;
+            var result = RunCrabboxPlan(mode, artifactRoot, azureImage);
 
             Assert.Equal(0, result.ExitCode);
             using var manifest = JsonDocument.Parse(File.ReadAllText(
@@ -67,18 +71,26 @@ public sealed class CleanWindowsRunnerScriptTests
             Assert.Equal("azure", root.GetProperty("provider").GetString());
             Assert.Equal("windows", root.GetProperty("target").GetString());
             Assert.Equal(windowsMode, root.GetProperty("windowsMode").GetString());
+            Assert.Equal(proofClass, root.GetProperty("proofClass").GetString());
+            Assert.Equal("amd64", root.GetProperty("acquisition").GetProperty("architecture").GetString());
+            Assert.Equal("managed", root.GetProperty("acquisition").GetProperty("azureOsDisk").GetString());
+            Assert.Equal(azureImage ?? "", root.GetProperty("acquisition").GetProperty("azureImage").GetString());
 
             var commands = root.GetProperty("commands");
             Assert.Contains("doctor --provider azure --target windows", commands.GetProperty("doctor").GetString());
             Assert.Contains(
                 $"warmup --provider azure --target windows --windows-mode {windowsMode}",
                 commands.GetProperty("warmup").GetString());
+            Assert.Contains("--arch amd64 --azure-os-disk managed", commands.GetProperty("warmup").GetString());
             Assert.Contains(
                 $"run --provider azure --target windows --windows-mode {windowsMode}",
                 commands.GetProperty("run").GetString());
             Assert.Contains(
                 $"stop --provider azure --target windows --windows-mode {windowsMode}",
                 commands.GetProperty("stop").GetString());
+            Assert.Contains(
+                $"list --provider azure --target windows --windows-mode {windowsMode} --json",
+                commands.GetProperty("listAfterStop").GetString());
             Assert.Equal(
                 expectsDesktop,
                 commands.GetProperty("warmup").GetString()!.Contains("--desktop", StringComparison.Ordinal));
@@ -100,11 +112,14 @@ public sealed class CleanWindowsRunnerScriptTests
         Assert.Contains("$leaseId = Get-OptionalLeaseIdFromWarmupOutput", script);
         Assert.Contains("Get-RemoteArtifactPathFromOutput", script);
         Assert.Contains("Get-Content -LiteralPath $capturedRemoteStdoutPath -Raw", script);
+        Assert.Contains("$capturedRemoteStdout -replace \"`r`n\", \"`n\"", script);
         Assert.Contains("$remoteScriptContent -replace \"`r`n\", \"`n\"", script);
         Assert.Contains("\"cp\", \"--provider\", $Provider, \"--id\", \"<lease-id>\"", script);
         Assert.Contains("phase-status.json", script);
         Assert.Contains("} finally {", script);
         Assert.Contains("$manifest.execution.stop.attempted = $true", script);
+        Assert.Contains("leaseAbsent = (-not $leaseStillListed)", script);
+        Assert.Contains("Remove-Item -LiteralPath \"Env:\\CRABBOX_AZURE_IMAGE\"", script);
         Assert.Contains("if ($stopFailure)", script);
         Assert.Contains("lease cleanup failed", script);
     }
@@ -114,11 +129,34 @@ public sealed class CleanWindowsRunnerScriptTests
     {
         var script = ReadScript("Invoke-CrabboxWindowsSmoke.ps1");
 
-        Assert.Contains("Combined NativeDesktop and Wsl2 on one lease is not supported.", script);
-        Assert.Contains("Wsl2 mode cannot satisfy a UI proof request.", script);
-        Assert.Contains("Wsl2 mode cannot be labeled as native proof.", script);
+        Assert.Contains("CombinedInstalledSmoke requires -AzureImage", script);
+        Assert.Contains("Only CombinedInstalledSmoke can be labeled as full installed-app proof.", script);
+        Assert.Contains("combinedImageContract=passed", script);
+        Assert.Contains("requires a running WSL2 Ubuntu distribution", script);
+        Assert.Contains("Wsl2Component cannot satisfy a UI proof request.", script);
         Assert.Contains("validate-installed-inno-smoke.ps1", script);
         Assert.Contains("WSL2 capability probe passed", script);
+    }
+
+    [Fact]
+    public void CrabboxCombinedPlan_RequiresExplicitManagedImage()
+    {
+        var artifactRoot = Path.Combine(Path.GetTempPath(), $"openclaw-crabbox-plan-{Guid.NewGuid():N}");
+        try
+        {
+            var result = RunCrabboxPlan("CombinedInstalledSmoke", artifactRoot);
+
+            Assert.NotEqual(0, result.ExitCode);
+            Assert.Contains("requires -AzureImage", result.Stderr);
+            Assert.False(File.Exists(Path.Combine(artifactRoot, "crabbox-smoke-manifest.json")));
+        }
+        finally
+        {
+            if (Directory.Exists(artifactRoot))
+            {
+                Directory.Delete(artifactRoot, recursive: true);
+            }
+        }
     }
 
     [Fact]
@@ -140,17 +178,27 @@ public sealed class CleanWindowsRunnerScriptTests
     {
         var docs = File.ReadAllText(Path.Combine(Root, "docs", "CLEAN_WINDOWS_RUNNERS.md"));
 
-        Assert.Contains("separate native and WSL2 leases do not prove one end-to-end host", docs);
-        Assert.Contains("fails closed", docs);
+        Assert.Contains("Separate native and WSL2 component leases do not prove one end-to-end host", docs);
+        Assert.Contains("CombinedInstalledSmoke", docs);
+        Assert.Contains("same host", docs);
+        Assert.Contains("Azure Windows ARM64 WSL2 is unsupported", docs);
         Assert.Contains("Do not describe digest verification as a Windows code signature.", docs);
-        Assert.Contains("actual provider, target, mode, raw lease", docs);
+        Assert.Contains("actual provider, target, proof mode", docs);
+        Assert.Contains("long-lived static Crabbox Windows host is not", docs);
+        Assert.Contains("config.cmd --ephemeral --disableupdate", docs);
+        Assert.Contains("pre-registration Hyper-V checkpoint or", docs);
+        Assert.Contains("Always finalize by destroying the VM and its credentials", docs);
+        Assert.Contains("Retry only classified", docs);
+        Assert.Contains("primary acceptance consumer", docs);
+        Assert.Contains(@"HKCU:\Software\Classes\openclaw", docs);
+        Assert.Contains("Never delete or pre-clean", docs);
         Assert.DoesNotContain("parallels-windows-vm", docs, StringComparison.OrdinalIgnoreCase);
     }
 
     private static string ReadScript(string name) =>
         File.ReadAllText(Path.Combine(Root, "scripts", "clean-windows", name));
 
-    private static ProcessResult RunCrabboxPlan(string mode, string artifactRoot)
+    private static ProcessResult RunCrabboxPlan(string mode, string artifactRoot, string? azureImage = null)
     {
         Directory.CreateDirectory(artifactRoot);
         var script = Path.Combine(Root, "scripts", "clean-windows", "Invoke-CrabboxWindowsSmoke.ps1");
@@ -163,7 +211,7 @@ public sealed class CleanWindowsRunnerScriptTests
             RedirectStandardError = true,
             CreateNoWindow = true,
         };
-        foreach (var argument in new[]
+        var arguments = new List<string>
         {
             "-NoProfile",
             "-ExecutionPolicy",
@@ -179,7 +227,14 @@ public sealed class CleanWindowsRunnerScriptTests
             "-ArtifactRoot",
             artifactRoot,
             "-PlanOnly",
-        })
+        };
+        if (azureImage is not null)
+        {
+            arguments.Add("-AzureImage");
+            arguments.Add(azureImage);
+        }
+
+        foreach (var argument in arguments)
         {
             startInfo.ArgumentList.Add(argument);
         }
