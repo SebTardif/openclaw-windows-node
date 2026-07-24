@@ -268,6 +268,84 @@ the exact artifact path. `phase-status.json` is the phase gate; the folder also
 includes `installed-smoke.log`, `installed-smoke.done`, `installed-smoke.pid`, Inno
 install/uninstall logs, one log per phase, the TRX, and the nested E2E artifacts.
 
+### Previous-release Inno upgrade smoke
+
+The production Inno identity cannot be safely isolated from a contributor's installed
+release. Run this PowerShell 7 lane only on a disposable clean Windows machine or VM:
+
+```powershell
+pwsh -File .\scripts\validate-inno-upgrade-smoke.ps1 `
+  -PreviousRelease v0.6.12 `
+  -PreviousInstallerSha256 <official-x64-installer-sha256> `
+  -ConfirmCleanMachineReleaseIdentity
+```
+
+Real proof for integration is expected on the clean Hyper-V/Crabbox Windows image.
+Do not remove or bypass a local guard to make a contributor workstation pass.
+All installer operations are noninteractive, and guard diagnostics identify the
+conflicting state category and path without reading or printing registry values,
+settings, gateway credentials, or device keys.
+
+The script rejects existing release and DEV installs, data directories, protocol and
+startup registry entries, shortcuts, tray processes, startup tasks, and app-owned WSL
+distros before it acquires or installs anything. It downloads only the exact x64 asset
+from the official `openclaw/openclaw-windows-node` GitHub release over HTTPS, checks
+the GitHub asset digest plus any supplied digest, and requires a valid OpenClaw
+Foundation signature on the installed previous-release tray. A missing release,
+checksum, signature, exact version, or proof phase is a failure.
+
+For deterministic offline runs, pass `-PreviousInstallerPath`, `-PreviousVersion`,
+and optionally `-PreviousInstallerSha256`. Locally built unsigned previous payloads
+also require `-AllowUnsignedPreviousPayload`. Use `-CurrentInstallerPath`,
+`-CurrentPayloadPath`, and `-CurrentVersion` to override the current source build.
+The previous and current SemVer values and installer/runtime hashes must differ, so
+reinstalling the same payload cannot pass as an upgrade.
+
+The lane installs the previous release into a run-owned directory, seeds representative
+settings, gateway registry, and per-gateway identity state, and upgrades in place with
+the current source-built release-identity installer. It proves the registered version
+transition, unchanged state hashes, current installed runtime hash and ProductVersion,
+then reuses `validate-installed-inno-smoke.ps1 -ProofInstalledPayloadOnly` for the
+published-gateway health, Windows `device.info`, local MCP native chat, and deterministic
+chat roundtrip. Uninstall must preserve the synthetic external gateway state before the
+harness deletes only its run-owned state and verifies no release registration, payload,
+protocol, startup, or WSL residue remains.
+
+To check only whether the current host is safe without downloading, installing,
+uninstalling, or changing OpenClaw state:
+
+```powershell
+pwsh -File .\scripts\validate-inno-upgrade-smoke.ps1 `
+  -SafetyPreflightOnly `
+  -ConfirmCleanMachineReleaseIdentity
+```
+
+A safety-only result does not count as upgrade proof. Full artifacts are under
+`TestResults\UpgradeSmoke\<timestamp>`, including installer logs, previous/current
+hash and version evidence, preservation hashes, delegated runtime proof, cleanup
+status, and `phase-status.json`.
+
+The `Windows Inno Upgrade Smoke` workflow is manual-only and runs on a disposable
+GitHub-hosted Windows runner. It requires an exact prior tag, expected installer
+SHA-256, and the `CLEAN-OPENCLAW-VM` confirmation. Normal pull request and release CI
+do not run this release-identity lane. The workflow and deterministic mock-backed
+gateway/chat proof are secretless; a live agent turn is deliberately outside the
+package-upgrade gate.
+
+This lane ports lifecycle oracles from the main OpenClaw repository rather than its
+npm, Bash, Docker, or systemd mechanics. The reference points are the
+[`openclaw-cross-os-release-checks-reusable.yml`](https://github.com/openclaw/openclaw/blob/main/.github/workflows/openclaw-cross-os-release-checks-reusable.yml)
+workflow, its
+[`openclaw-cross-os-release-checks.ts`](https://github.com/openclaw/openclaw/blob/main/scripts/openclaw-cross-os-release-checks.ts)
+harness, and the
+[`release-upgrade-user-journey` scenario](https://github.com/openclaw/openclaw/blob/main/scripts/e2e/lib/release-upgrade-user-journey/scenario.sh).
+The Windows port keeps immutable baseline/candidate identities, a clean profile,
+seeded state, a real candidate Inno install, fresh installed version/hash and ARP
+checks, gateway/dashboard/node/chat health, state preservation, and always-run
+failure artifacts. It has no updater-to-direct-install fallback while claiming an
+upgrade. Forward upgrade plus teardown does not claim product rollback; teardown is
+only fail-safe cleanup of state that the harness proved absent and then created.
+
 ## Remaining Work (Roadmap)
 
 1. ~~**system.run + exec approvals**~~ ✅ Implemented

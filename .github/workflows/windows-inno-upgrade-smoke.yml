@@ -1,0 +1,63 @@
+name: Windows Inno Upgrade Smoke
+
+on:
+  workflow_dispatch:
+    inputs:
+      previous_release:
+        description: Exact official previous release tag, for example v0.6.12
+        required: true
+        type: string
+      previous_installer_sha256:
+        description: SHA-256 for the official x64 installer asset
+        required: true
+        type: string
+      clean_machine_confirmation:
+        description: Enter CLEAN-OPENCLAW-VM to acknowledge the release-identity lane
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  upgrade-smoke:
+    runs-on: windows-latest
+    timeout-minutes: 90
+    steps:
+    - name: Require explicit clean-runner confirmation
+      shell: pwsh
+      env:
+        CLEAN_MACHINE_CONFIRMATION: ${{ inputs.clean_machine_confirmation }}
+      run: |
+        if ($env:CLEAN_MACHINE_CONFIRMATION -cne "CLEAN-OPENCLAW-VM") {
+          throw "clean_machine_confirmation must be exactly CLEAN-OPENCLAW-VM."
+        }
+
+    - uses: actions/checkout@v7
+      with:
+        fetch-depth: 0
+
+    - name: Setup .NET 10
+      uses: actions/setup-dotnet@v6
+      with:
+        dotnet-version: 10.0.x
+
+    - name: Validate clean Windows upgrade
+      shell: pwsh
+      env:
+        PREVIOUS_RELEASE: ${{ inputs.previous_release }}
+        PREVIOUS_INSTALLER_SHA256: ${{ inputs.previous_installer_sha256 }}
+      run: |
+        .\scripts\validate-inno-upgrade-smoke.ps1 `
+          -PreviousRelease $env:PREVIOUS_RELEASE `
+          -PreviousInstallerSha256 $env:PREVIOUS_INSTALLER_SHA256 `
+          -ConfirmCleanMachineReleaseIdentity
+
+    - name: Upload upgrade smoke artifacts
+      if: always()
+      uses: actions/upload-artifact@v6
+      with:
+        name: windows-inno-upgrade-smoke
+        path: TestResults/UpgradeSmoke
+        if-no-files-found: error
+        retention-days: 14

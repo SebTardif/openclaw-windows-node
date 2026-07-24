@@ -11,7 +11,12 @@
 [CmdletBinding()]
 param(
     [string]$RepoRoot = (Split-Path -Parent $PSScriptRoot),
-    [string]$ArtifactRoot = ""
+    [string]$ArtifactRoot = "",
+    [switch]$ProofInstalledPayloadOnly,
+    [string]$InstalledTrayPath = "",
+    [string]$ExpectedPayloadPath = "",
+    [ValidateSet("dev", "release")]
+    [string]$ExpectedIdentity = "dev"
 )
 
 Set-StrictMode -Version Latest
@@ -21,6 +26,17 @@ if (-not (Test-Path -LiteralPath $RepoRoot -PathType Container)) {
     throw "Repository root does not exist: $RepoRoot"
 }
 $RepoRoot = (Resolve-Path -LiteralPath $RepoRoot).Path
+if ($ProofInstalledPayloadOnly) {
+    if ([string]::IsNullOrWhiteSpace($InstalledTrayPath) -or
+        [string]::IsNullOrWhiteSpace($ExpectedPayloadPath)) {
+        throw "-ProofInstalledPayloadOnly requires -InstalledTrayPath and -ExpectedPayloadPath."
+    }
+} elseif (-not [string]::IsNullOrWhiteSpace($InstalledTrayPath) -or
+    -not [string]::IsNullOrWhiteSpace($ExpectedPayloadPath) -or
+    $ExpectedIdentity -ne "dev") {
+    throw "Installed payload overrides are valid only with -ProofInstalledPayloadOnly."
+}
+
 if ([string]::IsNullOrWhiteSpace($ArtifactRoot)) {
     $timestamp = Get-Date -Format "yyyyMMdd-HHmmss-fff"
     $ArtifactRoot = Join-Path $RepoRoot "TestResults\InstalledSmoke\$timestamp"
@@ -34,15 +50,31 @@ $PidPath = Join-Path $ArtifactRoot "installed-smoke.pid"
 
 $exitCode = 1
 $runId = [Guid]::NewGuid().ToString("N")
-$installRoot = Join-Path $env:LOCALAPPDATA "OpenClawInstalledSmoke\$runId\app"
+$installRoot = if ($ProofInstalledPayloadOnly) {
+    Split-Path -Parent ([IO.Path]::GetFullPath($InstalledTrayPath))
+} else {
+    Join-Path $env:LOCALAPPDATA "OpenClawInstalledSmoke\$runId\app"
+}
 $installerPath = Join-Path $RepoRoot "Output\OpenClawCompanion-Dev-Setup-x64.exe"
-$installedTray = Join-Path $installRoot "OpenClaw.Tray.WinUI.exe"
+$installedTray = if ($ProofInstalledPayloadOnly) {
+    [IO.Path]::GetFullPath($InstalledTrayPath)
+} else {
+    Join-Path $installRoot "OpenClaw.Tray.WinUI.exe"
+}
+$expectedPayload = if ($ProofInstalledPayloadOnly) {
+    [IO.Path]::GetFullPath($ExpectedPayloadPath)
+} else {
+    Join-Path $RepoRoot "publish-local-x64\OpenClaw.Tray.WinUI.exe"
+}
 $uninstaller = Join-Path $installRoot "unins000.exe"
 $devUninstallKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\{M0LTB0T-TRAY-4PP1-DEV}_is1"
 $devRoamingData = Join-Path $env:APPDATA "OpenClawTray-Dev"
 $devLocalData = Join-Path $env:LOCALAPPDATA "OpenClawTray-Dev"
 $phaseResults = [ordered]@{}
 $requiredPhases = @("preflight", "build", "install", "installed-payload", "roundtrip", "cleanup")
+if ($ProofInstalledPayloadOnly) {
+    $requiredPhases = @("preflight", "installed-payload", "roundtrip")
+}
 $ownsDevInstall = $false
 $originalEnvironment = @{
     OPENCLAW_RUN_E2E = $env:OPENCLAW_RUN_E2E
@@ -152,70 +184,84 @@ try {
     Remove-Item -LiteralPath $LogPath, $DonePath, $PidPath -Force -ErrorAction SilentlyContinue
     Set-Content -LiteralPath $PidPath -Value $PID -Encoding ASCII
     Set-Location $RepoRoot
-    Write-Host "OpenClaw installed DEV Inno smoke"
+    Write-Host $(if ($ProofInstalledPayloadOnly) {
+        "OpenClaw installed payload runtime proof"
+    } else {
+        "OpenClaw installed DEV Inno smoke"
+    })
     Write-Host "Artifacts: $ArtifactRoot"
 
     Invoke-Phase "preflight" {
-        if (Test-Path -LiteralPath $devUninstallKey) {
-            throw "A DEV install already exists. Refusing to overwrite or uninstall developer state."
-        }
-        if (Test-Path -LiteralPath $devRoamingData) {
-            throw "DEV roaming data already exists. Refusing to touch developer state: $devRoamingData"
-        }
-        if (Test-Path -LiteralPath $devLocalData) {
-            throw "DEV local data already exists. Refusing to touch developer state: $devLocalData"
-        }
-        $registeredDevDistro = @(& wsl.exe --list --quiet 2>$null) |
-            ForEach-Object { ($_ -replace '\x00', '').Trim() } |
-            Where-Object { $_ -eq "OpenClawGateway-Dev" }
-        if ($registeredDevDistro) {
-            throw "DEV WSL distro already exists. Refusing to touch developer state: OpenClawGateway-Dev"
+        if ($ProofInstalledPayloadOnly) {
+            if (-not (Test-Path -LiteralPath $installedTray -PathType Leaf)) {
+                throw "Installed tray payload does not exist: $installedTray"
+            }
+            if (-not (Test-Path -LiteralPath $expectedPayload -PathType Leaf)) {
+                throw "Expected published tray payload does not exist: $expectedPayload"
+            }
+        } else {
+            if (Test-Path -LiteralPath $devUninstallKey) {
+                throw "A DEV install already exists. Refusing to overwrite or uninstall developer state."
+            }
+            if (Test-Path -LiteralPath $devRoamingData) {
+                throw "DEV roaming data already exists. Refusing to touch developer state: $devRoamingData"
+            }
+            if (Test-Path -LiteralPath $devLocalData) {
+                throw "DEV local data already exists. Refusing to touch developer state: $devLocalData"
+            }
+            $registeredDevDistro = @(& wsl.exe --list --quiet 2>$null) |
+                ForEach-Object { ($_ -replace '\x00', '').Trim() } |
+                Where-Object { $_ -eq "OpenClawGateway-Dev" }
+            if ($registeredDevDistro) {
+                throw "DEV WSL distro already exists. Refusing to touch developer state: OpenClawGateway-Dev"
+            }
         }
         & (Join-Path $RepoRoot "scripts\setup-dev.ps1") -CheckOnly
         Assert-NativeSuccess "Developer prerequisite check"
     }
 
-    Invoke-Phase "build" {
-        Remove-Item -LiteralPath $installerPath -Force -ErrorAction SilentlyContinue
-        & (Join-Path $RepoRoot "scripts\build-inno-local.ps1") -Arch x64 -Dev -Fast -InstallInno
-        Assert-NativeSuccess "DEV Inno build"
-        if (-not (Test-Path -LiteralPath $installerPath)) {
-            throw "DEV installer was not produced at $installerPath."
+    if (-not $ProofInstalledPayloadOnly) {
+        Invoke-Phase "build" {
+            Remove-Item -LiteralPath $installerPath -Force -ErrorAction SilentlyContinue
+            & (Join-Path $RepoRoot "scripts\build-inno-local.ps1") -Arch x64 -Dev -Fast -InstallInno
+            Assert-NativeSuccess "DEV Inno build"
+            if (-not (Test-Path -LiteralPath $installerPath)) {
+                throw "DEV installer was not produced at $installerPath."
+            }
         }
-    }
 
-    Invoke-Phase "install" {
-        New-Item -ItemType Directory -Force -Path (Split-Path -Parent $installRoot) | Out-Null
-        $script:ownsDevInstall = $true
-        $installLog = Join-Path $ArtifactRoot "inno-install.log"
-        $process = Start-Process -FilePath $installerPath -ArgumentList @(
-            "/VERYSILENT",
-            "/SUPPRESSMSGBOXES",
-            "/NORESTART",
-            "/DIR=`"$installRoot`"",
-            "/LOG=`"$installLog`""
-        ) -Wait -PassThru
-        if ($process.ExitCode -ne 0) {
-            throw "DEV Inno installer failed with exit code $($process.ExitCode)."
-        }
-        if (-not (Test-Path -LiteralPath $installedTray)) {
-            throw "Installed tray payload is missing: $installedTray."
+        Invoke-Phase "install" {
+            New-Item -ItemType Directory -Force -Path (Split-Path -Parent $installRoot) | Out-Null
+            $script:ownsDevInstall = $true
+            $installLog = Join-Path $ArtifactRoot "inno-install.log"
+            $process = Start-Process -FilePath $installerPath -ArgumentList @(
+                "/VERYSILENT",
+                "/SUPPRESSMSGBOXES",
+                "/NORESTART",
+                "/DIR=`"$installRoot`"",
+                "/LOG=`"$installLog`""
+            ) -Wait -PassThru
+            if ($process.ExitCode -ne 0) {
+                throw "DEV Inno installer failed with exit code $($process.ExitCode)."
+            }
+            if (-not (Test-Path -LiteralPath $installedTray)) {
+                throw "Installed tray payload is missing: $installedTray."
+            }
         }
     }
 
     Invoke-Phase "installed-payload" {
         $identity = (Get-Content -LiteralPath (Join-Path $installRoot "app-identity.txt") -Raw).Trim()
-        if ($identity -ne "dev") {
-            throw "Installed payload identity '$identity' is not 'dev'."
+        if ($identity -ne $ExpectedIdentity) {
+            throw "Installed payload identity '$identity' is not '$ExpectedIdentity'."
         }
-        $publishedTray = Join-Path $RepoRoot "publish-local-x64\OpenClaw.Tray.WinUI.exe"
-        if (-not (Test-Path -LiteralPath $publishedTray)) {
-            throw "Published DEV tray is missing: $publishedTray."
+        if (-not (Test-Path -LiteralPath $expectedPayload)) {
+            throw "Expected published tray is missing: $expectedPayload."
         }
         $installedHash = (Get-FileHash -LiteralPath $installedTray -Algorithm SHA256).Hash
-        $publishedHash = (Get-FileHash -LiteralPath $publishedTray -Algorithm SHA256).Hash
+        $publishedHash = (Get-FileHash -LiteralPath $expectedPayload -Algorithm SHA256).Hash
         if ($installedHash -ne $publishedHash) {
-            throw "Installed tray hash does not match the DEV installer payload."
+            throw "Installed tray hash does not match the expected installer payload."
         }
         "installedTray=$installedTray"
         "installedSha256=$installedHash"
@@ -254,8 +300,10 @@ try {
         }
     }
 
-    Invoke-Phase "cleanup" {
-        Invoke-Cleanup
+    if (-not $ProofInstalledPayloadOnly) {
+        Invoke-Phase "cleanup" {
+            Invoke-Cleanup
+        }
     }
 
     foreach ($phase in $requiredPhases) {
@@ -266,7 +314,7 @@ try {
     $exitCode = 0
 } catch {
     $_ | Out-String | Add-Content -LiteralPath $LogPath -Encoding UTF8
-    if (-not $phaseResults.Contains("cleanup")) {
+    if (-not $ProofInstalledPayloadOnly -and -not $phaseResults.Contains("cleanup")) {
         try {
             Invoke-Phase "cleanup" {
                 Invoke-Cleanup
@@ -284,6 +332,7 @@ try {
     [ordered]@{
         runId = $runId
         exitCode = $exitCode
+        mode = if ($ProofInstalledPayloadOnly) { "proof-only" } else { "dev-install" }
         installedTray = $installedTray
         artifactRoot = $ArtifactRoot
         phases = $phaseResults
@@ -292,7 +341,11 @@ try {
 }
 
 if ($exitCode -eq 0) {
-    Write-Host "Installed DEV Inno smoke passed."
+    Write-Host $(if ($ProofInstalledPayloadOnly) {
+        "Installed payload runtime proof passed."
+    } else {
+        "Installed DEV Inno smoke passed."
+    })
     Write-Host "Artifacts: $ArtifactRoot"
 } else {
     Write-Warning "Installed DEV Inno smoke failed. Inspect $LogPath and phase-status.json."

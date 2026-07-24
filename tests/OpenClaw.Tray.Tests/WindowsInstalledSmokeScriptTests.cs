@@ -35,6 +35,21 @@ public sealed class WindowsInstalledSmokeScriptTests
     }
 
     [Fact]
+    public void Helper_ExposesProofOnlyReuseWithoutOwningInstallOrCleanup()
+    {
+        var script = ReadHelper();
+
+        Assert.Contains("[switch]$ProofInstalledPayloadOnly", script);
+        Assert.Contains("[string]$InstalledTrayPath = \"\"", script);
+        Assert.Contains("[string]$ExpectedPayloadPath = \"\"", script);
+        Assert.Contains("[ValidateSet(\"dev\", \"release\")]", script);
+        Assert.Contains("$requiredPhases = @(\"preflight\", \"installed-payload\", \"roundtrip\")", script);
+        Assert.Contains("Installed payload overrides are valid only with -ProofInstalledPayloadOnly.", script);
+        Assert.Contains("mode = if ($ProofInstalledPayloadOnly) { \"proof-only\" }", script);
+        Assert.Contains("if (-not $ProofInstalledPayloadOnly -and -not $phaseResults.Contains(\"cleanup\"))", script);
+    }
+
+    [Fact]
     public void Helper_ProtectsReleaseAndExistingDeveloperState()
     {
         var script = ReadHelper();
