@@ -123,6 +123,10 @@ for image 1. The pinned digest binds it to the verified name
 `Windows 11 Enterprise Evaluation`, which is also checked after setup. The
 answer uses en-US and a UEFI/GPT disk layout, suppresses disposable Evaluation
 OOBE, supplies no product key, and contains no arbitrary commands or scripts.
+Secure boot uses the canonical Hyper-V cmdlet template identifier
+`MicrosoftWindows`. Verification accepts only whitespace/case-normalized API
+output for that exact template. If the host exposes `SecureBootTemplateId`, it
+must contain a non-empty GUID.
 
 The original Microsoft ISO and the IMAPI2-built answer ISO remain separate.
 Before any VM or VHD creation, production Create mounts the answer ISO
@@ -134,8 +138,10 @@ apart after a 750 ms delay, and clear the Gen2 optical boot prompt. Injection
 continues through its fixed 7-second boot-only window even after a successful
 delivery, then stops unconditionally. At least one delivery must succeed, and
 a no-delivery failure includes a safe last-error diagnostic. Injection never
-runs for resume or later reboots. Only then does the bounded PowerShell Direct
-wait begin. Both DVD media are detached and answer
+runs during later reboots. Ordinary resume paths do not inject keys. The sole
+resume exception is an owned Off partial VM whose incomplete security
+configuration was repaired and reverified before it was started. Only then
+does the bounded PowerShell Direct wait begin. Both DVD media are detached and answer
 XML/staging/ISO files are removed. The controller verifies the actual
 edition, build, x64 architecture, local administrator, completed setup/OOBE,
 and image state. It removes known guest answer caches, rotates the temporary
@@ -169,58 +175,30 @@ Safe helper proof does not create a VM and does not require elevation:
 It generates, mounts, validates, dismounts, and deletes nonce-bound owned test
 media while printing only nonsecret JSON.
 
-For the current pre-VM partial state, no VM and no VHD exist. Only the owned
-unattended marker subtree remains. `-ResumeUnattended` is invalid because
-there is no owned VM to resume. From an elevated PowerShell session, validate
-the unattended marker and remove only its owned setup material:
+The current partial state already has the owned Generation 2 VM, VHD, original
+Windows ISO, answer ISO, setup DPAPI credential, VM markers, and unattended
+marker. Creation stopped before the first guest start because secure-boot
+configuration used a non-canonical template input. This state is resumable.
+Do not use `-CleanupUnattend` for this state.
 
 ```powershell
-.\scripts\clean-windows\Invoke-CleanWindowsHyperV.ps1 `
-  -Command Create `
-  -CleanupUnattend `
-  -VMName OpenClaw-Clean-Windows `
-  -OwnerId openclaw-clean-runner-bkudiess `
-  -VhdPath D:\Hyper-V\OpenClaw-Clean-Windows\os.vhdx `
-  -ConfirmOwnedAction
+.\scripts\clean-windows\Invoke-CleanWindowsHyperV.ps1 -Command Create -ResumeUnattended -VMName 'OpenClaw-Clean-Windows' -OwnerId 'openclaw-clean-runner-bkudiess' -VhdPath 'D:\Hyper-V\OpenClaw-Clean-Windows\os.vhdx' -ConfirmOwnedAction
 ```
 
-Cleanup never deletes a VM or VHD. In this pre-VM condition, neither exists.
-After cleanup, rerun the same exact fresh unattended Create:
-
-```powershell
-$createResult = .\scripts\clean-windows\Invoke-CleanWindowsHyperV.ps1 `
-  -Command Create `
-  -CreateMode Unattended `
-  -VMName OpenClaw-Clean-Windows `
-  -OwnerId openclaw-clean-runner-bkudiess `
-  -IsoPath D:\isos\Win11_Enterprise_Eval_25H2_en-us_x64.iso `
-  -VhdPath D:\Hyper-V\OpenClaw-Clean-Windows\os.vhdx `
-  -GenerateCredential `
-  -SwitchName "Default Switch" `
-  -ProcessorCount 8 `
-  -StartupMemoryGB 16 `
-  -VhdSizeGB 120 `
-  -UnattendedInstallTimeoutSec 7200
-```
-
-For an owned partial install, use one of these confirmed operations:
-
-```powershell
-.\scripts\clean-windows\Invoke-CleanWindowsHyperV.ps1 `
-  -Command Create -ResumeUnattended `
-  -VMName $vmName -OwnerId $ownerId -VhdPath $vhd `
-  -ConfirmOwnedAction
-
-.\scripts\clean-windows\Invoke-CleanWindowsHyperV.ps1 `
-  -Command Create -CleanupUnattend `
-  -VMName $vmName -OwnerId $ownerId -VhdPath $vhd `
-  -ConfirmOwnedAction
-```
+The command validates VM note/file ownership and unattended ownership. It
+first verifies host configuration. Only if verification fails and the exact
+owned VM is Off does it repair the security configuration with
+`MicrosoftWindows` and the already-owned Windows DVD. It preserves an existing
+key protector and enabled vTPM, re-verifies, and then starts the VM. It runs
+the same bounded Hyper-V CIM key pulses immediately after that repaired
+pre-first-start VM is running, clears the optical boot prompt, and continues
+the unattended flow. The VM, VHD, media, and credentials are preserved.
 
 Partial failure never deletes a VM or VHD. Before PowerShell Direct readiness,
-owned answer media and the DPAPI setup credential remain for diagnosis.
-Cleanup validates the exact unattended and VM markers before detaching or
-deleting only owned setup material.
+owned answer media and the DPAPI setup credential remain for diagnosis. For a
+different owned partial state that should not continue, Cleanup validates the
+exact unattended and VM markers before detaching or deleting only owned setup
+material.
 
 ## Prepare
 

@@ -199,7 +199,10 @@ public sealed class WindowsProofSkillContractTests
         Assert.Contains("fixed 7-second", combined);
         Assert.Contains("multiple 750 ms", combined);
         Assert.Contains("does not stop", combined);
-        Assert.Contains("never for resume", combined);
+        Assert.Contains("Ordinary resume paths do not inject keys", combined);
+        Assert.Contains("sole resume exception", combined);
+        Assert.Contains("configuration was repaired", combined);
+        Assert.Contains("reverified", combined);
         Assert.Contains("does not enable autologon", testing);
         Assert.Contains("explicit interactive sign-in", combined);
         Assert.Contains("never deletes", combined);

@@ -116,6 +116,7 @@ $script:UnattendMarkerSchema = "openclaw.clean-windows.unattend/v1"
 $script:OfficialIsoSha256 = "A61ADEAB895EF5A4DB436E0A7011C92A2FF17BB0357F58B13BBC4062E535E7B9"
 $script:ExpectedWindowsImageName = "Windows 11 Enterprise Evaluation"
 $script:ExpectedWindowsImageIndex = 1
+$script:WindowsSecureBootTemplate = "MicrosoftWindows"
 $script:OpticalBootKeyWindowSec = 7
 $script:OpticalBootInitialDelayMilliseconds = 750
 $script:OpticalBootPulseIntervalMilliseconds = 750
@@ -278,6 +279,42 @@ function Test-StringEquals {
     )
 
     return [string]::Equals($Left, $Right, [StringComparison]::OrdinalIgnoreCase)
+}
+
+function Normalize-SecureBootTemplate {
+    param([object]$Value)
+
+    if ($null -eq $Value) {
+        return ""
+    }
+
+    $withoutWhitespace = [regex]::Replace([string]$Value, "\s", "")
+    return $withoutWhitespace.ToLowerInvariant()
+}
+
+function Test-KeyProtectorPresent {
+    param([object]$KeyProtector)
+
+    $keyProtectorBytes = @($KeyProtector)
+    if ($keyProtectorBytes.Count -eq 0) {
+        return $false
+    }
+
+    # Hyper-V reports an unset protector as four zero bytes.
+    if ($keyProtectorBytes.Count -eq 4) {
+        $allBytesAreZero = $true
+        foreach ($keyProtectorByte in $keyProtectorBytes) {
+            if ([int]$keyProtectorByte -ne 0) {
+                $allBytesAreZero = $false
+                break
+            }
+        }
+        if ($allBytesAreZero) {
+            return $false
+        }
+    }
+
+    return $true
 }
 
 function Get-PropertyValueOrNull {
@@ -1925,20 +1962,49 @@ function Verify-HostVmConfiguration {
     } else {
         [string]::Equals([string]$secureBootValue, "On", [StringComparison]::OrdinalIgnoreCase)
     }
+    $hostReportedSecureBoot = if ($null -eq $secureBootValue) { "<null>" } else { [string]$secureBootValue }
     if (-not $secureBootEnabled) {
-        throw "VM '$VMName' does not have secure boot enabled."
+        throw "VM '$VMName' secure boot is not enabled for attempted canonical template identifier '$script:WindowsSecureBootTemplate'. Host-reported SecureBoot value: '$hostReportedSecureBoot'."
     }
 
-    $secureBootTemplate = [string](Get-PropertyValueOrNull -Object $firmware -Name "SecureBootTemplate")
-    if (-not [string]::IsNullOrWhiteSpace($secureBootTemplate) -and $secureBootTemplate -notmatch "Microsoft") {
-        throw "VM '$VMName' secure boot template is unexpected: $secureBootTemplate"
+    $secureBootTemplateValue = Get-PropertyValueOrNull -Object $firmware -Name "SecureBootTemplate"
+    $hostReportedSecureBootTemplate = if ($null -eq $secureBootTemplateValue) {
+        "<null>"
+    } else {
+        [string]$secureBootTemplateValue
+    }
+    if (
+        (Normalize-SecureBootTemplate -Value $secureBootTemplateValue) -cne
+            (Normalize-SecureBootTemplate -Value $script:WindowsSecureBootTemplate)
+    ) {
+        throw "VM '$VMName' secure boot template does not match attempted canonical identifier '$script:WindowsSecureBootTemplate'. Host-reported SecureBootTemplate value: '$hostReportedSecureBootTemplate'."
+    }
+
+    $secureBootTemplateIdProperty = $firmware.PSObject.Properties["SecureBootTemplateId"]
+    if ($null -ne $secureBootTemplateIdProperty) {
+        $secureBootTemplateIdValue = $secureBootTemplateIdProperty.Value
+        $hostReportedSecureBootTemplateId = if ($null -eq $secureBootTemplateIdValue) {
+            "<null>"
+        } else {
+            [string]$secureBootTemplateIdValue
+        }
+        $parsedSecureBootTemplateId = [Guid]::Empty
+        if (
+            -not [Guid]::TryParse(
+                [string]$secureBootTemplateIdValue,
+                [ref]$parsedSecureBootTemplateId
+            ) -or
+            $parsedSecureBootTemplateId -eq [Guid]::Empty
+        ) {
+            throw "VM '$VMName' secure boot template ID is invalid for attempted canonical identifier '$script:WindowsSecureBootTemplate'. Host-reported SecureBootTemplate value: '$hostReportedSecureBootTemplate'. Host-reported SecureBootTemplateId value: '$hostReportedSecureBootTemplateId'."
+        }
     }
 
     $security = Get-VMSecurity -VMName $VMName -ErrorAction Stop
     $tpmEnabled = Get-PropertyValueOrNull -Object $security -Name "TpmEnabled"
     if ($null -eq $tpmEnabled) {
-        $keyProtector = Get-VMKeyProtector -VMName $VMName -ErrorAction SilentlyContinue
-        $tpmEnabled = ($null -ne $keyProtector)
+        $keyProtector = Get-VMKeyProtector -VMName $VMName -ErrorAction Stop
+        $tpmEnabled = Test-KeyProtectorPresent -KeyProtector $keyProtector
     }
     if ($null -eq $tpmEnabled -or -not [bool]$tpmEnabled) {
         throw "VM '$VMName' does not have vTPM enabled."
@@ -2003,6 +2069,57 @@ function Get-EffectiveSwitchName {
     return $defaultSwitch.Name
 }
 
+function Set-OwnedVmSecurityConfiguration {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$ResolvedVhdPath,
+        [Parameter(Mandatory = $true)]
+        [string]$ExpectedOwnerId,
+        [Parameter(Mandatory = $true)]
+        [string]$ResolvedWindowsIsoPath
+    )
+
+    $ownedVm = Assert-OwnedVM `
+        -ResolvedVhdPath $ResolvedVhdPath `
+        -ExpectedOwnerId $ExpectedOwnerId
+    if ([string]$ownedVm.State -ne "Off") {
+        throw "Security configuration may be applied only while the exact owned VM '$VMName' is Off. Host-reported VM state: '$($ownedVm.State)'."
+    }
+
+    $windowsDvdDrives = @(
+        Get-VMDvdDrive -VMName $VMName -ErrorAction Stop |
+            Where-Object {
+                (Normalize-ComparisonPath ([string]$_.Path)) -eq
+                    (Normalize-ComparisonPath $ResolvedWindowsIsoPath)
+            }
+    )
+    if ($windowsDvdDrives.Count -ne 1) {
+        throw "Expected exactly one DVD drive for the verified Windows ISO on '$VMName', but found $($windowsDvdDrives.Count): $ResolvedWindowsIsoPath"
+    }
+    $windowsDvdDrive = $windowsDvdDrives[0]
+
+    Set-VMFirmware `
+        -VMName $VMName `
+        -EnableSecureBoot On `
+        -SecureBootTemplate $script:WindowsSecureBootTemplate `
+        -FirstBootDevice $windowsDvdDrive | Out-Null
+
+    $keyProtector = Get-VMKeyProtector -VMName $VMName -ErrorAction Stop
+    $hasKeyProtector = Test-KeyProtectorPresent -KeyProtector $keyProtector
+    if (-not $hasKeyProtector) {
+        Set-VMKeyProtector -VMName $VMName -NewLocalKeyProtector | Out-Null
+    }
+
+    $security = Get-VMSecurity -VMName $VMName -ErrorAction Stop
+    $tpmEnabled = Get-PropertyValueOrNull -Object $security -Name "TpmEnabled"
+    if ($null -eq $tpmEnabled) {
+        throw "Host API did not report vTPM state for exact owned VM '$VMName'. Refusing to change an unknown vTPM configuration."
+    }
+    if (-not [bool]$tpmEnabled) {
+        Enable-VMTPM -VMName $VMName | Out-Null
+    }
+}
+
 function New-OwnedHyperVVm {
     param(
         [Parameter(Mandatory = $true)]
@@ -2044,16 +2161,6 @@ function New-OwnedHyperVVm {
         Add-VMDvdDrive -VMName $VMName -Path $AnswerIsoPath | Out-Null
     }
 
-    $windowsDvdDrive = @(
-        Get-VMDvdDrive -VMName $VMName |
-            Where-Object {
-                (Normalize-ComparisonPath ([string]$_.Path)) -eq
-                    (Normalize-ComparisonPath $ResolvedIsoPath)
-            }
-    ) | Select-Object -First 1
-    if ($null -eq $windowsDvdDrive) {
-        throw "The verified Windows 11 ISO could not be attached to '$VMName'."
-    }
     if (
         -not [string]::IsNullOrWhiteSpace($AnswerIsoPath) -and
         -not @(
@@ -2067,13 +2174,10 @@ function New-OwnedHyperVVm {
         throw "The owned answer ISO could not be attached to '$VMName'."
     }
 
-    Set-VMFirmware `
-        -VMName $VMName `
-        -EnableSecureBoot On `
-        -SecureBootTemplate "Microsoft Windows" `
-        -FirstBootDevice $windowsDvdDrive | Out-Null
-    Set-VMKeyProtector -VMName $VMName -NewLocalKeyProtector | Out-Null
-    Enable-VMTPM -VMName $VMName | Out-Null
+    Set-OwnedVmSecurityConfiguration `
+        -ResolvedVhdPath $ResolvedVhdPath `
+        -ExpectedOwnerId $OwnerId `
+        -ResolvedWindowsIsoPath $ResolvedIsoPath
     $vm = Get-VM -Name $VMName -ErrorAction Stop
     Verify-HostVmConfiguration -VmObject $vm
     return $vm
@@ -2125,8 +2229,33 @@ function Invoke-ResumeUnattendedCommand {
     $state = Read-OwnedUnattendState -ResolvedVhdPath $ResolvedVhdPath -Paths $paths
     $vm = Assert-OwnedVM -ResolvedVhdPath $ResolvedVhdPath -ExpectedOwnerId $OwnerId
     Assert-UnattendStateMatchesVmMarker -State $state -VmObject $vm
-    Verify-HostVmConfiguration -VmObject $vm
+    $repairedPreFirstStartSecurityConfiguration = $false
+    $configurationVerificationError = $null
+    try {
+        Verify-HostVmConfiguration -VmObject $vm
+    } catch {
+        $configurationVerificationError = $_
+    }
+    if ($null -ne $configurationVerificationError) {
+        $vm = Assert-OwnedVM -ResolvedVhdPath $ResolvedVhdPath -ExpectedOwnerId $OwnerId
+        if ([string]$vm.State -ne "Off") {
+            throw "Owned unattended VM '$VMName' failed host configuration verification and cannot be repaired unless it is Off. Host-reported VM state: '$($vm.State)'. Verification failure: $($configurationVerificationError.Exception.Message)"
+        }
+
+        Assert-ConfirmationForOwnedAction -Action "Repairing security configuration for owned VM '$VMName'"
+        Write-Step "Repairing incomplete owned VM security configuration"
+        Set-OwnedVmSecurityConfiguration `
+            -ResolvedVhdPath $ResolvedVhdPath `
+            -ExpectedOwnerId $OwnerId `
+            -ResolvedWindowsIsoPath ([string]$state.windowsIsoPath)
+        $vm = Assert-OwnedVM -ResolvedVhdPath $ResolvedVhdPath -ExpectedOwnerId $OwnerId
+        Verify-HostVmConfiguration -VmObject $vm
+        $repairedPreFirstStartSecurityConfiguration = $true
+    }
     Ensure-VMRunning
+    if ($repairedPreFirstStartSecurityConfiguration) {
+        Invoke-UnattendedOpticalBootKey -VmObject $vm
+    }
 
     if (Test-Path -LiteralPath $paths.FinalCredentialPath -PathType Leaf) {
         $finalCredential = Import-CleanWindowsCredential `

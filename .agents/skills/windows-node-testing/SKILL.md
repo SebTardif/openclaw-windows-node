@@ -255,9 +255,11 @@ bounded time for PowerShell Direct, but first clears the Gen2 optical boot
 prompt through Microsoft Hyper-V `root\virtualization\v2`
 `Msvm_Keyboard.TypeKey` using the trusted VM ID. It sends multiple 750 ms
 space-key pulses within a fixed 7-second boot-only window and does not stop
-after the first successful delivery. The bounded sequence runs only after
-fresh unattended `Start-VM`, never for resume or later reboots. The controller
-then detaches both ISO drives, removes answer media,
+after the first successful delivery. The bounded sequence runs after fresh
+unattended `Start-VM` and never during later reboots. Ordinary resume paths do
+not inject keys. The sole resume exception is an owned Off partial VM whose
+incomplete security configuration was repaired and reverified before it was
+started. The controller then detaches both ISO drives, removes answer media,
 verifies completed Windows 11 Enterprise Evaluation setup, and rotates the
 generated setup credential. It establishes the final-credential session
 before accepting only a classified authentication rejection from the old

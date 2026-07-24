@@ -20,10 +20,14 @@ macOS, Parallels, or a Linux lease as Windows proof.
 - At least 8 GB guest memory, 80 GB free disk, and four logical processors by
   default.
 
-The controller creates a Generation 2 VM with secure boot, vTPM, automatic
+The controller creates a Generation 2 VM with secure boot using the canonical
+Hyper-V cmdlet template identifier `MicrosoftWindows`, vTPM, automatic
 checkpoints disabled, and nested virtualization enabled through
-`ExposeVirtualizationExtensions`. Nested virtualization is required because the
-installed smoke provisions and exercises WSL2 inside the guest.
+`ExposeVirtualizationExtensions`. Host verification accepts only
+whitespace/case-normalized API output for that exact template. When
+`SecureBootTemplateId` is exposed, it must be a present, non-empty GUID. Nested
+virtualization is required because the installed smoke provisions and
+exercises WSL2 inside the guest.
 
 The controller never deletes a VM or VHD. Existing VMs and checkpoints are
 refused unless both conditions are met:
@@ -103,8 +107,10 @@ For unattended mode, the controller:
 7. sends up to nine space-key pulses at 750 ms intervals after a 750 ms delay,
    stops unconditionally within a fixed 7-second boot-only window, requires at
    least one successful CIM delivery, and reports a safe last-error diagnostic
-   if none succeeds. It does not inject keys during resume, setup, or later
-   reboots;
+   if none succeeds. It does not inject keys during setup or later reboots.
+   Ordinary resume paths do not inject keys. The sole resume exception is an
+   owned Off partial VM whose incomplete security configuration was repaired
+   and reverified before it was started;
 8. waits a bounded time for PowerShell Direct;
 9. immediately detaches both ISO drives and removes the answer XML, staging
    directory, and answer ISO;
@@ -178,41 +184,30 @@ answer XML, staging directory, and answer ISO for diagnosis. Inspect the VM,
 VHD, DVD paths, and
 `.openclaw-clean-windows\OpenClaw-Clean-Windows\unattend.owner.json`.
 
-#### Recover the current pre-VM partial state
+#### Resume the current owned secure-boot partial state
 
-The current pre-VM condition has no VM and no VHD. Only the owned unattended
-marker subtree exists. `-ResumeUnattended` is invalid because there is no owned
-VM to resume. From an elevated PowerShell session, validate the unattended
-marker and remove only its owned setup material:
+The current partial state already contains the owned Generation 2 VM, VHD,
+original Windows ISO, answer ISO, setup DPAPI credential, VM ownership markers,
+and unattended ownership marker. Creation stopped before the first guest start
+because the secure-boot template input was not the canonical cmdlet identifier.
+This state is resumable. Do not use `-CleanupUnattend` for this state.
 
-```powershell
-.\scripts\clean-windows\Invoke-CleanWindowsHyperV.ps1 `
-  -Command Create `
-  -CleanupUnattend `
-  -VMName OpenClaw-Clean-Windows `
-  -OwnerId openclaw-clean-runner-bkudiess `
-  -VhdPath D:\Hyper-V\OpenClaw-Clean-Windows\os.vhdx `
-  -ConfirmOwnedAction
-```
-
-Cleanup never deletes a VM or VHD. In this pre-VM condition, neither exists.
-After cleanup, rerun the same exact fresh unattended Create:
+From an elevated PowerShell session, run exactly:
 
 ```powershell
-$createResult = .\scripts\clean-windows\Invoke-CleanWindowsHyperV.ps1 `
-  -Command Create `
-  -CreateMode Unattended `
-  -VMName OpenClaw-Clean-Windows `
-  -OwnerId openclaw-clean-runner-bkudiess `
-  -IsoPath D:\isos\Win11_Enterprise_Eval_25H2_en-us_x64.iso `
-  -VhdPath D:\Hyper-V\OpenClaw-Clean-Windows\os.vhdx `
-  -GenerateCredential `
-  -SwitchName "Default Switch" `
-  -ProcessorCount 8 `
-  -StartupMemoryGB 16 `
-  -VhdSizeGB 120 `
-  -UnattendedInstallTimeoutSec 7200
+.\scripts\clean-windows\Invoke-CleanWindowsHyperV.ps1 -Command Create -ResumeUnattended -VMName 'OpenClaw-Clean-Windows' -OwnerId 'openclaw-clean-runner-bkudiess' -VhdPath 'D:\Hyper-V\OpenClaw-Clean-Windows\os.vhdx' -ConfirmOwnedAction
 ```
+
+The command validates the VM note marker, VM marker file, and unattended
+ownership state. It first verifies host configuration. Only after verification
+fails and the exact owned VM is Off may it repair secure boot with
+`MicrosoftWindows`, restore the verified Windows DVD boot device, and create a
+missing key protector or enable a missing vTPM. It preserves an existing key
+protector and enabled vTPM, then re-verifies before starting the VM. Immediately
+after that repaired pre-first-start VM is running, it uses the same bounded
+Hyper-V CIM key pulses to clear the optical boot prompt and continue the
+unattended flow. It does not delete or replace the VM, VHD, attached media, or
+credentials.
 
 Resume only the exact owned VM:
 
@@ -226,9 +221,10 @@ Resume only the exact owned VM:
   -ConfirmOwnedAction
 ```
 
-If the partial install should not continue, detach exact owned installation
-media and remove only owned unattended media and the temporary setup
-credential:
+For a different owned partial install that should not continue, detach exact
+owned installation media and remove only owned unattended media and the
+temporary setup credential. Do not use this cleanup path for the current
+secure-boot partial state described above:
 
 ```powershell
 .\scripts\clean-windows\Invoke-CleanWindowsHyperV.ps1 `

@@ -31,6 +31,177 @@ public sealed class CleanWindowsRunnerScriptTests
     }
 
     [Fact]
+    public void HyperVController_UsesCanonicalWindowsSecureBootTemplateAndValidatesEffectiveTemplate()
+    {
+        var script = ReadScript("Invoke-CleanWindowsHyperV.ps1");
+        var normalizeStart = script.IndexOf(
+            "function Normalize-SecureBootTemplate",
+            StringComparison.Ordinal);
+        var normalizeEnd = script.IndexOf(
+            "function Get-PropertyValueOrNull",
+            normalizeStart,
+            StringComparison.Ordinal);
+        var normalization = script[normalizeStart..normalizeEnd];
+        var verifyStart = script.IndexOf(
+            "function Verify-HostVmConfiguration",
+            StringComparison.Ordinal);
+        var verifyEnd = script.IndexOf(
+            "function Invoke-PreparedGuestOperation",
+            verifyStart,
+            StringComparison.Ordinal);
+        var verification = script[verifyStart..verifyEnd];
+
+        Assert.Contains("$script:WindowsSecureBootTemplate = \"MicrosoftWindows\"", script);
+        Assert.Contains("-SecureBootTemplate $script:WindowsSecureBootTemplate", script);
+        Assert.DoesNotContain("-SecureBootTemplate \"Microsoft Windows\"", script);
+        Assert.Contains("[regex]::Replace([string]$Value, \"\\s\", \"\")", normalization);
+        Assert.Contains("$withoutWhitespace.ToLowerInvariant()", normalization);
+        Assert.Contains(
+            "Normalize-SecureBootTemplate -Value $secureBootTemplateValue",
+            verification);
+        Assert.Contains(
+            "Normalize-SecureBootTemplate -Value $script:WindowsSecureBootTemplate",
+            verification);
+        Assert.Contains("attempted canonical identifier '$script:WindowsSecureBootTemplate'", verification);
+        Assert.Contains("Host-reported SecureBootTemplate value", verification);
+        Assert.Contains(
+            "$firmware.PSObject.Properties[\"SecureBootTemplateId\"]",
+            verification);
+        Assert.Contains("[Guid]::TryParse(", verification);
+        Assert.Contains("$parsedSecureBootTemplateId -eq [Guid]::Empty", verification);
+        Assert.Contains("Host-reported SecureBootTemplateId value", verification);
+        Assert.DoesNotContain("-notmatch \"Microsoft\"", verification);
+    }
+
+    [Fact]
+    public void HyperVController_RepairsOnlyConfirmedOwnedOffPartialVmBeforeStarting()
+    {
+        var script = ReadScript("Invoke-CleanWindowsHyperV.ps1");
+        var seamStart = script.IndexOf(
+            "function Set-OwnedVmSecurityConfiguration",
+            StringComparison.Ordinal);
+        var seamEnd = script.IndexOf("function New-OwnedHyperVVm", seamStart, StringComparison.Ordinal);
+        var securitySeam = script[seamStart..seamEnd];
+        var freshStart = seamEnd;
+        var freshEnd = script.IndexOf(
+            "function Invoke-CleanupUnattendCommand",
+            freshStart,
+            StringComparison.Ordinal);
+        var freshCreate = script[freshStart..freshEnd];
+        var resumeStart = script.IndexOf(
+            "function Invoke-ResumeUnattendedCommand",
+            StringComparison.Ordinal);
+        var resumeEnd = script.IndexOf("function Invoke-CreateCommand", resumeStart, StringComparison.Ordinal);
+        var resume = script[resumeStart..resumeEnd];
+
+        Assert.Contains("Set-OwnedVmSecurityConfiguration", freshCreate);
+        Assert.Contains("Assert-OwnedVM", securitySeam);
+        Assert.Contains("[string]$ownedVm.State -ne \"Off\"", securitySeam);
+        Assert.Contains("Expected exactly one DVD drive for the verified Windows ISO", securitySeam);
+        Assert.Contains("-FirstBootDevice $windowsDvdDrive", securitySeam);
+        Assert.Contains("-SecureBootTemplate $script:WindowsSecureBootTemplate", securitySeam);
+        Assert.True(
+            securitySeam.IndexOf("if (-not $hasKeyProtector)", StringComparison.Ordinal) <
+            securitySeam.IndexOf("Set-VMKeyProtector", StringComparison.Ordinal));
+        Assert.Contains("Test-KeyProtectorPresent -KeyProtector $keyProtector", securitySeam);
+        Assert.Contains("Hyper-V reports an unset protector as four zero bytes", script);
+        Assert.True(
+            securitySeam.IndexOf("if (-not [bool]$tpmEnabled)", StringComparison.Ordinal) <
+            securitySeam.IndexOf("Enable-VMTPM", StringComparison.Ordinal));
+        Assert.Contains("Refusing to change an unknown vTPM configuration", securitySeam);
+
+        var stateIndex = resume.IndexOf("Read-OwnedUnattendState", StringComparison.Ordinal);
+        var ownedIndex = resume.IndexOf("Assert-OwnedVM", stateIndex, StringComparison.Ordinal);
+        var markerIndex = resume.IndexOf("Assert-UnattendStateMatchesVmMarker", ownedIndex, StringComparison.Ordinal);
+        var initialRepairFlagIndex = resume.IndexOf(
+            "$repairedPreFirstStartSecurityConfiguration = $false",
+            markerIndex,
+            StringComparison.Ordinal);
+        var initialVerifyIndex = resume.IndexOf(
+            "Verify-HostVmConfiguration",
+            initialRepairFlagIndex,
+            StringComparison.Ordinal);
+        var failedVerificationIndex = resume.IndexOf(
+            "if ($null -ne $configurationVerificationError)",
+            initialVerifyIndex,
+            StringComparison.Ordinal);
+        var offGuardIndex = resume.IndexOf("[string]$vm.State -ne \"Off\"", failedVerificationIndex, StringComparison.Ordinal);
+        var confirmationIndex = resume.IndexOf(
+            "Assert-ConfirmationForOwnedAction",
+            offGuardIndex,
+            StringComparison.Ordinal);
+        var repairIndex = resume.IndexOf(
+            "Set-OwnedVmSecurityConfiguration",
+            confirmationIndex,
+            StringComparison.Ordinal);
+        var reverifyIndex = resume.IndexOf(
+            "Verify-HostVmConfiguration",
+            repairIndex,
+            StringComparison.Ordinal);
+        var repairedFlagIndex = resume.IndexOf(
+            "$repairedPreFirstStartSecurityConfiguration = $true",
+            reverifyIndex,
+            StringComparison.Ordinal);
+        var ensureRunningIndex = resume.IndexOf("Ensure-VMRunning", repairedFlagIndex, StringComparison.Ordinal);
+        var repairedConditionIndex = resume.IndexOf(
+            "if ($repairedPreFirstStartSecurityConfiguration)",
+            ensureRunningIndex,
+            StringComparison.Ordinal);
+        var opticalBootKeyIndex = resume.IndexOf(
+            "Invoke-UnattendedOpticalBootKey -VmObject $vm",
+            repairedConditionIndex,
+            StringComparison.Ordinal);
+
+        Assert.True(stateIndex >= 0);
+        Assert.True(ownedIndex > stateIndex);
+        Assert.True(markerIndex > ownedIndex);
+        Assert.True(initialRepairFlagIndex > markerIndex);
+        Assert.True(initialVerifyIndex > initialRepairFlagIndex);
+        Assert.True(failedVerificationIndex > initialVerifyIndex);
+        Assert.True(offGuardIndex > failedVerificationIndex);
+        Assert.True(confirmationIndex > offGuardIndex);
+        Assert.True(repairIndex > confirmationIndex);
+        Assert.True(reverifyIndex > repairIndex);
+        Assert.True(repairedFlagIndex > reverifyIndex);
+        Assert.True(ensureRunningIndex > repairedFlagIndex);
+        Assert.True(repairedConditionIndex > ensureRunningIndex);
+        Assert.True(opticalBootKeyIndex > repairedConditionIndex);
+        Assert.Single(
+            resume.Split('\n'),
+            line => line.Contains(
+                "$repairedPreFirstStartSecurityConfiguration = $true",
+                StringComparison.Ordinal));
+        Assert.Contains("-ResolvedWindowsIsoPath ([string]$state.windowsIsoPath)", resume);
+        Assert.DoesNotContain("Stop-VM", resume, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void HyperVRecoveryDocs_PreserveAndResumeTheCurrentSecureBootPartialState()
+    {
+        var docs = File.ReadAllText(Path.Combine(Root, "docs", "CLEAN_WINDOWS_RUNNERS.md"));
+        var skill = File.ReadAllText(
+            Path.Combine(Root, ".agents", "skills", "openclaw-hyperv-smoke", "SKILL.md"));
+        var exactCommand =
+            @".\scripts\clean-windows\Invoke-CleanWindowsHyperV.ps1 -Command Create -ResumeUnattended -VMName 'OpenClaw-Clean-Windows' -OwnerId 'openclaw-clean-runner-bkudiess' -VhdPath 'D:\Hyper-V\OpenClaw-Clean-Windows\os.vhdx' -ConfirmOwnedAction";
+
+        foreach (var guidance in new[] { docs, skill })
+        {
+            Assert.Contains("`MicrosoftWindows`", guidance);
+            Assert.Contains("whitespace/case-normalized", guidance);
+            Assert.Contains("non-empty GUID", guidance);
+            Assert.Contains(exactCommand, guidance);
+            Assert.Contains("Do not use `-CleanupUnattend` for this state", guidance);
+            Assert.Contains("owned VM is Off", guidance);
+            Assert.Contains("Ordinary resume paths do not inject keys", guidance);
+            Assert.Contains("configuration was repaired", guidance);
+            Assert.Contains("reverified", guidance);
+            Assert.Contains("VM, VHD", guidance);
+            Assert.Contains("media", guidance);
+            Assert.Contains("credentials", guidance);
+        }
+    }
+
+    [Fact]
     public void HyperVController_OwnsCheckpointTransportArtifactAndRestoreContract()
     {
         var script = ReadScript("Invoke-CleanWindowsHyperV.ps1");
@@ -202,10 +373,22 @@ public sealed class CleanWindowsRunnerScriptTests
             "function Invoke-ResumeUnattendedCommand",
             StringComparison.Ordinal);
         var resumeEnd = controller.IndexOf("function Invoke-CreateCommand", resumeStart, StringComparison.Ordinal);
+        var resume = controller[resumeStart..resumeEnd];
+        var repairedResumeConditionIndex = resume.IndexOf(
+            "if ($repairedPreFirstStartSecurityConfiguration)",
+            StringComparison.Ordinal);
+        var repairedResumeBootKeyIndex = resume.IndexOf(
+            "Invoke-UnattendedOpticalBootKey -VmObject $vm",
+            StringComparison.Ordinal);
+        Assert.True(repairedResumeConditionIndex >= 0);
+        Assert.True(repairedResumeBootKeyIndex > repairedResumeConditionIndex);
         Assert.DoesNotContain(
             "Invoke-UnattendedOpticalBootKey",
-            controller[resumeStart..resumeEnd],
+            resume[..repairedResumeConditionIndex],
             StringComparison.Ordinal);
+        Assert.Single(
+            resume.Split('\n'),
+            line => line.Contains("Invoke-UnattendedOpticalBootKey", StringComparison.Ordinal));
     }
 
     [Theory]
