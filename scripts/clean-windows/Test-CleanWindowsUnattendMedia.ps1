@@ -141,6 +141,7 @@ try {
         credential = [ordered]@{
             dpapiRoundtrip = $true
             restrictiveAcl = $true
+            ownerIsCurrentUser = $true
             passwordPrinted = $false
         }
         answerMediaRestrictiveAcl = $true

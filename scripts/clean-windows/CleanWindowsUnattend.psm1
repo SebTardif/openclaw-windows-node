@@ -840,6 +840,18 @@ function Set-CleanWindowsRestrictiveAcl {
     }
 
     $currentSid = [Security.Principal.WindowsIdentity]::GetCurrent().User
+    if ($Directory) {
+        $existingAcl = New-Object Security.AccessControl.DirectorySecurity(
+            $Path,
+            [Security.AccessControl.AccessControlSections]::Owner
+        )
+    } else {
+        $existingAcl = New-Object Security.AccessControl.FileSecurity(
+            $Path,
+            [Security.AccessControl.AccessControlSections]::Owner
+        )
+    }
+    $existingOwnerSid = $existingAcl.GetOwner([Security.Principal.SecurityIdentifier])
     $systemSid = New-Object Security.Principal.SecurityIdentifier("S-1-5-18")
     $administratorsSid = New-Object Security.Principal.SecurityIdentifier("S-1-5-32-544")
     if ($Directory) {
@@ -850,6 +862,10 @@ function Set-CleanWindowsRestrictiveAcl {
         $inheritance = [Security.AccessControl.InheritanceFlags]::None
     }
     $acl.SetAccessRuleProtection($true, $false)
+    # Elevated UAC creation can default ownership to Administrators, so set it deliberately.
+    if ($existingOwnerSid.Value -cne $currentSid.Value) {
+        $acl.SetOwner($currentSid)
+    }
     foreach ($sid in @($currentSid, $systemSid, $administratorsSid)) {
         $rule = New-Object Security.AccessControl.FileSystemAccessRule(
             $sid,

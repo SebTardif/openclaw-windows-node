@@ -306,6 +306,38 @@ public sealed class CleanWindowsRunnerScriptTests
     }
 
     [Fact]
+    public void RestrictiveAcl_SetsCurrentUserOwnerBeforeApplyingExactlyThreeRules()
+    {
+        var helper = ReadScript("CleanWindowsUnattend.psm1");
+        var setterStart = helper.IndexOf("function Set-CleanWindowsRestrictiveAcl", StringComparison.Ordinal);
+        var setterEnd = helper.IndexOf("function Assert-CleanWindowsRestrictiveAcl", setterStart, StringComparison.Ordinal);
+        var setter = helper[setterStart..setterEnd];
+        var verifier = helper[setterEnd..helper.IndexOf(
+            "function Protect-CleanWindowsOwnedDirectory",
+            setterEnd,
+            StringComparison.Ordinal)];
+
+        var setOwnerIndex = setter.IndexOf("$acl.SetOwner($currentSid)", StringComparison.Ordinal);
+        var applyIndex = setter.IndexOf("SetAccessControl", StringComparison.Ordinal);
+        Assert.True(setOwnerIndex >= 0);
+        Assert.True(applyIndex > setOwnerIndex);
+        Assert.Contains("New-Object Security.AccessControl.DirectorySecurity(", setter);
+        Assert.Contains("New-Object Security.AccessControl.FileSecurity(", setter);
+        Assert.Contains("[Security.AccessControl.AccessControlSections]::Owner", setter);
+        Assert.Contains("$existingOwnerSid.Value -cne $currentSid.Value", setter);
+        Assert.Contains(
+            "foreach ($sid in @($currentSid, $systemSid, $administratorsSid))",
+            setter);
+        Assert.Single(
+            setter.Split('\n'),
+            line => line.Contains("$acl.AddAccessRule($rule)", StringComparison.Ordinal));
+        Assert.Contains("$rules.Count -ne 3", verifier);
+        Assert.Contains("$currentSid,", verifier);
+        Assert.Contains("\"S-1-5-18\"", verifier);
+        Assert.Contains("\"S-1-5-32-544\"", verifier);
+    }
+
+    [Fact]
     public void HyperVController_VerifiesInstalledEnterpriseEvaluationAndCompletedSetup()
     {
         var controller = ReadScript("Invoke-CleanWindowsHyperV.ps1");
@@ -350,6 +382,7 @@ public sealed class CleanWindowsRunnerScriptTests
             Assert.True(root.GetProperty("succeeded").GetBoolean());
             Assert.True(root.GetProperty("credential").GetProperty("dpapiRoundtrip").GetBoolean());
             Assert.True(root.GetProperty("credential").GetProperty("restrictiveAcl").GetBoolean());
+            Assert.True(root.GetProperty("credential").GetProperty("ownerIsCurrentUser").GetBoolean());
             Assert.False(root.GetProperty("credential").GetProperty("passwordPrinted").GetBoolean());
             Assert.True(root.GetProperty("answerMediaRestrictiveAcl").GetBoolean());
             Assert.Equal(1, root.GetProperty("answerFile").GetProperty("imageIndex").GetInt32());

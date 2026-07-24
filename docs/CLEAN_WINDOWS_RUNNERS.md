@@ -178,6 +178,42 @@ answer XML, staging directory, and answer ISO for diagnosis. Inspect the VM,
 VHD, DVD paths, and
 `.openclaw-clean-windows\OpenClaw-Clean-Windows\unattend.owner.json`.
 
+#### Recover the current pre-VM partial state
+
+The current pre-VM condition has no VM and no VHD. Only the owned unattended
+marker subtree exists. `-ResumeUnattended` is invalid because there is no owned
+VM to resume. From an elevated PowerShell session, validate the unattended
+marker and remove only its owned setup material:
+
+```powershell
+.\scripts\clean-windows\Invoke-CleanWindowsHyperV.ps1 `
+  -Command Create `
+  -CleanupUnattend `
+  -VMName OpenClaw-Clean-Windows `
+  -OwnerId openclaw-clean-runner-bkudiess `
+  -VhdPath D:\Hyper-V\OpenClaw-Clean-Windows\os.vhdx `
+  -ConfirmOwnedAction
+```
+
+Cleanup never deletes a VM or VHD. In this pre-VM condition, neither exists.
+After cleanup, rerun the same exact fresh unattended Create:
+
+```powershell
+$createResult = .\scripts\clean-windows\Invoke-CleanWindowsHyperV.ps1 `
+  -Command Create `
+  -CreateMode Unattended `
+  -VMName OpenClaw-Clean-Windows `
+  -OwnerId openclaw-clean-runner-bkudiess `
+  -IsoPath D:\isos\Win11_Enterprise_Eval_25H2_en-us_x64.iso `
+  -VhdPath D:\Hyper-V\OpenClaw-Clean-Windows\os.vhdx `
+  -GenerateCredential `
+  -SwitchName "Default Switch" `
+  -ProcessorCount 8 `
+  -StartupMemoryGB 16 `
+  -VhdSizeGB 120 `
+  -UnattendedInstallTimeoutSec 7200
+```
+
 Resume only the exact owned VM:
 
 ```powershell
