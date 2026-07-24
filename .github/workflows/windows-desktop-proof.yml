@@ -43,6 +43,28 @@ jobs:
       with:
         dotnet-version: 10.0.x
 
+    - name: Install WindowsAppRuntime
+      shell: pwsh
+      run: |
+        [xml]$props = Get-Content (Join-Path $env:GITHUB_WORKSPACE "Directory.Build.props")
+        $versionNode = $props.SelectSingleNode("/Project/PropertyGroup/MicrosoftWindowsAppSDKVersion")
+        if ($null -eq $versionNode -or [string]::IsNullOrWhiteSpace($versionNode.InnerText)) {
+          throw "MicrosoftWindowsAppSDKVersion was not found in Directory.Build.props"
+        }
+
+        $version = $versionNode.InnerText.Trim()
+        $channel = [regex]::Match($version, '^\d+\.\d+').Value
+        if ([string]::IsNullOrWhiteSpace($channel)) {
+          throw "Cannot derive WindowsAppRuntime channel from MicrosoftWindowsAppSDKVersion '$version'"
+        }
+
+        $url = "https://aka.ms/windowsappsdk/$channel/$version/windowsappruntimeinstall-x64.exe"
+        Write-Host "Installing WindowsAppRuntime $version from $url"
+        $exe = "$env:RUNNER_TEMP\WindowsAppRuntimeInstall.exe"
+        Invoke-WebRequest -Uri $url -OutFile $exe
+        & $exe --quiet
+        if ($LASTEXITCODE -ne 0) { throw "WindowsAppRuntimeInstall failed with exit code $LASTEXITCODE" }
+
     - name: Restore dependencies
       run: dotnet restore
 

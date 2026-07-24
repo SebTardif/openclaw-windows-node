@@ -49,6 +49,13 @@ public sealed class CleanWindowsRunnerScriptTests
         Assert.Contains("\"-PreviousInstallerSha256\", $RemotePreviousInstallerSha256", script);
         Assert.Contains("\"-ConfirmCleanMachineReleaseIdentity\"", script);
         Assert.Contains("$validationArguments", script);
+        Assert.Contains("function Ensure-GuestPowerShell7Installed", script);
+        Assert.Contains("winget install --id Microsoft.PowerShell -e --scope machine", script);
+        Assert.Contains("Ensure-GuestPowerShell7Installed -Session $activeSession", script);
+        Assert.True(
+            script.IndexOf("Ensure-GuestPowerShell7Installed -Session $activeSession", StringComparison.Ordinal) <
+            script.IndexOf("Running guest setup-dev", StringComparison.Ordinal),
+            "Prepare must install PowerShell 7 before setup-dev creates the reusable prerequisites checkpoint.");
         Assert.Contains("installed-runtime-proof\\phase-status.json", script);
         Assert.Contains("\"upgrade-smoke.log\"", script);
         Assert.Contains("\"upgrade-smoke.done\"", script);

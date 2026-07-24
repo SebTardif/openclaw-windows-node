@@ -199,6 +199,20 @@ public sealed class WindowsProofSkillContractTests
 
         Assert.Contains("runs-on: [self-hosted, windows, openclaw-desktop-proof]", workflow);
         Assert.DoesNotContain("runs-on: windows-latest", workflow);
+    }
+
+    [Fact]
+    public void Workflow_InstallsMatchingWindowsAppRuntimeBeforeDesktopProof()
+    {
+        var workflow = Read(".github", "workflows", "windows-desktop-proof.yml");
+
+        Assert.Contains("MicrosoftWindowsAppSDKVersion", workflow);
+        Assert.Contains("windowsappruntimeinstall-x64.exe", workflow);
+        Assert.Contains("& $exe --quiet", workflow);
+        Assert.True(
+            workflow.IndexOf("- name: Install WindowsAppRuntime", StringComparison.Ordinal) <
+            workflow.IndexOf("- name: Capture Windows desktop proof", StringComparison.Ordinal),
+            "The matching Windows App Runtime must be installed before the proof launches WinUI.");
         Assert.DoesNotContain("${{ inputs.runner", workflow);
         Assert.Contains("$sessionId -eq 0", workflow);
         Assert.Contains("[Environment]::UserInteractive", workflow);

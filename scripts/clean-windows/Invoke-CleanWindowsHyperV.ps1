@@ -998,6 +998,34 @@ function Ensure-GuestGitInstalled {
     } | Out-Null
 }
 
+function Ensure-GuestPowerShell7Installed {
+    param(
+        [Parameter(Mandatory = $true)]
+        [System.Management.Automation.Runspaces.PSSession]$Session
+    )
+
+    Write-Step "Ensuring guest PowerShell 7 is installed"
+    Invoke-GuestCommandWithTimeout -Session $Session -OperationName "Installing guest PowerShell 7" -TimeoutSec 1800 -ScriptBlock {
+        if (Get-Command pwsh.exe -ErrorAction SilentlyContinue) {
+            return
+        }
+
+        if (-not (Get-Command winget -ErrorAction SilentlyContinue)) {
+            throw "winget is not available in the guest. Install App Installer, then retry Prepare."
+        }
+
+        & winget install --id Microsoft.PowerShell -e --scope machine --accept-source-agreements --accept-package-agreements --disable-interactivity
+        if ($LASTEXITCODE -ne 0) {
+            throw "winget failed to install PowerShell 7 with exit code $LASTEXITCODE."
+        }
+
+        $env:Path = [Environment]::GetEnvironmentVariable("Path", "Machine") + ";" + [Environment]::GetEnvironmentVariable("Path", "User")
+        if (-not (Get-Command pwsh.exe -ErrorAction SilentlyContinue)) {
+            throw "PowerShell 7 was installed but pwsh.exe is not available on PATH in the guest session."
+        }
+    } | Out-Null
+}
+
 function Prepare-GuestPrerequisites {
     param(
         [Parameter(Mandatory = $true)]
@@ -1045,6 +1073,7 @@ function Prepare-GuestPrerequisites {
     }
 
     Ensure-GuestGitInstalled -Session $activeSession
+    Ensure-GuestPowerShell7Installed -Session $activeSession
     Copy-RepoToGuest -Session $activeSession
 
     $guestRepoRoot = Get-GuestRepoRoot
