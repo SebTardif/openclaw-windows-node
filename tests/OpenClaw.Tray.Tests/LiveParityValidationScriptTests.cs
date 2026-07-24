@@ -115,6 +115,18 @@ public sealed class LiveParityValidationScriptTests
     }
 
     [Fact]
+    public void CiWorkflow_RequiresEachNetworkRecoveryProofToPassAlongsideSecretlessContracts()
+    {
+        var workflow = ReadCiWorkflow();
+
+        Assert.Contains("if (\"${{ matrix.name }}\" -eq \"network-recovery\")", workflow);
+        Assert.Contains("GatewayStopAndStart_TrayLeavesReadyThenRecovers", workflow);
+        Assert.Contains("RepeatedGatewayRestart_TrayAndNodeRecoverEachTime", workflow);
+        Assert.Contains("did not report the network recovery proof", workflow);
+        Assert.Contains("must pass and cannot be skipped", workflow);
+    }
+
+    [Fact]
     public void CiWorkflow_NeverRunsLiveProofClassesOrReferencesLiveParitySecretGates()
     {
         var workflow = ReadCiWorkflow();

@@ -424,6 +424,25 @@ jobs:
           Write-Error "E2E shard '${{ matrix.name }}' executed zero tests. Check OPENCLAW_RUN_E2E gating/filter before merging."
           exit 1
         }
+        if ("${{ matrix.name }}" -eq "network-recovery") {
+          $networkRecoveryProofNames = @(
+            "GatewayStopAndStart_TrayLeavesReadyThenRecovers",
+            "RepeatedGatewayRestart_TrayAndNodeRecoverEachTime"
+          )
+
+          foreach ($networkRecoveryProofName in $networkRecoveryProofNames) {
+            $networkRecoveryProof = @($trx.TestRun.Results.UnitTestResult | Where-Object { $_.testName -like "*$networkRecoveryProofName*" }) | Select-Object -First 1
+            if ($null -eq $networkRecoveryProof) {
+              Write-Error "E2E shard '${{ matrix.name }}' did not report the network recovery proof '$networkRecoveryProofName'. Check the network-recovery filter before merging."
+              exit 1
+            }
+            if ([string]$networkRecoveryProof.outcome -ne "Passed") {
+              Write-Error "Network recovery proof '$networkRecoveryProofName' must pass and cannot be skipped. Outcome: '$($networkRecoveryProof.outcome)'."
+              exit 1
+            }
+            Write-Host "Network recovery E2E proof passed: $networkRecoveryProofName"
+          }
+        }
         if ("${{ matrix.name }}" -eq "setup-connect") {
           $publishedGatewayProofName = "RealPublishedGateway_DeviceInfo_AndNativeChat_Roundtrip"
           $publishedGatewayProof = @($trx.TestRun.Results.UnitTestResult | Where-Object { $_.testName -like "*$publishedGatewayProofName*" }) | Select-Object -First 1
