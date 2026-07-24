@@ -33,6 +33,8 @@ public sealed class AccessibilityAppFixture : IDisposable
 
     public IntPtr HubWindowHandle { get; }
 
+    public string? LastScreenshotCaptureMethod { get; private set; }
+
     public AccessibilityAppFixture()
     {
         _executablePath = Path.Combine(AppContext.BaseDirectory, "OpenClaw.Tray.WinUI.exe");
@@ -92,23 +94,6 @@ public sealed class AccessibilityAppFixture : IDisposable
             return null;
 
         EnsureTargetIsAlive();
-        var foreground = false;
-        for (var attempt = 0; attempt < 20; attempt++)
-        {
-            _ = ShowWindow(HubWindowHandle, ShowMaximized);
-            _ = BringWindowToTop(HubWindowHandle);
-            _ = SetForegroundWindow(HubWindowHandle);
-            if (GetForegroundWindow() == HubWindowHandle)
-            {
-                foreground = true;
-                break;
-            }
-            Thread.Sleep(100);
-        }
-        if (!foreground)
-            throw new InvalidOperationException("Could not foreground the Hub window for screenshot capture.");
-        Thread.Sleep(500);
-
         var bounds = AutomationElement.FromHandle(HubWindowHandle).Current.BoundingRectangle;
         var screenLeft = GetSystemMetrics(VirtualScreenLeft);
         var screenTop = GetSystemMetrics(VirtualScreenTop);
@@ -126,33 +111,108 @@ public sealed class AccessibilityAppFixture : IDisposable
         var path = Path.GetFullPath(configuredPath, Environment.CurrentDirectory);
         Directory.CreateDirectory(Path.GetDirectoryName(path)!);
         using var bitmap = new Bitmap(width, height, PixelFormat.Format32bppArgb);
-        using (var graphics = Graphics.FromImage(bitmap))
-        {
-            graphics.CopyFromScreen(
-                left,
-                top,
-                0,
-                0,
-                new Size(width, height),
-                CopyPixelOperation.SourceCopy);
-        }
 
-        var sampledColors = new HashSet<int>();
-        var stepX = Math.Max(1, width / 32);
-        var stepY = Math.Max(1, height / 32);
-        for (var y = 0; y < height && sampledColors.Count < 8; y += stepY)
+        LastScreenshotCaptureMethod = null;
+        if (TryCaptureWindow(bitmap) && HasVisualContent(bitmap))
         {
-            for (var x = 0; x < width && sampledColors.Count < 8; x += stepX)
-                sampledColors.Add(bitmap.GetPixel(x, y).ToArgb());
+            LastScreenshotCaptureMethod = "PrintWindow";
         }
-        if (sampledColors.Count < 3)
-            throw new InvalidOperationException("Hub screenshot capture was blank or near-uniform.");
+        else
+        {
+            CaptureForegroundWindow(bitmap, left, top);
+            if (!HasVisualContent(bitmap))
+                throw new InvalidOperationException("Hub screenshot capture was blank or near-uniform.");
+            LastScreenshotCaptureMethod = "CopyFromScreen";
+        }
 
         bitmap.Save(path, ImageFormat.Png);
 
         if (new FileInfo(path).Length == 0)
             throw new InvalidOperationException("Hub screenshot capture produced an empty file.");
         return path;
+    }
+
+    private bool TryCaptureWindow(Bitmap bitmap)
+    {
+        using var graphics = Graphics.FromImage(bitmap);
+        var deviceContext = graphics.GetHdc();
+        try
+        {
+            const uint renderFullContent = 2;
+            return PrintWindow(HubWindowHandle, deviceContext, renderFullContent);
+        }
+        finally
+        {
+            graphics.ReleaseHdc(deviceContext);
+        }
+    }
+
+    private void CaptureForegroundWindow(Bitmap bitmap, int left, int top)
+    {
+        var foreground = false;
+        for (var attempt = 0; attempt < 20; attempt++)
+        {
+            if (TryForegroundHubWindow())
+            {
+                foreground = true;
+                break;
+            }
+            Thread.Sleep(100);
+        }
+        if (!foreground)
+            throw new InvalidOperationException(
+                "PrintWindow did not produce a usable image and the Hub window could not be foregrounded for the fallback capture.");
+        Thread.Sleep(500);
+
+        using var graphics = Graphics.FromImage(bitmap);
+        graphics.CopyFromScreen(
+            left,
+            top,
+            0,
+            0,
+            bitmap.Size,
+            CopyPixelOperation.SourceCopy);
+    }
+
+    private bool TryForegroundHubWindow()
+    {
+        var currentThreadId = GetCurrentThreadId();
+        var foregroundThreadId = GetWindowThreadProcessId(GetForegroundWindow(), out _);
+        var targetThreadId = GetWindowThreadProcessId(HubWindowHandle, out _);
+        var attachedToForeground = false;
+        var attachedToTarget = false;
+        try
+        {
+            if (foregroundThreadId != 0 && foregroundThreadId != currentThreadId)
+                attachedToForeground = AttachThreadInput(currentThreadId, foregroundThreadId, attach: true);
+            if (targetThreadId != 0 && targetThreadId != currentThreadId)
+                attachedToTarget = AttachThreadInput(currentThreadId, targetThreadId, attach: true);
+
+            _ = ShowWindow(HubWindowHandle, ShowMaximized);
+            _ = BringWindowToTop(HubWindowHandle);
+            _ = SetForegroundWindow(HubWindowHandle);
+            return GetForegroundWindow() == HubWindowHandle;
+        }
+        finally
+        {
+            if (attachedToTarget)
+                _ = AttachThreadInput(currentThreadId, targetThreadId, attach: false);
+            if (attachedToForeground)
+                _ = AttachThreadInput(currentThreadId, foregroundThreadId, attach: false);
+        }
+    }
+
+    private static bool HasVisualContent(Bitmap bitmap)
+    {
+        var sampledColors = new HashSet<int>();
+        var stepX = Math.Max(1, bitmap.Width / 32);
+        var stepY = Math.Max(1, bitmap.Height / 32);
+        for (var y = 0; y < bitmap.Height && sampledColors.Count < 8; y += stepY)
+        {
+            for (var x = 0; x < bitmap.Width && sampledColors.Count < 8; x += stepX)
+                sampledColors.Add(bitmap.GetPixel(x, y).ToArgb());
+        }
+        return sampledColors.Count >= 3;
     }
 
     private async Task WaitForPageMarkerAsync(string pageTag, string automationId)
@@ -264,6 +324,20 @@ public sealed class AccessibilityAppFixture : IDisposable
 
     [DllImport("user32.dll")]
     private static extern IntPtr GetForegroundWindow();
+
+    [DllImport("kernel32.dll")]
+    private static extern uint GetCurrentThreadId();
+
+    [DllImport("user32.dll")]
+    private static extern uint GetWindowThreadProcessId(IntPtr windowHandle, out uint processId);
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool AttachThreadInput(uint idAttach, uint idAttachTo, bool attach);
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool PrintWindow(IntPtr windowHandle, IntPtr deviceContext, uint flags);
 
     [DllImport("user32.dll")]
     private static extern int GetSystemMetrics(int index);

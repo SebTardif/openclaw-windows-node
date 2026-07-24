@@ -345,6 +345,24 @@ checks, gateway/dashboard/node/chat health, state preservation, and always-run
 failure artifacts. It has no updater-to-direct-install fallback while claiming an
 upgrade. Forward upgrade plus teardown does not claim product rollback; teardown is
 only fail-safe cleanup of state that the harness proved absent and then created.
+### Windows desktop proof (screenshot/manifest capture)
+
+Run a repeatable, fail-closed screenshot proof of the tray's Connection page:
+
+```powershell
+.\scripts\capture-windows-desktop-proof.ps1 -ArtifactRoot <path-outside-product-data>
+```
+
+This launches an isolated current-head tray under a temp
+`OPENCLAW_TRAY_DATA_DIR`, drives the deterministic `connection` deep link,
+captures a Hub-window-only screenshot, and writes a `schemaVersion: 1`
+manifest. It never reads or writes real `%APPDATA%\OpenClawTray` state and
+fails closed if the app, route marker, or any required artifact is missing.
+See `.agents/skills/windows-computer-use-proof/SKILL.md` for the full
+contract, manifest schema, and PR proof content. A manual-only
+`workflow_dispatch` GitHub Actions lane (`.github/workflows/windows-desktop-proof.yml`)
+runs the same script on a hosted `windows-latest` runner and uploads its
+artifacts unconditionally.
 
 ## Remaining Work (Roadmap)
 

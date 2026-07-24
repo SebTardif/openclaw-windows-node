@@ -77,6 +77,7 @@ required closeout lane for code changes.
 | Local MXC E2E | `.\scripts\validate-mxc-e2e.ps1` | MXC sandboxing, `system.run`, exec approvals, Windows node command execution, gateway setup/connect changes that affect MXC |
 | Product WSL setup validation | `.\scripts\validate-wsl-gateway.ps1` | Tray onboarding/setup-engine changes that must prove the product WSL install path |
 | Packaging script checks | `powershell -File .\tests\PackagingTests\Test-InnoUninstallOrdering.ps1` | Installer script changes that affect uninstall or cleanup ordering |
+| Windows desktop proof | `.\scripts\capture-windows-desktop-proof.ps1 -ArtifactRoot <path>` | UI/desktop changes that need a repeatable, fail-closed screenshot and manifest of a real running tray; see `.agents\skills\windows-computer-use-proof\SKILL.md` |
 
 ## Running tests
 

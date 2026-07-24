@@ -1,0 +1,56 @@
+name: Windows Desktop Proof (manual)
+
+# Manual-only proof lane. This workflow never runs on push or pull_request,
+# so it cannot affect required PR/merge CI. It exists to let a maintainer
+# capture a fresh, fail-closed screenshot/manifest proof of the tray's
+# Connection page on a real GitHub-hosted windows-latest runner, on demand.
+on:
+  workflow_dispatch:
+    inputs:
+      configuration:
+        description: 'Build configuration'
+        required: false
+        default: 'Debug'
+        type: choice
+        options:
+          - Debug
+          - Release
+
+permissions:
+  contents: read
+
+jobs:
+  desktop-proof:
+    runs-on: windows-latest
+    steps:
+    - uses: actions/checkout@v7
+
+    - name: Setup .NET 10
+      uses: actions/setup-dotnet@v6
+      with:
+        dotnet-version: 10.0.x
+
+    - name: Restore dependencies
+      run: dotnet restore
+
+    - name: Capture Windows desktop proof
+      id: proof
+      shell: pwsh
+      run: |
+        $env:OPENCLAW_REPO_ROOT = (Get-Location).Path
+        .\scripts\capture-windows-desktop-proof.ps1 `
+          -Configuration "${{ inputs.configuration }}" `
+          -ArtifactRoot "TestResults\DesktopProof"
+
+    # Uploaded unconditionally so a failing/fail-closed run still publishes
+    # its manifest and diagnostics; a missing artifact upload must never be
+    # the only trace of a capture attempt.
+    - name: Upload desktop proof artifacts
+      if: always()
+      uses: actions/upload-artifact@v7
+      with:
+        name: windows-desktop-proof
+        path: |
+          TestResults/DesktopProof/**
+          !TestResults/DesktopProof/**/*.trx
+        if-no-files-found: error

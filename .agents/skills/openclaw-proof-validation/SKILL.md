@@ -7,6 +7,8 @@ description: "Plan and collect OpenClaw Windows validation/proof: tests, rubber-
 
 Use for changes that affect tray UX, Settings, onboarding, chat/canvas, Command Center, Windows node capabilities, local MCP, gateway connection/pairing, permissions, diagnostics, or agent-facing instructions.
 
+For choosing which validation lane (unit, UI, accessibility, local MCP, gateway, installed Inno, live, performance, clean-runner) applies to a change, see `.agents/skills/windows-node-testing/SKILL.md`.
+
 If the validation host is macOS, read [PARALLELS.md](PARALLELS.md) for the optional local Parallels Windows VM workflow.
 
 ## Rules
@@ -39,7 +41,7 @@ dotnet test .\tests\OpenClaw.WinNode.Cli.Tests\OpenClaw.WinNode.Cli.Tests.csproj
 
 | Surface | Proof to collect |
 |---|---|
-| UI / WinUI | Launch `.\run-app-local.ps1 -Isolated`, exercise the changed path with computer-use or developer-provided screenshots/output, and include visible evidence or blocker. If the developer captures manually, provide exact steps and confirm screenshot/artifact links resolve after updating the PR body. |
+| UI / WinUI | Launch `.\run-app-local.ps1 -Isolated`, exercise the changed path with computer-use or developer-provided screenshots/output, and include visible evidence or blocker. If the developer captures manually, provide exact steps and confirm screenshot/artifact links resolve after updating the PR body. For a repeatable, scripted screenshot/manifest capture instead of manual computer-use, see `.agents/skills/windows-computer-use-proof/SKILL.md`. |
 | Local MCP | Enable **Local MCP Server**, run `winnode --list-tools`, then invoke the changed command with `winnode --command <name> --params '<json-object>'`. |
 | Raw MCP HTTP | For protocol/server-shape changes, paste JSON-RPC `tools/list` and `tools/call` responses from `http://127.0.0.1:8765/`. |
 | Gateway path | When relevant and available, prove `openclaw nodes invoke --command <name> --params '<json-object>'`; otherwise state the gateway blocker. |
