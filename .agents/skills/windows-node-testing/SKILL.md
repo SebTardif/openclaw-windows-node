@@ -248,6 +248,11 @@ lease-id capture and cleanup. Missing elevation, RBAC, image preparation, or
 lease proof is an external blocker, never a reason to weaken ownership or
 success-shape separate component evidence.
 
+If `Checkpoint-VM` returned before an exact fixed-name snapshot became visible,
+do not issue ad hoc checkpoint commands. Route pending-intent or the narrowly
+documented completed-unattended markerless state through the Hyper-V skill's
+Prepare-only `-RecoverPendingCheckpoint -ConfirmOwnedAction` procedure.
+
 Fresh unattended Hyper-V `Create` requires `-GenerateCredential`, verifies the
 official ISO SHA256, builds a separate answer ISO with Windows IMAPI2, and
 mounts and validates that ISO before any VM or VHD creation. It then waits a

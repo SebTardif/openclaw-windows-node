@@ -298,31 +298,40 @@ public sealed class CleanWindowsRunnerScriptTests
     }
 
     [Fact]
-    public void HyperVRecoveryDocs_ResumeOnlyTheOwnedInstalledRunningPartialState()
+    public void HyperVRecoveryDocs_UseTypedRecoveryForCompletedMarkerlessCheckpoint()
     {
         var docs = File.ReadAllText(Path.Combine(Root, "docs", "CLEAN_WINDOWS_RUNNERS.md"));
         var skill = File.ReadAllText(
             Path.Combine(Root, ".agents", "skills", "openclaw-hyperv-smoke", "SKILL.md"));
-        var exactCommand =
-            @".\scripts\clean-windows\Invoke-CleanWindowsHyperV.ps1 -Command Create -ResumeUnattended -VMName 'OpenClaw-Clean-Windows' -OwnerId 'openclaw-clean-runner-bkudiess' -VhdPath 'D:\Hyper-V\OpenClaw-Clean-Windows\os.vhdx' -ConfirmOwnedAction";
+        var routing = File.ReadAllText(
+            Path.Combine(Root, ".agents", "skills", "windows-node-testing", "SKILL.md"));
+        var exactResumeCommand =
+            @"$createResult = .\scripts\clean-windows\Invoke-CleanWindowsHyperV.ps1 -Command Create -ResumeUnattended -VMName 'OpenClaw-Clean-Windows' -OwnerId 'openclaw-clean-runner-bkudiess' -VhdPath 'D:\Hyper-V\OpenClaw-Clean-Windows\os.vhdx' -ConfirmOwnedAction";
+        var exactPrepareCommand =
+            @".\scripts\clean-windows\Invoke-CleanWindowsHyperV.ps1 -Command Prepare -VMName 'OpenClaw-Clean-Windows' -OwnerId 'openclaw-clean-runner-bkudiess' -VhdPath 'D:\Hyper-V\OpenClaw-Clean-Windows\os.vhdx' -CredentialPath $credentialPath -RecoverPendingCheckpoint -ConfirmOwnedAction";
 
         foreach (var guidance in new[] { docs, skill })
         {
-            Assert.Contains(exactCommand, guidance);
-            Assert.Contains("installed, Running owned VM", guidance);
-            Assert.Contains("`powershell-direct-ready`", guidance);
-            Assert.Contains("both DVD", guidance);
-            Assert.Contains("already null", guidance);
-            Assert.Contains("setup DPAPI credential", guidance);
-            Assert.Contains("final rotated credential", guidance);
-            Assert.Contains("Resume", guidance);
-            Assert.Contains("only", guidance);
+            Assert.Contains(exactResumeCommand, guidance);
+            Assert.Contains("$credentialPath = $createResult.CredentialPath", guidance);
+            Assert.Contains(exactPrepareCommand, guidance);
+            Assert.Contains("completed unattended", guidance, StringComparison.OrdinalIgnoreCase);
+            Assert.Contains("final rotated", guidance);
+            Assert.Contains("marker", guidance);
+            Assert.Contains("exact", guidance);
+            Assert.Contains("creation time", guidance);
+            Assert.Contains("without", guidance);
+            Assert.Contains("delet", guidance);
+            Assert.Contains("continues", guidance);
             Assert.Contains("Do not use `-CleanupUnattend`", guidance);
             Assert.Contains("reinstall", guidance);
             Assert.Contains("delete", guidance);
-            Assert.Contains("exact", guidance);
-            Assert.Contains("old setup credential rejection", guidance);
+            Assert.Contains("ad hoc", guidance);
+            Assert.Contains("snapshot", guidance);
         }
+        Assert.Contains("-RecoverPendingCheckpoint -ConfirmOwnedAction", routing);
+        Assert.Contains("Prepare-only", routing);
+        Assert.Contains("do not issue ad hoc checkpoint commands", routing);
     }
 
     [Fact]
@@ -359,6 +368,398 @@ public sealed class CleanWindowsRunnerScriptTests
         Assert.Contains("cleanupCompleted", script);
         Assert.Contains("finally {", script);
         Assert.Contains("Restore-OwnedCheckpoint -ResolvedVhdPath $ResolvedVhdPath", script);
+    }
+
+    [Fact]
+    public void HyperVController_CheckpointCreationWritesPendingIntentBeforeMutationAndFinalizesAfterObservation()
+    {
+        var controller = ReadScript("Invoke-CleanWindowsHyperV.ps1");
+        var helper = ReadScript("CleanWindowsUnattend.psm1");
+        var creation = ExtractPowerShellFunction(
+            controller,
+            "New-OwnedCheckpoint",
+            "Get-UnattendedCompletionProof");
+
+        var pendingIndex = creation.IndexOf("New-PendingCheckpointMarker", StringComparison.Ordinal);
+        var pendingWriteIndex = creation.IndexOf(
+            "Write-MarkerFile -Path $markerPath -Marker $pendingMarker",
+            pendingIndex,
+            StringComparison.Ordinal);
+        var checkpointIndex = creation.IndexOf("Checkpoint-VM", StringComparison.Ordinal);
+        var observationIndex = creation.IndexOf(
+            "Wait-ForOwnedCheckpointObservation",
+            checkpointIndex,
+            StringComparison.Ordinal);
+        var completeIndex = creation.IndexOf(
+            "New-CompletedCheckpointMarker",
+            observationIndex,
+            StringComparison.Ordinal);
+        var completeWriteIndex = creation.IndexOf(
+            "Write-MarkerFile -Path $markerPath -Marker $completedMarker",
+            completeIndex,
+            StringComparison.Ordinal);
+
+        Assert.Contains(
+            "$script:CheckpointMarkerSchema = \"openclaw.clean-windows.checkpoint-owner/v2\"",
+            controller);
+        Assert.Contains("status = \"pending\"", controller);
+        Assert.Contains("operationNonce = $nonce", controller);
+        Assert.Contains("creationStartedUtc = $startedUtc", controller);
+        Assert.True(pendingIndex >= 0);
+        Assert.True(pendingWriteIndex > pendingIndex);
+        Assert.True(checkpointIndex > pendingWriteIndex);
+        Assert.True(observationIndex > checkpointIndex);
+        Assert.True(completeIndex > observationIndex);
+        Assert.True(completeWriteIndex > completeIndex);
+        Assert.Contains("The pending intent remains", creation);
+        Assert.DoesNotContain("Remove-Item", creation, StringComparison.Ordinal);
+        Assert.Contains(
+            "[IO.File]::Replace($temporaryPath, $resolvedPath, [NullString]::Value)",
+            helper);
+        Assert.Contains("[IO.File]::Move($temporaryPath, $resolvedPath)", helper);
+        Assert.Contains("Set-CleanWindowsRestrictiveAcl -Path $temporaryPath", helper);
+        Assert.Contains("Assert-CleanWindowsRestrictiveAcl -Path $temporaryPath", helper);
+        Assert.Contains("Assert-CleanWindowsRestrictiveAcl -Path $resolvedOwnedRoot", helper);
+    }
+
+    [Theory]
+    [InlineData("powershell.exe", "Desktop")]
+    [InlineData("pwsh.exe", "Core")]
+    public void OwnedJsonWriter_ReplacesPendingMarkerWithCompleteMarkerInRealShell(
+        string shell,
+        string expectedEdition)
+    {
+        var ownedRoot = Path.Combine(
+            Root,
+            "TestResults",
+            $"owned-json-writer-{Guid.NewGuid():N}");
+        try
+        {
+            var result = RunOwnedJsonWriterProof(shell, ownedRoot);
+
+            AssertPowerShellProofSucceeded(result);
+            var jsonLine = result.Stdout
+                .Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries)
+                .Last();
+            using var proof = JsonDocument.Parse(jsonLine);
+            var root = proof.RootElement;
+            Assert.Equal(expectedEdition, root.GetProperty("edition").GetString());
+            Assert.Equal("pending", root.GetProperty("firstStatus").GetString());
+            Assert.Equal("complete", root.GetProperty("secondStatus").GetString());
+            Assert.Equal(2, root.GetProperty("generation").GetInt32());
+            Assert.True(root.GetProperty("directoryAclVerified").GetBoolean());
+            Assert.True(root.GetProperty("fileAclVerified").GetBoolean());
+            Assert.Equal(0, root.GetProperty("temporaryFileCount").GetInt32());
+            Assert.True(root.GetProperty("targetExistedBeforeCleanup").GetBoolean());
+            Assert.False(Directory.Exists(ownedRoot));
+        }
+        finally
+        {
+            if (Directory.Exists(ownedRoot))
+            {
+                Directory.Delete(ownedRoot, recursive: true);
+            }
+        }
+    }
+
+    [Fact]
+    public void HyperVController_TransactionalCheckpointMarkerBindsExactObservedIdentity()
+    {
+        var result = RunPowerShellCommand(BuildCheckpointMarkerProof());
+
+        AssertPowerShellProofSucceeded(result);
+        using var document = JsonDocument.Parse(result.Stdout);
+        var marker = document.RootElement;
+        Assert.Equal("openclaw.clean-windows.checkpoint-owner/v2", marker.GetProperty("schema").GetString());
+        Assert.Equal("complete", marker.GetProperty("status").GetString());
+        Assert.Equal("clean-windows", marker.GetProperty("checkpointName").GetString());
+        Assert.Equal("owner", marker.GetProperty("ownerId").GetString());
+        Assert.Equal(
+            "11111111-1111-1111-1111-111111111111",
+            marker.GetProperty("vmId").GetString());
+        Assert.Equal(
+            "22222222-2222-2222-2222-222222222222",
+            marker.GetProperty("snapshotId").GetString());
+        Assert.True(marker.TryGetProperty("operationNonce", out _));
+        Assert.True(marker.TryGetProperty("creationStartedUtc", out _));
+        Assert.True(marker.TryGetProperty("snapshotCreationTimeUtc", out _));
+    }
+
+    [Theory]
+    [InlineData(
+        "$script:getCall++; return @($snapshot)",
+        "1")]
+    [InlineData(
+        "$script:getCall++; if ($script:getCall -lt 3) { return @() }; return @($snapshot)",
+        "3")]
+    public void HyperVController_CheckpointObservationAcceptsImmediateAndDelayedAppearance(
+        string getSnapshotBody,
+        string expectedCalls)
+    {
+        var proof = BuildCheckpointObservationProof(
+            getSnapshotBody,
+            """
+            $result = Wait-ForOwnedCheckpointObservation `
+                -OwnedCheckpointName 'clean-windows' `
+                -VmObject $vm `
+                -TimeoutSec 1 `
+                -PollIntervalMilliseconds 10
+            [Console]::Out.Write("$script:getCall|$($result.Id)")
+            """);
+
+        var result = RunPowerShellCommand(proof);
+
+        AssertPowerShellProofSucceeded(result);
+        Assert.Equal($"{expectedCalls}|22222222-2222-2222-2222-222222222222", result.Stdout);
+    }
+
+    [Fact]
+    public void HyperVController_CheckpointObservationRejectsDuplicatesImmediately()
+    {
+        var proof = BuildCheckpointObservationProof(
+            "$script:getCall++; return @($snapshot, $snapshot)",
+            """
+            try {
+                Wait-ForOwnedCheckpointObservation `
+                    -OwnedCheckpointName 'clean-windows' `
+                    -VmObject $vm `
+                    -TimeoutSec 1 `
+                    -PollIntervalMilliseconds 10 | Out-Null
+                throw 'Expected duplicate refusal.'
+            } catch {
+                [Console]::Out.Write("$script:getCall|$($_.Exception.Message)")
+            }
+            """);
+
+        var result = RunPowerShellCommand(proof);
+
+        AssertPowerShellProofSucceeded(result);
+        Assert.StartsWith("1|", result.Stdout, StringComparison.Ordinal);
+        Assert.Contains("multiple checkpoints named 'clean-windows'", result.Stdout);
+    }
+
+    [Fact]
+    public void HyperVController_CheckpointCreationFinalizesOnlyAfterObservedSnapshot()
+    {
+        var result = RunPowerShellCommand(BuildCheckpointCreationProof(observationFails: false));
+
+        AssertPowerShellProofSucceeded(result);
+        Assert.Equal(
+            "pending,write:pending,checkpoint,observe,finalize,assert:complete,write:complete|complete",
+            result.Stdout);
+    }
+
+    [Fact]
+    public void HyperVController_CheckpointTimeoutRetainsPendingIntent()
+    {
+        var result = RunPowerShellCommand(BuildCheckpointCreationProof(observationFails: true));
+
+        AssertPowerShellProofSucceeded(result);
+        Assert.StartsWith(
+            "pending,write:pending,checkpoint,observe|pending|",
+            result.Stdout,
+            StringComparison.Ordinal);
+        Assert.Contains("pending intent remains", result.Stdout, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("write:complete", result.Stdout, StringComparison.Ordinal);
+        Assert.DoesNotContain(
+            "finalize",
+            result.Stdout.Split('|')[0],
+            StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("Duplicate", "duplicate checkpoints named 'clean-windows'")]
+    [InlineData("WrongName", "another checkpoint name")]
+    [InlineData("WrongVm", "exact owned VM id")]
+    [InlineData("BeforeCompletion", "predates completed unattended installation")]
+    [InlineData("OutsideLegacyWindow", "outside the conservative recovery window")]
+    [InlineData("OutsidePendingWindow", "outside the pending operation window")]
+    public void HyperVController_CheckpointRecoveryCandidateRefusesAmbiguousIdentityOrTime(
+        string scenario,
+        string expectedError)
+    {
+        var result = RunPowerShellCommand(BuildCheckpointRecoveryCandidateProof(scenario));
+
+        AssertPowerShellProofSucceeded(result);
+        Assert.Contains(expectedError, result.Stdout, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void HyperVController_EmptyCheckpointRecoveryCollectionEmitsDomainErrorWithoutMutation()
+    {
+        var result = RunPowerShellCommand(BuildCheckpointRecoveryCandidateProof("Empty"));
+        var controller = ReadScript("Invoke-CleanWindowsHyperV.ps1");
+        var candidate = ExtractPowerShellFunction(
+            controller,
+            "Get-RecoverableCheckpointCandidate",
+            "Recover-PendingOwnedCheckpoint");
+
+        AssertPowerShellProofSucceeded(result);
+        Assert.Equal(
+            "Checkpoint recovery requires exactly one checkpoint named 'clean-windows'.|pending|unchanged|0",
+            result.Stdout);
+        Assert.Contains("[AllowEmptyCollection()]", candidate);
+        Assert.DoesNotContain("Checkpoint-VM", candidate, StringComparison.Ordinal);
+        Assert.DoesNotContain("Remove-VMSnapshot", candidate, StringComparison.Ordinal);
+        Assert.DoesNotContain("Restore-VMSnapshot", candidate, StringComparison.Ordinal);
+        Assert.DoesNotContain("Write-MarkerFile", candidate, StringComparison.Ordinal);
+        Assert.DoesNotContain("$Marker.status =", candidate, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void HyperVController_CheckpointRecoveryRequiresAllOwnershipAndCompletionGates()
+    {
+        var controller = ReadScript("Invoke-CleanWindowsHyperV.ps1");
+        var prepare = ExtractPowerShellFunction(
+            controller,
+            "Invoke-PrepareCommand",
+            "Invoke-VerifyCommand");
+        var recovery = ExtractPowerShellFunction(
+            controller,
+            "Recover-PendingOwnedCheckpoint",
+            "Wait-ForVmState");
+        var completionProof = ExtractPowerShellFunction(
+            controller,
+            "Get-UnattendedCompletionProof",
+            "Get-RecoverableCheckpointCandidate");
+
+        var ownerIndex = prepare.IndexOf("Assert-OwnedVM", StringComparison.Ordinal);
+        var credentialIndex = prepare.IndexOf("Resolve-OperationCredential", StringComparison.Ordinal);
+        var recoveryIndex = prepare.IndexOf("Recover-PendingOwnedCheckpoint", StringComparison.Ordinal);
+        var cleanLookupIndex = prepare.IndexOf(
+            "Get-SingleCheckpoint -OwnedCheckpointName $script:CleanCheckpointName",
+            recoveryIndex,
+            StringComparison.Ordinal);
+        var newCleanIndex = prepare.IndexOf(
+            "New-OwnedCheckpoint",
+            cleanLookupIndex,
+            StringComparison.Ordinal);
+        var preparedRemovalIndex = prepare.IndexOf(
+            "Remove-OwnedCheckpointIfPresent",
+            newCleanIndex,
+            StringComparison.Ordinal);
+
+        Assert.True(ownerIndex >= 0);
+        Assert.True(credentialIndex > ownerIndex);
+        Assert.True(recoveryIndex > credentialIndex);
+        Assert.True(cleanLookupIndex > recoveryIndex);
+        Assert.True(newCleanIndex > cleanLookupIndex);
+        Assert.True(preparedRemovalIndex > newCleanIndex);
+        Assert.Contains("if ($RecoverPendingCheckpoint)", prepare);
+        Assert.Contains("Read-OwnedUnattendState", recovery);
+        Assert.Contains("Assert-UnattendStateMatchesVmMarker", recovery);
+        Assert.Contains("Get-UnattendedCompletionProof", recovery);
+        Assert.Contains("-CredentialPath $paths.FinalCredentialPath", recovery);
+        Assert.Contains("-ExpectedKind \"final\"", recovery);
+        Assert.Contains("Get-RecoverableCheckpointCandidate", recovery);
+        Assert.Contains("legacy-markerless-completed-unattended", recovery);
+        Assert.Contains("already has a finalized ownership marker", recovery);
+        Assert.Contains("Checkpoint recovery requires unattended state status 'complete'", completionProof);
+        Assert.Contains("completedUtc", completionProof);
+        Assert.Contains("LastWriteTimeUtc", completionProof);
+        Assert.DoesNotContain("Checkpoint-VM", recovery, StringComparison.Ordinal);
+        Assert.DoesNotContain("Remove-VMSnapshot", recovery, StringComparison.Ordinal);
+        Assert.DoesNotContain("Remove-OwnedCheckpointIfPresent", recovery, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void HyperVController_MarkerlessRecoveryFinalizesWithoutSnapshotMutation()
+    {
+        var result = RunPowerShellCommand(BuildMarkerlessCheckpointRecoveryProof());
+
+        AssertPowerShellProofSucceeded(result);
+        Assert.Equal(
+            "confirm,paths,state,bind,completion,credential,read-marker,snapshots,candidate,pending,complete,assert,write,info|complete|legacy-markerless-completed-unattended",
+            result.Stdout);
+    }
+
+    [Fact]
+    public void HyperVController_LegacyCompletedResumePreservesOriginalCompletionBound()
+    {
+        var controller = ReadScript("Invoke-CleanWindowsHyperV.ps1");
+        var setStatus = ExtractPowerShellFunction(
+            controller,
+            "Set-UnattendStateStatus",
+            "Assert-WindowsIsoHash");
+        var proof = string.Concat(
+            "$ErrorActionPreference = 'Stop'\n",
+            "$state = [pscustomobject]@{ status = 'complete'; updatedUtc = '2026-07-27T08:00:00Z' }\n",
+            "$paths = [pscustomobject]@{ StatePath = 'C:\\owned\\unattend.owner.json' }\n",
+            "function Get-UnattendedCompletionProof { param([object]$State, [string]$StatePath) return [pscustomobject]@{ CompletionUtc = [DateTime]'2026-07-27T08:00:01Z' } }\n",
+            "function Write-UnattendState { param([object]$State, [object]$Paths) }\n",
+            setStatus,
+            "\nSet-UnattendStateStatus -State $state -Paths $paths -Status 'complete'\n",
+            "[Console]::Out.Write($state.completedUtc)\n");
+
+        var result = RunPowerShellCommand(proof);
+
+        AssertPowerShellProofSucceeded(result);
+        Assert.Equal(
+            DateTimeOffset.Parse("2026-07-27T08:00:01Z").UtcDateTime,
+            DateTimeOffset.Parse(result.Stdout).UtcDateTime);
+        Assert.Contains(
+            "$updatedUtc -lt $completedUtc.AddSeconds(-$script:CheckpointRecoveryClockSkewSec)",
+            controller);
+        Assert.Contains(
+            "$completionUtc = if ($stateFileUtc -gt $updatedUtc)",
+            controller);
+    }
+
+    [Fact]
+    public void HyperVController_PendingMarkersNeverAuthorizeCheckpointRemovalOrRestore()
+    {
+        var controller = ReadScript("Invoke-CleanWindowsHyperV.ps1");
+        var assertion = ExtractPowerShellFunction(
+            controller,
+            "Assert-OwnedCheckpoint",
+            "Remove-OwnedCheckpointIfPresent");
+        var removal = ExtractPowerShellFunction(
+            controller,
+            "Remove-OwnedCheckpointIfPresent",
+            "New-OwnedCheckpoint");
+        var restore = ExtractPowerShellFunction(
+            controller,
+            "Restore-OwnedCheckpoint",
+            "Open-GuestSession");
+
+        Assert.Contains("Assert-FinalizedCheckpointMarkerMatches", assertion);
+        Assert.Contains("-ExpectedStatus \"complete\"", controller);
+        Assert.True(
+            removal.IndexOf("Assert-OwnedCheckpoint", StringComparison.Ordinal) <
+            removal.IndexOf("Remove-VMSnapshot", StringComparison.Ordinal));
+        Assert.True(
+            restore.IndexOf("Assert-OwnedCheckpoint", StringComparison.Ordinal) <
+            restore.IndexOf("Restore-VMSnapshot", StringComparison.Ordinal));
+        Assert.Contains("Refusing to remove, overwrite, or treat pending state as finalized", removal);
+    }
+
+    [Theory]
+    [InlineData("Create")]
+    [InlineData("Cleanup")]
+    [InlineData("Verify")]
+    [InlineData("Smoke")]
+    [InlineData("Restore")]
+    public void HyperVController_RejectsCheckpointRecoveryOutsidePrepare(string scenario)
+    {
+        var result = RunCheckpointRecoveryParameterContract(scenario, confirmOwnedAction: true);
+
+        Assert.NotEqual(0, result.ExitCode);
+        Assert.Contains(
+            "RecoverPendingCheckpoint is accepted only with -Command Prepare.",
+            result.Stderr);
+        Assert.DoesNotContain("Run this controller from an elevated PowerShell session", result.Stderr);
+    }
+
+    [Fact]
+    public void HyperVController_RequiresConfirmationForCheckpointRecovery()
+    {
+        var result = RunCheckpointRecoveryParameterContract(
+            "Prepare",
+            confirmOwnedAction: false);
+
+        Assert.NotEqual(0, result.ExitCode);
+        Assert.Contains("RecoverPendingCheckpoint requires -ConfirmOwnedAction.", result.Stderr);
+        Assert.DoesNotContain("Run this controller from an elevated PowerShell session", result.Stderr);
     }
 
     [Fact]
@@ -1187,6 +1588,315 @@ public sealed class CleanWindowsRunnerScriptTests
             "\n");
     }
 
+    private static string BuildCheckpointObservationProof(
+        string getSnapshotBody,
+        string testBody)
+    {
+        var controller = ReadScript("Invoke-CleanWindowsHyperV.ps1");
+        var stringEquals = ExtractPowerShellFunction(
+            controller,
+            "Test-StringEquals",
+            "Normalize-SecureBootTemplate");
+        var propertyValue = ExtractPowerShellFunction(
+            controller,
+            "Get-PropertyValueOrNull",
+            "Assert-HyperVPrerequisites");
+        var requiredGuid = ExtractPowerShellFunction(
+            controller,
+            "Get-RequiredGuidString",
+            "New-PendingCheckpointMarker");
+        var snapshotIdentity = ExtractPowerShellFunction(
+            controller,
+            "Assert-CheckpointSnapshotBelongsToVm",
+            "Assert-Version2CheckpointMarkerIntentMatches");
+        var observation = ExtractPowerShellFunction(
+            controller,
+            "Wait-ForOwnedCheckpointObservation",
+            "Assert-OwnedCheckpoint");
+        return string.Concat(
+            "$ErrorActionPreference = 'Stop'\n",
+            "$VMName = 'OpenClaw-Checkpoint-Proof'\n",
+            "$script:getCall = 0\n",
+            "$vm = [pscustomobject]@{ Id = [Guid]'11111111-1111-1111-1111-111111111111'; Name = $VMName }\n",
+            "$snapshot = [pscustomobject]@{ Name = 'clean-windows'; Id = [Guid]'22222222-2222-2222-2222-222222222222'; VMId = $vm.Id; VMName = $VMName; CreationTime = [DateTime]::UtcNow }\n",
+            "function Get-VMSnapshot { param([string]$VMName, [object]$ErrorAction)\n",
+            getSnapshotBody,
+            "\n}\n",
+            "function Start-Sleep { param([int]$Milliseconds) }\n",
+            stringEquals,
+            "\n",
+            propertyValue,
+            "\n",
+            requiredGuid,
+            "\n",
+            snapshotIdentity,
+            "\n",
+            observation,
+            "\n",
+            testBody,
+            "\n");
+    }
+
+    private static string BuildCheckpointMarkerProof()
+    {
+        var controller = ReadScript("Invoke-CleanWindowsHyperV.ps1");
+        var normalize = ExtractPowerShellFunction(
+            controller,
+            "Normalize-ComparisonPath",
+            "Test-StringEquals");
+        var stringEquals = ExtractPowerShellFunction(
+            controller,
+            "Test-StringEquals",
+            "Normalize-SecureBootTemplate");
+        var propertyValue = ExtractPowerShellFunction(
+            controller,
+            "Get-PropertyValueOrNull",
+            "Assert-HyperVPrerequisites");
+        var utcConversion = ExtractPowerShellFunction(
+            controller,
+            "ConvertTo-CheckpointUtc",
+            "Get-RequiredGuidString");
+        var requiredGuid = ExtractPowerShellFunction(
+            controller,
+            "Get-RequiredGuidString",
+            "New-PendingCheckpointMarker");
+        var pending = ExtractPowerShellFunction(
+            controller,
+            "New-PendingCheckpointMarker",
+            "New-CompletedCheckpointMarker");
+        var completed = ExtractPowerShellFunction(
+            controller,
+            "New-CompletedCheckpointMarker",
+            "Write-MarkerFile");
+        var snapshotIdentity = ExtractPowerShellFunction(
+            controller,
+            "Assert-CheckpointSnapshotBelongsToVm",
+            "Assert-Version2CheckpointMarkerIntentMatches");
+        var markerIdentity = ExtractPowerShellFunction(
+            controller,
+            "Assert-Version2CheckpointMarkerIntentMatches",
+            "Assert-FinalizedCheckpointMarkerMatches");
+        var finalizedIdentity = ExtractPowerShellFunction(
+            controller,
+            "Assert-FinalizedCheckpointMarkerMatches",
+            "Get-PrimaryVhdPath");
+        return string.Concat(
+            "$ErrorActionPreference = 'Stop'\n",
+            "$VMName = 'OpenClaw-Checkpoint-Proof'\n",
+            "$script:MarkerSchema = 'openclaw.clean-windows.owner/v1'\n",
+            "$script:CheckpointMarkerSchema = 'openclaw.clean-windows.checkpoint-owner/v2'\n",
+            "$script:CleanCheckpointName = 'clean-windows'\n",
+            "$script:PreparedCheckpointName = 'openclaw-prerequisites'\n",
+            "$script:CheckpointCreationWindowSec = 900\n",
+            "$vm = [pscustomobject]@{ Id = [Guid]'11111111-1111-1111-1111-111111111111'; Name = $VMName }\n",
+            "$snapshot = [pscustomobject]@{ Name = 'clean-windows'; Id = [Guid]'22222222-2222-2222-2222-222222222222'; VMId = $vm.Id; VMName = $VMName; CreationTime = [DateTime]'2026-07-27T08:05:00Z' }\n",
+            "function Assert-OwnerMarkerMatches { throw 'Legacy assertion must not run for a version 2 marker.' }\n",
+            normalize,
+            "\n",
+            stringEquals,
+            "\n",
+            propertyValue,
+            "\n",
+            utcConversion,
+            "\n",
+            requiredGuid,
+            "\n",
+            pending,
+            "\n",
+            completed,
+            "\n",
+            snapshotIdentity,
+            "\n",
+            markerIdentity,
+            "\n",
+            finalizedIdentity,
+            "\n",
+            "$intent = New-PendingCheckpointMarker -ResolvedVhdPath 'C:\\owned\\os.vhdx' -ExpectedOwnerId 'owner' -OwnedCheckpointName 'clean-windows' -VmObject $vm -CreationStartedUtc ([DateTime]'2026-07-27T08:04:00Z') -OperationNonce '33333333-3333-3333-3333-333333333333'\n",
+            "$marker = New-CompletedCheckpointMarker -PendingMarker $intent -SnapshotObject $snapshot\n",
+            "Assert-FinalizedCheckpointMarkerMatches -Marker $marker -ExpectedOwnerId 'owner' -ExpectedVhdPath 'C:\\owned\\os.vhdx' -OwnedCheckpointName 'clean-windows' -VmObject $vm -SnapshotObject $snapshot\n",
+            "[Console]::Out.Write(($marker | ConvertTo-Json -Compress))\n");
+    }
+
+    private static string BuildCheckpointCreationProof(bool observationFails)
+    {
+        var controller = ReadScript("Invoke-CleanWindowsHyperV.ps1");
+        var creation = ExtractPowerShellFunction(
+            controller,
+            "New-OwnedCheckpoint",
+            "Get-UnattendedCompletionProof");
+        var observationBody = observationFails
+            ? "throw 'simulated observation timeout'"
+            : "return $snapshot";
+        return string.Concat(
+            "$ErrorActionPreference = 'Stop'\n",
+            "$VMName = 'OpenClaw-Checkpoint-Proof'\n",
+            "$script:events = New-Object 'Collections.Generic.List[string]'\n",
+            "$script:lastMarker = $null\n",
+            "$vm = [pscustomobject]@{ Id = [Guid]'11111111-1111-1111-1111-111111111111'; Name = $VMName }\n",
+            "$snapshot = [pscustomobject]@{ Name = 'clean-windows'; Id = [Guid]'22222222-2222-2222-2222-222222222222'; VMId = $vm.Id; VMName = $VMName; CreationTime = [DateTime]::UtcNow }\n",
+            "function Assert-ConfirmationForOwnedAction { param([string]$Action) }\n",
+            "function Assert-OwnedVM { param([string]$ResolvedVhdPath, [string]$ExpectedOwnerId) return $vm }\n",
+            "function Remove-OwnedCheckpointIfPresent { param([string]$ResolvedVhdPath, [string]$ExpectedOwnerId, [string]$OwnedCheckpointName) }\n",
+            "function Get-CheckpointMarkerPath { param([string]$ResolvedVhdPath, [string]$OwnedVmName, [string]$OwnedCheckpointName) return 'C:\\owned\\checkpoint.clean-windows.owner.json' }\n",
+            "function Test-Path { param([string]$LiteralPath, [object]$PathType) return $false }\n",
+            "function Get-SingleCheckpoint { param([string]$OwnedCheckpointName) return $null }\n",
+            "function New-PendingCheckpointMarker { param([string]$ResolvedVhdPath, [string]$ExpectedOwnerId, [string]$OwnedCheckpointName, [object]$VmObject) [void]$script:events.Add('pending'); return [pscustomobject]@{ status = 'pending' } }\n",
+            "function Write-MarkerFile { param([string]$Path, [object]$Marker) $script:lastMarker = $Marker; [void]$script:events.Add(\"write:$($Marker.status)\") }\n",
+            "function Write-Step { param([string]$Message) }\n",
+            "function Checkpoint-VM { param([string]$VMName, [string]$SnapshotName, [switch]$Confirm) [void]$script:events.Add('checkpoint') }\n",
+            "function Wait-ForOwnedCheckpointObservation { param([string]$OwnedCheckpointName, [object]$VmObject) [void]$script:events.Add('observe'); ",
+            observationBody,
+            " }\n",
+            "function New-CompletedCheckpointMarker { param([object]$PendingMarker, [object]$SnapshotObject) [void]$script:events.Add('finalize'); return [pscustomobject]@{ status = 'complete' } }\n",
+            "function Read-MarkerFile { param([string]$Path) return $script:lastMarker }\n",
+            "function Assert-FinalizedCheckpointMarkerMatches { param([object]$Marker, [string]$ExpectedOwnerId, [string]$ExpectedVhdPath, [string]$OwnedCheckpointName, [object]$VmObject, [object]$SnapshotObject) [void]$script:events.Add(\"assert:$($Marker.status)\") }\n",
+            creation,
+            "\n",
+            "try {\n",
+            "  New-OwnedCheckpoint -ResolvedVhdPath 'C:\\owned\\os.vhdx' -ExpectedOwnerId 'owner' -OwnedCheckpointName 'clean-windows' | Out-Null\n",
+            "  [Console]::Out.Write(\"$($script:events -join ',')|$($script:lastMarker.status)\")\n",
+            "} catch {\n",
+            "  [Console]::Out.Write(\"$($script:events -join ',')|$($script:lastMarker.status)|$($_.Exception.Message)\")\n",
+            "}\n");
+    }
+
+    private static string BuildCheckpointRecoveryCandidateProof(string scenario)
+    {
+        var controller = ReadScript("Invoke-CleanWindowsHyperV.ps1");
+        var normalize = ExtractPowerShellFunction(
+            controller,
+            "Normalize-ComparisonPath",
+            "Test-StringEquals");
+        var stringEquals = ExtractPowerShellFunction(
+            controller,
+            "Test-StringEquals",
+            "Normalize-SecureBootTemplate");
+        var propertyValue = ExtractPowerShellFunction(
+            controller,
+            "Get-PropertyValueOrNull",
+            "Assert-HyperVPrerequisites");
+        var utcConversion = ExtractPowerShellFunction(
+            controller,
+            "ConvertTo-CheckpointUtc",
+            "Get-RequiredGuidString");
+        var requiredGuid = ExtractPowerShellFunction(
+            controller,
+            "Get-RequiredGuidString",
+            "New-PendingCheckpointMarker");
+        var snapshotIdentity = ExtractPowerShellFunction(
+            controller,
+            "Assert-CheckpointSnapshotBelongsToVm",
+            "Assert-Version2CheckpointMarkerIntentMatches");
+        var markerIdentity = ExtractPowerShellFunction(
+            controller,
+            "Assert-Version2CheckpointMarkerIntentMatches",
+            "Assert-FinalizedCheckpointMarkerMatches");
+        var candidate = ExtractPowerShellFunction(
+            controller,
+            "Get-RecoverableCheckpointCandidate",
+            "Recover-PendingOwnedCheckpoint");
+        var scenarioSetup = scenario switch
+        {
+            "Empty" =>
+                "$marker = [pscustomobject]@{ status = 'pending'; sentinel = 'unchanged' }; $snapshots = @()\n",
+            "Duplicate" => "$snapshots = @($snapshot, $snapshot)\n",
+            "WrongName" => "$snapshot.Name = 'not-clean-windows'; $snapshots = @($snapshot)\n",
+            "WrongVm" => "$snapshot.VMId = [Guid]'99999999-9999-9999-9999-999999999999'\n",
+            "BeforeCompletion" => "$snapshot.CreationTime = [DateTime]'2026-07-27T07:59:00Z'\n",
+            "OutsideLegacyWindow" =>
+                "$snapshot.CreationTime = [DateTime]'2026-07-27T15:00:00Z'; $now = [DateTime]'2026-07-27T16:00:00Z'\n",
+            "OutsidePendingWindow" =>
+                "$marker = [pscustomobject]@{ schema = $script:CheckpointMarkerSchema; status = 'pending'; resourceType = 'checkpoint'; resourceName = 'clean-windows'; checkpointName = 'clean-windows'; ownerId = 'owner'; vmName = $VMName; vmId = [string]$vm.Id; vhdPath = 'C:\\owned\\os.vhdx'; operationNonce = '33333333-3333-3333-3333-333333333333'; creationStartedUtc = '2026-07-27T08:04:00Z' }; $snapshot.CreationTime = [DateTime]'2026-07-27T08:20:00Z'\n",
+            _ => throw new ArgumentOutOfRangeException(nameof(scenario)),
+        };
+        var failureOutput = scenario == "Empty"
+            ? "[Console]::Out.Write(\"$($_.Exception.Message)|$($marker.status)|$($marker.sentinel)|$script:mutationCount\")\n"
+            : "[Console]::Out.Write($_.Exception.Message)\n";
+        return string.Concat(
+            "$ErrorActionPreference = 'Stop'\n",
+            "$VMName = 'OpenClaw-Checkpoint-Proof'\n",
+            "$script:CheckpointMarkerSchema = 'openclaw.clean-windows.checkpoint-owner/v2'\n",
+            "$script:CheckpointRecoveryClockSkewSec = 300\n",
+            "$script:LegacyCheckpointRecoveryWindowSec = 21600\n",
+            "$script:CheckpointCreationWindowSec = 900\n",
+            "$vm = [pscustomobject]@{ Id = [Guid]'11111111-1111-1111-1111-111111111111'; Name = $VMName }\n",
+            "$snapshot = [pscustomobject]@{ Name = 'clean-windows'; Id = [Guid]'22222222-2222-2222-2222-222222222222'; VMId = $vm.Id; VMName = $VMName; CreationTime = [DateTime]'2026-07-27T08:05:00Z' }\n",
+            "$snapshots = @($snapshot)\n",
+            "$marker = $null\n",
+            "$completion = [DateTime]'2026-07-27T08:00:00Z'\n",
+            "$now = [DateTime]'2026-07-27T09:00:00Z'\n",
+            "$script:mutationCount = 0\n",
+            "function Checkpoint-VM { $script:mutationCount++ }\n",
+            "function Remove-VMSnapshot { $script:mutationCount++ }\n",
+            "function Restore-VMSnapshot { $script:mutationCount++ }\n",
+            "function Write-MarkerFile { $script:mutationCount++ }\n",
+            scenarioSetup,
+            normalize,
+            "\n",
+            stringEquals,
+            "\n",
+            propertyValue,
+            "\n",
+            utcConversion,
+            "\n",
+            requiredGuid,
+            "\n",
+            snapshotIdentity,
+            "\n",
+            markerIdentity,
+            "\n",
+            candidate,
+            "\n",
+            "try {\n",
+            "  Get-RecoverableCheckpointCandidate -Snapshots $snapshots -Marker $marker -VmObject $vm -ResolvedVhdPath 'C:\\owned\\os.vhdx' -ExpectedOwnerId 'owner' -OwnedCheckpointName 'clean-windows' -UnattendedCompletionUtc $completion -NowUtc $now | Out-Null\n",
+            "  [Console]::Out.Write('unexpected-success')\n",
+            "} catch {\n",
+            "  ",
+            failureOutput,
+            "}\n");
+    }
+
+    private static string BuildMarkerlessCheckpointRecoveryProof()
+    {
+        var controller = ReadScript("Invoke-CleanWindowsHyperV.ps1");
+        var recovery = ExtractPowerShellFunction(
+            controller,
+            "Recover-PendingOwnedCheckpoint",
+            "Wait-ForVmState");
+        return string.Concat(
+            "$ErrorActionPreference = 'Stop'\n",
+            "$VMName = 'OpenClaw-Checkpoint-Proof'\n",
+            "$script:MarkerSchema = 'openclaw.clean-windows.owner/v1'\n",
+            "$script:CheckpointMarkerSchema = 'openclaw.clean-windows.checkpoint-owner/v2'\n",
+            "$script:CleanCheckpointName = 'clean-windows'\n",
+            "$script:events = New-Object 'Collections.Generic.List[string]'\n",
+            "$script:lastMarker = $null\n",
+            "$vm = [pscustomobject]@{ Id = [Guid]'11111111-1111-1111-1111-111111111111'; Name = $VMName }\n",
+            "$snapshot = [pscustomobject]@{ Name = 'clean-windows'; Id = [Guid]'22222222-2222-2222-2222-222222222222'; VMId = $vm.Id; VMName = $VMName; CreationTime = [DateTime]'2026-07-27T08:05:00Z' }\n",
+            "function Get-PropertyValueOrNull { param([object]$Object, [string]$Name) $property = $Object.PSObject.Properties[$Name]; if ($null -eq $property) { return $null }; return $property.Value }\n",
+            "function ConvertTo-CheckpointUtc { param([object]$Value, [string]$Label) return ([DateTime]$Value).ToUniversalTime() }\n",
+            "function Assert-ConfirmationForOwnedAction { param([string]$Action) [void]$script:events.Add('confirm') }\n",
+            "function Get-UnattendPaths { param([string]$ResolvedVhdPath) [void]$script:events.Add('paths'); return [pscustomobject]@{ StatePath = 'C:\\owned\\unattend.owner.json'; FinalCredentialPath = 'C:\\owned\\credentials\\guest.clixml'; FinalCredentialMetadataPath = 'C:\\owned\\credentials\\guest.owner.json'; OwnedRoot = 'C:\\owned' } }\n",
+            "function Read-OwnedUnattendState { param([string]$ResolvedVhdPath, [object]$Paths) [void]$script:events.Add('state'); return [pscustomobject]@{ status = 'complete'; guestAdministratorName = 'OpenClawAdmin' } }\n",
+            "function Assert-UnattendStateMatchesVmMarker { param([object]$State, [object]$VmObject) [void]$script:events.Add('bind') }\n",
+            "function Get-UnattendedCompletionProof { param([object]$State, [string]$StatePath) [void]$script:events.Add('completion'); return [pscustomobject]@{ CompletionUtc = [DateTime]'2026-07-27T08:00:00Z' } }\n",
+            "function Import-CleanWindowsCredential { param([string]$CredentialPath, [string]$MetadataPath, [string]$OwnedRoot, [string]$VMName, [string]$OwnerId, [string]$ExpectedKind) [void]$script:events.Add('credential'); return [pscustomobject]@{ UserName = 'OpenClawAdmin' } }\n",
+            "function Get-CheckpointMarkerPath { param([string]$ResolvedVhdPath, [string]$OwnedVmName, [string]$OwnedCheckpointName) return 'C:\\owned\\checkpoint.clean-windows.owner.json' }\n",
+            "function Read-MarkerFile { param([string]$Path) [void]$script:events.Add('read-marker'); return $null }\n",
+            "function Get-VMSnapshot { param([string]$VMName, [object]$ErrorAction) [void]$script:events.Add('snapshots'); return $snapshot }\n",
+            "function Get-RecoverableCheckpointCandidate { param([object[]]$Snapshots, [object]$Marker, [object]$VmObject, [string]$ResolvedVhdPath, [string]$ExpectedOwnerId, [string]$OwnedCheckpointName, [DateTime]$UnattendedCompletionUtc) [void]$script:events.Add('candidate'); return $snapshot }\n",
+            "function New-PendingCheckpointMarker { param([string]$ResolvedVhdPath, [string]$ExpectedOwnerId, [string]$OwnedCheckpointName, [object]$VmObject, [DateTime]$CreationStartedUtc) [void]$script:events.Add('pending'); return [pscustomobject]@{ status = 'pending' } }\n",
+            "function New-CompletedCheckpointMarker { param([object]$PendingMarker, [object]$SnapshotObject) [void]$script:events.Add('complete'); return [pscustomobject]@{ status = 'complete'; recoveryKind = $PendingMarker.recoveryKind } }\n",
+            "function Assert-FinalizedCheckpointMarkerMatches { param([object]$Marker, [string]$ExpectedOwnerId, [string]$ExpectedVhdPath, [string]$OwnedCheckpointName, [object]$VmObject, [object]$SnapshotObject) [void]$script:events.Add('assert') }\n",
+            "function Write-MarkerFile { param([string]$Path, [object]$Marker) $script:lastMarker = $Marker; [void]$script:events.Add('write') }\n",
+            "function Write-InfoLine { param([string]$Message) [void]$script:events.Add('info') }\n",
+            "function Assert-OwnedCheckpoint { throw 'Finalized-marker idempotency branch was not expected.' }\n",
+            recovery,
+            "\n",
+            "Recover-PendingOwnedCheckpoint -ResolvedVhdPath 'C:\\owned\\os.vhdx' -ExpectedOwnerId 'owner' -VmObject $vm | Out-Null\n",
+            "[Console]::Out.Write(\"$($script:events -join ',')|$($script:lastMarker.status)|$($script:lastMarker.recoveryKind)\")\n");
+    }
+
     private static string ExtractPowerShellFunction(
         string script,
         string functionName,
@@ -1323,6 +2033,71 @@ public sealed class CleanWindowsRunnerScriptTests
         return new ProcessResult(process.ExitCode, stdout, stderr);
     }
 
+    private static ProcessResult RunCheckpointRecoveryParameterContract(
+        string scenario,
+        bool confirmOwnedAction)
+    {
+        var script = Path.Combine(
+            Root,
+            "scripts",
+            "clean-windows",
+            "Invoke-CleanWindowsHyperV.ps1");
+        var command = scenario == "Cleanup" ? "Create" : scenario;
+        var startInfo = new ProcessStartInfo
+        {
+            FileName = "powershell.exe",
+            UseShellExecute = false,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            CreateNoWindow = true,
+        };
+        var arguments = new List<string>
+        {
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            script,
+            "-Command",
+            command,
+            "-VMName",
+            "OpenClaw-Recovery-Parameter-Contract",
+            "-OwnerId",
+            "openclaw-recovery-parameter-contract",
+            "-VhdPath",
+            Path.Combine(Root, "TestResults", "recovery-parameter-contract.vhdx"),
+            "-RecoverPendingCheckpoint",
+        };
+        if (scenario is "Prepare" or "Verify" or "Smoke")
+        {
+            arguments.Add("-CredentialPath");
+            arguments.Add(Path.Combine(Root, "TestResults", "missing-guest.clixml"));
+        }
+        if (scenario == "Cleanup")
+        {
+            arguments.Add("-CleanupUnattend");
+        }
+        if (confirmOwnedAction)
+        {
+            arguments.Add("-ConfirmOwnedAction");
+        }
+        foreach (var argument in arguments)
+        {
+            startInfo.ArgumentList.Add(argument);
+        }
+
+        using var process = Process.Start(startInfo)
+            ?? throw new InvalidOperationException("Failed to start checkpoint recovery parameter validation.");
+        var stdout = process.StandardOutput.ReadToEnd();
+        var stderr = process.StandardError.ReadToEnd();
+        if (!process.WaitForExit(30_000))
+        {
+            process.Kill(entireProcessTree: true);
+            throw new TimeoutException("Checkpoint recovery parameter validation exceeded 30 seconds.");
+        }
+        return new ProcessResult(process.ExitCode, stdout, stderr);
+    }
+
     private static ProcessResult RunPowerShellCommand(string command)
     {
         var startInfo = new ProcessStartInfo
@@ -1346,6 +2121,140 @@ public sealed class CleanWindowsRunnerScriptTests
         {
             process.Kill(entireProcessTree: true);
             throw new TimeoutException("PowerShell command exceeded 30 seconds.");
+        }
+        return new ProcessResult(process.ExitCode, stdout, stderr);
+    }
+
+    private static ProcessResult RunOwnedJsonWriterProof(string shell, string ownedRoot)
+    {
+        var modulePath = Path.Combine(
+            Root,
+            "scripts",
+            "clean-windows",
+            "CleanWindowsUnattend.psm1");
+        const string command =
+            """
+            $ErrorActionPreference = 'Stop'
+            $modulePath = $env:OPENCLAW_OWNED_JSON_MODULE
+            $ownedRoot = $env:OPENCLAW_OWNED_JSON_ROOT
+            $target = Join-Path $ownedRoot 'checkpoint.clean-windows.owner.json'
+            try {
+                Import-Module -Name $modulePath -Force -ErrorAction Stop
+                $pending = [pscustomobject][ordered]@{
+                    schema = 'openclaw.clean-windows.checkpoint-owner/v2'
+                    status = 'pending'
+                    operationNonce = '33333333-3333-3333-3333-333333333333'
+                    generation = 1
+                    pendingOnly = 'first-write'
+                }
+                $complete = [pscustomobject][ordered]@{
+                    schema = 'openclaw.clean-windows.checkpoint-owner/v2'
+                    status = 'complete'
+                    operationNonce = '33333333-3333-3333-3333-333333333333'
+                    generation = 2
+                    snapshotId = '22222222-2222-2222-2222-222222222222'
+                }
+
+                Write-CleanWindowsOwnedJsonFile `
+                    -Path $target `
+                    -OwnedRoot $ownedRoot `
+                    -Value $pending | Out-Null
+                $first = Get-Content -LiteralPath $target -Raw | ConvertFrom-Json
+                if ([string]$first.status -cne 'pending' -or [int]$first.generation -ne 1) {
+                    throw 'First owned JSON write did not persist the pending marker.'
+                }
+
+                Write-CleanWindowsOwnedJsonFile `
+                    -Path $target `
+                    -OwnedRoot $ownedRoot `
+                    -Value $complete | Out-Null
+                $second = Get-Content -LiteralPath $target -Raw | ConvertFrom-Json
+                if (
+                    [string]$second.status -cne 'complete' -or
+                    [int]$second.generation -ne 2 -or
+                    [string]$second.snapshotId -cne '22222222-2222-2222-2222-222222222222' -or
+                    $null -ne $second.PSObject.Properties['pendingOnly']
+                ) {
+                    throw 'Second owned JSON write did not atomically replace the pending marker.'
+                }
+
+                $loadedModule = @(
+                    Get-Module |
+                        Where-Object {
+                            [string]::Equals(
+                                [string]$_.Path,
+                                $modulePath,
+                                [StringComparison]::OrdinalIgnoreCase
+                            )
+                        }
+                )[0]
+                & $loadedModule {
+                    param($Path)
+                    Assert-CleanWindowsRestrictiveAcl -Path $Path
+                } $ownedRoot
+                $directoryAclVerified = $true
+                & $loadedModule {
+                    param($Path)
+                    Assert-CleanWindowsRestrictiveAcl -Path $Path
+                } $target
+                $fileAclVerified = $true
+
+                $temporaryFiles = @(
+                    Get-ChildItem -LiteralPath $ownedRoot -File |
+                        Where-Object {
+                            $_.Name -like 'checkpoint.clean-windows.owner.json.*.tmp'
+                        }
+                )
+                if ($temporaryFiles.Count -ne 0) {
+                    throw 'Owned JSON writer left a temporary marker file behind.'
+                }
+
+                [Console]::Out.Write(([pscustomobject][ordered]@{
+                    edition = [string]$PSVersionTable.PSEdition
+                    firstStatus = [string]$first.status
+                    secondStatus = [string]$second.status
+                    generation = [int]$second.generation
+                    directoryAclVerified = $directoryAclVerified
+                    fileAclVerified = $fileAclVerified
+                    temporaryFileCount = $temporaryFiles.Count
+                    targetExistedBeforeCleanup = Test-Path -LiteralPath $target -PathType Leaf
+                } | ConvertTo-Json -Compress))
+            } finally {
+                if (Test-Path -LiteralPath $ownedRoot) {
+                    Remove-Item -LiteralPath $ownedRoot -Recurse -Force -ErrorAction Stop
+                }
+            }
+            """;
+        var startInfo = new ProcessStartInfo
+        {
+            FileName = shell,
+            UseShellExecute = false,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            CreateNoWindow = true,
+        };
+        foreach (var argument in new[]
+                 {
+                     "-NoProfile",
+                     "-ExecutionPolicy",
+                     "Bypass",
+                     "-Command",
+                     command,
+                 })
+        {
+            startInfo.ArgumentList.Add(argument);
+        }
+        startInfo.Environment["OPENCLAW_OWNED_JSON_MODULE"] = modulePath;
+        startInfo.Environment["OPENCLAW_OWNED_JSON_ROOT"] = ownedRoot;
+
+        using var process = Process.Start(startInfo)
+            ?? throw new InvalidOperationException($"Failed to start owned JSON proof in {shell}.");
+        var stdout = process.StandardOutput.ReadToEnd();
+        var stderr = process.StandardError.ReadToEnd();
+        if (!process.WaitForExit(30_000))
+        {
+            process.Kill(entireProcessTree: true);
+            throw new TimeoutException($"Owned JSON proof in {shell} exceeded 30 seconds.");
         }
         return new ProcessResult(process.ExitCode, stdout, stderr);
     }

@@ -993,6 +993,57 @@ function Protect-CleanWindowsOwnedDirectory {
     return $resolvedPath
 }
 
+function Write-CleanWindowsOwnedJsonFile {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path,
+        [Parameter(Mandatory = $true)]
+        [string]$OwnedRoot,
+        [Parameter(Mandatory = $true)]
+        [object]$Value,
+        [ValidateRange(1, 32)]
+        [int]$Depth = 8
+    )
+
+    $resolvedOwnedRoot = [IO.Path]::GetFullPath($OwnedRoot).TrimEnd("\")
+    $resolvedPath = Assert-CleanWindowsPathUnderRoot -Path $Path -OwnedRoot $resolvedOwnedRoot
+    if (
+        -not [string]::Equals(
+            (Split-Path -Parent $resolvedPath),
+            $resolvedOwnedRoot,
+            [StringComparison]::OrdinalIgnoreCase
+        )
+    ) {
+        throw "Owned JSON marker must be written directly beneath its owned root."
+    }
+
+    New-Item -ItemType Directory -Force -Path $resolvedOwnedRoot | Out-Null
+    Set-CleanWindowsRestrictiveAcl -Path $resolvedOwnedRoot -Directory
+    Assert-CleanWindowsRestrictiveAcl -Path $resolvedOwnedRoot
+
+    $temporaryPath = "{0}.{1}.tmp" -f $resolvedPath, ([Guid]::NewGuid().ToString("N"))
+    try {
+        $json = $Value | ConvertTo-Json -Depth $Depth
+        $utf8 = New-Object Text.UTF8Encoding($true)
+        [IO.File]::WriteAllText($temporaryPath, $json, $utf8)
+        Set-CleanWindowsRestrictiveAcl -Path $temporaryPath
+        Assert-CleanWindowsRestrictiveAcl -Path $temporaryPath
+
+        if ([IO.File]::Exists($resolvedPath)) {
+            [IO.File]::Replace($temporaryPath, $resolvedPath, [NullString]::Value)
+        } else {
+            [IO.File]::Move($temporaryPath, $resolvedPath)
+        }
+    } finally {
+        if ([IO.File]::Exists($temporaryPath)) {
+            [IO.File]::Delete($temporaryPath)
+        }
+    }
+
+    return $resolvedPath
+}
+
 function Export-CleanWindowsCredential {
     [CmdletBinding()]
     param(
@@ -1109,5 +1160,6 @@ Export-ModuleMember -Function @(
     "Protect-CleanWindowsOwnedDirectory",
     "Test-CleanWindowsAnswerFile",
     "Test-CleanWindowsAnswerIsoMount",
-    "Test-CleanWindowsCredentialAuthenticationRejection"
+    "Test-CleanWindowsCredentialAuthenticationRejection",
+    "Write-CleanWindowsOwnedJsonFile"
 )

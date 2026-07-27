@@ -38,6 +38,14 @@ refused unless both conditions are met:
 The VM marker is stored in Hyper-V VM notes and beside the VHD under
 `.openclaw-clean-windows\<vm-name>`. Checkpoint marker files bind the checkpoint
 name, Hyper-V snapshot ID, creation time, VM ID, VHD path, and owner ID.
+Checkpoint creation first atomically writes a version 2 `pending` intent at the
+final marker path, then calls `Checkpoint-VM` and polls only the exact fixed name
+for up to 60 seconds at 500 millisecond intervals. The marker becomes `complete`
+only after the exact snapshot identity and creation time are observable. A
+timeout retains the pending intent for explicit recovery. A pending candidate
+must have appeared within 15 minutes of its recorded start. Pending markers
+never authorize remove or restore actions. Existing version 1 checkpoint
+markers remain compatible only when all legacy final identity fields match.
 
 ### Create the VM unattended by default
 
@@ -177,7 +185,7 @@ Safe manual setup remains available:
 Manual mode still verifies the explicit ISO SHA256 before creating the VM. It
 attaches only the Microsoft ISO and leaves Windows setup to the operator.
 
-### Resume or clean an owned partial unattended install
+### Resume, recover, or clean owned unattended state
 
 A failed unattended operation never deletes its VM or VHD. Before PowerShell
 Direct readiness, it retains the owned state marker, DPAPI setup credential,
@@ -185,37 +193,50 @@ answer XML, staging directory, and answer ISO for diagnosis. Inspect the VM,
 VHD, DVD paths, and
 `.openclaw-clean-windows\OpenClaw-Clean-Windows\unattend.owner.json`.
 
-#### Resume the current owned installed Running partial state
+#### Recover the current completed Create and markerless checkpoint
 
-The current partial state is an installed, Running owned VM. PowerShell Direct
-already succeeded with the setup DPAPI credential, and the unattended marker
-status is exactly `powershell-direct-ready`. The detach commands succeeded, and
-read-only inspection after the controller exited showed both DVD drives with
-null paths. The owned answer ISO, staging material, and setup credential remain,
-while the final rotated credential does not yet exist.
+The current owned VM has a completed unattended marker. Answer media and setup
+material are removed, and the final rotated `guest.clixml` credential exists.
+The first `Prepare` call returned successfully from `Checkpoint-VM` for the
+fixed `clean-windows` name, but Hyper-V did not expose the snapshot to the
+immediate read. The filesystem later showed a new `.avhdx` plus Snapshot
+`.vmcx`, `.vmgs`, and `.vmrs` files. Because the old controller failed before
+it wrote a checkpoint owner marker, the snapshot must not be removed,
+recreated, or adopted by normal `Prepare`.
 
-Use Resume only. Do not use `-CleanupUnattend`, reinstall Windows, delete the
-VM, or delete the VHD for this state.
-
-From an elevated PowerShell session, run exactly:
+From an elevated PowerShell session, first rerun confirmed Resume to validate
+the completed owned state and return the existing final credential path:
 
 ```powershell
-.\scripts\clean-windows\Invoke-CleanWindowsHyperV.ps1 -Command Create -ResumeUnattended -VMName 'OpenClaw-Clean-Windows' -OwnerId 'openclaw-clean-runner-bkudiess' -VhdPath 'D:\Hyper-V\OpenClaw-Clean-Windows\os.vhdx' -ConfirmOwnedAction
+$createResult = .\scripts\clean-windows\Invoke-CleanWindowsHyperV.ps1 -Command Create -ResumeUnattended -VMName 'OpenClaw-Clean-Windows' -OwnerId 'openclaw-clean-runner-bkudiess' -VhdPath 'D:\Hyper-V\OpenClaw-Clean-Windows\os.vhdx' -ConfirmOwnedAction
+$credentialPath = $createResult.CredentialPath
 ```
 
-The command validates the exact VM note marker, VM marker file, unattended
-marker, owner, VM, VHD, and media bindings before recovery. Only when the marker
-status is exactly `powershell-direct-ready` may Resume accept both expected
-media as already null. Any other status still requires both exact owned paths
-before the first detach attempt. A detach attempt bounded-polls Hyper-V through
-delayed stale reads and reports only controller and location diagnostics on
-timeout.
+Then run the one typed recovery path:
 
-Resume reuses the setup DPAPI credential and continues the ordinary
-post-readiness flow: guest answer-cache cleanup, owned answer-media deletion,
-final credential creation and rotation, old setup credential rejection, and
-edition, build, architecture, account, setup, OOBE, and image verification.
-It does not replace the VM, VHD, or credentials by starting over.
+```powershell
+.\scripts\clean-windows\Invoke-CleanWindowsHyperV.ps1 -Command Prepare -VMName 'OpenClaw-Clean-Windows' -OwnerId 'openclaw-clean-runner-bkudiess' -VhdPath 'D:\Hyper-V\OpenClaw-Clean-Windows\os.vhdx' -CredentialPath $credentialPath -RecoverPendingCheckpoint -ConfirmOwnedAction
+```
+
+`-RecoverPendingCheckpoint` is accepted only for `Prepare` with
+`-ConfirmOwnedAction`. It validates the exact VM note and file markers, completed
+unattended state, imported final DPAPI credential, exact VM and VHD identity,
+and exactly one snapshot whose name is `clean-windows`. For this legacy
+markerless state, the snapshot creation time must be at or after the conservative
+completion bound derived from both the unattended marker update time and its
+file timestamp, and within the fixed six-hour legacy recovery window. Duplicate,
+wrong-name, wrong-VM, old, or future snapshots are refused.
+
+Successful recovery atomically writes the finalized checkpoint marker without
+deleting or recreating the snapshot. `Prepare` then continues after the
+`clean-windows` capture step, restores that checkpoint, installs prerequisites,
+and transactionally creates `openclaw-prerequisites`. Repeating the switch after
+the marker is finalized validates the existing final marker and is harmless.
+
+Do not use `-CleanupUnattend`, reinstall Windows, delete the VM or VHD, issue
+ad hoc snapshot commands, or remove the current snapshot.
+
+#### Resume a different owned partial state
 
 Resume only the exact owned VM:
 
@@ -231,8 +252,8 @@ Resume only the exact owned VM:
 
 For a different owned partial install that should not continue, detach exact
 owned installation media and remove only owned unattended media and the
-temporary setup credential. Do not use this cleanup path for the current installed Running partial state
-described above:
+temporary setup credential. Do not use this cleanup path for the current
+completed state described above:
 
 ```powershell
 .\scripts\clean-windows\Invoke-CleanWindowsHyperV.ps1 `
@@ -279,6 +300,8 @@ the ISO, validates its nonce-bound marker, and removes the generated root.
 `openclaw-prerequisites`. Guest commands and PowerShell Direct readiness have
 bounded timeouts. `-Credential` remains available for operator-managed manual
 mode. Unattended mode should use the returned DPAPI `-CredentialPath`.
+Checkpoint writes are transactional and eventually consistent. Recovery is
+never automatic and is limited to the explicit owned path documented above.
 
 ### Verify and smoke
 

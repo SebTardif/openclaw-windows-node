@@ -57,6 +57,8 @@ param(
 
     [switch]$CleanupUnattend,
 
+    [switch]$RecoverPendingCheckpoint,
+
     [ValidatePattern('^[0-9A-Fa-f]{64}$')]
     [string]$ExpectedIsoSha256 = "A61ADEAB895EF5A4DB436E0A7011C92A2FF17BB0357F58B13BBC4062E535E7B9",
 
@@ -110,6 +112,7 @@ $ErrorActionPreference = "Stop"
 $script:RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
 $script:VmNotePrefix = "OPENCLAW-CLEAN-WINDOWS:"
 $script:MarkerSchema = "openclaw.clean-windows.owner/v1"
+$script:CheckpointMarkerSchema = "openclaw.clean-windows.checkpoint-owner/v2"
 $script:CleanCheckpointName = "clean-windows"
 $script:PreparedCheckpointName = "openclaw-prerequisites"
 $script:UnattendMarkerSchema = "openclaw.clean-windows.unattend/v1"
@@ -123,6 +126,11 @@ $script:OpticalBootPulseIntervalMilliseconds = 750
 $script:OpticalBootMaxPulseCount = 9
 $script:InstallationMediaDetachTimeoutSec = 5
 $script:InstallationMediaDetachPollIntervalMilliseconds = 250
+$script:CheckpointObservationTimeoutSec = 60
+$script:CheckpointObservationPollIntervalMilliseconds = 500
+$script:CheckpointCreationWindowSec = 900
+$script:LegacyCheckpointRecoveryWindowSec = 21600
+$script:CheckpointRecoveryClockSkewSec = 300
 
 Import-Module (Join-Path $PSScriptRoot "CleanWindowsUnattend.psm1") -Force
 
@@ -154,6 +162,13 @@ function Test-Administrator {
 function Assert-RequiredParameters {
     if ([string]::IsNullOrWhiteSpace($VhdPath)) {
         throw "VhdPath is required for command '$Command'."
+    }
+
+    if ($RecoverPendingCheckpoint -and $Command -ne "Prepare") {
+        throw "RecoverPendingCheckpoint is accepted only with -Command Prepare."
+    }
+    if ($RecoverPendingCheckpoint -and -not $ConfirmOwnedAction) {
+        throw "RecoverPendingCheckpoint requires -ConfirmOwnedAction."
     }
 
     switch ($Command) {
@@ -466,9 +481,12 @@ function Write-UnattendState {
         [object]$Paths
     )
 
-    New-Item -ItemType Directory -Force -Path $Paths.OwnedRoot | Out-Null
     $State.updatedUtc = [DateTime]::UtcNow.ToString("o")
-    $State | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $Paths.StatePath -Encoding UTF8
+    Write-CleanWindowsOwnedJsonFile `
+        -Path $Paths.StatePath `
+        -OwnedRoot $Paths.OwnedRoot `
+        -Value $State `
+        -Depth 6 | Out-Null
 }
 
 function Read-OwnedUnattendState {
@@ -571,6 +589,23 @@ function Set-UnattendStateStatus {
         [string]$Status
     )
 
+    if ($Status -ceq "complete") {
+        $completedUtc = if ([string]$State.status -ceq "complete") {
+            $legacyCompletion = Get-UnattendedCompletionProof `
+                -State $State `
+                -StatePath $Paths.StatePath
+            $legacyCompletion.CompletionUtc.ToString("o")
+        } else {
+            [DateTime]::UtcNow.ToString("o")
+        }
+        if ($State.PSObject.Properties["completedUtc"]) {
+            if ([string]::IsNullOrWhiteSpace([string]$State.completedUtc)) {
+                $State.completedUtc = $completedUtc
+            }
+        } else {
+            $State | Add-Member -NotePropertyName "completedUtc" -NotePropertyValue $completedUtc
+        }
+    }
     $State.status = $Status
     Write-UnattendState -State $State -Paths $Paths
 }
@@ -664,6 +699,120 @@ function New-OwnerMarkerObject {
     return $marker
 }
 
+function ConvertTo-CheckpointUtc {
+    param(
+        [Parameter(Mandatory = $true)]
+        [object]$Value,
+        [Parameter(Mandatory = $true)]
+        [string]$Label
+    )
+
+    try {
+        if ($Value -is [DateTime]) {
+            return ([DateTime]$Value).ToUniversalTime()
+        }
+        return ([DateTimeOffset]::Parse(
+            [string]$Value,
+            [Globalization.CultureInfo]::InvariantCulture,
+            [Globalization.DateTimeStyles]::AssumeUniversal
+        )).UtcDateTime
+    } catch {
+        throw "$Label is missing or is not a valid UTC timestamp."
+    }
+}
+
+function Get-RequiredGuidString {
+    param(
+        [AllowNull()]
+        [object]$Value,
+        [Parameter(Mandatory = $true)]
+        [string]$Label
+    )
+
+    $parsed = [Guid]::Empty
+    if (
+        $null -eq $Value -or
+        -not [Guid]::TryParse([string]$Value, [ref]$parsed) -or
+        $parsed -eq [Guid]::Empty
+    ) {
+        throw "$Label is missing or is not a non-empty GUID."
+    }
+    return $parsed.ToString("D")
+}
+
+function New-PendingCheckpointMarker {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$ResolvedVhdPath,
+        [Parameter(Mandatory = $true)]
+        [string]$ExpectedOwnerId,
+        [Parameter(Mandatory = $true)]
+        [string]$OwnedCheckpointName,
+        [Parameter(Mandatory = $true)]
+        [object]$VmObject,
+        [DateTime]$CreationStartedUtc = [DateTime]::UtcNow,
+        [string]$OperationNonce = ([Guid]::NewGuid().ToString("D"))
+    )
+
+    if ($OwnedCheckpointName -cnotin @($script:CleanCheckpointName, $script:PreparedCheckpointName)) {
+        throw "Checkpoint intent name '$OwnedCheckpointName' is not one of the fixed owned checkpoint names."
+    }
+    $vmId = Get-RequiredGuidString `
+        -Value (Get-PropertyValueOrNull -Object $VmObject -Name "Id") `
+        -Label "Owned VM id"
+    $nonce = Get-RequiredGuidString -Value $OperationNonce -Label "Checkpoint operation nonce"
+    $startedUtc = $CreationStartedUtc.ToUniversalTime().ToString("o")
+
+    return [pscustomobject][ordered]@{
+        schema = $script:CheckpointMarkerSchema
+        status = "pending"
+        resourceType = "checkpoint"
+        resourceName = $OwnedCheckpointName
+        checkpointName = $OwnedCheckpointName
+        ownerId = $ExpectedOwnerId
+        vmName = $VMName
+        vmId = $vmId
+        vhdPath = [IO.Path]::GetFullPath($ResolvedVhdPath)
+        operationNonce = $nonce
+        creationStartedUtc = $startedUtc
+        createdUtc = $startedUtc
+    }
+}
+
+function New-CompletedCheckpointMarker {
+    param(
+        [Parameter(Mandatory = $true)]
+        [object]$PendingMarker,
+        [Parameter(Mandatory = $true)]
+        [object]$SnapshotObject
+    )
+
+    $pendingSchema = [string](Get-PropertyValueOrNull -Object $PendingMarker -Name "schema")
+    $pendingStatus = [string](Get-PropertyValueOrNull -Object $PendingMarker -Name "status")
+    if (
+        $pendingSchema -cne $script:CheckpointMarkerSchema -or
+        $pendingStatus -cne "pending"
+    ) {
+        throw "Only a version 2 pending checkpoint intent can be finalized."
+    }
+
+    $snapshotId = Get-RequiredGuidString `
+        -Value (Get-PropertyValueOrNull -Object $SnapshotObject -Name "Id") `
+        -Label "Observed checkpoint id"
+    $snapshotCreationTimeUtc = ConvertTo-CheckpointUtc `
+        -Value (Get-PropertyValueOrNull -Object $SnapshotObject -Name "CreationTime") `
+        -Label "Observed checkpoint creation time"
+    $completed = [ordered]@{}
+    foreach ($property in $PendingMarker.PSObject.Properties) {
+        $completed[$property.Name] = $property.Value
+    }
+    $completed.status = "complete"
+    $completed.snapshotId = $snapshotId
+    $completed.snapshotCreationTimeUtc = $snapshotCreationTimeUtc.ToString("o")
+    $completed.finalizedUtc = [DateTime]::UtcNow.ToString("o")
+    return [pscustomobject]$completed
+}
+
 function Write-MarkerFile {
     param(
         [Parameter(Mandatory = $true)]
@@ -672,8 +821,12 @@ function Write-MarkerFile {
         [object]$Marker
     )
 
-    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $Path) | Out-Null
-    $Marker | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $Path -Encoding UTF8
+    $ownedRoot = Split-Path -Parent $Path
+    Write-CleanWindowsOwnedJsonFile `
+        -Path $Path `
+        -OwnedRoot $ownedRoot `
+        -Value $Marker `
+        -Depth 8 | Out-Null
 }
 
 function Read-MarkerFile {
@@ -806,6 +959,191 @@ function Assert-OwnerMarkerMatches {
     }
 }
 
+function Assert-CheckpointSnapshotBelongsToVm {
+    param(
+        [Parameter(Mandatory = $true)]
+        [object]$SnapshotObject,
+        [Parameter(Mandatory = $true)]
+        [object]$VmObject,
+        [Parameter(Mandatory = $true)]
+        [string]$OwnedCheckpointName
+    )
+
+    if (
+        [string](Get-PropertyValueOrNull -Object $SnapshotObject -Name "Name") -cne
+            $OwnedCheckpointName
+    ) {
+        throw "Checkpoint recovery candidate does not have the exact fixed name '$OwnedCheckpointName'."
+    }
+
+    $expectedVmId = Get-RequiredGuidString `
+        -Value (Get-PropertyValueOrNull -Object $VmObject -Name "Id") `
+        -Label "Owned VM id"
+    $snapshotVmId = Get-RequiredGuidString `
+        -Value (Get-PropertyValueOrNull -Object $SnapshotObject -Name "VMId") `
+        -Label "Checkpoint VM id"
+    if ($snapshotVmId -cne $expectedVmId) {
+        throw "Checkpoint recovery candidate does not belong to the exact owned VM id."
+    }
+
+    $snapshotVmName = Get-PropertyValueOrNull -Object $SnapshotObject -Name "VMName"
+    if (
+        $null -ne $snapshotVmName -and
+        -not (Test-StringEquals -Left ([string]$snapshotVmName) -Right $VMName)
+    ) {
+        throw "Checkpoint recovery candidate does not belong to VM '$VMName'."
+    }
+}
+
+function Assert-Version2CheckpointMarkerIntentMatches {
+    param(
+        [Parameter(Mandatory = $true)]
+        [object]$Marker,
+        [Parameter(Mandatory = $true)]
+        [string]$ExpectedStatus,
+        [Parameter(Mandatory = $true)]
+        [string]$ExpectedOwnerId,
+        [Parameter(Mandatory = $true)]
+        [string]$ExpectedVhdPath,
+        [Parameter(Mandatory = $true)]
+        [string]$OwnedCheckpointName,
+        [Parameter(Mandatory = $true)]
+        [object]$VmObject
+    )
+
+    $markerSchema = [string](Get-PropertyValueOrNull -Object $Marker -Name "schema")
+    $markerStatus = [string](Get-PropertyValueOrNull -Object $Marker -Name "status")
+    $markerResourceType = [string](Get-PropertyValueOrNull -Object $Marker -Name "resourceType")
+    $markerResourceName = [string](Get-PropertyValueOrNull -Object $Marker -Name "resourceName")
+    $markerCheckpointName = [string](Get-PropertyValueOrNull -Object $Marker -Name "checkpointName")
+    $markerOwnerId = [string](Get-PropertyValueOrNull -Object $Marker -Name "ownerId")
+    $markerVmName = [string](Get-PropertyValueOrNull -Object $Marker -Name "vmName")
+    $markerVhdPath = [string](Get-PropertyValueOrNull -Object $Marker -Name "vhdPath")
+    if ($markerSchema -cne $script:CheckpointMarkerSchema) {
+        throw "Checkpoint marker schema is not recognized as a transactional marker."
+    }
+    if ($markerStatus -cne $ExpectedStatus) {
+        throw "Checkpoint marker status '$markerStatus' is not '$ExpectedStatus'."
+    }
+    if ($markerResourceType -cne "checkpoint") {
+        throw "Checkpoint marker resource type is not 'checkpoint'."
+    }
+    if (
+        $markerResourceName -cne $OwnedCheckpointName -or
+        $markerCheckpointName -cne $OwnedCheckpointName
+    ) {
+        throw "Checkpoint marker does not bind the exact fixed name '$OwnedCheckpointName'."
+    }
+    if (
+        -not (Test-StringEquals -Left $markerOwnerId -Right $ExpectedOwnerId) -or
+        -not (Test-StringEquals -Left $markerVmName -Right $VMName)
+    ) {
+        throw "Checkpoint marker does not match this owner or VM."
+    }
+    if ((Normalize-ComparisonPath $markerVhdPath) -ne (Normalize-ComparisonPath $ExpectedVhdPath)) {
+        throw "Checkpoint marker VHD path does not match the exact owned VHD."
+    }
+
+    $expectedVmId = Get-RequiredGuidString `
+        -Value (Get-PropertyValueOrNull -Object $VmObject -Name "Id") `
+        -Label "Owned VM id"
+    $markerVmId = Get-RequiredGuidString `
+        -Value (Get-PropertyValueOrNull -Object $Marker -Name "vmId") `
+        -Label "Checkpoint marker VM id"
+    if ($markerVmId -cne $expectedVmId) {
+        throw "Checkpoint marker VM id does not match the exact owned VM."
+    }
+    Get-RequiredGuidString `
+        -Value (Get-PropertyValueOrNull -Object $Marker -Name "operationNonce") `
+        -Label "Checkpoint operation nonce" | Out-Null
+    ConvertTo-CheckpointUtc `
+        -Value (Get-PropertyValueOrNull -Object $Marker -Name "creationStartedUtc") `
+        -Label "Checkpoint creation-start time" | Out-Null
+}
+
+function Assert-FinalizedCheckpointMarkerMatches {
+    param(
+        [Parameter(Mandatory = $true)]
+        [object]$Marker,
+        [Parameter(Mandatory = $true)]
+        [string]$ExpectedOwnerId,
+        [Parameter(Mandatory = $true)]
+        [string]$ExpectedVhdPath,
+        [Parameter(Mandatory = $true)]
+        [string]$OwnedCheckpointName,
+        [Parameter(Mandatory = $true)]
+        [object]$VmObject,
+        [Parameter(Mandatory = $true)]
+        [object]$SnapshotObject
+    )
+
+    Assert-CheckpointSnapshotBelongsToVm `
+        -SnapshotObject $SnapshotObject `
+        -VmObject $VmObject `
+        -OwnedCheckpointName $OwnedCheckpointName
+
+    if (
+        [string](Get-PropertyValueOrNull -Object $Marker -Name "schema") -ceq
+            $script:MarkerSchema
+    ) {
+        if ($Marker.PSObject.Properties["status"] -and [string]$Marker.status -cne "complete") {
+            throw "Legacy checkpoint marker is not finalized."
+        }
+        foreach ($requiredProperty in @("vmId", "snapshotId", "snapshotCreationTimeUtc")) {
+            if (-not $Marker.PSObject.Properties[$requiredProperty]) {
+                throw "Legacy checkpoint marker is missing required final identity '$requiredProperty'."
+            }
+        }
+        Assert-OwnerMarkerMatches `
+            -Marker $Marker `
+            -ExpectedResourceType "checkpoint" `
+            -ExpectedResourceName $OwnedCheckpointName `
+            -ExpectedOwnerId $ExpectedOwnerId `
+            -ExpectedVmName $VMName `
+            -ExpectedVhdPath $ExpectedVhdPath `
+            -VmObject $VmObject `
+            -SnapshotObject $SnapshotObject
+        return
+    }
+
+    Assert-Version2CheckpointMarkerIntentMatches `
+        -Marker $Marker `
+        -ExpectedStatus "complete" `
+        -ExpectedOwnerId $ExpectedOwnerId `
+        -ExpectedVhdPath $ExpectedVhdPath `
+        -OwnedCheckpointName $OwnedCheckpointName `
+        -VmObject $VmObject
+
+    $expectedSnapshotId = Get-RequiredGuidString `
+        -Value (Get-PropertyValueOrNull -Object $SnapshotObject -Name "Id") `
+        -Label "Observed checkpoint id"
+    $markerSnapshotId = Get-RequiredGuidString `
+        -Value (Get-PropertyValueOrNull -Object $Marker -Name "snapshotId") `
+        -Label "Checkpoint marker snapshot id"
+    if ($markerSnapshotId -cne $expectedSnapshotId) {
+        throw "Checkpoint marker snapshot id does not match the current checkpoint."
+    }
+
+    $expectedCreationTime = ConvertTo-CheckpointUtc `
+        -Value (Get-PropertyValueOrNull -Object $SnapshotObject -Name "CreationTime") `
+        -Label "Observed checkpoint creation time"
+    $markerCreationTime = ConvertTo-CheckpointUtc `
+        -Value (Get-PropertyValueOrNull -Object $Marker -Name "snapshotCreationTimeUtc") `
+        -Label "Checkpoint marker snapshot creation time"
+    if ($markerCreationTime.Ticks -ne $expectedCreationTime.Ticks) {
+        throw "Checkpoint marker creation time does not match the current checkpoint."
+    }
+    $creationStartedUtc = ConvertTo-CheckpointUtc `
+        -Value (Get-PropertyValueOrNull -Object $Marker -Name "creationStartedUtc") `
+        -Label "Checkpoint creation-start time"
+    if ($expectedCreationTime -lt $creationStartedUtc) {
+        throw "Checkpoint creation time predates its owned pending intent."
+    }
+    if ($expectedCreationTime -gt $creationStartedUtc.AddSeconds($script:CheckpointCreationWindowSec)) {
+        throw "Checkpoint creation time is outside its owned pending operation window."
+    }
+}
+
 function Get-PrimaryVhdPath {
     param(
         [Parameter(Mandatory = $true)]
@@ -877,7 +1215,12 @@ function Get-SingleCheckpoint {
         [string]$OwnedCheckpointName
     )
 
-    $snapshots = @(Get-VMSnapshot -VMName $VMName -Name $OwnedCheckpointName -ErrorAction SilentlyContinue)
+    $snapshots = @(
+        Get-VMSnapshot -VMName $VMName -ErrorAction Stop |
+            Where-Object {
+                [string]$_.Name -ceq $OwnedCheckpointName
+            }
+    )
     if ($snapshots.Count -eq 0) {
         return $null
     }
@@ -887,6 +1230,45 @@ function Get-SingleCheckpoint {
     }
 
     return $snapshots[0]
+}
+
+function Wait-ForOwnedCheckpointObservation {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$OwnedCheckpointName,
+        [Parameter(Mandatory = $true)]
+        [object]$VmObject,
+        [ValidateRange(1, 300)]
+        [int]$TimeoutSec = $script:CheckpointObservationTimeoutSec,
+        [ValidateRange(10, 5000)]
+        [int]$PollIntervalMilliseconds = $script:CheckpointObservationPollIntervalMilliseconds
+    )
+
+    $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSec)
+    do {
+        $matches = @(
+            Get-VMSnapshot -VMName $VMName -ErrorAction Stop |
+                Where-Object {
+                    [string]$_.Name -ceq $OwnedCheckpointName
+                }
+        )
+        if ($matches.Count -gt 1) {
+            throw "VM '$VMName' has multiple checkpoints named '$OwnedCheckpointName'."
+        }
+        if ($matches.Count -eq 1) {
+            Assert-CheckpointSnapshotBelongsToVm `
+                -SnapshotObject $matches[0] `
+                -VmObject $VmObject `
+                -OwnedCheckpointName $OwnedCheckpointName
+            return $matches[0]
+        }
+        if ([DateTime]::UtcNow -ge $deadline) {
+            break
+        }
+        Start-Sleep -Milliseconds $PollIntervalMilliseconds
+    } while ($true)
+
+    throw "Timed out after $TimeoutSec seconds waiting for exact checkpoint '$OwnedCheckpointName' to appear for VM '$VMName'."
 }
 
 function Assert-OwnedCheckpoint {
@@ -910,13 +1292,13 @@ function Assert-OwnedCheckpoint {
         throw "Checkpoint '$OwnedCheckpointName' is missing its ownership marker file: $checkpointMarkerPath"
     }
 
-    Assert-OwnerMarkerMatches `
+    $vm = Get-VM -Name $VMName -ErrorAction Stop
+    Assert-FinalizedCheckpointMarkerMatches `
         -Marker $marker `
-        -ExpectedResourceType "checkpoint" `
-        -ExpectedResourceName $OwnedCheckpointName `
         -ExpectedOwnerId $ExpectedOwnerId `
-        -ExpectedVmName $VMName `
         -ExpectedVhdPath $ResolvedVhdPath `
+        -OwnedCheckpointName $OwnedCheckpointName `
+        -VmObject $vm `
         -SnapshotObject $snapshot
 
     return $snapshot
@@ -934,6 +1316,10 @@ function Remove-OwnedCheckpointIfPresent {
 
     $snapshot = Get-SingleCheckpoint -OwnedCheckpointName $OwnedCheckpointName
     if ($null -eq $snapshot) {
+        $checkpointMarkerPath = Get-CheckpointMarkerPath -ResolvedVhdPath $ResolvedVhdPath -OwnedVmName $VMName -OwnedCheckpointName $OwnedCheckpointName
+        if (Test-Path -LiteralPath $checkpointMarkerPath -PathType Leaf) {
+            throw "Checkpoint marker exists while '$OwnedCheckpointName' is not observable. Refusing to remove, overwrite, or treat pending state as finalized: $checkpointMarkerPath"
+        }
         return
     }
 
@@ -958,28 +1344,304 @@ function New-OwnedCheckpoint {
     )
 
     Assert-ConfirmationForOwnedAction -Action "Creating checkpoint '$OwnedCheckpointName'"
+    $vm = Assert-OwnedVM -ResolvedVhdPath $ResolvedVhdPath -ExpectedOwnerId $ExpectedOwnerId
     Remove-OwnedCheckpointIfPresent -ResolvedVhdPath $ResolvedVhdPath -ExpectedOwnerId $ExpectedOwnerId -OwnedCheckpointName $OwnedCheckpointName
 
-    Write-Step "Creating checkpoint $OwnedCheckpointName"
-    Checkpoint-VM -VMName $VMName -SnapshotName $OwnedCheckpointName -Confirm:$false | Out-Null
-
-    $snapshot = Get-SingleCheckpoint -OwnedCheckpointName $OwnedCheckpointName
-    if ($null -eq $snapshot) {
-        throw "Checkpoint '$OwnedCheckpointName' was not created."
+    $markerPath = Get-CheckpointMarkerPath -ResolvedVhdPath $ResolvedVhdPath -OwnedVmName $VMName -OwnedCheckpointName $OwnedCheckpointName
+    if (Test-Path -LiteralPath $markerPath -PathType Leaf) {
+        throw "Checkpoint marker still exists after the owned replacement check. Refusing to overwrite pending or mismatched state: $markerPath"
+    }
+    if ($null -ne (Get-SingleCheckpoint -OwnedCheckpointName $OwnedCheckpointName)) {
+        throw "Checkpoint '$OwnedCheckpointName' is still present without a finalized marker. Refusing to create a duplicate."
     }
 
-    $vm = Get-VM -Name $VMName -ErrorAction Stop
-    $marker = New-OwnerMarkerObject `
-        -ResourceType "checkpoint" `
-        -ResourceName $OwnedCheckpointName `
+    $pendingMarker = New-PendingCheckpointMarker `
+        -ResolvedVhdPath $ResolvedVhdPath `
+        -ExpectedOwnerId $ExpectedOwnerId `
+        -OwnedCheckpointName $OwnedCheckpointName `
+        -VmObject $vm
+    Write-MarkerFile -Path $markerPath -Marker $pendingMarker
+
+    Write-Step "Creating checkpoint $OwnedCheckpointName"
+    try {
+        Checkpoint-VM -VMName $VMName -SnapshotName $OwnedCheckpointName -Confirm:$false | Out-Null
+        $snapshot = Wait-ForOwnedCheckpointObservation `
+            -OwnedCheckpointName $OwnedCheckpointName `
+            -VmObject $vm
+        $completedMarker = New-CompletedCheckpointMarker `
+            -PendingMarker $pendingMarker `
+            -SnapshotObject $snapshot
+        Assert-FinalizedCheckpointMarkerMatches `
+            -Marker $completedMarker `
+            -ExpectedOwnerId $ExpectedOwnerId `
+            -ExpectedVhdPath $ResolvedVhdPath `
+            -OwnedCheckpointName $OwnedCheckpointName `
+            -VmObject $vm `
+            -SnapshotObject $snapshot
+        Write-MarkerFile -Path $markerPath -Marker $completedMarker
+        return
+    } catch {
+        throw "Checkpoint '$OwnedCheckpointName' did not reach a finalized owned state. The pending intent remains at '$markerPath' for explicit recovery. $($_.Exception.Message)"
+    }
+}
+
+function Get-UnattendedCompletionProof {
+    param(
+        [Parameter(Mandatory = $true)]
+        [object]$State,
+        [Parameter(Mandatory = $true)]
+        [string]$StatePath
+    )
+
+    if (
+        [string](Get-PropertyValueOrNull -Object $State -Name "status") -cne
+            "complete"
+    ) {
+        throw "Checkpoint recovery requires unattended state status 'complete'."
+    }
+    if (-not $State.PSObject.Properties["updatedUtc"]) {
+        throw "Completed unattended state is missing its update timestamp."
+    }
+
+    $updatedUtc = ConvertTo-CheckpointUtc `
+        -Value $State.updatedUtc `
+        -Label "Unattended state update time"
+    if (
+        $State.PSObject.Properties["completedUtc"] -and
+        -not [string]::IsNullOrWhiteSpace([string]$State.completedUtc)
+    ) {
+        $completedUtc = ConvertTo-CheckpointUtc `
+            -Value $State.completedUtc `
+            -Label "Unattended completion time"
+        if ($updatedUtc -lt $completedUtc.AddSeconds(-$script:CheckpointRecoveryClockSkewSec)) {
+            throw "Unattended update time predates completion beyond the allowed consistency bound."
+        }
+        return [pscustomobject]@{
+            CompletionUtc = $completedUtc
+            Source = "completedUtc"
+            LegacyFallback = $false
+        }
+    }
+
+    if (-not (Test-Path -LiteralPath $StatePath -PathType Leaf)) {
+        throw "Legacy unattended completion proof requires the exact owned state file."
+    }
+    $stateFileUtc = (Get-Item -LiteralPath $StatePath -ErrorAction Stop).LastWriteTimeUtc
+    if ([Math]::Abs(($stateFileUtc - $updatedUtc).TotalSeconds) -gt $script:CheckpointRecoveryClockSkewSec) {
+        throw "Legacy unattended marker and file timestamps are outside the allowed consistency bound."
+    }
+    $completionUtc = if ($stateFileUtc -gt $updatedUtc) { $stateFileUtc } else { $updatedUtc }
+    return [pscustomobject]@{
+        CompletionUtc = $completionUtc
+        Source = "legacy-updatedUtc-and-file-time"
+        LegacyFallback = $true
+    }
+}
+
+function Get-RecoverableCheckpointCandidate {
+    param(
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyCollection()]
+        [object[]]$Snapshots,
+        [AllowNull()]
+        [object]$Marker,
+        [Parameter(Mandatory = $true)]
+        [object]$VmObject,
+        [Parameter(Mandatory = $true)]
+        [string]$ResolvedVhdPath,
+        [Parameter(Mandatory = $true)]
+        [string]$ExpectedOwnerId,
+        [Parameter(Mandatory = $true)]
+        [string]$OwnedCheckpointName,
+        [Parameter(Mandatory = $true)]
+        [DateTime]$UnattendedCompletionUtc,
+        [DateTime]$NowUtc = [DateTime]::UtcNow
+    )
+
+    $allSnapshots = @($Snapshots | Where-Object { $null -ne $_ })
+    $matchingSnapshots = @(
+        $allSnapshots |
+            Where-Object {
+                [string]$_.Name -ceq $OwnedCheckpointName
+            }
+    )
+    if ($matchingSnapshots.Count -gt 1) {
+        throw "Checkpoint recovery found duplicate checkpoints named '$OwnedCheckpointName'."
+    }
+    $wrongNameSnapshots = @(
+        $allSnapshots |
+            Where-Object {
+                [string]$_.Name -cne $OwnedCheckpointName
+            }
+    )
+    if ($wrongNameSnapshots.Count -gt 0) {
+        throw "Checkpoint recovery found another checkpoint name and refuses ambiguous adoption."
+    }
+    if ($matchingSnapshots.Count -ne 1) {
+        throw "Checkpoint recovery requires exactly one checkpoint named '$OwnedCheckpointName'."
+    }
+
+    $candidate = $matchingSnapshots[0]
+    Assert-CheckpointSnapshotBelongsToVm `
+        -SnapshotObject $candidate `
+        -VmObject $VmObject `
+        -OwnedCheckpointName $OwnedCheckpointName
+    $snapshotCreationUtc = ConvertTo-CheckpointUtc `
+        -Value (Get-PropertyValueOrNull -Object $candidate -Name "CreationTime") `
+        -Label "Checkpoint recovery candidate creation time"
+    $completionUtc = $UnattendedCompletionUtc.ToUniversalTime()
+    $currentUtc = $NowUtc.ToUniversalTime()
+    if ($completionUtc -gt $currentUtc.AddSeconds($script:CheckpointRecoveryClockSkewSec)) {
+        throw "Unattended completion time is in the future beyond the allowed clock bound."
+    }
+    if ($snapshotCreationUtc -lt $completionUtc) {
+        throw "Checkpoint recovery candidate predates completed unattended installation."
+    }
+    if ($snapshotCreationUtc -gt $currentUtc.AddSeconds($script:CheckpointRecoveryClockSkewSec)) {
+        throw "Checkpoint recovery candidate creation time is in the future beyond the allowed clock bound."
+    }
+
+    if ($null -eq $Marker) {
+        if ($snapshotCreationUtc -gt $completionUtc.AddSeconds($script:LegacyCheckpointRecoveryWindowSec)) {
+            throw "Legacy markerless checkpoint is outside the conservative recovery window."
+        }
+        return $candidate
+    }
+
+    Assert-Version2CheckpointMarkerIntentMatches `
+        -Marker $Marker `
+        -ExpectedStatus "pending" `
+        -ExpectedOwnerId $ExpectedOwnerId `
+        -ExpectedVhdPath $ResolvedVhdPath `
+        -OwnedCheckpointName $OwnedCheckpointName `
+        -VmObject $VmObject
+    $creationStartedUtc = ConvertTo-CheckpointUtc `
+        -Value (Get-PropertyValueOrNull -Object $Marker -Name "creationStartedUtc") `
+        -Label "Checkpoint creation-start time"
+    if ($creationStartedUtc -lt $completionUtc) {
+        throw "Pending checkpoint intent predates completed unattended installation."
+    }
+    if ($snapshotCreationUtc -lt $creationStartedUtc) {
+        throw "Checkpoint recovery candidate predates the pending checkpoint intent."
+    }
+    if ($snapshotCreationUtc -gt $creationStartedUtc.AddSeconds($script:CheckpointCreationWindowSec)) {
+        throw "Checkpoint recovery candidate is outside the pending operation window."
+    }
+
+    return $candidate
+}
+
+function Recover-PendingOwnedCheckpoint {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$ResolvedVhdPath,
+        [Parameter(Mandatory = $true)]
+        [string]$ExpectedOwnerId,
+        [Parameter(Mandatory = $true)]
+        [object]$VmObject
+    )
+
+    Assert-ConfirmationForOwnedAction -Action "Recovering checkpoint '$($script:CleanCheckpointName)'"
+    $paths = Get-UnattendPaths -ResolvedVhdPath $ResolvedVhdPath
+    $state = Read-OwnedUnattendState -ResolvedVhdPath $ResolvedVhdPath -Paths $paths
+    Assert-UnattendStateMatchesVmMarker -State $state -VmObject $VmObject
+    $completionProof = Get-UnattendedCompletionProof -State $state -StatePath $paths.StatePath
+
+    $finalCredential = Import-CleanWindowsCredential `
+        -CredentialPath $paths.FinalCredentialPath `
+        -MetadataPath $paths.FinalCredentialMetadataPath `
+        -OwnedRoot $paths.OwnedRoot `
+        -VMName $VMName `
+        -OwnerId $ExpectedOwnerId `
+        -ExpectedKind "final"
+    if (
+        -not [string]::Equals(
+            $finalCredential.UserName,
+            [string]$state.guestAdministratorName,
+            [StringComparison]::Ordinal
+        )
+    ) {
+        throw "Final credential username does not match completed unattended state."
+    }
+
+    $checkpointName = $script:CleanCheckpointName
+    $markerPath = Get-CheckpointMarkerPath `
         -ResolvedVhdPath $ResolvedVhdPath `
         -OwnedVmName $VMName `
-        -OwnedOwnerId $ExpectedOwnerId `
-        -VmObject $vm `
-        -SnapshotObject $snapshot
+        -OwnedCheckpointName $checkpointName
+    $marker = Read-MarkerFile -Path $markerPath
+    $markerSchema = if ($null -eq $marker) {
+        ""
+    } else {
+        [string](Get-PropertyValueOrNull -Object $marker -Name "schema")
+    }
+    $markerStatus = if (
+        $null -ne $marker -and
+        $marker.PSObject.Properties["status"]
+    ) {
+        [string]$marker.status
+    } else {
+        ""
+    }
+    if (
+        $markerSchema -ceq $script:MarkerSchema -or
+        (
+            $markerSchema -ceq $script:CheckpointMarkerSchema -and
+            $markerStatus -ceq "complete"
+        )
+    ) {
+        $finalizedSnapshot = Assert-OwnedCheckpoint `
+            -ResolvedVhdPath $ResolvedVhdPath `
+            -ExpectedOwnerId $ExpectedOwnerId `
+            -OwnedCheckpointName $checkpointName
+        Write-InfoLine "Checkpoint '$checkpointName' already has a finalized ownership marker. Recovery is idempotently satisfied."
+        return $finalizedSnapshot
+    }
 
-    $markerPath = Get-CheckpointMarkerPath -ResolvedVhdPath $ResolvedVhdPath -OwnedVmName $VMName -OwnedCheckpointName $OwnedCheckpointName
-    Write-MarkerFile -Path $markerPath -Marker $marker
+    $snapshots = @(Get-VMSnapshot -VMName $VMName -ErrorAction Stop)
+    $candidate = Get-RecoverableCheckpointCandidate `
+        -Snapshots $snapshots `
+        -Marker $marker `
+        -VmObject $VmObject `
+        -ResolvedVhdPath $ResolvedVhdPath `
+        -ExpectedOwnerId $ExpectedOwnerId `
+        -OwnedCheckpointName $checkpointName `
+        -UnattendedCompletionUtc $completionProof.CompletionUtc
+
+    if ($null -eq $marker) {
+        $legacySnapshotCreationUtc = ConvertTo-CheckpointUtc `
+            -Value (Get-PropertyValueOrNull -Object $candidate -Name "CreationTime") `
+            -Label "Legacy markerless checkpoint creation time"
+        $marker = New-PendingCheckpointMarker `
+            -ResolvedVhdPath $ResolvedVhdPath `
+            -ExpectedOwnerId $ExpectedOwnerId `
+            -OwnedCheckpointName $checkpointName `
+            -VmObject $VmObject `
+            -CreationStartedUtc $legacySnapshotCreationUtc
+        $marker | Add-Member `
+            -NotePropertyName "recoveryKind" `
+            -NotePropertyValue "legacy-markerless-completed-unattended"
+        $marker | Add-Member `
+            -NotePropertyName "recoveryCompletionLowerBoundUtc" `
+            -NotePropertyValue $completionProof.CompletionUtc.ToString("o")
+        $marker | Add-Member `
+            -NotePropertyName "recoveryCompletionSource" `
+            -NotePropertyValue ([string]$completionProof.Source)
+    }
+
+    $completedMarker = New-CompletedCheckpointMarker `
+        -PendingMarker $marker `
+        -SnapshotObject $candidate
+    Assert-FinalizedCheckpointMarkerMatches `
+        -Marker $completedMarker `
+        -ExpectedOwnerId $ExpectedOwnerId `
+        -ExpectedVhdPath $ResolvedVhdPath `
+        -OwnedCheckpointName $checkpointName `
+        -VmObject $VmObject `
+        -SnapshotObject $candidate
+    Write-MarkerFile -Path $markerPath -Marker $completedMarker
+    Write-InfoLine "Recovered exact checkpoint '$checkpointName' without deleting or recreating it."
+    return $candidate
 }
 
 function Wait-ForVmState {
@@ -2522,6 +3184,13 @@ function Invoke-PrepareCommand {
     $vm = Assert-OwnedVM -ResolvedVhdPath $resolvedVhdPath -ExpectedOwnerId $OwnerId
     Verify-HostVmConfiguration -VmObject $vm
     $operationCredential = Resolve-OperationCredential -ResolvedVhdPath $resolvedVhdPath
+
+    if ($RecoverPendingCheckpoint) {
+        Recover-PendingOwnedCheckpoint `
+            -ResolvedVhdPath $resolvedVhdPath `
+            -ExpectedOwnerId $OwnerId `
+            -VmObject $vm | Out-Null
+    }
 
     $cleanCheckpoint = Get-SingleCheckpoint -OwnedCheckpointName $script:CleanCheckpointName
     if ($null -eq $cleanCheckpoint) {
