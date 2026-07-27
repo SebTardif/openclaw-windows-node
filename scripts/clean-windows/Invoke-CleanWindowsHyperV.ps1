@@ -131,6 +131,7 @@ $script:CheckpointObservationPollIntervalMilliseconds = 500
 $script:CheckpointCreationWindowSec = 900
 $script:LegacyCheckpointRecoveryWindowSec = 21600
 $script:CheckpointRecoveryClockSkewSec = 300
+$script:VhdChainMaxDepth = 32
 
 Import-Module (Join-Path $PSScriptRoot "CleanWindowsUnattend.psm1") -Force
 
@@ -371,6 +372,7 @@ function Assert-HyperVPrerequisites {
         "Restore-VMSnapshot",
         "Remove-VMSnapshot",
         "Get-VMHardDiskDrive",
+        "Get-VHD",
         "Get-VMProcessor",
         "Get-VMFirmware",
         "Get-VMSecurity",
@@ -1144,19 +1146,218 @@ function Assert-FinalizedCheckpointMarkerMatches {
     }
 }
 
-function Get-PrimaryVhdPath {
+function Resolve-CanonicalExistingVhdPath {
     param(
         [Parameter(Mandatory = $true)]
-        [string]$OwnedVmName
+        [AllowNull()]
+        [AllowEmptyString()]
+        [string]$Path,
+        [Parameter(Mandatory = $true)]
+        [int]$Level,
+        [Parameter(Mandatory = $true)]
+        [string]$Role
     )
 
-    $drives = @(Get-VMHardDiskDrive -VMName $OwnedVmName -ErrorAction Stop |
-        Sort-Object ControllerType, ControllerNumber, ControllerLocation)
-    if ($drives.Count -eq 0) {
-        throw "VM '$OwnedVmName' does not have a hard disk attached."
+    $levelDescription = if ($Level -ge 0) { " at level $Level" } else { "" }
+    if ([string]::IsNullOrWhiteSpace($Path)) {
+        throw "$Role path$levelDescription is empty."
     }
 
-    return (Resolve-FullPath -Path $drives[0].Path)
+    if (-not [IO.Path]::IsPathRooted($Path)) {
+        throw "$Role path$levelDescription is not an absolute path: '$Path'."
+    }
+
+    try {
+        $fullPath = [IO.Path]::GetFullPath($Path)
+    } catch {
+        throw "$Role path$levelDescription cannot be canonicalized: '$Path'."
+    }
+
+    try {
+        $exists = Test-Path -LiteralPath $fullPath -PathType Leaf
+    } catch {
+        throw "$Role path$levelDescription could not be checked for existence: '$fullPath'."
+    }
+    if (-not $exists) {
+        throw "$Role path$levelDescription does not exist as a file: '$fullPath'."
+    }
+
+    try {
+        $resolvedPaths = @(Resolve-Path -LiteralPath $fullPath -ErrorAction Stop)
+    } catch {
+        throw "$Role path$levelDescription could not be resolved: '$fullPath'."
+    }
+    if ($resolvedPaths.Count -ne 1) {
+        throw "$Role path$levelDescription resolved ambiguously: '$fullPath'."
+    }
+
+    $providerPath = Get-PropertyValueOrNull -Object $resolvedPaths[0] -Name "ProviderPath"
+    if ([string]::IsNullOrWhiteSpace([string]$providerPath)) {
+        $providerPath = Get-PropertyValueOrNull -Object $resolvedPaths[0] -Name "Path"
+    }
+    if ([string]::IsNullOrWhiteSpace([string]$providerPath)) {
+        throw "$Role path$levelDescription did not resolve to a canonical file-system path: '$fullPath'."
+    }
+
+    try {
+        $canonicalPath = [IO.Path]::GetFullPath([string]$providerPath)
+    } catch {
+        throw "$Role path$levelDescription returned an invalid canonical path: '$fullPath'."
+    }
+    if (-not [IO.Path]::IsPathRooted($canonicalPath)) {
+        throw "$Role path$levelDescription returned a non-absolute canonical path: '$canonicalPath'."
+    }
+
+    return $canonicalPath
+}
+
+function Assert-VhdChainReachesOwnedBase {
+    param(
+        [Parameter(Mandatory = $true)]
+        [AllowNull()]
+        [AllowEmptyString()]
+        [string]$AttachedVhdPath,
+        [Parameter(Mandatory = $true)]
+        [AllowNull()]
+        [AllowEmptyString()]
+        [string]$OwnedBaseVhdPath,
+        [ValidateRange(1, 128)]
+        [int]$MaxDepth = $script:VhdChainMaxDepth
+    )
+
+    $canonicalAttachedLeafPath = Resolve-CanonicalExistingVhdPath `
+        -Path $AttachedVhdPath `
+        -Level 0 `
+        -Role "Attached VHD leaf"
+    $canonicalOwnedBasePath = Resolve-CanonicalExistingVhdPath `
+        -Path $OwnedBaseVhdPath `
+        -Level -1 `
+        -Role "Owner-marked base VHD"
+    $currentPath = $canonicalAttachedLeafPath
+    $visited = [Collections.Generic.HashSet[string]]::new(
+        [StringComparer]::OrdinalIgnoreCase
+    )
+
+    for ($level = 0; $level -lt $MaxDepth; $level++) {
+        if (-not $visited.Add($currentPath)) {
+            throw "VHD chain cycle detected at level $($level): '$currentPath'."
+        }
+
+        try {
+            $vhdRecords = @(Get-VHD -Path $currentPath -ErrorAction Stop)
+        } catch {
+            throw "Get-VHD failed for VHD chain path at level $($level): '$currentPath'."
+        }
+        if ($vhdRecords.Count -ne 1 -or $null -eq $vhdRecords[0]) {
+            throw "Get-VHD returned ambiguous data for VHD chain path at level $($level): '$currentPath'."
+        }
+        $vhdRecord = $vhdRecords[0]
+
+        $reportedPathProperty = $vhdRecord.PSObject.Properties["Path"]
+        if (
+            $null -eq $reportedPathProperty -or
+            $null -eq $reportedPathProperty.Value -or
+            -not ($reportedPathProperty.Value -is [string])
+        ) {
+            throw "Get-VHD did not report one string Path for VHD chain level $($level): '$currentPath'."
+        }
+        $reportedPath = Resolve-CanonicalExistingVhdPath `
+            -Path ([string]$reportedPathProperty.Value) `
+            -Level $level `
+            -Role "Get-VHD reported VHD"
+        if (-not [string]::Equals(
+            $reportedPath,
+            $currentPath,
+            [StringComparison]::OrdinalIgnoreCase
+        )) {
+            throw "Get-VHD reported a different path for VHD chain level $level. Queried '$currentPath'; reported '$reportedPath'."
+        }
+
+        $parentPathProperty = $vhdRecord.PSObject.Properties["ParentPath"]
+        if ($null -eq $parentPathProperty) {
+            throw "Get-VHD did not report ParentPath data for VHD chain level $($level): '$currentPath'."
+        }
+        if (
+            $null -ne $parentPathProperty.Value -and
+            -not ($parentPathProperty.Value -is [string])
+        ) {
+            throw "Get-VHD reported ambiguous ParentPath data for VHD chain level $($level): '$currentPath'."
+        }
+
+        $parentPath = [string]$parentPathProperty.Value
+        $isOwnedBase = [string]::Equals(
+            $currentPath,
+            $canonicalOwnedBasePath,
+            [StringComparison]::OrdinalIgnoreCase
+        )
+        if ([string]::IsNullOrWhiteSpace($parentPath)) {
+            if (-not $isOwnedBase) {
+                throw "VHD chain terminated at unrelated base at level $($level): '$currentPath'. Expected '$canonicalOwnedBasePath'."
+            }
+
+            return [pscustomobject]@{
+                LeafPath = $canonicalAttachedLeafPath
+                BasePath = $canonicalOwnedBasePath
+                Depth = $level
+                ChainLength = $level + 1
+            }
+        }
+
+        if ($isOwnedBase) {
+            throw "Owner-marked base VHD is not terminal at level $($level): '$currentPath'."
+        }
+
+        $canonicalParentPath = Resolve-CanonicalExistingVhdPath `
+            -Path $parentPath `
+            -Level ($level + 1) `
+            -Role "VHD parent"
+        if ($visited.Contains($canonicalParentPath)) {
+            throw "VHD chain cycle detected at level $($level + 1): '$canonicalParentPath'."
+        }
+        if (($level + 1) -ge $MaxDepth) {
+            throw "VHD chain exceeded the maximum depth of $MaxDepth after level $($level): '$canonicalParentPath'."
+        }
+
+        $currentPath = $canonicalParentPath
+    }
+
+    throw "VHD chain exceeded the maximum depth of $MaxDepth."
+}
+
+function Assert-OwnedVmDiskBinding {
+    param(
+        [Parameter(Mandatory = $true)]
+        [object]$VmObject,
+        [Parameter(Mandatory = $true)]
+        [string]$ResolvedVhdPath
+    )
+
+    $ownedVmName = [string](Get-PropertyValueOrNull -Object $VmObject -Name "Name")
+    if (-not (Test-StringEquals -Left $ownedVmName -Right $VMName)) {
+        throw "Hard disk inspection was not given the exact VM object for '$VMName'."
+    }
+
+    try {
+        $drives = @(Get-VMHardDiskDrive -VM $VmObject -ErrorAction Stop)
+    } catch {
+        throw "Active hard disks could not be read from exact VM '$VMName'."
+    }
+    if ($drives.Count -ne 1) {
+        throw "VM '$VMName' must have exactly one active hard disk for this controller, but found $($drives.Count). Refusing to infer an OS disk or accept additional data disks."
+    }
+
+    $drivePathProperty = $drives[0].PSObject.Properties["Path"]
+    if (
+        $null -eq $drivePathProperty -or
+        $null -eq $drivePathProperty.Value -or
+        -not ($drivePathProperty.Value -is [string])
+    ) {
+        throw "The active hard disk on exact VM '$VMName' does not have one unambiguous string path."
+    }
+
+    return Assert-VhdChainReachesOwnedBase `
+        -AttachedVhdPath ([string]$drivePathProperty.Value) `
+        -OwnedBaseVhdPath $ResolvedVhdPath
 }
 
 function Assert-OwnedVM {
@@ -1167,14 +1368,19 @@ function Assert-OwnedVM {
         [string]$ExpectedOwnerId
     )
 
-    $vm = Get-VM -Name $VMName -ErrorAction SilentlyContinue
-    if ($null -eq $vm) {
+    $vmMatches = @(Get-VM -Name $VMName -ErrorAction SilentlyContinue)
+    if ($vmMatches.Count -eq 0) {
         throw "VM '$VMName' was not found."
     }
-
-    $actualVhdPath = Get-PrimaryVhdPath -OwnedVmName $VMName
-    if ((Normalize-ComparisonPath $actualVhdPath) -ne (Normalize-ComparisonPath $ResolvedVhdPath)) {
-        throw "VM '$VMName' is attached to '$actualVhdPath', not '$ResolvedVhdPath'."
+    if ($vmMatches.Count -ne 1) {
+        throw "VM lookup for '$VMName' returned ambiguous results."
+    }
+    $vm = $vmMatches[0]
+    if (-not (Test-StringEquals `
+        -Left ([string](Get-PropertyValueOrNull -Object $vm -Name "Name")) `
+        -Right $VMName
+    )) {
+        throw "VM lookup did not return the exact named VM '$VMName'."
     }
 
     $noteMarker = Get-VMNoteMarker -VmObject $vm
@@ -1205,6 +1411,10 @@ function Assert-OwnedVM {
         -ExpectedVmName $VMName `
         -ExpectedVhdPath $ResolvedVhdPath `
         -VmObject $vm
+
+    Assert-OwnedVmDiskBinding `
+        -VmObject $vm `
+        -ResolvedVhdPath $ResolvedVhdPath | Out-Null
 
     return $vm
 }

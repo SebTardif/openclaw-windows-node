@@ -252,6 +252,12 @@ If `Checkpoint-VM` returned before an exact fixed-name snapshot became visible,
 do not issue ad hoc checkpoint commands. Route pending-intent or the narrowly
 documented completed-unattended markerless state through the Hyper-V skill's
 Prepare-only `-RecoverPendingCheckpoint -ConfirmOwnedAction` procedure.
+An active checkpoint `.avhdx` is not accepted by name or extension alone. The
+controller reads the exact VM object's sole active hard disk and uses `Get-VHD`
+to require a bounded, cycle-free canonical `ParentPath` chain whose terminal
+ancestor is the exact owner-marked base VHD. All VM, owner, ID, VHD, and
+checkpoint markers remain required. Use the Hyper-V skill's exact elevated
+Resume Create command first to return the marker-bound final credential path.
 
 Fresh unattended Hyper-V `Create` requires `-GenerateCredential`, verifies the
 official ISO SHA256, builds a separate answer ISO with Windows IMAPI2, and

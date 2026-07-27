@@ -94,6 +94,16 @@ Never delete or unregister a VM, VHD, or checkpoint. Never modify, restore,
 start, or stop an unowned or mismatched resource. Never weaken
 `-ConfirmOwnedAction`, clean-state guards, or checkpoint identity checks.
 
+An active checkpoint attaches its `.avhdx` leaf instead of the owner-marker
+base `.vhdx`. The ownership assertion reads active hard disks only from the
+exact VM object and preserves this controller's exactly-one-disk rule. It
+requires each leaf and parent to exist and be `Get-VHD` readable, follows
+canonical `ParentPath` ancestry for at most 32 levels with case-insensitive
+cycle detection, and accepts only a terminal path equal to the exact
+owner-marked base. Extra disks, unrelated bases, broken ancestry, cycles,
+ambiguous data, and excess depth fail closed. VM note/file markers, VM ID,
+owner ID, VHD marker, and checkpoint identity remain mandatory.
+
 ## Create unattended by default
 
 Fresh unattended Create requires `-GenerateCredential` as explicit consent.
@@ -186,6 +196,10 @@ material are removed, and the final rotated `guest.clixml` exists. The first
 immediate snapshot read returned null. Hyper-V later exposed a new `.avhdx` and
 Snapshot `.vmcx`, `.vmgs`, and `.vmrs` files, and the old controller wrote no
 checkpoint marker. Do not remove, recreate, or normally adopt that snapshot.
+The active leaf is
+`D:\Hyper-V\OpenClaw-Clean-Windows\os_622E57AA-66AB-4904-B875-7705065AF129.avhdx`;
+its verified terminal `ParentPath` ancestor is the exact owner base
+`D:\Hyper-V\OpenClaw-Clean-Windows\os.vhdx`.
 
 ```powershell
 $createResult = .\scripts\clean-windows\Invoke-CleanWindowsHyperV.ps1 -Command Create -ResumeUnattended -VMName 'OpenClaw-Clean-Windows' -OwnerId 'openclaw-clean-runner-bkudiess' -VhdPath 'D:\Hyper-V\OpenClaw-Clean-Windows\os.vhdx' -ConfirmOwnedAction
@@ -194,8 +208,10 @@ $credentialPath = $createResult.CredentialPath
 .\scripts\clean-windows\Invoke-CleanWindowsHyperV.ps1 -Command Prepare -VMName 'OpenClaw-Clean-Windows' -OwnerId 'openclaw-clean-runner-bkudiess' -VhdPath 'D:\Hyper-V\OpenClaw-Clean-Windows\os.vhdx' -CredentialPath $credentialPath -RecoverPendingCheckpoint -ConfirmOwnedAction
 ```
 
-Resume first validates the completed owned state and returns the existing final
-credential path. The typed recovery is Prepare-only and requires
+From an elevated PowerShell session, the exact Resume command above is the
+preferred retry. Resume first validates the completed owned state and returns
+the existing marker-bound final credential path without guessing it. The typed
+recovery is Prepare-only and requires
 `-ConfirmOwnedAction`. It validates exact VM note/file ownership, completed
 unattended ownership, secure import of the final DPAPI credential, one exact
 `clean-windows` snapshot, VM identity, and a bounded creation time derived from

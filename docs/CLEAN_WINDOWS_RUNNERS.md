@@ -38,6 +38,18 @@ refused unless both conditions are met:
 The VM marker is stored in Hyper-V VM notes and beside the VHD under
 `.openclaw-clean-windows\<vm-name>`. Checkpoint marker files bind the checkpoint
 name, Hyper-V snapshot ID, creation time, VM ID, VHD path, and owner ID.
+An active checkpoint normally changes the VM's attached hard disk from the
+owner-marked base `.vhdx` to a differencing `.avhdx`. `Assert-OwnedVM` reads
+hard disks only from the exact VM object and keeps this controller's strict
+exactly-one-active-hard-disk contract. It requires the attached leaf to be an
+existing canonical file, reads every level with `Get-VHD`, and follows
+`ParentPath` for at most 32 levels with case-insensitive cycle detection. The
+chain is accepted only when its terminal canonical path is the exact
+owner-marked base VHD. Missing or unreadable levels, unrelated terminal bases,
+cycles, excess depth, ambiguous API data, and every additional hard disk are
+refused. This does not weaken the VM note/file marker, VM ID, owner ID, or
+checkpoint identity checks.
+
 Checkpoint creation first atomically writes a version 2 `pending` intent at the
 final marker path, then calls `Checkpoint-VM` and polls only the exact fixed name
 for up to 60 seconds at 500 millisecond intervals. The marker becomes `complete`
@@ -204,8 +216,17 @@ immediate read. The filesystem later showed a new `.avhdx` plus Snapshot
 it wrote a checkpoint owner marker, the snapshot must not be removed,
 recreated, or adopted by normal `Prepare`.
 
-From an elevated PowerShell session, first rerun confirmed Resume to validate
-the completed owned state and return the existing final credential path:
+The active OS disk is currently
+`D:\Hyper-V\OpenClaw-Clean-Windows\os_622E57AA-66AB-4904-B875-7705065AF129.avhdx`.
+Its `Get-VHD` ancestry terminates at the exact owner-marked base
+`D:\Hyper-V\OpenClaw-Clean-Windows\os.vhdx`. The checkpoint-aware verification
+above accepts that expected relationship only after all ordinary ownership
+markers match.
+
+From an elevated PowerShell session, the preferred exact retry is the
+idempotent Resume command below. It validates the completed owned state and
+safely returns the marker-bound final credential path without guessing its
+location:
 
 ```powershell
 $createResult = .\scripts\clean-windows\Invoke-CleanWindowsHyperV.ps1 -Command Create -ResumeUnattended -VMName 'OpenClaw-Clean-Windows' -OwnerId 'openclaw-clean-runner-bkudiess' -VhdPath 'D:\Hyper-V\OpenClaw-Clean-Windows\os.vhdx' -ConfirmOwnedAction

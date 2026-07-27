@@ -19,7 +19,9 @@ public sealed class CleanWindowsRunnerScriptTests
         Assert.Contains("snapshotId", script);
         Assert.Contains("snapshotCreationTimeUtc", script);
         Assert.Contains("if ((Normalize-ComparisonPath $Marker.vhdPath) -ne", script);
-        Assert.Contains("if ((Normalize-ComparisonPath $actualVhdPath) -ne", script);
+        Assert.Contains("Assert-OwnedVmDiskBinding", script);
+        Assert.Contains("Get-VMHardDiskDrive -VM $VmObject", script);
+        Assert.Contains("\"Get-VHD\"", script);
         Assert.Contains("-Generation 2", script);
         Assert.Contains("-ExposeVirtualizationExtensions $true", script);
         Assert.Contains("-EnableSecureBoot On", script);
@@ -28,6 +30,146 @@ public sealed class CleanWindowsRunnerScriptTests
         Assert.Contains("-AutomaticCheckpointsEnabled $false", script);
         Assert.DoesNotContain("Remove-VM ", script);
         Assert.DoesNotContain("Remove-VHD", script);
+    }
+
+    [Fact]
+    public void HyperVController_RequiresGetVhdAndBindsOnlyTheExactOwnedVmDisk()
+    {
+        var controller = ReadScript("Invoke-CleanWindowsHyperV.ps1");
+        var prerequisites = ExtractPowerShellFunction(
+            controller,
+            "Assert-HyperVPrerequisites",
+            "Get-OwnedMarkerRoot");
+        var resolver = ExtractPowerShellFunction(
+            controller,
+            "Resolve-CanonicalExistingVhdPath",
+            "Assert-VhdChainReachesOwnedBase");
+        var ancestry = ExtractPowerShellFunction(
+            controller,
+            "Assert-VhdChainReachesOwnedBase",
+            "Assert-OwnedVmDiskBinding");
+        var diskBinding = ExtractPowerShellFunction(
+            controller,
+            "Assert-OwnedVmDiskBinding",
+            "Assert-OwnedVM");
+        var ownership = ExtractPowerShellFunction(
+            controller,
+            "Assert-OwnedVM",
+            "Get-SingleCheckpoint");
+
+        Assert.Contains("\"Get-VHD\"", prerequisites);
+        Assert.Contains("$script:VhdChainMaxDepth = 32", controller);
+        Assert.Contains("Test-Path -LiteralPath $fullPath -PathType Leaf", resolver);
+        Assert.Contains("Resolve-Path -LiteralPath $fullPath -ErrorAction Stop", resolver);
+        Assert.Contains("Get-VHD -Path $currentPath -ErrorAction Stop", ancestry);
+        Assert.Contains("ParentPath", ancestry);
+        Assert.Contains("Collections.Generic.HashSet[string]", ancestry);
+        Assert.Contains("[StringComparer]::OrdinalIgnoreCase", ancestry);
+        Assert.Contains("cycle detected", ancestry);
+        Assert.Contains("maximum depth", ancestry);
+        Assert.Contains("terminated at unrelated base", ancestry);
+        Assert.Contains("Get-VMHardDiskDrive -VM $VmObject -ErrorAction Stop", diskBinding);
+        Assert.Contains("$drives.Count -ne 1", diskBinding);
+        Assert.Contains("exactly one active hard disk", diskBinding);
+        Assert.Contains("additional data disks", diskBinding);
+        Assert.Contains("Assert-VhdChainReachesOwnedBase", diskBinding);
+        Assert.DoesNotContain("Get-VMHardDiskDrive -VMName", diskBinding);
+
+        var noteMarkerIndex = ownership.IndexOf("Assert-OwnerMarkerMatches", StringComparison.Ordinal);
+        var fileMarkerIndex = ownership.LastIndexOf("Assert-OwnerMarkerMatches", StringComparison.Ordinal);
+        var diskBindingIndex = ownership.IndexOf("Assert-OwnedVmDiskBinding", StringComparison.Ordinal);
+        Assert.True(noteMarkerIndex >= 0);
+        Assert.True(fileMarkerIndex > noteMarkerIndex);
+        Assert.True(diskBindingIndex > fileMarkerIndex);
+        Assert.DoesNotContain("Get-PrimaryVhdPath", controller, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void HyperVController_AllOwnedEntryPointsUseCheckpointAwareVmAssertion()
+    {
+        var controller = ReadScript("Invoke-CleanWindowsHyperV.ps1");
+        var entryPoints = new[]
+        {
+            ("Invoke-ResumeUnattendedCommand", "Invoke-CreateCommand"),
+            ("Invoke-PrepareCommand", "Invoke-VerifyCommand"),
+            ("Invoke-VerifyCommand", "Invoke-SmokeCommand"),
+            ("Invoke-SmokeCommand", "Invoke-RestoreCommand"),
+        };
+
+        foreach (var (functionName, nextFunctionName) in entryPoints)
+        {
+            var entryPoint = ExtractPowerShellFunction(controller, functionName, nextFunctionName);
+            Assert.Contains("Assert-OwnedVM", entryPoint);
+        }
+
+        var prepare = ExtractPowerShellFunction(
+            controller,
+            "Invoke-PrepareCommand",
+            "Invoke-VerifyCommand");
+        Assert.True(
+            prepare.IndexOf("Assert-OwnedVM", StringComparison.Ordinal) <
+            prepare.IndexOf("Recover-PendingOwnedCheckpoint", StringComparison.Ordinal));
+    }
+
+    [Theory]
+    [InlineData("DirectBase", "accepted|0|1|1")]
+    [InlineData("MultipleLevels", "accepted|3|4|4")]
+    public void HyperVController_VhdAncestryAcceptsDirectAndMultiLevelOwnedChains(
+        string scenario,
+        string expectedOutput)
+    {
+        var result = RunPowerShellCommand(BuildVhdChainProof(scenario));
+
+        AssertPowerShellProofSucceeded(result);
+        Assert.Equal(expectedOutput, result.Stdout);
+    }
+
+    [Fact]
+    public void HyperVController_CheckpointActiveAvhdxReachesExactOwnerBase()
+    {
+        var proof = BuildVhdChainProof("CheckpointLeaf");
+        Assert.Contains(
+            @"D:\Hyper-V\OpenClaw-Clean-Windows\os_622E57AA-66AB-4904-B875-7705065AF129.avhdx",
+            proof);
+
+        var result = RunPowerShellCommand(proof);
+
+        AssertPowerShellProofSucceeded(result);
+        Assert.Equal("accepted|1|2|2", result.Stdout);
+    }
+
+    [Theory]
+    [InlineData("WrongTerminal", "terminated at unrelated base")]
+    [InlineData("MissingParent", "does not exist as a file")]
+    [InlineData("GetVhdError", "Get-VHD failed")]
+    [InlineData("Cycle", "cycle detected")]
+    [InlineData("OverMaxDepth", "maximum depth of 32")]
+    [InlineData("InvalidPath", "is not an absolute path")]
+    [InlineData("AmbiguousGetVhd", "returned ambiguous data")]
+    public void HyperVController_VhdAncestryFailsClosed(
+        string scenario,
+        string expectedError)
+    {
+        var proof = BuildVhdChainProof(scenario);
+        Assert.Contains("function Get-VHD", proof);
+
+        var result = RunPowerShellCommand(proof);
+
+        AssertPowerShellProofSucceeded(result);
+        Assert.StartsWith("rejected|", result.Stdout, StringComparison.Ordinal);
+        Assert.Contains(expectedError, result.Stdout, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void HyperVController_RefusesDuplicateActiveOsDiskDrivesBeforeChainInference()
+    {
+        var result = RunPowerShellCommand(BuildDuplicateActiveVhdProof());
+
+        AssertPowerShellProofSucceeded(result);
+        Assert.StartsWith("0|0|", result.Stdout, StringComparison.Ordinal);
+        Assert.Contains("exactly one active hard disk", result.Stdout);
+        Assert.Contains("found 2", result.Stdout);
+        Assert.Contains("additional data disks", result.Stdout);
     }
 
     [Fact]
@@ -328,10 +470,26 @@ public sealed class CleanWindowsRunnerScriptTests
             Assert.Contains("delete", guidance);
             Assert.Contains("ad hoc", guidance);
             Assert.Contains("snapshot", guidance);
+            Assert.Contains(
+                @"D:\Hyper-V\OpenClaw-Clean-Windows\os_622E57AA-66AB-4904-B875-7705065AF129.avhdx",
+                guidance);
+            Assert.Contains(
+                @"D:\Hyper-V\OpenClaw-Clean-Windows\os.vhdx",
+                guidance);
+            Assert.Contains("Get-VHD", guidance);
+            Assert.Contains("terminal", guidance);
+            Assert.Contains("owner-marked base", guidance);
+            Assert.Contains("preferred", guidance, StringComparison.OrdinalIgnoreCase);
+            Assert.Contains("elevated PowerShell", guidance);
         }
         Assert.Contains("-RecoverPendingCheckpoint -ConfirmOwnedAction", routing);
         Assert.Contains("Prepare-only", routing);
         Assert.Contains("do not issue ad hoc checkpoint commands", routing);
+        Assert.Contains("sole active hard disk", routing);
+        Assert.Contains("Get-VHD", routing);
+        Assert.Contains("terminal", routing);
+        Assert.Contains("owner-marked base VHD", routing);
+        Assert.Contains("Resume Create", routing);
     }
 
     [Fact]
@@ -1555,6 +1713,174 @@ public sealed class CleanWindowsRunnerScriptTests
     private static string ReadScript(string name) =>
         File.ReadAllText(Path.Combine(Root, "scripts", "clean-windows", name));
 
+    private static string BuildVhdChainProof(string scenario)
+    {
+        var controller = ReadScript("Invoke-CleanWindowsHyperV.ps1");
+        var propertyValue = ExtractPowerShellFunction(
+            controller,
+            "Get-PropertyValueOrNull",
+            "Assert-HyperVPrerequisites");
+        var resolver = ExtractPowerShellFunction(
+            controller,
+            "Resolve-CanonicalExistingVhdPath",
+            "Assert-VhdChainReachesOwnedBase");
+        var ancestry = ExtractPowerShellFunction(
+            controller,
+            "Assert-VhdChainReachesOwnedBase",
+            "Assert-OwnedVmDiskBinding");
+        var scenarioSetup = scenario switch
+        {
+            "DirectBase" => "",
+            "CheckpointLeaf" =>
+                """
+                $attachedPath = 'D:\Hyper-V\OpenClaw-Clean-Windows\os_622E57AA-66AB-4904-B875-7705065AF129.avhdx'
+                Add-FakeVhd -Path $attachedPath -ParentPath 'd:\HYPER-V\OpenClaw-Clean-Windows\.\os.vhdx'
+                """,
+            "MultipleLevels" =>
+                """
+                $attachedPath = 'D:\Hyper-V\OpenClaw-Clean-Windows\level-3.avhdx'
+                Add-FakeVhd -Path $attachedPath -ParentPath 'D:\Hyper-V\OpenClaw-Clean-Windows\level-2.avhdx'
+                Add-FakeVhd -Path 'D:\Hyper-V\OpenClaw-Clean-Windows\level-2.avhdx' -ParentPath 'D:\Hyper-V\OpenClaw-Clean-Windows\level-1.avhdx'
+                Add-FakeVhd -Path 'D:\Hyper-V\OpenClaw-Clean-Windows\level-1.avhdx' -ParentPath $basePath
+                """,
+            "WrongTerminal" =>
+                """
+                $attachedPath = 'D:\Hyper-V\OpenClaw-Clean-Windows\wrong-leaf.avhdx'
+                Add-FakeVhd -Path $attachedPath -ParentPath 'D:\Hyper-V\Unrelated\data.vhdx'
+                Add-FakeVhd -Path 'D:\Hyper-V\Unrelated\data.vhdx' -ParentPath $null
+                """,
+            "MissingParent" =>
+                """
+                $attachedPath = 'D:\Hyper-V\OpenClaw-Clean-Windows\missing-parent.avhdx'
+                Add-FakeVhd -Path $attachedPath -ParentPath 'D:\Hyper-V\OpenClaw-Clean-Windows\missing.vhdx'
+                """,
+            "GetVhdError" =>
+                """
+                $attachedPath = 'D:\Hyper-V\OpenClaw-Clean-Windows\get-vhd-error.avhdx'
+                Add-FakeVhd -Path $attachedPath -ParentPath $basePath
+                $script:getVhdErrorPath = $attachedPath
+                """,
+            "Cycle" =>
+                """
+                $attachedPath = 'D:\Hyper-V\OpenClaw-Clean-Windows\cycle-a.avhdx'
+                Add-FakeVhd -Path $attachedPath -ParentPath 'D:\Hyper-V\OpenClaw-Clean-Windows\cycle-b.avhdx'
+                Add-FakeVhd -Path 'D:\Hyper-V\OpenClaw-Clean-Windows\cycle-b.avhdx' -ParentPath $attachedPath
+                """,
+            "OverMaxDepth" =>
+                """
+                $attachedPath = 'D:\Hyper-V\OpenClaw-Clean-Windows\depth-00.avhdx'
+                for ($index = 0; $index -lt 32; $index++) {
+                    $path = 'D:\Hyper-V\OpenClaw-Clean-Windows\depth-{0:D2}.avhdx' -f $index
+                    $parent = if ($index -eq 31) {
+                        $basePath
+                    } else {
+                        'D:\Hyper-V\OpenClaw-Clean-Windows\depth-{0:D2}.avhdx' -f ($index + 1)
+                    }
+                    Add-FakeVhd -Path $path -ParentPath $parent
+                }
+                """,
+            "InvalidPath" => "$attachedPath = 'relative\\invalid.avhdx'\n",
+            "AmbiguousGetVhd" =>
+                """
+                $attachedPath = 'D:\Hyper-V\OpenClaw-Clean-Windows\ambiguous.avhdx'
+                Add-FakeVhd -Path $attachedPath -ParentPath $basePath
+                $script:ambiguousGetVhdPath = $attachedPath
+                """,
+            _ => throw new ArgumentOutOfRangeException(nameof(scenario)),
+        };
+
+        return string.Concat(
+            "$ErrorActionPreference = 'Stop'\n",
+            "$script:VhdChainMaxDepth = 32\n",
+            "$script:getVhdCalls = 0\n",
+            "$script:getVhdErrorPath = ''\n",
+            "$script:ambiguousGetVhdPath = ''\n",
+            "$script:existingPaths = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)\n",
+            "$script:parents = @{}\n",
+            "$basePath = 'D:\\Hyper-V\\OpenClaw-Clean-Windows\\os.vhdx'\n",
+            "$attachedPath = $basePath\n",
+            "function Add-FakeVhd {\n",
+            "    param([string]$Path, [AllowNull()][string]$ParentPath)\n",
+            "    $canonicalPath = [IO.Path]::GetFullPath($Path)\n",
+            "    [void]$script:existingPaths.Add($canonicalPath)\n",
+            "    $script:parents[$canonicalPath] = $ParentPath\n",
+            "}\n",
+            "function Test-Path {\n",
+            "    param([string]$LiteralPath, [object]$PathType)\n",
+            "    return $script:existingPaths.Contains([IO.Path]::GetFullPath($LiteralPath))\n",
+            "}\n",
+            "function Resolve-Path {\n",
+            "    param([string]$LiteralPath, [object]$ErrorAction)\n",
+            "    $canonicalPath = [IO.Path]::GetFullPath($LiteralPath)\n",
+            "    if (-not $script:existingPaths.Contains($canonicalPath)) { throw 'missing fake VHD' }\n",
+            "    return [pscustomobject]@{ ProviderPath = $canonicalPath; Path = $canonicalPath }\n",
+            "}\n",
+            "function Get-VHD {\n",
+            "    [CmdletBinding()]\n",
+            "    param([string]$Path)\n",
+            "    $script:getVhdCalls++\n",
+            "    $canonicalPath = [IO.Path]::GetFullPath($Path)\n",
+            "    if ([string]::Equals($canonicalPath, $script:getVhdErrorPath, [StringComparison]::OrdinalIgnoreCase)) { throw 'simulated Get-VHD failure' }\n",
+            "    if (-not $script:parents.ContainsKey($canonicalPath)) { throw 'unknown fake VHD' }\n",
+            "    $record = [pscustomobject]@{ Path = $canonicalPath; ParentPath = $script:parents[$canonicalPath] }\n",
+            "    if ([string]::Equals($canonicalPath, $script:ambiguousGetVhdPath, [StringComparison]::OrdinalIgnoreCase)) { return @($record, $record) }\n",
+            "    return $record\n",
+            "}\n",
+            propertyValue,
+            "\n",
+            resolver,
+            "\n",
+            ancestry,
+            "\n",
+            "Add-FakeVhd -Path $basePath -ParentPath $null\n",
+            scenarioSetup,
+            "\ntry {\n",
+            "    $chain = Assert-VhdChainReachesOwnedBase -AttachedVhdPath $attachedPath -OwnedBaseVhdPath $basePath\n",
+            "    [Console]::Out.Write(\"accepted|$($chain.Depth)|$($chain.ChainLength)|$script:getVhdCalls\")\n",
+            "} catch {\n",
+            "    [Console]::Out.Write(\"rejected|$($_.Exception.Message)|$script:getVhdCalls\")\n",
+            "}\n");
+    }
+
+    private static string BuildDuplicateActiveVhdProof()
+    {
+        var controller = ReadScript("Invoke-CleanWindowsHyperV.ps1");
+        var stringEquals = ExtractPowerShellFunction(
+            controller,
+            "Test-StringEquals",
+            "Normalize-SecureBootTemplate");
+        var propertyValue = ExtractPowerShellFunction(
+            controller,
+            "Get-PropertyValueOrNull",
+            "Assert-HyperVPrerequisites");
+        var diskBinding = ExtractPowerShellFunction(
+            controller,
+            "Assert-OwnedVmDiskBinding",
+            "Assert-OwnedVM");
+        return string.Concat(
+            "$ErrorActionPreference = 'Stop'\n",
+            "$VMName = 'OpenClaw-Disk-Proof'\n",
+            "$script:chainCalls = 0\n",
+            "$script:getVhdCalls = 0\n",
+            "$vm = [pscustomobject]@{ Name = $VMName; Id = [Guid]'11111111-1111-1111-1111-111111111111' }\n",
+            "$drive1 = [pscustomobject]@{ Path = 'D:\\Hyper-V\\OpenClaw-Clean-Windows\\checkpoint-a.avhdx' }\n",
+            "$drive2 = [pscustomobject]@{ Path = 'D:\\Hyper-V\\OpenClaw-Clean-Windows\\checkpoint-b.avhdx' }\n",
+            "function Get-VMHardDiskDrive { [CmdletBinding()] param([object]$VM) return @($drive1, $drive2) }\n",
+            "function Get-VHD { [CmdletBinding()] param([string]$Path) $script:getVhdCalls++ }\n",
+            "function Assert-VhdChainReachesOwnedBase { param([string]$AttachedVhdPath, [string]$OwnedBaseVhdPath) $script:chainCalls++ }\n",
+            stringEquals,
+            "\n",
+            propertyValue,
+            "\n",
+            diskBinding,
+            "\ntry {\n",
+            "    Assert-OwnedVmDiskBinding -VmObject $vm -ResolvedVhdPath 'D:\\Hyper-V\\OpenClaw-Clean-Windows\\os.vhdx' | Out-Null\n",
+            "    [Console]::Out.Write('unexpected-success')\n",
+            "} catch {\n",
+            "    [Console]::Out.Write(\"$script:chainCalls|$script:getVhdCalls|$($_.Exception.Message)\")\n",
+            "}\n");
+    }
+
     private static string BuildDetachProof(string getDvdDriveBody, string testBody)
     {
         var controller = ReadScript("Invoke-CleanWindowsHyperV.ps1");
@@ -1679,7 +2005,7 @@ public sealed class CleanWindowsRunnerScriptTests
         var finalizedIdentity = ExtractPowerShellFunction(
             controller,
             "Assert-FinalizedCheckpointMarkerMatches",
-            "Get-PrimaryVhdPath");
+            "Resolve-CanonicalExistingVhdPath");
         return string.Concat(
             "$ErrorActionPreference = 'Stop'\n",
             "$VMName = 'OpenClaw-Checkpoint-Proof'\n",
