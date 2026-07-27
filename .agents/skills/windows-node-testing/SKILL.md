@@ -257,7 +257,15 @@ controller reads the exact VM object's sole active hard disk and uses `Get-VHD`
 to require a bounded, cycle-free canonical `ParentPath` chain whose terminal
 ancestor is the exact owner-marked base VHD. All VM, owner, ID, VHD, and
 checkpoint markers remain required. Use the Hyper-V skill's exact elevated
-Resume Create command first to return the marker-bound final credential path.
+recovery procedure only when the controller reports pending intent.
+
+The current owned VM is restored to its exact finalized `clean-windows`
+checkpoint and retains the final rotated credential. Route it through normal
+`Prepare` without `-RecoverPendingCheckpoint`. Prepare uses bounded
+optional-feature, conditional restart, WSL package, conditional restart, and
+final verification stages before tool setup. It does not install Ubuntu or
+another distribution. The installed smoke provisions its app-owned
+distribution later.
 
 Fresh unattended Hyper-V `Create` requires `-GenerateCredential`, verifies the
 official ISO SHA256, builds a separate answer ISO with Windows IMAPI2, and

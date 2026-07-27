@@ -190,39 +190,30 @@ Safe helper proof does not create a VM and does not require elevation:
 It generates, mounts, validates, dismounts, and deletes nonce-bound owned test
 media while printing only nonsecret JSON.
 
-The current state has completed unattended Create. Answer media and setup
-material are removed, and the final rotated `guest.clixml` exists. The first
-`Prepare` call returned from `Checkpoint-VM` for `clean-windows`, but its
-immediate snapshot read returned null. Hyper-V later exposed a new `.avhdx` and
-Snapshot `.vmcx`, `.vmgs`, and `.vmrs` files, and the old controller wrote no
-checkpoint marker. Do not remove, recreate, or normally adopt that snapshot.
-The active leaf is
-`D:\Hyper-V\OpenClaw-Clean-Windows\os_622E57AA-66AB-4904-B875-7705065AF129.avhdx`;
-its verified terminal `ParentPath` ancestor is the exact owner base
-`D:\Hyper-V\OpenClaw-Clean-Windows\os.vhdx`.
+The current Windows 11 Enterprise Evaluation build 26200 x64 state has nested
+hypervisor presence confirmed and is restored to the exact `clean-windows`
+checkpoint. Its checkpoint owner marker is finalized, answer media and setup
+material are absent, and the final rotated `guest.clixml` credential remains
+available. Both WSL optional features are disabled at that checkpoint, and
+`wsl.exe --status` returns exit 50 with `WSL is not installed`. This is the
+expected input to normal `Prepare`.
+
+From an elevated PowerShell session, run normal `Prepare` without
+`-RecoverPendingCheckpoint`:
 
 ```powershell
-$createResult = .\scripts\clean-windows\Invoke-CleanWindowsHyperV.ps1 -Command Create -ResumeUnattended -VMName 'OpenClaw-Clean-Windows' -OwnerId 'openclaw-clean-runner-bkudiess' -VhdPath 'D:\Hyper-V\OpenClaw-Clean-Windows\os.vhdx' -ConfirmOwnedAction
-$credentialPath = $createResult.CredentialPath
-
-.\scripts\clean-windows\Invoke-CleanWindowsHyperV.ps1 -Command Prepare -VMName 'OpenClaw-Clean-Windows' -OwnerId 'openclaw-clean-runner-bkudiess' -VhdPath 'D:\Hyper-V\OpenClaw-Clean-Windows\os.vhdx' -CredentialPath $credentialPath -RecoverPendingCheckpoint -ConfirmOwnedAction
+.\scripts\clean-windows\Invoke-CleanWindowsHyperV.ps1 -Command Prepare -VMName 'OpenClaw-Clean-Windows' -OwnerId 'openclaw-clean-runner-bkudiess' -VhdPath 'D:\Hyper-V\OpenClaw-Clean-Windows\os.vhdx' -CredentialPath $credentialPath -ConfirmOwnedAction
 ```
 
-From an elevated PowerShell session, the exact Resume command above is the
-preferred retry. Resume first validates the completed owned state and returns
-the existing marker-bound final credential path without guessing it. The typed
-recovery is Prepare-only and requires
-`-ConfirmOwnedAction`. It validates exact VM note/file ownership, completed
-unattended ownership, secure import of the final DPAPI credential, one exact
-`clean-windows` snapshot, VM identity, and a bounded creation time derived from
-the unattended completion proof. Legacy markerless recovery uses a fixed
-six-hour window. Duplicate, wrong-name, wrong-VM, old, and future snapshots fail
-closed. It finalizes the marker without delete/recreate, then Prepare continues
-with restore, prerequisites, and transactional creation of
-`openclaw-prerequisites`.
+`-RecoverPendingCheckpoint` remains a Prepare-only repair for a future
+operation that actually reports pending intent, or for the narrowly supported
+completed-unattended markerless state. It requires `-ConfirmOwnedAction`,
+validates exact VM, VHD, credential, snapshot identity, and bounded creation
+time, and never deletes or recreates a snapshot. Do not add it to the current
+normal command.
 
 Do not use `-CleanupUnattend`, reinstall, delete the VM or VHD, issue ad hoc
-snapshot commands, or remove the current snapshot.
+snapshot commands, or remove either owned checkpoint.
 
 Partial failure never deletes a VM or VHD. Before PowerShell Direct readiness,
 owned answer media and the DPAPI setup credential remain for diagnosis. For a
@@ -242,12 +233,24 @@ material.
   -ConfirmOwnedAction
 ```
 
-`Prepare` creates `clean-windows`, restores it, enables nested WSL2
-prerequisites, installs Git and PowerShell 7, copies the checkout through
-PowerShell Direct, runs `scripts\setup-dev.ps1`, and creates
-`openclaw-prerequisites`. Checkpoint observation is bounded and exact-name only.
-Timeouts retain pending intent for explicit recovery. Recovery is never
-automatic.
+`Prepare` creates or validates `clean-windows`, restores it, and uses explicit
+idempotent stages. The optional-feature stage checks both exact Windows
+features, enables only disabled features with `-NoRestart`, and returns both
+states plus `needsRestart`. The host controller restarts and reconnects only
+the exact owned VM when required. The package stage uses a fixed native helper
+that captures bounded `wsl.exe --status` and `--version` output without sending
+native stderr to the PowerShell job error stream. When absent, it runs only
+`wsl.exe --install --no-distribution`; no `--web-download` fallback is used.
+After a successful install invocation, the package stage always requests a
+second bounded restart. Final verification requires structured zero-exit status
+and version proof before Git, PowerShell 7, checkout copy, or
+`scripts\setup-dev.ps1`.
+
+`Prepare` does not install Ubuntu or another distribution. Installed smoke
+provisions its app-owned distribution later. Checkpoint observation, guest
+commands, restarts, and reconnects are bounded. Failed jobs report bounded,
+sanitized reason and child diagnostics before removal. Timeouts retain pending
+intent for explicit recovery. Recovery is never automatic.
 
 ## Verify
 

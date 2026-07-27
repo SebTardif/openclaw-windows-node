@@ -440,56 +440,581 @@ public sealed class CleanWindowsRunnerScriptTests
     }
 
     [Fact]
-    public void HyperVRecoveryDocs_UseTypedRecoveryForCompletedMarkerlessCheckpoint()
+    public void HyperVCurrentStateDocs_UseNormalPrepareAfterExactCleanRestore()
     {
         var docs = File.ReadAllText(Path.Combine(Root, "docs", "CLEAN_WINDOWS_RUNNERS.md"));
         var skill = File.ReadAllText(
             Path.Combine(Root, ".agents", "skills", "openclaw-hyperv-smoke", "SKILL.md"));
         var routing = File.ReadAllText(
             Path.Combine(Root, ".agents", "skills", "windows-node-testing", "SKILL.md"));
-        var exactResumeCommand =
-            @"$createResult = .\scripts\clean-windows\Invoke-CleanWindowsHyperV.ps1 -Command Create -ResumeUnattended -VMName 'OpenClaw-Clean-Windows' -OwnerId 'openclaw-clean-runner-bkudiess' -VhdPath 'D:\Hyper-V\OpenClaw-Clean-Windows\os.vhdx' -ConfirmOwnedAction";
         var exactPrepareCommand =
+            @".\scripts\clean-windows\Invoke-CleanWindowsHyperV.ps1 -Command Prepare -VMName 'OpenClaw-Clean-Windows' -OwnerId 'openclaw-clean-runner-bkudiess' -VhdPath 'D:\Hyper-V\OpenClaw-Clean-Windows\os.vhdx' -CredentialPath $credentialPath -ConfirmOwnedAction";
+        var obsoleteRecoveryCommand =
             @".\scripts\clean-windows\Invoke-CleanWindowsHyperV.ps1 -Command Prepare -VMName 'OpenClaw-Clean-Windows' -OwnerId 'openclaw-clean-runner-bkudiess' -VhdPath 'D:\Hyper-V\OpenClaw-Clean-Windows\os.vhdx' -CredentialPath $credentialPath -RecoverPendingCheckpoint -ConfirmOwnedAction";
 
         foreach (var guidance in new[] { docs, skill })
         {
-            Assert.Contains(exactResumeCommand, guidance);
-            Assert.Contains("$credentialPath = $createResult.CredentialPath", guidance);
+            var normalizedGuidance = guidance.Replace("\r", "", StringComparison.Ordinal)
+                .Replace("\n", " ", StringComparison.Ordinal);
             Assert.Contains(exactPrepareCommand, guidance);
-            Assert.Contains("completed unattended", guidance, StringComparison.OrdinalIgnoreCase);
-            Assert.Contains("final rotated", guidance);
-            Assert.Contains("marker", guidance);
-            Assert.Contains("exact", guidance);
-            Assert.Contains("creation time", guidance);
-            Assert.Contains("without", guidance);
-            Assert.Contains("delet", guidance);
-            Assert.Contains("continues", guidance);
-            Assert.Contains("Do not use `-CleanupUnattend`", guidance);
-            Assert.Contains("reinstall", guidance);
-            Assert.Contains("delete", guidance);
-            Assert.Contains("ad hoc", guidance);
-            Assert.Contains("snapshot", guidance);
+            Assert.DoesNotContain(obsoleteRecoveryCommand, guidance, StringComparison.Ordinal);
+            Assert.Contains("exact `clean-windows` checkpoint", normalizedGuidance);
+            Assert.Contains("finalized", normalizedGuidance);
+            Assert.Contains("final rotated", normalizedGuidance);
+            Assert.Contains("normal `Prepare`", normalizedGuidance);
+            Assert.Contains("without `-RecoverPendingCheckpoint`", normalizedGuidance);
+            Assert.Contains("exact", normalizedGuidance);
+            Assert.Contains("Do not use `-CleanupUnattend`", normalizedGuidance);
+            Assert.Contains("does not install Ubuntu", normalizedGuidance);
+            Assert.Contains("app-owned distribution", normalizedGuidance);
+            Assert.Contains("optional-feature stage", normalizedGuidance);
+            Assert.Contains("package stage", normalizedGuidance);
             Assert.Contains(
-                @"D:\Hyper-V\OpenClaw-Clean-Windows\os_622E57AA-66AB-4904-B875-7705065AF129.avhdx",
-                guidance);
-            Assert.Contains(
-                @"D:\Hyper-V\OpenClaw-Clean-Windows\os.vhdx",
-                guidance);
-            Assert.Contains("Get-VHD", guidance);
-            Assert.Contains("terminal", guidance);
-            Assert.Contains("owner-marked base", guidance);
-            Assert.Contains("preferred", guidance, StringComparison.OrdinalIgnoreCase);
-            Assert.Contains("elevated PowerShell", guidance);
+                "final verification",
+                normalizedGuidance,
+                StringComparison.OrdinalIgnoreCase);
+            Assert.Contains("elevated PowerShell", normalizedGuidance);
         }
-        Assert.Contains("-RecoverPendingCheckpoint -ConfirmOwnedAction", routing);
-        Assert.Contains("Prepare-only", routing);
-        Assert.Contains("do not issue ad hoc checkpoint commands", routing);
-        Assert.Contains("sole active hard disk", routing);
-        Assert.Contains("Get-VHD", routing);
-        Assert.Contains("terminal", routing);
-        Assert.Contains("owner-marked base VHD", routing);
-        Assert.Contains("Resume Create", routing);
+        var normalizedRouting = routing.Replace("\r", "", StringComparison.Ordinal)
+            .Replace("\n", " ", StringComparison.Ordinal);
+        Assert.Contains("-RecoverPendingCheckpoint -ConfirmOwnedAction", normalizedRouting);
+        Assert.Contains("Prepare-only", normalizedRouting);
+        Assert.Contains("do not issue ad hoc checkpoint commands", normalizedRouting);
+        Assert.Contains("sole active hard disk", normalizedRouting);
+        Assert.Contains("Get-VHD", normalizedRouting);
+        Assert.Contains("terminal", normalizedRouting);
+        Assert.Contains("owner-marked base VHD", normalizedRouting);
+        Assert.Contains("normal `Prepare`", normalizedRouting);
+        Assert.Contains("without `-RecoverPendingCheckpoint`", normalizedRouting);
+        Assert.Contains("does not install Ubuntu", normalizedRouting);
+    }
+
+    [Fact]
+    public void HyperVController_FeatureStageEnablesOnlyDisabledFeaturesAndReturnsRestartProof()
+    {
+        var controller = ReadScript("Invoke-CleanWindowsHyperV.ps1");
+        var featureStage = ExtractPowerShellFunction(
+            controller,
+            "Get-GuestOptionalFeatureStageScriptBlock",
+            "Invoke-GuestOptionalFeatureStage");
+
+        Assert.Contains("Get-WindowsOptionalFeature", featureStage);
+        Assert.Contains("Enable-WindowsOptionalFeature", featureStage);
+        Assert.Contains("-Online", featureStage);
+        Assert.Contains("-All", featureStage);
+        Assert.Contains("-NoRestart", featureStage);
+        Assert.DoesNotContain("wsl.exe", featureStage, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain(
+            "Invoke-OpenClawTrustedWslProcess",
+            featureStage,
+            StringComparison.Ordinal);
+
+        var result = RunPowerShellCommand(BuildOptionalFeatureStageProof(featuresEnabled: false));
+
+        AssertPowerShellProofSucceeded(result);
+        using var document = JsonDocument.Parse(result.Stdout);
+        var proof = document.RootElement;
+        Assert.Equal("optional-features", proof.GetProperty("stage").GetString());
+        Assert.Equal(
+            "Enabled",
+            proof.GetProperty("microsoftWindowsSubsystemLinuxState").GetString());
+        Assert.Equal(
+            "Enabled",
+            proof.GetProperty("virtualMachinePlatformState").GetString());
+        Assert.True(proof.GetProperty("changed").GetBoolean());
+        Assert.True(proof.GetProperty("needsRestart").GetBoolean());
+        Assert.Equal(2, proof.GetProperty("enableCalls").GetInt32());
+    }
+
+    [Fact]
+    public void HyperVController_EnabledFeatureStageSkipsEnableAndPackageFollowsHostBoundary()
+    {
+        var controller = ReadScript("Invoke-CleanWindowsHyperV.ps1");
+        var result = RunPowerShellCommand(BuildOptionalFeatureStageProof(featuresEnabled: true));
+
+        AssertPowerShellProofSucceeded(result);
+        using var document = JsonDocument.Parse(result.Stdout);
+        var proof = document.RootElement;
+        Assert.False(proof.GetProperty("changed").GetBoolean());
+        Assert.False(proof.GetProperty("needsRestart").GetBoolean());
+        Assert.Equal(0, proof.GetProperty("enableCalls").GetInt32());
+
+        var prepare = ExtractPowerShellFunction(
+            controller,
+            "Prepare-GuestPrerequisites",
+            "Verify-HostVmConfiguration");
+        var featureIndex = prepare.IndexOf(
+            "Invoke-GuestOptionalFeatureStage",
+            StringComparison.Ordinal);
+        var featureRestartGuardIndex = prepare.IndexOf(
+            "if ([bool]$featureResult.needsRestart)",
+            featureIndex,
+            StringComparison.Ordinal);
+        var firstRestartIndex = prepare.IndexOf(
+            "Restart-GuestAndReconnect",
+            featureRestartGuardIndex,
+            StringComparison.Ordinal);
+        var helperIndex = prepare.IndexOf(
+            "Install-GuestWslNativeHelper",
+            firstRestartIndex,
+            StringComparison.Ordinal);
+        var packageIndex = prepare.IndexOf(
+            "Invoke-GuestWslPackageStage",
+            helperIndex,
+            StringComparison.Ordinal);
+
+        Assert.True(featureIndex >= 0);
+        Assert.True(featureRestartGuardIndex > featureIndex);
+        Assert.True(firstRestartIndex > featureRestartGuardIndex);
+        Assert.True(helperIndex > firstRestartIndex);
+        Assert.True(packageIndex > helperIndex);
+    }
+
+    [Fact]
+    public void HyperVController_EnablePendingFeatureStageRequestsRestartWithoutReenabling()
+    {
+        var result = RunPowerShellCommand(BuildOptionalFeatureStageProof(
+            featuresEnabled: false,
+            initialState: "EnablePending"));
+
+        AssertPowerShellProofSucceeded(result);
+        using var document = JsonDocument.Parse(result.Stdout);
+        var proof = document.RootElement;
+        Assert.Equal(
+            "EnablePending",
+            proof.GetProperty("microsoftWindowsSubsystemLinuxState").GetString());
+        Assert.Equal(
+            "EnablePending",
+            proof.GetProperty("virtualMachinePlatformState").GetString());
+        Assert.False(proof.GetProperty("changed").GetBoolean());
+        Assert.True(proof.GetProperty("needsRestart").GetBoolean());
+        Assert.Equal(0, proof.GetProperty("enableCalls").GetInt32());
+    }
+
+    [Fact]
+    public void HyperVController_NativeWslHelperCapturesExpectedExitAndStderrWithoutFailingJob()
+    {
+        var controller = ReadScript("Invoke-CleanWindowsHyperV.ps1");
+        var nativeHelper = ExtractPowerShellFunction(
+            controller,
+            "Get-GuestWslNativeHelperInstallerScriptBlock",
+            "Install-GuestWslNativeHelper");
+        var ownedRoot = Path.Combine(
+            Root,
+            "TestResults",
+            $"wsl-native-helper-{Guid.NewGuid():N}");
+        try
+        {
+            var result = RunPowerShellCommand(BuildNativeWslHelperProof(ownedRoot));
+
+            AssertPowerShellProofSucceeded(result);
+            using var document = JsonDocument.Parse(result.Stdout);
+            var proof = document.RootElement;
+            Assert.Equal("Completed", proof.GetProperty("jobState").GetString());
+            Assert.Equal(50, proof.GetProperty("exitCode").GetInt32());
+            Assert.Equal("", proof.GetProperty("stdout").GetString());
+            Assert.Contains(
+                "WSL is not installed",
+                proof.GetProperty("stderr").GetString(),
+                StringComparison.Ordinal);
+            Assert.True(proof.GetProperty("utf8Decoded").GetBoolean());
+            Assert.Equal("1", proof.GetProperty("wslUtf8AtLaunch").GetString());
+            Assert.Equal("prior-value", proof.GetProperty("wslUtf8After").GetString());
+            Assert.Equal(0, proof.GetProperty("remainingCaptureFiles").GetInt32());
+
+            var normalizedNativeHelper = nativeHelper.Replace("\r", "", StringComparison.Ordinal);
+            var utf8SetIndex = normalizedNativeHelper.IndexOf(
+                "\"WSL_UTF8\",\n                    \"1\"",
+                StringComparison.Ordinal);
+            var startProcessIndex = normalizedNativeHelper.IndexOf(
+                "$nativeProcess = Start-Process",
+                StringComparison.Ordinal);
+            var restoreIndex = normalizedNativeHelper.IndexOf(
+                "$restoredWslUtf8Value",
+                startProcessIndex,
+                StringComparison.Ordinal);
+            var cleanupIndex = normalizedNativeHelper.IndexOf(
+                "Remove-Item -LiteralPath $capturePath",
+                restoreIndex,
+                StringComparison.Ordinal);
+            Assert.True(utf8SetIndex >= 0);
+            Assert.True(startProcessIndex > utf8SetIndex);
+            Assert.True(restoreIndex > startProcessIndex);
+            Assert.True(cleanupIndex > restoreIndex);
+            Assert.Contains("[Text.Encoding]::UTF8", nativeHelper);
+        }
+        finally
+        {
+            if (Directory.Exists(ownedRoot))
+            {
+                Directory.Delete(ownedRoot, recursive: true);
+            }
+        }
+    }
+
+    [Fact]
+    public void HyperVController_NativeWslHelperRestoresAbsentUtf8AfterLaunchFailure()
+    {
+        var ownedRoot = Path.Combine(
+            Root,
+            "TestResults",
+            $"wsl-native-helper-failure-{Guid.NewGuid():N}");
+        try
+        {
+            var result = RunPowerShellCommand(BuildNativeWslHelperFailureProof(ownedRoot));
+
+            AssertPowerShellProofSucceeded(result);
+            using var document = JsonDocument.Parse(result.Stdout);
+            var proof = document.RootElement;
+            Assert.Equal("1", proof.GetProperty("wslUtf8AtLaunch").GetString());
+            Assert.True(proof.GetProperty("wslUtf8AbsentAfter").GetBoolean());
+            Assert.Equal(0, proof.GetProperty("remainingCaptureFiles").GetInt32());
+            Assert.Contains(
+                "Trusted WSL operation 'Status' failed",
+                proof.GetProperty("error").GetString(),
+                StringComparison.Ordinal);
+        }
+        finally
+        {
+            if (Directory.Exists(ownedRoot))
+            {
+                Directory.Delete(ownedRoot, recursive: true);
+            }
+        }
+    }
+
+    [Theory]
+    [InlineData(-1)]
+    [InlineData(50)]
+    public void HyperVController_AbsentPackageUsesExactNoDistributionInstallAndRequestsRestart(
+        int expectedNotInstalledExitCode)
+    {
+        var controller = ReadScript("Invoke-CleanWindowsHyperV.ps1");
+        var nativeHelper = ExtractPowerShellFunction(
+            controller,
+            "Get-GuestWslNativeHelperInstallerScriptBlock",
+            "Install-GuestWslNativeHelper");
+        var packageStage = ExtractPowerShellFunction(
+            controller,
+            "Get-GuestWslPackageStageScriptBlock",
+            "Invoke-GuestWslPackageStage");
+
+        Assert.Contains("@(\"--install\", \"--no-distribution\")", nativeHelper);
+        Assert.Contains("[string[]]$nativeArguments", nativeHelper);
+        Assert.Contains("[ValidateSet(\"Status\", \"Version\", \"InstallNoDistribution\")]", nativeHelper);
+        Assert.Contains("Start-Process", nativeHelper);
+        Assert.Contains("-RedirectStandardOutput", nativeHelper);
+        Assert.Contains("-RedirectStandardError", nativeHelper);
+        Assert.Contains("-Wait", nativeHelper);
+        Assert.Contains("-PassThru", nativeHelper);
+        Assert.Contains("finally {", nativeHelper);
+        Assert.Contains("Remove-Item -LiteralPath $capturePath", nativeHelper);
+        Assert.DoesNotContain("Invoke-Expression", nativeHelper, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("--web-download", nativeHelper, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("$installExitCode -notin [int[]]@(0, 3010)", packageStage);
+        Assert.Contains("$exitCode -in [int[]]@(-1, 50) -and $notInstalled", packageStage);
+        Assert.DoesNotContain("post-install", packageStage, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("$restartReported", packageStage, StringComparison.Ordinal);
+
+        var result = RunPowerShellCommand(BuildWslPackageStageProof(
+            packageInstalled: false,
+            installExitCode: 0,
+            statusExitCode: expectedNotInstalledExitCode,
+            versionExitCode: expectedNotInstalledExitCode,
+            installOutput: "The operation completed successfully."));
+
+        AssertPowerShellProofSucceeded(result);
+        using var document = JsonDocument.Parse(result.Stdout);
+        var proof = document.RootElement;
+        Assert.Equal("Status,Version,InstallNoDistribution", proof.GetProperty("calls").GetString());
+        Assert.True(proof.GetProperty("installInvoked").GetBoolean());
+        Assert.Equal(0, proof.GetProperty("installExitCode").GetInt32());
+        Assert.Equal("restart-required", proof.GetProperty("normalizedState").GetString());
+        Assert.True(proof.GetProperty("needsRestart").GetBoolean());
+    }
+
+    [Fact]
+    public void HyperVController_AcceptsCompatibilityInstallExitAndAlwaysRestarts()
+    {
+        var result = RunPowerShellCommand(BuildWslPackageStageProof(
+            packageInstalled: false,
+            installExitCode: 3010,
+            statusExitCode: 50,
+            versionExitCode: 0,
+            versionOutput: "WSL version 2.6.1",
+            installOutput: "The requested operation is successful."));
+
+        AssertPowerShellProofSucceeded(result);
+        using var document = JsonDocument.Parse(result.Stdout);
+        var proof = document.RootElement;
+        Assert.Equal("Status,Version,InstallNoDistribution", proof.GetProperty("calls").GetString());
+        Assert.Equal(3010, proof.GetProperty("installExitCode").GetInt32());
+        Assert.True(proof.GetProperty("needsRestart").GetBoolean());
+    }
+
+    [Fact]
+    public void HyperVController_StatusAbsentInstallsWhenVersionIsReady()
+    {
+        var result = RunPowerShellCommand(BuildWslPackageStageProof(
+            packageInstalled: false,
+            installExitCode: 0,
+            statusExitCode: -1,
+            versionExitCode: 0,
+            versionOutput: "WSL version 2.6.1",
+            installOutput: "The operation completed successfully."));
+
+        AssertPowerShellProofSucceeded(result);
+        using var document = JsonDocument.Parse(result.Stdout);
+        var proof = document.RootElement;
+        Assert.Equal("Status,Version,InstallNoDistribution", proof.GetProperty("calls").GetString());
+        Assert.True(proof.GetProperty("installInvoked").GetBoolean());
+        Assert.True(proof.GetProperty("needsRestart").GetBoolean());
+    }
+
+    [Fact]
+    public void HyperVController_ArbitraryMinusOneWithoutAbsentSignalFailsClosed()
+    {
+        var result = RunPowerShellCommand(BuildWslPackageStageProof(
+            packageInstalled: false,
+            statusExitCode: -1,
+            statusOutput: "The request could not be completed.",
+            versionExitCode: 0,
+            versionOutput: "WSL version 2.6.1",
+            captureFailure: true));
+
+        AssertPowerShellProofSucceeded(result);
+        using var document = JsonDocument.Parse(result.Stdout);
+        var proof = document.RootElement;
+        Assert.Equal("Status,Version", proof.GetProperty("calls").GetString());
+        Assert.Contains(
+            "unexpected exit code -1",
+            proof.GetProperty("error").GetString(),
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void HyperVController_ReadyStatusAndAbsentVersionFailsAsContradictory()
+    {
+        var result = RunPowerShellCommand(BuildWslPackageStageProof(
+            packageInstalled: false,
+            statusExitCode: 0,
+            statusOutput: "WSL status ready",
+            versionExitCode: 50,
+            versionOutput: "WSL is not installed",
+            captureFailure: true));
+
+        AssertPowerShellProofSucceeded(result);
+        using var document = JsonDocument.Parse(result.Stdout);
+        var proof = document.RootElement;
+        Assert.Equal("Status,Version", proof.GetProperty("calls").GetString());
+        Assert.Contains(
+            "status reported ready",
+            proof.GetProperty("error").GetString(),
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void HyperVController_InstalledPackageSkipsInstall()
+    {
+        var result = RunPowerShellCommand(BuildWslPackageStageProof(packageInstalled: true));
+
+        AssertPowerShellProofSucceeded(result);
+        using var document = JsonDocument.Parse(result.Stdout);
+        var proof = document.RootElement;
+        Assert.Equal("Status,Version", proof.GetProperty("calls").GetString());
+        Assert.True(proof.GetProperty("wasInstalled").GetBoolean());
+        Assert.False(proof.GetProperty("installInvoked").GetBoolean());
+        Assert.Equal("ready", proof.GetProperty("normalizedState").GetString());
+        Assert.False(proof.GetProperty("needsRestart").GetBoolean());
+    }
+
+    [Fact]
+    public void HyperVController_FinalWslVerificationReturnsProofBeforeToolSetup()
+    {
+        var controller = ReadScript("Invoke-CleanWindowsHyperV.ps1");
+        var nativeHelper = ExtractPowerShellFunction(
+            controller,
+            "Get-GuestWslNativeHelperInstallerScriptBlock",
+            "Install-GuestWslNativeHelper");
+        var verificationStage = ExtractPowerShellFunction(
+            controller,
+            "Get-GuestWslVerificationStageScriptBlock",
+            "Invoke-GuestWslVerificationStage");
+        var result = RunPowerShellCommand(BuildWslVerificationStageProof());
+
+        AssertPowerShellProofSucceeded(result);
+        using var document = JsonDocument.Parse(result.Stdout);
+        var proof = document.RootElement;
+        Assert.Equal("wsl-package-only", proof.GetProperty("scope").GetString());
+        Assert.Equal("ready", proof.GetProperty("normalizedState").GetString());
+        Assert.Equal(0, proof.GetProperty("statusExitCode").GetInt32());
+        Assert.Equal(0, proof.GetProperty("versionExitCode").GetInt32());
+        Assert.Equal("WSL status ready", proof.GetProperty("status").GetString());
+        Assert.Equal("WSL version 2.6.1", proof.GetProperty("version").GetString());
+        Assert.Contains(
+            "ConvertTo-OpenClawNativeDiagnostic -Text $text -MaxChars $MaxChars",
+            nativeHelper);
+        Assert.Contains("if ($combined.Length -gt 1024)", verificationStage);
+        Assert.Contains(
+            "return $combined.Substring(0, 1024) + \" [truncated]\"",
+            verificationStage);
+
+        var prepare = ExtractPowerShellFunction(
+            controller,
+            "Prepare-GuestPrerequisites",
+            "Verify-HostVmConfiguration");
+        var finalVerificationIndex = prepare.IndexOf(
+            "Invoke-GuestWslVerificationStage",
+            StringComparison.Ordinal);
+        var gitIndex = prepare.IndexOf(
+            "Ensure-GuestGitInstalled",
+            finalVerificationIndex,
+            StringComparison.Ordinal);
+        var powershellIndex = prepare.IndexOf(
+            "Ensure-GuestPowerShell7Installed",
+            gitIndex,
+            StringComparison.Ordinal);
+        var copyIndex = prepare.IndexOf("Copy-RepoToGuest", powershellIndex, StringComparison.Ordinal);
+        var setupIndex = prepare.IndexOf("Running guest setup-dev", copyIndex, StringComparison.Ordinal);
+
+        Assert.True(finalVerificationIndex >= 0);
+        Assert.True(gitIndex > finalVerificationIndex);
+        Assert.True(powershellIndex > gitIndex);
+        Assert.True(copyIndex > powershellIndex);
+        Assert.True(setupIndex > copyIndex);
+    }
+
+    [Fact]
+    public void HyperVController_OrdersBothConditionalRebootsAroundPackageStages()
+    {
+        var controller = ReadScript("Invoke-CleanWindowsHyperV.ps1");
+        var prepare = ExtractPowerShellFunction(
+            controller,
+            "Prepare-GuestPrerequisites",
+            "Verify-HostVmConfiguration");
+        var featureIndex = prepare.IndexOf(
+            "Invoke-GuestOptionalFeatureStage",
+            StringComparison.Ordinal);
+        var firstGuardIndex = prepare.IndexOf(
+            "if ([bool]$featureResult.needsRestart)",
+            featureIndex,
+            StringComparison.Ordinal);
+        var firstRestartIndex = prepare.IndexOf(
+            "Restart-GuestAndReconnect",
+            firstGuardIndex,
+            StringComparison.Ordinal);
+        var packageIndex = prepare.IndexOf(
+            "Invoke-GuestWslPackageStage",
+            firstRestartIndex,
+            StringComparison.Ordinal);
+        var secondGuardIndex = prepare.IndexOf(
+            "if ([bool]$packageResult.needsRestart)",
+            packageIndex,
+            StringComparison.Ordinal);
+        var secondRestartIndex = prepare.IndexOf(
+            "Restart-GuestAndReconnect",
+            secondGuardIndex,
+            StringComparison.Ordinal);
+        var finalVerificationIndex = prepare.IndexOf(
+            "Invoke-GuestWslVerificationStage",
+            secondRestartIndex,
+            StringComparison.Ordinal);
+
+        Assert.True(featureIndex >= 0);
+        Assert.True(firstGuardIndex > featureIndex);
+        Assert.True(firstRestartIndex > firstGuardIndex);
+        Assert.True(packageIndex > firstRestartIndex);
+        Assert.True(secondGuardIndex > packageIndex);
+        Assert.True(secondRestartIndex > secondGuardIndex);
+        Assert.True(finalVerificationIndex > secondRestartIndex);
+        Assert.Equal(
+            2,
+            prepare.Split('\n').Count(
+                line => line.Contains("Restart-GuestAndReconnect", StringComparison.Ordinal)));
+        Assert.Contains("-ResolvedVhdPath $ResolvedVhdPath", prepare);
+        Assert.Contains("-ExpectedOwnerId $ExpectedOwnerId", prepare);
+    }
+
+    [Fact]
+    public void HyperVController_FailedGuestJobCapturesBoundedDiagnosticsBeforeRemoval()
+    {
+        var controller = ReadScript("Invoke-CleanWindowsHyperV.ps1");
+        var result = RunPowerShellCommand(BuildFailedGuestJobDiagnosticProof());
+
+        AssertPowerShellProofSucceeded(result);
+        using var document = JsonDocument.Parse(result.Stdout);
+        var proof = document.RootElement;
+        var diagnostic = proof.GetProperty("diagnostic").GetString()!;
+        Assert.Equal("Failed", proof.GetProperty("jobState").GetString());
+        Assert.True(proof.GetProperty("jobRemoved").GetBoolean());
+        Assert.True(diagnostic.Length <= 3084);
+        Assert.Contains("reasonType=", diagnostic, StringComparison.Ordinal);
+        Assert.Contains("child-reason", diagnostic, StringComparison.Ordinal);
+        Assert.Contains("errors=", diagnostic, StringComparison.Ordinal);
+        Assert.Contains("child-error", diagnostic, StringComparison.Ordinal);
+        Assert.Contains("output=", diagnostic, StringComparison.Ordinal);
+        Assert.Contains("[truncated]", diagnostic, StringComparison.Ordinal);
+        Assert.DoesNotContain("do-not-print", diagnostic, StringComparison.Ordinal);
+
+        var invocation = ExtractPowerShellFunction(
+            controller,
+            "Invoke-GuestCommandWithTimeout",
+            "Restart-GuestAndReconnect");
+        var stateIndex = invocation.IndexOf(
+            "if ($job.State -ne \"Completed\")",
+            StringComparison.Ordinal);
+        var diagnosticsIndex = invocation.IndexOf(
+            "Get-FailedGuestJobDiagnostic -Job $job",
+            stateIndex,
+            StringComparison.Ordinal);
+        var throwIndex = invocation.IndexOf(
+            "Guest job diagnostics:",
+            diagnosticsIndex,
+            StringComparison.Ordinal);
+        var removeIndex = invocation.IndexOf(
+            "Remove-Job -Job $job",
+            throwIndex,
+            StringComparison.Ordinal);
+        Assert.True(stateIndex >= 0);
+        Assert.True(diagnosticsIndex > stateIndex);
+        Assert.True(throwIndex > diagnosticsIndex);
+        Assert.True(removeIndex > throwIndex);
+    }
+
+    [Fact]
+    public void HyperVController_GuestCommandTimeoutSemanticsRemainBoundedAndRemoveJob()
+    {
+        var controller = ReadScript("Invoke-CleanWindowsHyperV.ps1");
+        var invocation = ExtractPowerShellFunction(
+            controller,
+            "Invoke-GuestCommandWithTimeout",
+            "Restart-GuestAndReconnect");
+
+        var waitIndex = invocation.IndexOf(
+            "Wait-Job -Job $job -Timeout $TimeoutSec",
+            StringComparison.Ordinal);
+        var stopIndex = invocation.IndexOf(
+            "Stop-Job -Job $job -Force",
+            waitIndex,
+            StringComparison.Ordinal);
+        var timeoutIndex = invocation.IndexOf(
+            "timed out after $TimeoutSec seconds.",
+            stopIndex,
+            StringComparison.Ordinal);
+        var diagnosticsIndex = invocation.IndexOf(
+            "Get-FailedGuestJobDiagnostic",
+            timeoutIndex,
+            StringComparison.Ordinal);
+        var removeIndex = invocation.IndexOf(
+            "Remove-Job -Job $job -Force",
+            diagnosticsIndex,
+            StringComparison.Ordinal);
+
+        Assert.True(waitIndex >= 0);
+        Assert.True(stopIndex > waitIndex);
+        Assert.True(timeoutIndex > stopIndex);
+        Assert.True(diagnosticsIndex > timeoutIndex);
+        Assert.True(removeIndex > diagnosticsIndex);
     }
 
     [Fact]
@@ -2221,6 +2746,341 @@ public sealed class CleanWindowsRunnerScriptTests
             "\n",
             "Recover-PendingOwnedCheckpoint -ResolvedVhdPath 'C:\\owned\\os.vhdx' -ExpectedOwnerId 'owner' -VmObject $vm | Out-Null\n",
             "[Console]::Out.Write(\"$($script:events -join ',')|$($script:lastMarker.status)|$($script:lastMarker.recoveryKind)\")\n");
+    }
+
+    private static string BuildOptionalFeatureStageProof(
+        bool featuresEnabled,
+        string? initialState = null)
+    {
+        var controller = ReadScript("Invoke-CleanWindowsHyperV.ps1");
+        var getter = ExtractPowerShellFunction(
+            controller,
+            "Get-GuestOptionalFeatureStageScriptBlock",
+            "Invoke-GuestOptionalFeatureStage");
+        var state = initialState ?? (featuresEnabled ? "Enabled" : "Disabled");
+        return string.Concat(
+            "$ErrorActionPreference = 'Stop'\n",
+            "$script:featureStates = @{\n",
+            "  'Microsoft-Windows-Subsystem-Linux' = '",
+            state,
+            "'\n",
+            "  'VirtualMachinePlatform' = '",
+            state,
+            "'\n",
+            "}\n",
+            "$script:enableCalls = 0\n",
+            "function Get-WindowsOptionalFeature {\n",
+            "  [CmdletBinding()]\n",
+            "  param([switch]$Online, [string]$FeatureName)\n",
+            "  return [pscustomobject]@{ FeatureName = $FeatureName; State = $script:featureStates[$FeatureName] }\n",
+            "}\n",
+            "function Enable-WindowsOptionalFeature {\n",
+            "  [CmdletBinding()]\n",
+            "  param([switch]$Online, [string]$FeatureName, [switch]$All, [switch]$NoRestart)\n",
+            "  if ($script:featureStates[$FeatureName] -notin @('Disabled', 'DisabledWithPayloadRemoved')) { throw 'Attempted to enable a non-disabled feature.' }\n",
+            "  $script:enableCalls++\n",
+            "  $script:featureStates[$FeatureName] = 'Enabled'\n",
+            "  return [pscustomobject]@{ RestartNeeded = $false }\n",
+            "}\n",
+            getter,
+            "\n$result = & (Get-GuestOptionalFeatureStageScriptBlock)\n",
+            "$result | Add-Member -NotePropertyName enableCalls -NotePropertyValue $script:enableCalls\n",
+            "[Console]::Out.Write(($result | ConvertTo-Json -Compress))\n");
+    }
+
+    private static string BuildNativeWslHelperProof(string ownedRoot)
+    {
+        var controller = ReadScript("Invoke-CleanWindowsHyperV.ps1");
+        var getter = ExtractPowerShellFunction(
+            controller,
+            "Get-GuestWslNativeHelperInstallerScriptBlock",
+            "Install-GuestWslNativeHelper");
+        var escapedOwnedRoot = ownedRoot.Replace("'", "''", StringComparison.Ordinal);
+        return string.Concat(
+            "$ErrorActionPreference = 'Stop'\n",
+            "$job = Start-Job -ScriptBlock {\n",
+            "  param($OwnedRoot)\n",
+            "  $ErrorActionPreference = 'Stop'\n",
+            getter,
+            "\n  New-Item -ItemType Directory -Force -Path $OwnedRoot | Out-Null\n",
+            "  $env:TEMP = $OwnedRoot\n",
+            "  $env:TMP = $OwnedRoot\n",
+            "  [Environment]::SetEnvironmentVariable('WSL_UTF8', 'prior-value', [EnvironmentVariableTarget]::Process)\n",
+            "  $script:wslUtf8AtLaunch = ''\n",
+            "  function global:Test-Path {\n",
+            "    [CmdletBinding()]\n",
+            "    param([string]$LiteralPath, [object]$PathType)\n",
+            "    if ($LiteralPath -like '*\\System32\\wsl.exe') { return $true }\n",
+            "    return Microsoft.PowerShell.Management\\Test-Path @PSBoundParameters\n",
+            "  }\n",
+            "  function global:Start-Process {\n",
+            "    [CmdletBinding()]\n",
+            "    param(\n",
+            "      [string]$FilePath,\n",
+            "      [string[]]$ArgumentList,\n",
+            "      [string]$RedirectStandardOutput,\n",
+            "      [string]$RedirectStandardError,\n",
+            "      [switch]$Wait,\n",
+            "      [switch]$PassThru,\n",
+            "      [object]$WindowStyle\n",
+            "    )\n",
+            "    $script:wslUtf8AtLaunch = [Environment]::GetEnvironmentVariable('WSL_UTF8', [EnvironmentVariableTarget]::Process)\n",
+            "    [IO.File]::WriteAllText($RedirectStandardOutput, '', [Text.Encoding]::UTF8)\n",
+            "    [IO.File]::WriteAllText($RedirectStandardError, ('WSL is not installed ' + [char]0x03A9), [Text.Encoding]::UTF8)\n",
+            "    return [pscustomobject]@{ ExitCode = 50 }\n",
+            "  }\n",
+            "  & (Get-GuestWslNativeHelperInstallerScriptBlock) | Out-Null\n",
+            "  $nativeResult = Invoke-OpenClawTrustedWslProcess -Operation 'Status'\n",
+            "  [pscustomobject][ordered]@{\n",
+            "    exitCode = [int]$nativeResult.exitCode\n",
+            "    stdout = [string]$nativeResult.stdout\n",
+            "    stderr = [string]$nativeResult.stderr\n",
+            "    utf8Decoded = [string]$nativeResult.stderr -like ('*' + [char]0x03A9)\n",
+            "    wslUtf8AtLaunch = $script:wslUtf8AtLaunch\n",
+            "    wslUtf8After = [Environment]::GetEnvironmentVariable('WSL_UTF8', [EnvironmentVariableTarget]::Process)\n",
+            "    remainingCaptureFiles = @(Get-ChildItem -LiteralPath $OwnedRoot -Filter 'openclaw-wsl-*.txt' -File -Recurse).Count\n",
+            "  }\n",
+            "} -ArgumentList '",
+            escapedOwnedRoot,
+            "'\n",
+            "Wait-Job -Job $job -Timeout 15 | Out-Null\n",
+            "$jobState = [string]$job.State\n",
+            "$payload = @(Receive-Job -Job $job -ErrorAction Stop) | Select-Object -Last 1\n",
+            "Remove-Job -Job $job -Force\n",
+            "[Console]::Out.Write(([pscustomobject][ordered]@{\n",
+            "  jobState = $jobState\n",
+            "  exitCode = [int]$payload.exitCode\n",
+            "  stdout = [string]$payload.stdout\n",
+            "  stderr = [string]$payload.stderr\n",
+            "  utf8Decoded = [bool]$payload.utf8Decoded\n",
+            "  wslUtf8AtLaunch = [string]$payload.wslUtf8AtLaunch\n",
+            "  wslUtf8After = [string]$payload.wslUtf8After\n",
+            "  remainingCaptureFiles = [int]$payload.remainingCaptureFiles\n",
+            "} | ConvertTo-Json -Compress))\n");
+    }
+
+    private static string BuildNativeWslHelperFailureProof(string ownedRoot)
+    {
+        var controller = ReadScript("Invoke-CleanWindowsHyperV.ps1");
+        var getter = ExtractPowerShellFunction(
+            controller,
+            "Get-GuestWslNativeHelperInstallerScriptBlock",
+            "Install-GuestWslNativeHelper");
+        var escapedOwnedRoot = ownedRoot.Replace("'", "''", StringComparison.Ordinal);
+        return string.Concat(
+            "$ErrorActionPreference = 'Stop'\n",
+            "$OwnedRoot = '",
+            escapedOwnedRoot,
+            "'\n",
+            getter,
+            "\nNew-Item -ItemType Directory -Force -Path $OwnedRoot | Out-Null\n",
+            "$env:TEMP = $OwnedRoot\n",
+            "$env:TMP = $OwnedRoot\n",
+            "[Environment]::SetEnvironmentVariable('WSL_UTF8', $null, [EnvironmentVariableTarget]::Process)\n",
+            "$script:wslUtf8AtLaunch = ''\n",
+            "function global:Test-Path {\n",
+            "  [CmdletBinding()]\n",
+            "  param([string]$LiteralPath, [object]$PathType)\n",
+            "  if ($LiteralPath -like '*\\System32\\wsl.exe') { return $true }\n",
+            "  return Microsoft.PowerShell.Management\\Test-Path @PSBoundParameters\n",
+            "}\n",
+            "function global:Start-Process {\n",
+            "  [CmdletBinding()]\n",
+            "  param(\n",
+            "    [string]$FilePath,\n",
+            "    [string[]]$ArgumentList,\n",
+            "    [string]$RedirectStandardOutput,\n",
+            "    [string]$RedirectStandardError,\n",
+            "    [switch]$Wait,\n",
+            "    [switch]$PassThru,\n",
+            "    [object]$WindowStyle\n",
+            "  )\n",
+            "  $script:wslUtf8AtLaunch = [Environment]::GetEnvironmentVariable('WSL_UTF8', [EnvironmentVariableTarget]::Process)\n",
+            "  [IO.File]::WriteAllText($RedirectStandardOutput, 'partial output', [Text.Encoding]::UTF8)\n",
+            "  [IO.File]::WriteAllText($RedirectStandardError, 'partial error', [Text.Encoding]::UTF8)\n",
+            "  throw 'simulated native launch failure'\n",
+            "}\n",
+            "& (Get-GuestWslNativeHelperInstallerScriptBlock) | Out-Null\n",
+            "$errorMessage = ''\n",
+            "try {\n",
+            "  Invoke-OpenClawTrustedWslProcess -Operation 'Status' | Out-Null\n",
+            "  throw 'Expected trusted WSL launch failure.'\n",
+            "} catch {\n",
+            "  $errorMessage = $_.Exception.Message\n",
+            "}\n",
+            "[Console]::Out.Write(([pscustomobject][ordered]@{\n",
+            "  error = $errorMessage\n",
+            "  wslUtf8AtLaunch = $script:wslUtf8AtLaunch\n",
+            "  wslUtf8AbsentAfter = $null -eq [Environment]::GetEnvironmentVariable('WSL_UTF8', [EnvironmentVariableTarget]::Process)\n",
+            "  remainingCaptureFiles = @(Get-ChildItem -LiteralPath $OwnedRoot -Filter 'openclaw-wsl-*.txt' -File -Recurse).Count\n",
+            "} | ConvertTo-Json -Compress))\n");
+    }
+
+    private static string BuildWslPackageStageProof(
+        bool packageInstalled,
+        int installExitCode = 0,
+        int statusExitCode = 50,
+        string statusOutput = "WSL is not installed",
+        int versionExitCode = 50,
+        string versionOutput = "WSL is not installed",
+        string installOutput = "The operation completed successfully.",
+        bool captureFailure = false)
+    {
+        var controller = ReadScript("Invoke-CleanWindowsHyperV.ps1");
+        var getter = ExtractPowerShellFunction(
+            controller,
+            "Get-GuestWslPackageStageScriptBlock",
+            "Invoke-GuestWslPackageStage");
+        var escapedStatusOutput = statusOutput.Replace("'", "''", StringComparison.Ordinal);
+        var escapedVersionOutput = versionOutput.Replace("'", "''", StringComparison.Ordinal);
+        var escapedInstallOutput = installOutput.Replace("'", "''", StringComparison.Ordinal);
+        var resultBody = packageInstalled
+            ? """
+              return [pscustomobject]@{
+                operation = $Operation
+                exitCode = 0
+                stdout = if ($Operation -eq 'Status') { 'WSL status ready' } else { 'WSL version 2.6.1' }
+                stderr = ''
+              }
+              """
+            : string.Concat(
+                "  if ($Operation -eq 'InstallNoDistribution') {\n",
+                "    return [pscustomobject]@{\n",
+                "      operation = $Operation\n",
+                "      exitCode = ",
+                installExitCode,
+                "\n",
+                "      stdout = '",
+                escapedInstallOutput,
+                "'\n",
+                "      stderr = ''\n",
+                "    }\n",
+                "  }\n",
+                "  if ($Operation -eq 'Status') {\n",
+                "    return [pscustomobject]@{\n",
+                "      operation = $Operation\n",
+                "      exitCode = ",
+                statusExitCode,
+                "\n",
+                "      stdout = ''\n",
+                "      stderr = '",
+                escapedStatusOutput,
+                "'\n",
+                "    }\n",
+                "  }\n",
+                "  return [pscustomobject]@{\n",
+                "    operation = $Operation\n",
+                "    exitCode = ",
+                versionExitCode,
+                "\n",
+                "    stdout = '",
+                escapedVersionOutput,
+                "'\n",
+                "    stderr = ''\n",
+                "  }\n");
+        var execution = captureFailure
+            ? """
+              try {
+                & (Get-GuestWslPackageStageScriptBlock) | Out-Null
+                throw 'Expected WSL package stage failure.'
+              } catch {
+                [Console]::Out.Write(([pscustomobject][ordered]@{
+                  calls = $script:nativeCalls -join ','
+                  error = $_.Exception.Message
+                } | ConvertTo-Json -Compress))
+              }
+              """
+            : """
+              $result = & (Get-GuestWslPackageStageScriptBlock)
+              [Console]::Out.Write(([pscustomobject][ordered]@{
+                calls = $script:nativeCalls -join ','
+                normalizedState = [string]$result.normalizedState
+                wasInstalled = [bool]$result.wasInstalled
+                installInvoked = [bool]$result.installInvoked
+                installExitCode = $result.installExitCode
+                needsRestart = [bool]$result.needsRestart
+              } | ConvertTo-Json -Compress))
+              """;
+        return string.Concat(
+            "$ErrorActionPreference = 'Stop'\n",
+            "$script:nativeCalls = New-Object 'Collections.Generic.List[string]'\n",
+            "function Get-WindowsOptionalFeature {\n",
+            "  [CmdletBinding()]\n",
+            "  param([switch]$Online, [string]$FeatureName)\n",
+            "  return [pscustomobject]@{ FeatureName = $FeatureName; State = 'Enabled' }\n",
+            "}\n",
+            "function global:Invoke-OpenClawTrustedWslProcess {\n",
+            "  param([string]$Operation)\n",
+            "  [void]$script:nativeCalls.Add($Operation)\n",
+            resultBody,
+            "\n}\n",
+            getter,
+            "\n",
+            execution,
+            "\n");
+    }
+
+    private static string BuildWslVerificationStageProof()
+    {
+        var controller = ReadScript("Invoke-CleanWindowsHyperV.ps1");
+        var getter = ExtractPowerShellFunction(
+            controller,
+            "Get-GuestWslVerificationStageScriptBlock",
+            "Invoke-GuestWslVerificationStage");
+        return string.Concat(
+            "$ErrorActionPreference = 'Stop'\n",
+            "function Get-WindowsOptionalFeature {\n",
+            "  [CmdletBinding()]\n",
+            "  param([switch]$Online, [string]$FeatureName)\n",
+            "  return [pscustomobject]@{ FeatureName = $FeatureName; State = 'Enabled' }\n",
+            "}\n",
+            "function global:Invoke-OpenClawTrustedWslProcess {\n",
+            "  param([string]$Operation)\n",
+            "  return [pscustomobject]@{\n",
+            "    operation = $Operation\n",
+            "    exitCode = 0\n",
+            "    stdout = if ($Operation -eq 'Status') { 'WSL status ready' } else { 'WSL version 2.6.1' }\n",
+            "    stderr = ''\n",
+            "  }\n",
+            "}\n",
+            getter,
+            "\n$result = & (Get-GuestWslVerificationStageScriptBlock)\n",
+            "[Console]::Out.Write(($result | ConvertTo-Json -Compress))\n");
+    }
+
+    private static string BuildFailedGuestJobDiagnosticProof()
+    {
+        var controller = ReadScript("Invoke-CleanWindowsHyperV.ps1");
+        var helpersStart = controller.IndexOf(
+            "function ConvertTo-SafeGuestDiagnosticText",
+            StringComparison.Ordinal);
+        var helpersEnd = controller.IndexOf(
+            "function Invoke-GuestCommandWithTimeout",
+            helpersStart,
+            StringComparison.Ordinal);
+        Assert.True(helpersStart >= 0);
+        Assert.True(helpersEnd > helpersStart);
+        var helpers = controller[helpersStart..helpersEnd];
+        return string.Concat(
+            "$ErrorActionPreference = 'Stop'\n",
+            helpers,
+            "\n$job = Start-Job -ScriptBlock {\n",
+            "  Write-Output ('child-output-' + ('x' * 2000))\n",
+            "  Write-Output 'token=do-not-print'\n",
+            "  Write-Error 'child-error'\n",
+            "  throw 'child-reason'\n",
+            "}\n",
+            "Wait-Job -Job $job -Timeout 15 | Out-Null\n",
+            "$jobState = [string]$job.State\n",
+            "$jobId = $job.Id\n",
+            "$diagnostic = Get-FailedGuestJobDiagnostic -Job $job\n",
+            "Remove-Job -Job $job -Force\n",
+            "$jobRemoved = $null -eq (Get-Job -Id $jobId -ErrorAction SilentlyContinue)\n",
+            "[Console]::Out.Write(([pscustomobject][ordered]@{\n",
+            "  jobState = $jobState\n",
+            "  jobRemoved = $jobRemoved\n",
+            "  diagnostic = $diagnostic\n",
+            "} | ConvertTo-Json -Compress))\n");
     }
 
     private static string ExtractPowerShellFunction(

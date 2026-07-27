@@ -2623,6 +2623,209 @@ function Complete-UnattendedInstallation {
     return Write-UnattendedResult -Paths $Paths -Verification $verification -Status "complete"
 }
 
+function ConvertTo-SafeGuestDiagnosticText {
+    param(
+        [AllowNull()]
+        [object]$Value,
+        [ValidateRange(32, 4096)]
+        [int]$MaxChars = 512
+    )
+
+    if ($null -eq $Value) {
+        return ""
+    }
+
+    if (
+        $Value -is [System.Management.Automation.PSCredential] -or
+        $Value -is [Security.SecureString] -or
+        $Value -is [byte[]]
+    ) {
+        return "<sensitive value omitted>"
+    }
+
+    $rawText = $null
+    if ($Value -is [System.Management.Automation.ErrorRecord]) {
+        $exception = $Value.Exception
+        if ($null -eq $exception) {
+            $rawText = "<error record without an exception>"
+        } else {
+            $rawText = "[{0}] {1}" -f $exception.GetType().FullName, $exception.Message
+        }
+    } elseif ($Value -is [Exception]) {
+        $rawText = "[{0}] {1}" -f $Value.GetType().FullName, $Value.Message
+    } elseif (
+        $Value -is [string] -or
+        $Value -is [char] -or
+        $Value -is [bool] -or
+        $Value -is [byte] -or
+        $Value -is [sbyte] -or
+        $Value -is [int16] -or
+        $Value -is [uint16] -or
+        $Value -is [int32] -or
+        $Value -is [uint32] -or
+        $Value -is [int64] -or
+        $Value -is [uint64] -or
+        $Value -is [single] -or
+        $Value -is [double] -or
+        $Value -is [decimal] -or
+        $Value -is [DateTime] -or
+        $Value -is [DateTimeOffset] -or
+        $Value -is [Guid] -or
+        $Value.GetType().IsEnum
+    ) {
+        $rawText = [string]$Value
+    } else {
+        return "<{0} object omitted>" -f $Value.GetType().FullName
+    }
+
+    if ($rawText.Length -gt ($MaxChars * 2)) {
+        $rawText = $rawText.Substring(0, $MaxChars * 2)
+    }
+
+    $safeText = [regex]::Replace(
+        $rawText,
+        "[\x00-\x1F\x7F]+",
+        " "
+    )
+    $safeText = [regex]::Replace(
+        $safeText,
+        "(?i)\bBearer\s+[A-Za-z0-9._~+/\-=]+",
+        "Bearer [redacted]"
+    )
+    $safeText = [regex]::Replace(
+        $safeText,
+        "(?i)\b(password|passwd|pwd|token|credential|secret|authorization)\b\s*[:=]\s*[^;,|]*",
+        '$1=[redacted]'
+    )
+    $safeText = [regex]::Replace(
+        $safeText,
+        "(?i)(?:--?)(password|passwd|pwd|token|credential|secret|authorization)\s+(?:'[^']*'|`"[^`"]*`"|[^\s;,|]+)",
+        '--$1 [redacted]'
+    )
+    $safeText = [regex]::Replace($safeText, "\s+", " ").Trim()
+
+    if ($safeText.Length -gt $MaxChars) {
+        return $safeText.Substring(0, $MaxChars) + " [truncated]"
+    }
+    return $safeText
+}
+
+function ConvertTo-BoundedGuestDiagnosticRecords {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Label,
+        [AllowEmptyCollection()]
+        [object[]]$Records = @(),
+        [ValidateRange(1, 16)]
+        [int]$MaxRecords = 4
+    )
+
+    $items = New-Object "Collections.Generic.List[string]"
+    foreach ($record in @($Records | Select-Object -First $MaxRecords)) {
+        $safeRecord = ConvertTo-SafeGuestDiagnosticText -Value $record -MaxChars 384
+        if (-not [string]::IsNullOrWhiteSpace($safeRecord)) {
+            $items.Add($safeRecord)
+        }
+    }
+
+    if ($items.Count -eq 0) {
+        return ""
+    }
+    return "{0}=[{1}]" -f $Label, ($items -join " | ")
+}
+
+function Get-FailedGuestJobDiagnostic {
+    param(
+        [Parameter(Mandatory = $true)]
+        [object]$Job
+    )
+
+    $diagnostics = New-Object "Collections.Generic.List[string]"
+    $reason = $Job.JobStateInfo.Reason
+    if ($null -ne $reason) {
+        $diagnostics.Add(
+            "reasonType={0}" -f (ConvertTo-SafeGuestDiagnosticText -Value $reason.GetType().FullName -MaxChars 256)
+        )
+        $diagnostics.Add(
+            "reason={0}" -f (ConvertTo-SafeGuestDiagnosticText -Value $reason -MaxChars 512)
+        )
+    }
+
+    $receiveErrors = @()
+    $receivedOutput = @()
+    try {
+        $receivedOutput = @(
+            Receive-Job `
+                -Job $Job `
+                -Keep `
+                -ErrorAction SilentlyContinue `
+                -ErrorVariable receiveErrors
+        )
+    } catch {
+        $diagnostics.Add(
+            "receiveFailure={0}" -f (ConvertTo-SafeGuestDiagnosticText -Value $_ -MaxChars 512)
+        )
+    }
+
+    $receivedText = ConvertTo-BoundedGuestDiagnosticRecords `
+        -Label "receivedOutput" `
+        -Records $receivedOutput
+    if (-not [string]::IsNullOrWhiteSpace($receivedText)) {
+        $diagnostics.Add($receivedText)
+    }
+    $receiveErrorText = ConvertTo-BoundedGuestDiagnosticRecords `
+        -Label "receiveErrors" `
+        -Records $receiveErrors
+    if (-not [string]::IsNullOrWhiteSpace($receiveErrorText)) {
+        $diagnostics.Add($receiveErrorText)
+    }
+
+    $childIndex = 0
+    foreach ($childJob in @($Job.ChildJobs | Select-Object -First 4)) {
+        if ($null -eq $childJob) {
+            continue
+        }
+
+        $childParts = New-Object "Collections.Generic.List[string]"
+        $childParts.Add(
+            "state={0}" -f (ConvertTo-SafeGuestDiagnosticText -Value $childJob.State -MaxChars 64)
+        )
+        $childReason = $childJob.JobStateInfo.Reason
+        if ($null -ne $childReason) {
+            $childParts.Add(
+                "reasonType={0}" -f (ConvertTo-SafeGuestDiagnosticText -Value $childReason.GetType().FullName -MaxChars 256)
+            )
+            $childParts.Add(
+                "reason={0}" -f (ConvertTo-SafeGuestDiagnosticText -Value $childReason -MaxChars 384)
+            )
+        }
+
+        $childErrorText = ConvertTo-BoundedGuestDiagnosticRecords `
+            -Label "errors" `
+            -Records @($childJob.Error)
+        if (-not [string]::IsNullOrWhiteSpace($childErrorText)) {
+            $childParts.Add($childErrorText)
+        }
+        $childOutputText = ConvertTo-BoundedGuestDiagnosticRecords `
+            -Label "output" `
+            -Records @($childJob.Output)
+        if (-not [string]::IsNullOrWhiteSpace($childOutputText)) {
+            $childParts.Add($childOutputText)
+        }
+
+        $diagnostics.Add(("child[{0}]({1})" -f $childIndex, ($childParts -join "; ")))
+        $childIndex++
+    }
+
+    if ($diagnostics.Count -eq 0) {
+        return "no bounded diagnostics were available"
+    }
+
+    return ConvertTo-SafeGuestDiagnosticText `
+        -Value ($diagnostics -join "; ") `
+        -MaxChars 3072
+}
+
 function Invoke-GuestCommandWithTimeout {
     param(
         [Parameter(Mandatory = $true)]
@@ -2644,10 +2847,25 @@ function Invoke-GuestCommandWithTimeout {
         }
 
         if ($job.State -ne "Completed") {
-            throw "$OperationName ended in state '$($job.State)'."
+            $failedState = [string]$job.State
+            $diagnostic = Get-FailedGuestJobDiagnostic -Job $job
+            throw "$OperationName ended in state '$failedState'. Guest job diagnostics: $diagnostic"
         }
 
-        return (Receive-Job -Job $job -ErrorAction Stop)
+        $completedReceiveErrors = @()
+        $completedOutput = @(
+            Receive-Job `
+                -Job $job `
+                -ErrorAction SilentlyContinue `
+                -ErrorVariable completedReceiveErrors
+        )
+        if ($completedReceiveErrors.Count -gt 0) {
+            $completedErrorDiagnostic = ConvertTo-BoundedGuestDiagnosticRecords `
+                -Label "receiveErrors" `
+                -Records $completedReceiveErrors
+            throw "$OperationName completed with guest error records. Guest job diagnostics: $completedErrorDiagnostic"
+        }
+        return $completedOutput
     } finally {
         Remove-Job -Job $job -Force -ErrorAction SilentlyContinue | Out-Null
     }
@@ -2658,16 +2876,51 @@ function Restart-GuestAndReconnect {
         [Parameter(Mandatory = $true)]
         [System.Management.Automation.Runspaces.PSSession]$Session,
         [Parameter(Mandatory = $true)]
-        [System.Management.Automation.PSCredential]$GuestCredential
+        [System.Management.Automation.PSCredential]$GuestCredential,
+        [Parameter(Mandatory = $true)]
+        [string]$ResolvedVhdPath,
+        [Parameter(Mandatory = $true)]
+        [string]$ExpectedOwnerId
     )
 
-    $previousBootTicks = Invoke-Command -Session $Session -ScriptBlock {
-        return (Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop).LastBootUpTime.ToUniversalTime().Ticks
-    } -ErrorAction Stop
+    $ownedVm = Assert-OwnedVM `
+        -ResolvedVhdPath $ResolvedVhdPath `
+        -ExpectedOwnerId $ExpectedOwnerId
+    if ([string]$ownedVm.State -cne "Running") {
+        throw "Exact owned VM '$VMName' must be running before a guest restart."
+    }
+    $ownedVmId = ([Guid]$ownedVm.Id).ToString("D")
 
-    Invoke-Command -Session $Session -ScriptBlock {
-        Start-Process -FilePath shutdown.exe -ArgumentList "/r", "/t", "0", "/f" -WindowStyle Hidden
-    } -ErrorAction SilentlyContinue | Out-Null
+    $previousBootOutput = @(
+        Invoke-GuestCommandWithTimeout `
+            -Session $Session `
+            -OperationName "Reading guest boot identity before restart" `
+            -TimeoutSec 60 `
+            -ScriptBlock {
+                return (Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop).LastBootUpTime.ToUniversalTime().Ticks
+            }
+    )
+    if ($previousBootOutput.Count -ne 1) {
+        throw "Guest boot identity probe before restart returned $($previousBootOutput.Count) values; expected one."
+    }
+    $previousBootTicks = [Int64]$previousBootOutput[0]
+
+    Assert-ConfirmationForOwnedAction -Action "Restarting exact owned VM '$VMName'"
+    Invoke-GuestCommandWithTimeout `
+        -Session $Session `
+        -OperationName "Requesting guest restart" `
+        -TimeoutSec 30 `
+        -ScriptBlock {
+            $restartProcess = Start-Process `
+                -FilePath (Join-Path $env:SystemRoot "System32\shutdown.exe") `
+                -ArgumentList ([string[]]@("/r", "/t", "5", "/f")) `
+                -Wait `
+                -PassThru `
+                -WindowStyle Hidden
+            if ([int]$restartProcess.ExitCode -ne 0) {
+                throw "shutdown.exe rejected the bounded restart request with exit code $($restartProcess.ExitCode)."
+            }
+        } | Out-Null
 
     Remove-PSSession -Session $Session -ErrorAction SilentlyContinue
     $deadline = (Get-Date).AddSeconds($GuestRestartTimeoutSec)
@@ -2676,10 +2929,26 @@ function Restart-GuestAndReconnect {
         $candidateSession = $null
         try {
             $candidateSession = New-PSSession -VMName $VMName -Credential $GuestCredential -ErrorAction Stop
-            $currentBootTicks = Invoke-Command -Session $candidateSession -ScriptBlock {
-                return (Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop).LastBootUpTime.ToUniversalTime().Ticks
-            } -ErrorAction Stop
+            $currentBootOutput = @(
+                Invoke-GuestCommandWithTimeout `
+                    -Session $candidateSession `
+                    -OperationName "Reading guest boot identity after restart" `
+                    -TimeoutSec 60 `
+                    -ScriptBlock {
+                        return (Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop).LastBootUpTime.ToUniversalTime().Ticks
+                    }
+            )
+            if ($currentBootOutput.Count -ne 1) {
+                throw "Guest boot identity probe after restart returned $($currentBootOutput.Count) values; expected one."
+            }
+            $currentBootTicks = [Int64]$currentBootOutput[0]
             if ([Int64]$currentBootTicks -gt [Int64]$previousBootTicks) {
+                $reconnectedVm = Assert-OwnedVM `
+                    -ResolvedVhdPath $ResolvedVhdPath `
+                    -ExpectedOwnerId $ExpectedOwnerId
+                if (([Guid]$reconnectedVm.Id).ToString("D") -cne $ownedVmId) {
+                    throw "PowerShell Direct reconnected after restart, but the exact owned VM identity changed."
+                }
                 return $candidateSession
             }
         } catch {
@@ -2693,9 +2962,562 @@ function Restart-GuestAndReconnect {
     } while ((Get-Date) -lt $deadline)
 
     if ($null -ne $lastError) {
-        throw "Guest '$VMName' did not complete a fresh reboot within $GuestRestartTimeoutSec seconds. Last error: $($lastError.Exception.Message)"
+        $safeLastError = ConvertTo-SafeGuestDiagnosticText -Value $lastError -MaxChars 512
+        throw "Guest '$VMName' did not complete a fresh reboot within $GuestRestartTimeoutSec seconds. Last error: $safeLastError"
     }
     throw "Guest '$VMName' did not report a newer boot time within $GuestRestartTimeoutSec seconds."
+}
+
+function Get-RequiredGuestStageResult {
+    param(
+        [AllowEmptyCollection()]
+        [object[]]$Output = @(),
+        [Parameter(Mandatory = $true)]
+        [string]$ExpectedStage
+    )
+
+    $results = @($Output | Where-Object { $null -ne $_ })
+    if ($results.Count -ne 1) {
+        throw "Guest stage '$ExpectedStage' returned $($results.Count) result objects; expected exactly one."
+    }
+
+    $stageProperty = $results[0].PSObject.Properties["stage"]
+    if ($null -eq $stageProperty -or [string]$stageProperty.Value -cne $ExpectedStage) {
+        throw "Guest stage '$ExpectedStage' did not return its required structured stage identity."
+    }
+    return $results[0]
+}
+
+function Get-GuestOptionalFeatureStageScriptBlock {
+    return {
+        $featureNames = [string[]]@(
+            "Microsoft-Windows-Subsystem-Linux",
+            "VirtualMachinePlatform"
+        )
+        $changedFeatures = New-Object "Collections.Generic.List[string]"
+        $featureStates = [ordered]@{}
+        $restartReported = $false
+
+        foreach ($featureName in $featureNames) {
+            $feature = Get-WindowsOptionalFeature `
+                -Online `
+                -FeatureName $featureName `
+                -ErrorAction Stop
+            $initialState = [string]$feature.State
+            if ($initialState -ceq "Enabled") {
+                $featureStates[$featureName] = $initialState
+                continue
+            }
+            if ($initialState -ceq "EnablePending") {
+                $restartReported = $true
+                $featureStates[$featureName] = $initialState
+                continue
+            }
+            if (
+                $initialState -cne "Disabled" -and
+                $initialState -cne "DisabledWithPayloadRemoved"
+            ) {
+                throw "Feature '$featureName' is in unsupported state '$initialState'."
+            }
+
+            $enableResult = Enable-WindowsOptionalFeature `
+                -Online `
+                -FeatureName $featureName `
+                -All `
+                -NoRestart `
+                -ErrorAction Stop
+            $changedFeatures.Add($featureName)
+            if ([bool]$enableResult.RestartNeeded) {
+                $restartReported = $true
+            }
+
+            $resultingFeature = Get-WindowsOptionalFeature `
+                -Online `
+                -FeatureName $featureName `
+                -ErrorAction Stop
+            $resultingState = [string]$resultingFeature.State
+            if ($resultingState -cne "Enabled" -and $resultingState -cne "EnablePending") {
+                throw "Feature '$featureName' ended in unexpected state '$resultingState' after enablement."
+            }
+            if ($resultingState -ceq "EnablePending") {
+                $restartReported = $true
+            }
+            $featureStates[$featureName] = $resultingState
+        }
+
+        $changed = $changedFeatures.Count -gt 0
+        $needsRestart = $changed -or $restartReported
+        if (-not $needsRestart) {
+            foreach ($featureName in $featureNames) {
+                if ([string]$featureStates[$featureName] -cne "Enabled") {
+                    throw "Feature '$featureName' is not enabled and no restart was requested."
+                }
+            }
+        }
+
+        [pscustomobject][ordered]@{
+            stage = "optional-features"
+            microsoftWindowsSubsystemLinuxState = [string]$featureStates["Microsoft-Windows-Subsystem-Linux"]
+            virtualMachinePlatformState = [string]$featureStates["VirtualMachinePlatform"]
+            changed = $changed
+            changedFeatures = [string[]]@($changedFeatures)
+            restartReported = $restartReported
+            needsRestart = $needsRestart
+        }
+    }
+}
+
+function Invoke-GuestOptionalFeatureStage {
+    param(
+        [Parameter(Mandatory = $true)]
+        [System.Management.Automation.Runspaces.PSSession]$Session
+    )
+
+    $output = Invoke-GuestCommandWithTimeout `
+        -Session $Session `
+        -OperationName "Preparing guest optional features" `
+        -TimeoutSec 1800 `
+        -ScriptBlock (Get-GuestOptionalFeatureStageScriptBlock)
+    return Get-RequiredGuestStageResult -Output @($output) -ExpectedStage "optional-features"
+}
+
+function Get-GuestWslNativeHelperInstallerScriptBlock {
+    return {
+        function global:Invoke-OpenClawTrustedWslProcess {
+            [CmdletBinding()]
+            param(
+                [Parameter(Mandatory = $true)]
+                [ValidateSet("Status", "Version", "InstallNoDistribution")]
+                [string]$Operation
+            )
+
+            function ConvertTo-OpenClawNativeDiagnostic {
+                param(
+                    [AllowNull()]
+                    [string]$Text,
+                    [ValidateRange(64, 8192)]
+                    [int]$MaxChars = 4096
+                )
+
+                if ([string]::IsNullOrEmpty($Text)) {
+                    return ""
+                }
+                $sanitized = [regex]::Replace(
+                    $Text,
+                    "[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]+",
+                    ""
+                )
+                $sanitized = [regex]::Replace(
+                    $sanitized,
+                    "(?i)\bBearer\s+[A-Za-z0-9._~+/\-=]+",
+                    "Bearer [redacted]"
+                )
+                $sanitized = [regex]::Replace(
+                    $sanitized,
+                    "(?i)\b(password|passwd|pwd|token|credential|secret|authorization)\b\s*[:=]\s*[^;,|`r`n]*",
+                    '$1=[redacted]'
+                )
+                $sanitized = [regex]::Replace(
+                    $sanitized,
+                    "(?i)(?:--?)(password|passwd|pwd|token|credential|secret|authorization)\s+(?:'[^']*'|`"[^`"]*`"|[^\s;,|]+)",
+                    '--$1 [redacted]'
+                )
+                $sanitized = $sanitized.Trim()
+                if ($sanitized.Length -gt $MaxChars) {
+                    return $sanitized.Substring(0, $MaxChars) + " [truncated]"
+                }
+                return $sanitized
+            }
+
+            function Read-OpenClawBoundedNativeText {
+                param(
+                    [Parameter(Mandatory = $true)]
+                    [string]$Path,
+                    [ValidateRange(64, 8192)]
+                    [int]$MaxChars = 4096
+                )
+
+                if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+                    return ""
+                }
+
+                $stream = $null
+                $reader = $null
+                try {
+                    $stream = [IO.File]::Open(
+                        $Path,
+                        [IO.FileMode]::Open,
+                        [IO.FileAccess]::Read,
+                        [IO.FileShare]::ReadWrite
+                    )
+                    $reader = [IO.StreamReader]::new(
+                        $stream,
+                        [Text.Encoding]::UTF8,
+                        $true,
+                        1024,
+                        $false
+                    )
+                    $buffer = New-Object "char[]" ($MaxChars + 1)
+                    $readCount = $reader.ReadBlock($buffer, 0, $buffer.Length)
+                    $boundedCount = [Math]::Min($readCount, $MaxChars)
+                    $text = if ($boundedCount -eq 0) {
+                        ""
+                    } else {
+                        -join $buffer[0..($boundedCount - 1)]
+                    }
+                    if ($readCount -gt $MaxChars) {
+                        $text += " [truncated]"
+                    }
+                    return ConvertTo-OpenClawNativeDiagnostic -Text $text -MaxChars $MaxChars
+                } finally {
+                    if ($null -ne $reader) {
+                        $reader.Dispose()
+                    } elseif ($null -ne $stream) {
+                        $stream.Dispose()
+                    }
+                }
+            }
+
+            $wslPath = [IO.Path]::GetFullPath(
+                (Join-Path $env:SystemRoot "System32\wsl.exe")
+            )
+            if (-not (Test-Path -LiteralPath $wslPath -PathType Leaf)) {
+                throw "The trusted System32 wsl.exe path is not present."
+            }
+
+            [string[]]$nativeArguments = switch ($Operation) {
+                "Status" {
+                    @("--status")
+                    break
+                }
+                "Version" {
+                    @("--version")
+                    break
+                }
+                "InstallNoDistribution" {
+                    @("--install", "--no-distribution")
+                    break
+                }
+                default {
+                    throw "Unsupported trusted WSL operation '$Operation'."
+                }
+            }
+
+            $nonce = [Guid]::NewGuid().ToString("N")
+            $temporaryRoot = [IO.Path]::GetFullPath([IO.Path]::GetTempPath())
+            $stdoutPath = Join-Path $temporaryRoot ("openclaw-wsl-{0}.stdout.txt" -f $nonce)
+            $stderrPath = Join-Path $temporaryRoot ("openclaw-wsl-{0}.stderr.txt" -f $nonce)
+            $invocationFailure = $null
+            $environmentRestoreFailure = $null
+            $result = $null
+            $cleanupFailures = New-Object "Collections.Generic.List[string]"
+            $priorWslUtf8Value = [Environment]::GetEnvironmentVariable(
+                "WSL_UTF8",
+                [EnvironmentVariableTarget]::Process
+            )
+            $wslUtf8WasPresent = $null -ne $priorWslUtf8Value
+            $wslUtf8WasSetForLaunch = $false
+            try {
+                [Environment]::SetEnvironmentVariable(
+                    "WSL_UTF8",
+                    "1",
+                    [EnvironmentVariableTarget]::Process
+                )
+                $wslUtf8WasSetForLaunch = $true
+                $nativeProcess = Start-Process `
+                    -FilePath $wslPath `
+                    -ArgumentList $nativeArguments `
+                    -RedirectStandardOutput $stdoutPath `
+                    -RedirectStandardError $stderrPath `
+                    -Wait `
+                    -PassThru `
+                    -WindowStyle Hidden `
+                    -ErrorAction Stop
+                $result = [pscustomobject][ordered]@{
+                    operation = $Operation
+                    arguments = [string[]]@($nativeArguments)
+                    exitCode = [int]$nativeProcess.ExitCode
+                    stdout = Read-OpenClawBoundedNativeText -Path $stdoutPath
+                    stderr = Read-OpenClawBoundedNativeText -Path $stderrPath
+                }
+            } catch {
+                $invocationFailure = $_
+            } finally {
+                if ($wslUtf8WasSetForLaunch) {
+                    try {
+                        $restoredWslUtf8Value = if ($wslUtf8WasPresent) {
+                            $priorWslUtf8Value
+                        } else {
+                            $null
+                        }
+                        [Environment]::SetEnvironmentVariable(
+                            "WSL_UTF8",
+                            $restoredWslUtf8Value,
+                            [EnvironmentVariableTarget]::Process
+                        )
+                    } catch {
+                        $environmentRestoreFailure = $_
+                    }
+                }
+                foreach ($capturePath in [string[]]@($stdoutPath, $stderrPath)) {
+                    if (Test-Path -LiteralPath $capturePath) {
+                        try {
+                            Remove-Item -LiteralPath $capturePath -Force -ErrorAction Stop
+                        } catch {
+                            $cleanupFailures.Add(
+                                (ConvertTo-OpenClawNativeDiagnostic -Text $_.Exception.Message -MaxChars 256)
+                            )
+                        }
+                    }
+                }
+            }
+
+            if ($null -ne $environmentRestoreFailure) {
+                $restoreFailureType = $environmentRestoreFailure.Exception.GetType().FullName
+                $restoreFailureMessage = ConvertTo-OpenClawNativeDiagnostic `
+                    -Text $environmentRestoreFailure.Exception.Message `
+                    -MaxChars 512
+                throw "Trusted WSL operation '$Operation' could not restore WSL_UTF8 ($restoreFailureType): $restoreFailureMessage"
+            }
+            if ($null -ne $invocationFailure) {
+                $failureType = $invocationFailure.Exception.GetType().FullName
+                $failureMessage = ConvertTo-OpenClawNativeDiagnostic `
+                    -Text $invocationFailure.Exception.Message `
+                    -MaxChars 512
+                throw "Trusted WSL operation '$Operation' failed ($failureType): $failureMessage"
+            }
+            if ($cleanupFailures.Count -gt 0) {
+                throw "Trusted WSL operation '$Operation' could not remove its temporary capture files: $($cleanupFailures -join ' | ')"
+            }
+            if ($null -eq $result) {
+                throw "Trusted WSL operation '$Operation' returned no process result."
+            }
+            return $result
+        }
+
+        [pscustomobject][ordered]@{
+            stage = "native-helper"
+            helperReady = $true
+            allowedOperations = [string[]]@(
+                "Status",
+                "Version",
+                "InstallNoDistribution"
+            )
+        }
+    }
+}
+
+function Install-GuestWslNativeHelper {
+    param(
+        [Parameter(Mandatory = $true)]
+        [System.Management.Automation.Runspaces.PSSession]$Session
+    )
+
+    $output = Invoke-GuestCommandWithTimeout `
+        -Session $Session `
+        -OperationName "Installing trusted guest WSL process helper" `
+        -TimeoutSec 60 `
+        -ScriptBlock (Get-GuestWslNativeHelperInstallerScriptBlock)
+    $result = Get-RequiredGuestStageResult -Output @($output) -ExpectedStage "native-helper"
+    if (-not [bool]$result.helperReady) {
+        throw "Trusted guest WSL process helper did not report ready."
+    }
+}
+
+function Get-GuestWslPackageStageScriptBlock {
+    return {
+        function Get-OpenClawWslResultDiagnostic {
+            param(
+                [Parameter(Mandatory = $true)]
+                [object]$Result
+            )
+
+            $combined = ("{0}`n{1}" -f [string]$Result.stdout, [string]$Result.stderr).Trim()
+            $combined = [regex]::Replace($combined, "\s+", " ")
+            if ($combined.Length -gt 1024) {
+                return $combined.Substring(0, 1024) + " [truncated]"
+            }
+            return $combined
+        }
+
+        function Get-OpenClawWslResultState {
+            param(
+                [Parameter(Mandatory = $true)]
+                [object]$Result,
+                [Parameter(Mandatory = $true)]
+                [string]$Label
+            )
+
+            $exitCode = [int]$Result.exitCode
+            $diagnostic = Get-OpenClawWslResultDiagnostic -Result $Result
+            $notInstalled = $diagnostic -match (
+                "(?i)(?:\bWSL\b|Windows Subsystem for Linux).{0,80}\b(?:is\s+)?not installed\b"
+            )
+            if ($exitCode -eq 0) {
+                if ($notInstalled) {
+                    throw "$Label returned exit code 0 with contradictory not-installed output."
+                }
+                return "ready"
+            }
+            if ($exitCode -in [int[]]@(-1, 50) -and $notInstalled) {
+                return "not-installed"
+            }
+            throw "$Label returned unexpected exit code $exitCode. Diagnostic: $diagnostic"
+        }
+
+        foreach ($featureName in [string[]]@(
+            "Microsoft-Windows-Subsystem-Linux",
+            "VirtualMachinePlatform"
+        )) {
+            $feature = Get-WindowsOptionalFeature `
+                -Online `
+                -FeatureName $featureName `
+                -ErrorAction Stop
+            if ([string]$feature.State -cne "Enabled") {
+                throw "Package stage requires feature '$featureName' to be Enabled; found '$($feature.State)'."
+            }
+        }
+
+        $statusResult = Invoke-OpenClawTrustedWslProcess -Operation "Status"
+        $versionResult = Invoke-OpenClawTrustedWslProcess -Operation "Version"
+        $statusState = Get-OpenClawWslResultState -Result $statusResult -Label "wsl.exe --status"
+        $versionState = Get-OpenClawWslResultState -Result $versionResult -Label "wsl.exe --version"
+
+        if ($statusState -ceq "ready") {
+            if ($versionState -cne "ready") {
+                throw "wsl.exe --status reported ready while wsl.exe --version reported '$versionState'."
+            }
+            return [pscustomobject][ordered]@{
+                stage = "wsl-package"
+                scope = "wsl-package-only"
+                normalizedState = "ready"
+                wasInstalled = $true
+                installInvoked = $false
+                installExitCode = $null
+                statusExitCode = [int]$statusResult.exitCode
+                versionExitCode = [int]$versionResult.exitCode
+                needsRestart = $false
+            }
+        }
+        if ($statusState -cne "not-installed") {
+            throw "wsl.exe --status returned unsupported normalized state '$statusState'."
+        }
+
+        $installResult = Invoke-OpenClawTrustedWslProcess -Operation "InstallNoDistribution"
+        $installExitCode = [int]$installResult.exitCode
+        if ($installExitCode -notin [int[]]@(0, 3010)) {
+            $installDiagnostic = Get-OpenClawWslResultDiagnostic -Result $installResult
+            throw "wsl.exe --install --no-distribution returned unexpected exit code $installExitCode. Diagnostic: $installDiagnostic"
+        }
+
+        [pscustomobject][ordered]@{
+            stage = "wsl-package"
+            scope = "wsl-package-only"
+            normalizedState = "restart-required"
+            wasInstalled = $false
+            installInvoked = $true
+            installExitCode = $installExitCode
+            statusExitCode = [int]$statusResult.exitCode
+            versionExitCode = [int]$versionResult.exitCode
+            needsRestart = $true
+        }
+    }
+}
+
+function Invoke-GuestWslPackageStage {
+    param(
+        [Parameter(Mandatory = $true)]
+        [System.Management.Automation.Runspaces.PSSession]$Session
+    )
+
+    $output = Invoke-GuestCommandWithTimeout `
+        -Session $Session `
+        -OperationName "Preparing guest WSL package" `
+        -TimeoutSec 1800 `
+        -ScriptBlock (Get-GuestWslPackageStageScriptBlock)
+    $result = Get-RequiredGuestStageResult -Output @($output) -ExpectedStage "wsl-package"
+    if ([string]$result.normalizedState -notin [string[]]@("ready", "restart-required")) {
+        throw "Guest WSL package stage returned unsupported normalized state '$($result.normalizedState)'."
+    }
+    return $result
+}
+
+function Get-GuestWslVerificationStageScriptBlock {
+    return {
+        function Get-OpenClawWslVerificationText {
+            param(
+                [Parameter(Mandatory = $true)]
+                [object]$Result
+            )
+
+            $combined = ("{0}`n{1}" -f [string]$Result.stdout, [string]$Result.stderr).Trim()
+            $combined = [regex]::Replace($combined, "\s+", " ")
+            if ($combined.Length -gt 1024) {
+                return $combined.Substring(0, 1024) + " [truncated]"
+            }
+            return $combined
+        }
+
+        $featureStates = [ordered]@{}
+        foreach ($featureName in [string[]]@(
+            "Microsoft-Windows-Subsystem-Linux",
+            "VirtualMachinePlatform"
+        )) {
+            $feature = Get-WindowsOptionalFeature `
+                -Online `
+                -FeatureName $featureName `
+                -ErrorAction Stop
+            $featureStates[$featureName] = [string]$feature.State
+            if ([string]$feature.State -cne "Enabled") {
+                throw "Final WSL verification requires feature '$featureName' to be Enabled; found '$($feature.State)'."
+            }
+        }
+
+        $statusResult = Invoke-OpenClawTrustedWslProcess -Operation "Status"
+        $versionResult = Invoke-OpenClawTrustedWslProcess -Operation "Version"
+        $statusText = Get-OpenClawWslVerificationText -Result $statusResult
+        $versionText = Get-OpenClawWslVerificationText -Result $versionResult
+        if ([int]$statusResult.exitCode -ne 0) {
+            throw "Final wsl.exe --status verification failed with exit code $($statusResult.exitCode). Diagnostic: $statusText"
+        }
+        if ([int]$versionResult.exitCode -ne 0) {
+            throw "Final wsl.exe --version verification failed with exit code $($versionResult.exitCode). Diagnostic: $versionText"
+        }
+
+        [pscustomobject][ordered]@{
+            stage = "wsl-verification"
+            scope = "wsl-package-only"
+            normalizedState = "ready"
+            microsoftWindowsSubsystemLinuxState = [string]$featureStates["Microsoft-Windows-Subsystem-Linux"]
+            virtualMachinePlatformState = [string]$featureStates["VirtualMachinePlatform"]
+            statusExitCode = [int]$statusResult.exitCode
+            versionExitCode = [int]$versionResult.exitCode
+            status = $statusText
+            version = $versionText
+        }
+    }
+}
+
+function Invoke-GuestWslVerificationStage {
+    param(
+        [Parameter(Mandatory = $true)]
+        [System.Management.Automation.Runspaces.PSSession]$Session
+    )
+
+    $output = Invoke-GuestCommandWithTimeout `
+        -Session $Session `
+        -OperationName "Verifying guest WSL package" `
+        -TimeoutSec 300 `
+        -ScriptBlock (Get-GuestWslVerificationStageScriptBlock)
+    $result = Get-RequiredGuestStageResult -Output @($output) -ExpectedStage "wsl-verification"
+    if (
+        [string]$result.normalizedState -cne "ready" -or
+        [int]$result.statusExitCode -ne 0 -or
+        [int]$result.versionExitCode -ne 0
+    ) {
+        throw "Guest WSL verification did not return a ready zero-exit proof."
+    }
+    return $result
 }
 
 function Get-GuestRepoRoot {
@@ -2854,69 +3676,73 @@ function Prepare-GuestPrerequisites {
         [Parameter(Mandatory = $true)]
         [System.Management.Automation.Runspaces.PSSession]$Session,
         [Parameter(Mandatory = $true)]
-        [System.Management.Automation.PSCredential]$GuestCredential
+        [System.Management.Automation.PSCredential]$GuestCredential,
+        [Parameter(Mandatory = $true)]
+        [string]$ResolvedVhdPath,
+        [Parameter(Mandatory = $true)]
+        [string]$ExpectedOwnerId
     )
 
     Write-Step "Preparing guest prerequisites"
-
-    $wslResult = Invoke-GuestCommandWithTimeout -Session $Session -OperationName "Enabling guest WSL prerequisites" -TimeoutSec 1800 -ScriptBlock {
-        $needsRestart = $false
-        foreach ($featureName in @("Microsoft-Windows-Subsystem-Linux", "VirtualMachinePlatform")) {
-            $feature = Get-WindowsOptionalFeature -Online -FeatureName $featureName -ErrorAction Stop
-            if ($feature.State -ne "Enabled") {
-                Enable-WindowsOptionalFeature -Online -NoRestart -FeatureName $featureName -All | Out-Null
-                $needsRestart = $true
-            }
-        }
-
-        $wslOutput = & wsl.exe --status 2>&1
-        $wslExitCode = $LASTEXITCODE
-        if ($wslExitCode -ne 0) {
-            & wsl.exe --install --no-distribution
-            $installExitCode = $LASTEXITCODE
-            if ($installExitCode -ne 0 -and $installExitCode -ne 3010) {
-                throw "wsl --install --no-distribution failed with exit code $installExitCode. Output: $wslOutput"
-            }
-
-            $needsRestart = $true
-        }
-
-        [ordered]@{
-            needsRestart = $needsRestart
-        } | ConvertTo-Json -Compress
-    }
-
-    $parsedWslResult = $null
-    if ($wslResult) {
-        $parsedWslResult = ($wslResult | Select-Object -Last 1 | ConvertFrom-Json)
-    }
-
     $activeSession = $Session
-    if ($null -ne $parsedWslResult -and $parsedWslResult.needsRestart) {
-        Write-InfoLine "Guest restart is required to complete WSL prerequisites."
-        $activeSession = Restart-GuestAndReconnect -Session $Session -GuestCredential $GuestCredential
+    try {
+        $featureResult = Invoke-GuestOptionalFeatureStage -Session $activeSession
+        if ([bool]$featureResult.needsRestart) {
+            Write-InfoLine "Guest restart is required to complete optional feature enablement."
+            $activeSession = Restart-GuestAndReconnect `
+                -Session $activeSession `
+                -GuestCredential $GuestCredential `
+                -ResolvedVhdPath $ResolvedVhdPath `
+                -ExpectedOwnerId $ExpectedOwnerId
+        }
+
+        Install-GuestWslNativeHelper -Session $activeSession
+        $packageResult = Invoke-GuestWslPackageStage -Session $activeSession
+        if ([bool]$packageResult.needsRestart) {
+            Write-InfoLine "Guest restart is required to complete WSL package preparation."
+            $activeSession = Restart-GuestAndReconnect `
+                -Session $activeSession `
+                -GuestCredential $GuestCredential `
+                -ResolvedVhdPath $ResolvedVhdPath `
+                -ExpectedOwnerId $ExpectedOwnerId
+            Install-GuestWslNativeHelper -Session $activeSession
+        }
+
+        $wslProof = Invoke-GuestWslVerificationStage -Session $activeSession
+        Write-InfoLine "Guest WSL package verification proof:"
+        Write-Host ([pscustomobject][ordered]@{
+            scope = [string]$wslProof.scope
+            normalizedState = [string]$wslProof.normalizedState
+            statusExitCode = [int]$wslProof.statusExitCode
+            versionExitCode = [int]$wslProof.versionExitCode
+            status = [string]$wslProof.status
+            version = [string]$wslProof.version
+        } | ConvertTo-Json -Compress)
+
+        Ensure-GuestGitInstalled -Session $activeSession
+        Ensure-GuestPowerShell7Installed -Session $activeSession
+        Copy-RepoToGuest -Session $activeSession
+
+        $guestRepoRoot = Get-GuestRepoRoot
+        Invoke-GuestCommandWithTimeout -Session $activeSession -OperationName "Running guest setup-dev" -TimeoutSec $GuestCommandTimeoutSec -ScriptBlock {
+            param($RemoteRepoRoot)
+            Set-Location $RemoteRepoRoot
+            & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $RemoteRepoRoot "scripts\setup-dev.ps1")
+            if ($LASTEXITCODE -ne 0) {
+                throw "setup-dev.ps1 failed with exit code $LASTEXITCODE."
+            }
+        } -ArgumentList @($guestRepoRoot) | Out-Null
+
+        return $activeSession
+    } catch {
+        if (
+            $null -ne $activeSession -and
+            $activeSession.InstanceId -ne $Session.InstanceId
+        ) {
+            Remove-PSSession -Session $activeSession -ErrorAction SilentlyContinue
+        }
+        throw
     }
-
-    Ensure-GuestGitInstalled -Session $activeSession
-    Ensure-GuestPowerShell7Installed -Session $activeSession
-    Copy-RepoToGuest -Session $activeSession
-
-    $guestRepoRoot = Get-GuestRepoRoot
-    Invoke-GuestCommandWithTimeout -Session $activeSession -OperationName "Running guest setup-dev" -TimeoutSec $GuestCommandTimeoutSec -ScriptBlock {
-        param($RemoteRepoRoot)
-        Set-Location $RemoteRepoRoot
-        & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $RemoteRepoRoot "scripts\setup-dev.ps1")
-        if ($LASTEXITCODE -ne 0) {
-            throw "setup-dev.ps1 failed with exit code $LASTEXITCODE."
-        }
-
-        & wsl.exe --status
-        if ($LASTEXITCODE -ne 0) {
-            throw "wsl --status failed with exit code $LASTEXITCODE."
-        }
-    } -ArgumentList @($guestRepoRoot) | Out-Null
-
-    return $activeSession
 }
 
 function Verify-HostVmConfiguration {
@@ -3430,7 +4256,11 @@ function Invoke-PrepareCommand {
     $session = $null
     try {
         $session = Open-GuestSession -GuestCredential $operationCredential -TimeoutSec $PowerShellDirectTimeoutSec
-        $session = Prepare-GuestPrerequisites -Session $session -GuestCredential $operationCredential
+        $session = Prepare-GuestPrerequisites `
+            -Session $session `
+            -GuestCredential $operationCredential `
+            -ResolvedVhdPath $resolvedVhdPath `
+            -ExpectedOwnerId $OwnerId
     } catch {
         if ($null -ne $session) {
             Stop-VMGracefully -Session $session -TimeoutSec $GuestShutdownTimeoutSec
@@ -3470,21 +4300,10 @@ function Invoke-VerifyCommand {
         -GuestCredential $operationCredential `
         -Action {
         param($Session)
+        Install-GuestWslNativeHelper -Session $Session
+        $wslProof = Invoke-GuestWslVerificationStage -Session $Session
         $verifyResult = Invoke-GuestCommandWithTimeout -Session $Session -OperationName "Verifying guest readiness" -TimeoutSec $GuestCommandTimeoutSec -ScriptBlock {
             $windowsSdkPath = "${env:ProgramFiles(x86)}\Windows Kits\10\Include"
-            $wslFeature = Get-WindowsOptionalFeature -Online -FeatureName "Microsoft-Windows-Subsystem-Linux"
-            $vmPlatformFeature = Get-WindowsOptionalFeature -Online -FeatureName "VirtualMachinePlatform"
-            $wslStatus = (& wsl.exe --status 2>&1 | Out-String).Trim()
-            $wslExitCode = $LASTEXITCODE
-
-            if ($wslExitCode -ne 0) {
-                throw "wsl --status failed with exit code $wslExitCode."
-            }
-
-            if ($wslFeature.State -ne "Enabled" -or $vmPlatformFeature.State -ne "Enabled") {
-                throw "WSL guest features are not fully enabled."
-            }
-
             if (-not (Test-Path -LiteralPath $windowsSdkPath)) {
                 throw "Windows SDK is not present in the guest."
             }
@@ -3497,16 +4316,33 @@ function Invoke-VerifyCommand {
                 nodeVersion = (& node --version 2>&1 | Out-String).Trim()
                 npmVersion = (& npm --version 2>&1 | Out-String).Trim()
                 windowsSdkPresent = (Test-Path -LiteralPath $windowsSdkPath)
-                wslFeatureState = $wslFeature.State
-                virtualMachinePlatformState = $vmPlatformFeature.State
-                wslStatus = $wslStatus
             } | ConvertTo-Json -Depth 5
         }
 
-        $summary = $verifyResult | Select-Object -Last 1
-        if ($null -eq $summary) {
+        $toolSummaryJson = $verifyResult | Select-Object -Last 1
+        if ($null -eq $toolSummaryJson) {
             throw "Guest verification did not return a summary."
         }
+        $toolSummary = $toolSummaryJson | ConvertFrom-Json -ErrorAction Stop
+        $summary = [pscustomobject][ordered]@{
+            computerName = [string]$toolSummary.computerName
+            userName = [string]$toolSummary.userName
+            gitVersion = [string]$toolSummary.gitVersion
+            dotnetVersion = [string]$toolSummary.dotnetVersion
+            nodeVersion = [string]$toolSummary.nodeVersion
+            npmVersion = [string]$toolSummary.npmVersion
+            windowsSdkPresent = [bool]$toolSummary.windowsSdkPresent
+            wslPackageProof = [pscustomobject][ordered]@{
+                scope = [string]$wslProof.scope
+                normalizedState = [string]$wslProof.normalizedState
+                microsoftWindowsSubsystemLinuxState = [string]$wslProof.microsoftWindowsSubsystemLinuxState
+                virtualMachinePlatformState = [string]$wslProof.virtualMachinePlatformState
+                statusExitCode = [int]$wslProof.statusExitCode
+                versionExitCode = [int]$wslProof.versionExitCode
+                status = [string]$wslProof.status
+                version = [string]$wslProof.version
+            }
+        } | ConvertTo-Json -Depth 5
 
         Write-InfoLine "Guest verification summary:"
         Write-Host $summary
