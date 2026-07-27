@@ -188,13 +188,15 @@ Do not use `-CleanupUnattend` for this state.
 The command validates VM note/file ownership and unattended ownership. It
 first verifies host configuration. Only if verification fails and the exact
 owned VM is Off does it repair the security configuration with
-`MicrosoftWindows` and the already-owned Windows DVD. The repair establishes a
-missing key protector before applying secure-boot firmware, preserves an
-existing valid key protector, then enables vTPM only when disabled and fully
-re-verifies before starting the VM. It runs the same bounded Hyper-V CIM key
-pulses immediately after that repaired pre-first-start VM is running, clears
-the optical boot prompt, and continues the unattended flow. The VM, VHD, media,
-and credentials are preserved. Do not clean up or delete this state.
+`MicrosoftWindows` and the already-owned Windows DVD. The repair treats any
+four-byte host sentinel as an invalid key protector. It establishes a missing
+protector and immediately re-reads and validates the new local protector before
+applying secure-boot firmware. It preserves an existing valid protector, then
+enables vTPM only when disabled and fully re-verifies before starting the VM.
+It runs the same bounded Hyper-V CIM key pulses immediately after that repaired
+pre-first-start VM is running, clears the optical boot prompt, and continues
+the unattended flow. The VM, VHD, media, and credentials are preserved. Do not
+clean up or delete this state.
 
 Partial failure never deletes a VM or VHD. Before PowerShell Direct readiness,
 owned answer media and the DPAPI setup credential remain for diagnosis. For a

@@ -74,6 +74,44 @@ public sealed class CleanWindowsRunnerScriptTests
     }
 
     [Fact]
+    public void HyperVController_KeyProtectorPredicateRejectsEveryFourByteHostSentinel()
+    {
+        var script = ReadScript("Invoke-CleanWindowsHyperV.ps1");
+        var predicateStart = script.IndexOf(
+            "function Test-KeyProtectorPresent",
+            StringComparison.Ordinal);
+        var predicateEnd = script.IndexOf(
+            "function Get-PropertyValueOrNull",
+            predicateStart,
+            StringComparison.Ordinal);
+        var predicate = script[predicateStart..predicateEnd];
+        var proofScript = string.Concat(
+            "$ErrorActionPreference = 'Stop'\n",
+            predicate,
+            "\n$results = @(\n",
+            "    Test-KeyProtectorPresent -KeyProtector ([object[]]@([byte]0, [byte]0, [byte]0, [byte]1))\n",
+            "    Test-KeyProtectorPresent -KeyProtector ([byte[]]@(17, 42, 128, 255))\n",
+            "    Test-KeyProtectorPresent -KeyProtector $null\n",
+            "    Test-KeyProtectorPresent -KeyProtector ([byte[]]@())\n",
+            "    Test-KeyProtectorPresent -KeyProtector ([byte[]]@(1, 2, 3, 4, 5))\n",
+            ")\n",
+            "[Console]::Out.Write(($results -join ','))\n");
+
+        Assert.Contains("$keyProtectorBytes.Count -le 4", predicate);
+        Assert.DoesNotContain("Write-", predicate, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("Out-", predicate, StringComparison.OrdinalIgnoreCase);
+
+        var result = RunPowerShellCommand(proofScript);
+
+        Assert.True(
+            result.ExitCode == 0,
+            $"Key protector predicate proof failed.\nstdout:\n{result.Stdout}\nstderr:\n{result.Stderr}");
+        Assert.Equal("False,False,False,False,True", result.Stdout);
+        Assert.DoesNotContain("0,0,0,1", result.Stdout, StringComparison.Ordinal);
+        Assert.DoesNotContain("17,42,128,255", result.Stdout, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void HyperVController_RepairsOnlyConfirmedOwnedOffPartialVmBeforeStarting()
     {
         var script = ReadScript("Invoke-CleanWindowsHyperV.ps1");
@@ -106,7 +144,7 @@ public sealed class CleanWindowsRunnerScriptTests
         Assert.Contains("-FirstBootDevice $windowsDvdDrive", securitySeam);
         Assert.Contains("-SecureBootTemplate $script:WindowsSecureBootTemplate", securitySeam);
         Assert.Contains("Test-KeyProtectorPresent -KeyProtector $keyProtector", securitySeam);
-        Assert.Contains("Hyper-V reports an unset protector as four zero bytes", script);
+        Assert.Contains("Hyper-V can report an unset protector as a four-byte host sentinel", script);
         Assert.Contains("Refusing to change an unknown vTPM configuration", securitySeam);
 
         var getProtectorIndex = securitySeam.IndexOf("Get-VMKeyProtector", StringComparison.Ordinal);
@@ -117,6 +155,22 @@ public sealed class CleanWindowsRunnerScriptTests
             "if (-not $hasKeyProtector)",
             StringComparison.Ordinal);
         var setProtectorIndex = securitySeam.IndexOf("Set-VMKeyProtector", StringComparison.Ordinal);
+        var rereadProtectorIndex = securitySeam.IndexOf(
+            "Get-VMKeyProtector",
+            setProtectorIndex,
+            StringComparison.Ordinal);
+        var retestProtectorIndex = securitySeam.IndexOf(
+            "Test-KeyProtectorPresent -KeyProtector $keyProtector",
+            rereadProtectorIndex,
+            StringComparison.Ordinal);
+        var invalidNewProtectorGuardIndex = securitySeam.IndexOf(
+            "if (-not $hasKeyProtector)",
+            retestProtectorIndex,
+            StringComparison.Ordinal);
+        var invalidNewProtectorFailureIndex = securitySeam.IndexOf(
+            "Hyper-V did not report a valid local key protector",
+            invalidNewProtectorGuardIndex,
+            StringComparison.Ordinal);
         var setFirmwareIndex = securitySeam.IndexOf("Set-VMFirmware", StringComparison.Ordinal);
         var getSecurityIndex = securitySeam.IndexOf("Get-VMSecurity", StringComparison.Ordinal);
         var disabledTpmGuardIndex = securitySeam.IndexOf(
@@ -128,14 +182,23 @@ public sealed class CleanWindowsRunnerScriptTests
         Assert.True(testProtectorIndex > getProtectorIndex);
         Assert.True(missingProtectorGuardIndex > testProtectorIndex);
         Assert.True(setProtectorIndex > missingProtectorGuardIndex);
-        Assert.True(setFirmwareIndex > setProtectorIndex);
+        Assert.True(rereadProtectorIndex > setProtectorIndex);
+        Assert.True(retestProtectorIndex > rereadProtectorIndex);
+        Assert.True(invalidNewProtectorGuardIndex > retestProtectorIndex);
+        Assert.True(invalidNewProtectorFailureIndex > invalidNewProtectorGuardIndex);
+        Assert.True(setFirmwareIndex > invalidNewProtectorFailureIndex);
         Assert.True(getSecurityIndex > setFirmwareIndex);
         Assert.True(disabledTpmGuardIndex > getSecurityIndex);
         Assert.True(enableTpmIndex > disabledTpmGuardIndex);
         Assert.Contains(
             """
             if (-not $hasKeyProtector) {
-                    Set-VMKeyProtector -VMName $VMName -NewLocalKeyProtector | Out-Null
+                    Set-VMKeyProtector -VMName $VMName -NewLocalKeyProtector -ErrorAction Stop | Out-Null
+                    $keyProtector = Get-VMKeyProtector -VMName $VMName -ErrorAction Stop
+                    $hasKeyProtector = Test-KeyProtectorPresent -KeyProtector $keyProtector
+                    if (-not $hasKeyProtector) {
+                        throw "Hyper-V did not report a valid local key protector for exact owned VM '$VMName' after creating one. Refusing to configure firmware or vTPM."
+                    }
                 }
             """,
             securitySeam);
@@ -251,6 +314,8 @@ public sealed class CleanWindowsRunnerScriptTests
             Assert.Contains(exactCommand, guidance);
             Assert.Contains("Do not use `-CleanupUnattend` for this state", guidance);
             Assert.Contains("owned VM is Off", guidance);
+            Assert.Contains("four-byte host sentinel", guidance);
+            Assert.Contains("immediately re-reads and validates", guidance);
             Assert.Contains("Ordinary resume paths do not inject keys", guidance);
             Assert.Contains("configuration was repaired", guidance);
             Assert.Contains("reverified", guidance);
@@ -1033,6 +1098,33 @@ public sealed class CleanWindowsRunnerScriptTests
         {
             process.Kill(entireProcessTree: true);
             throw new TimeoutException("Hyper-V parameter validation exceeded 30 seconds.");
+        }
+        return new ProcessResult(process.ExitCode, stdout, stderr);
+    }
+
+    private static ProcessResult RunPowerShellCommand(string command)
+    {
+        var startInfo = new ProcessStartInfo
+        {
+            FileName = "powershell.exe",
+            UseShellExecute = false,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            CreateNoWindow = true,
+        };
+        foreach (var argument in new[] { "-NoProfile", "-Command", command })
+        {
+            startInfo.ArgumentList.Add(argument);
+        }
+
+        using var process = Process.Start(startInfo)
+            ?? throw new InvalidOperationException("Failed to start PowerShell.");
+        var stdout = process.StandardOutput.ReadToEnd();
+        var stderr = process.StandardError.ReadToEnd();
+        if (!process.WaitForExit(30_000))
+        {
+            process.Kill(entireProcessTree: true);
+            throw new TimeoutException("PowerShell command exceeded 30 seconds.");
         }
         return new ProcessResult(process.ExitCode, stdout, stderr);
     }

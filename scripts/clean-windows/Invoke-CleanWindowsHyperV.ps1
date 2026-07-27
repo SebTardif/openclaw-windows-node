@@ -295,23 +295,15 @@ function Normalize-SecureBootTemplate {
 function Test-KeyProtectorPresent {
     param([object]$KeyProtector)
 
-    $keyProtectorBytes = @($KeyProtector)
-    if ($keyProtectorBytes.Count -eq 0) {
+    if ($null -eq $KeyProtector) {
         return $false
     }
 
-    # Hyper-V reports an unset protector as four zero bytes.
-    if ($keyProtectorBytes.Count -eq 4) {
-        $allBytesAreZero = $true
-        foreach ($keyProtectorByte in $keyProtectorBytes) {
-            if ([int]$keyProtectorByte -ne 0) {
-                $allBytesAreZero = $false
-                break
-            }
-        }
-        if ($allBytesAreZero) {
-            return $false
-        }
+    $keyProtectorBytes = @($KeyProtector)
+    # Hyper-V can report an unset protector as a four-byte host sentinel.
+    # A valid local key protector must contain a substantive blob beyond it.
+    if ($keyProtectorBytes.Count -le 4) {
+        return $false
     }
 
     return $true
@@ -2101,7 +2093,12 @@ function Set-OwnedVmSecurityConfiguration {
     $keyProtector = Get-VMKeyProtector -VMName $VMName -ErrorAction Stop
     $hasKeyProtector = Test-KeyProtectorPresent -KeyProtector $keyProtector
     if (-not $hasKeyProtector) {
-        Set-VMKeyProtector -VMName $VMName -NewLocalKeyProtector | Out-Null
+        Set-VMKeyProtector -VMName $VMName -NewLocalKeyProtector -ErrorAction Stop | Out-Null
+        $keyProtector = Get-VMKeyProtector -VMName $VMName -ErrorAction Stop
+        $hasKeyProtector = Test-KeyProtectorPresent -KeyProtector $keyProtector
+        if (-not $hasKeyProtector) {
+            throw "Hyper-V did not report a valid local key protector for exact owned VM '$VMName' after creating one. Refusing to configure firmware or vTPM."
+        }
     }
 
     Set-VMFirmware `
