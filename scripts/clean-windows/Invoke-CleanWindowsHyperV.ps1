@@ -121,6 +121,8 @@ $script:OpticalBootKeyWindowSec = 7
 $script:OpticalBootInitialDelayMilliseconds = 750
 $script:OpticalBootPulseIntervalMilliseconds = 750
 $script:OpticalBootMaxPulseCount = 9
+$script:InstallationMediaDetachTimeoutSec = 5
+$script:InstallationMediaDetachPollIntervalMilliseconds = 250
 
 Import-Module (Join-Path $PSScriptRoot "CleanWindowsUnattend.psm1") -Force
 
@@ -1195,35 +1197,135 @@ function Detach-OwnedInstallationMedia {
     param(
         [Parameter(Mandatory = $true)]
         [object]$State,
-        [switch]$RequireBoth
+        [switch]$RequireBoth,
+        [switch]$AllowAlreadyDetachedAfterPowerShellDirectReady,
+        [ValidateRange(1, 30)]
+        [int]$TimeoutSec = $script:InstallationMediaDetachTimeoutSec,
+        [ValidateRange(10, 1000)]
+        [int]$PollIntervalMilliseconds = $script:InstallationMediaDetachPollIntervalMilliseconds
     )
 
+    if ($RequireBoth -and $AllowAlreadyDetachedAfterPowerShellDirectReady) {
+        throw "RequireBoth and AllowAlreadyDetachedAfterPowerShellDirectReady are mutually exclusive."
+    }
+    if (
+        $AllowAlreadyDetachedAfterPowerShellDirectReady -and
+        [string]$State.status -cne "powershell-direct-ready"
+    ) {
+        throw "Already-detached recovery requires unattended status 'powershell-direct-ready'."
+    }
+
     $expectedMedia = @(
-        (Normalize-ComparisonPath ([string]$State.windowsIsoPath)),
-        (Normalize-ComparisonPath ([string]$State.answerIsoPath))
+        [pscustomobject]@{
+            Label = "Windows ISO"
+            Path = Normalize-ComparisonPath ([string]$State.windowsIsoPath)
+        },
+        [pscustomobject]@{
+            Label = "answer ISO"
+            Path = Normalize-ComparisonPath ([string]$State.answerIsoPath)
+        }
     )
-    $detached = @{}
-    foreach ($drive in @(Get-VMDvdDrive -VMName $VMName -ErrorAction Stop)) {
+    $initialDrives = @(Get-VMDvdDrive -VMName $VMName -ErrorAction Stop)
+    $initialMatches = @(
+        foreach ($drive in $initialDrives) {
+            $drivePath = Normalize-ComparisonPath ([string]$drive.Path)
+            if ($expectedMedia.Path -contains $drivePath) {
+                $drive
+            }
+        }
+    )
+    $initialAttachedPaths = @($initialMatches | ForEach-Object {
+        Normalize-ComparisonPath ([string]$_.Path)
+    })
+
+    if ($RequireBoth) {
+        foreach ($expected in $expectedMedia) {
+            if ($initialAttachedPaths -notcontains $expected.Path) {
+                throw "Expected owned $($expected.Label) was not attached. Refusing to issue a partial detach."
+            }
+        }
+    }
+    if ($AllowAlreadyDetachedAfterPowerShellDirectReady) {
+        if ($initialMatches.Count -eq 0) {
+            return
+        }
+        foreach ($expected in $expectedMedia) {
+            if ($initialAttachedPaths -notcontains $expected.Path) {
+                throw "Already-detached recovery found only part of the expected owned installation media. Refusing to issue a partial detach."
+            }
+        }
+    }
+
+    foreach ($drive in $initialMatches) {
         $drivePath = Normalize-ComparisonPath ([string]$drive.Path)
-        if ($expectedMedia -contains $drivePath) {
+        if ($expectedMedia.Path -contains $drivePath) {
             Set-VMDvdDrive `
                 -VMName $VMName `
                 -ControllerNumber $drive.ControllerNumber `
                 -ControllerLocation $drive.ControllerLocation `
                 -Path $null | Out-Null
-            $detached[$drivePath] = $true
         }
     }
-    if ($RequireBoth) {
-        foreach ($expectedPath in $expectedMedia) {
-            if (-not $detached.ContainsKey($expectedPath)) {
-                throw "Expected owned installation media was not attached. Refusing to report successful detach."
+
+    $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSec)
+    do {
+        $remaining = @(
+            foreach ($drive in @(Get-VMDvdDrive -VMName $VMName -ErrorAction Stop)) {
+                $drivePath = Normalize-ComparisonPath ([string]$drive.Path)
+                if ($expectedMedia.Path -contains $drivePath) {
+                    $expected = @($expectedMedia | Where-Object { $_.Path -eq $drivePath })[0]
+                    [pscustomobject]@{
+                        Label = $expected.Label
+                        ControllerNumber = [int]$drive.ControllerNumber
+                        ControllerLocation = [int]$drive.ControllerLocation
+                    }
+                }
             }
+        )
+        if ($remaining.Count -eq 0) {
+            return
         }
-    }
-    foreach ($drive in @(Get-VMDvdDrive -VMName $VMName -ErrorAction Stop)) {
-        if ($expectedMedia -contains (Normalize-ComparisonPath ([string]$drive.Path))) {
-            throw "Owned installation media remained attached after the detach operation."
+        if ([DateTime]::UtcNow -ge $deadline) {
+            break
+        }
+        Start-Sleep -Milliseconds $PollIntervalMilliseconds
+    } while ($true)
+
+    $diagnostics = @(
+        $remaining |
+            Sort-Object ControllerNumber, ControllerLocation, Label |
+            ForEach-Object {
+                "{0} remains attached at controller {1}, location {2}" -f
+                    $_.Label,
+                    $_.ControllerNumber,
+                    $_.ControllerLocation
+            }
+    ) -join "; "
+    throw "Timed out waiting for Hyper-V to report owned installation media detached after $TimeoutSec seconds. $diagnostics."
+}
+
+function Assert-BothOwnedInstallationMediaAttached {
+    param(
+        [Parameter(Mandatory = $true)]
+        [object]$State
+    )
+
+    $attachedPaths = @(
+        Get-VMDvdDrive -VMName $VMName -ErrorAction Stop |
+            ForEach-Object { Normalize-ComparisonPath ([string]$_.Path) }
+    )
+    foreach ($expected in @(
+        [pscustomobject]@{
+            Label = "Windows ISO"
+            Path = Normalize-ComparisonPath ([string]$State.windowsIsoPath)
+        },
+        [pscustomobject]@{
+            Label = "answer ISO"
+            Path = Normalize-ComparisonPath ([string]$State.answerIsoPath)
+        }
+    )) {
+        if ($attachedPaths -notcontains $expected.Path) {
+            throw "Expected owned $($expected.Label) was not attached before the PowerShell Direct readiness transition."
         }
     }
 }
@@ -1562,9 +1664,19 @@ function Complete-UnattendedInstallation {
         [object]$State,
         [Parameter(Mandatory = $true)]
         [Management.Automation.PSCredential]$SetupCredential,
-        [switch]$RequireAttachedMedia
+        [switch]$RequireAttachedMedia,
+        [switch]$AllowAlreadyDetachedAfterPowerShellDirectReady
     )
 
+    if ($RequireAttachedMedia -and $AllowAlreadyDetachedAfterPowerShellDirectReady) {
+        throw "RequireAttachedMedia and AllowAlreadyDetachedAfterPowerShellDirectReady are mutually exclusive."
+    }
+    if (
+        $AllowAlreadyDetachedAfterPowerShellDirectReady -and
+        [string]$State.status -cne "powershell-direct-ready"
+    ) {
+        throw "Already-detached resume requires unattended status 'powershell-direct-ready'."
+    }
     if (
         -not [string]::Equals(
             $SetupCredential.UserName,
@@ -1580,9 +1692,15 @@ function Complete-UnattendedInstallation {
         -GuestCredential $SetupCredential `
         -TimeoutSec $UnattendedInstallTimeoutSec
     try {
+        if ($RequireAttachedMedia) {
+            Assert-BothOwnedInstallationMediaAttached -State $State
+        }
         Set-UnattendStateStatus -State $State -Paths $Paths -Status "powershell-direct-ready"
         Write-Step "Detaching owned installation media"
-        Detach-OwnedInstallationMedia -State $State -RequireBoth:$RequireAttachedMedia
+        Detach-OwnedInstallationMedia `
+            -State $State `
+            -RequireBoth:$RequireAttachedMedia `
+            -AllowAlreadyDetachedAfterPowerShellDirectReady:$AllowAlreadyDetachedAfterPowerShellDirectReady
         Remove-OwnedUnattendMedia -Paths $Paths
         Set-UnattendStateStatus -State $State -Paths $Paths -Status "installation-media-removed"
 
@@ -2226,6 +2344,8 @@ function Invoke-ResumeUnattendedCommand {
     $state = Read-OwnedUnattendState -ResolvedVhdPath $ResolvedVhdPath -Paths $paths
     $vm = Assert-OwnedVM -ResolvedVhdPath $ResolvedVhdPath -ExpectedOwnerId $OwnerId
     Assert-UnattendStateMatchesVmMarker -State $state -VmObject $vm
+    $allowAlreadyDetachedAfterPowerShellDirectReady =
+        [string]$state.status -ceq "powershell-direct-ready"
     $repairedPreFirstStartSecurityConfiguration = $false
     $configurationVerificationError = $null
     try {
@@ -2299,7 +2419,9 @@ function Invoke-ResumeUnattendedCommand {
         -ResolvedVhdPath $ResolvedVhdPath `
         -Paths $paths `
         -State $state `
-        -SetupCredential $setupCredential
+        -SetupCredential $setupCredential `
+        -RequireAttachedMedia:(-not $allowAlreadyDetachedAfterPowerShellDirectReady) `
+        -AllowAlreadyDetachedAfterPowerShellDirectReady:$allowAlreadyDetachedAfterPowerShellDirectReady
 }
 
 function Invoke-CreateCommand {

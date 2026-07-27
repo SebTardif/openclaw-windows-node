@@ -112,8 +112,9 @@ For unattended mode, the controller:
    owned Off partial VM whose incomplete security configuration was repaired
    and reverified before it was started;
 8. waits a bounded time for PowerShell Direct;
-9. immediately detaches both ISO drives and removes the answer XML, staging
-   directory, and answer ISO;
+9. detaches both ISO drives, bounded-polls Hyper-V until neither exact owned
+   path is reported, then removes the answer XML, staging directory, and answer
+   ISO;
 10. verifies Windows 11 Enterprise Evaluation, build, x64/AMD64 architecture,
    the enabled local administrator, PowerShell Direct, completed setup/OOBE,
    completed image state, and no pending setup command;
@@ -184,13 +185,17 @@ answer XML, staging directory, and answer ISO for diagnosis. Inspect the VM,
 VHD, DVD paths, and
 `.openclaw-clean-windows\OpenClaw-Clean-Windows\unattend.owner.json`.
 
-#### Resume the current owned secure-boot partial state
+#### Resume the current owned installed Running partial state
 
-The current partial state already contains the owned Generation 2 VM, VHD,
-original Windows ISO, answer ISO, setup DPAPI credential, VM ownership markers,
-and unattended ownership marker. Creation stopped before the first guest start
-because the secure-boot template input was not the canonical cmdlet identifier.
-This state is resumable. Do not use `-CleanupUnattend` for this state.
+The current partial state is an installed, Running owned VM. PowerShell Direct
+already succeeded with the setup DPAPI credential, and the unattended marker
+status is exactly `powershell-direct-ready`. The detach commands succeeded, and
+read-only inspection after the controller exited showed both DVD drives with
+null paths. The owned answer ISO, staging material, and setup credential remain,
+while the final rotated credential does not yet exist.
+
+Use Resume only. Do not use `-CleanupUnattend`, reinstall Windows, delete the
+VM, or delete the VHD for this state.
 
 From an elevated PowerShell session, run exactly:
 
@@ -198,19 +203,19 @@ From an elevated PowerShell session, run exactly:
 .\scripts\clean-windows\Invoke-CleanWindowsHyperV.ps1 -Command Create -ResumeUnattended -VMName 'OpenClaw-Clean-Windows' -OwnerId 'openclaw-clean-runner-bkudiess' -VhdPath 'D:\Hyper-V\OpenClaw-Clean-Windows\os.vhdx' -ConfirmOwnedAction
 ```
 
-The command validates the VM note marker, VM marker file, and unattended
-ownership state. It first verifies host configuration. Only after verification
-fails and the exact owned VM is Off may it repair the security configuration.
-The repair treats any four-byte host sentinel as an invalid key protector. It
-establishes a missing protector and immediately re-reads and validates the new
-local protector before applying secure boot with `MicrosoftWindows` and the
-verified Windows DVD boot device. It preserves an existing valid protector,
-then enables vTPM only when disabled and fully re-verifies before starting the
-VM. Immediately after that repaired
-pre-first-start VM is running, it uses the same bounded
-Hyper-V CIM key pulses to clear the optical boot prompt and continue the
-unattended flow. It does not delete or replace the VM, VHD, attached media, or
-credentials.
+The command validates the exact VM note marker, VM marker file, unattended
+marker, owner, VM, VHD, and media bindings before recovery. Only when the marker
+status is exactly `powershell-direct-ready` may Resume accept both expected
+media as already null. Any other status still requires both exact owned paths
+before the first detach attempt. A detach attempt bounded-polls Hyper-V through
+delayed stale reads and reports only controller and location diagnostics on
+timeout.
+
+Resume reuses the setup DPAPI credential and continues the ordinary
+post-readiness flow: guest answer-cache cleanup, owned answer-media deletion,
+final credential creation and rotation, old setup credential rejection, and
+edition, build, architecture, account, setup, OOBE, and image verification.
+It does not replace the VM, VHD, or credentials by starting over.
 
 Resume only the exact owned VM:
 
@@ -226,8 +231,8 @@ Resume only the exact owned VM:
 
 For a different owned partial install that should not continue, detach exact
 owned installation media and remove only owned unattended media and the
-temporary setup credential. Do not use this cleanup path for the current
-secure-boot partial state described above:
+temporary setup credential. Do not use this cleanup path for the current installed Running partial state
+described above:
 
 ```powershell
 .\scripts\clean-windows\Invoke-CleanWindowsHyperV.ps1 `

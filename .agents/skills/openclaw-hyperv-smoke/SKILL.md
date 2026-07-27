@@ -141,8 +141,9 @@ a no-delivery failure includes a safe last-error diagnostic. Injection never
 runs during later reboots. Ordinary resume paths do not inject keys. The sole
 resume exception is an owned Off partial VM whose incomplete security
 configuration was repaired and reverified before it was started. Only then
-does the bounded PowerShell Direct wait begin. Both DVD media are detached and answer
-XML/staging/ISO files are removed. The controller verifies the actual
+does the bounded PowerShell Direct wait begin. Both DVD media are detached with
+bounded Hyper-V readback polling, and answer XML/staging/ISO files are removed.
+The controller verifies the actual
 edition, build, x64 architecture, local administrator, completed setup/OOBE,
 and image state. It removes known guest answer caches, rotates the temporary
 setup password, establishes and probes the final-credential PowerShell Direct
@@ -175,28 +176,26 @@ Safe helper proof does not create a VM and does not require elevation:
 It generates, mounts, validates, dismounts, and deletes nonce-bound owned test
 media while printing only nonsecret JSON.
 
-The current partial state already has the owned Generation 2 VM, VHD, original
-Windows ISO, answer ISO, setup DPAPI credential, VM markers, and unattended
-marker. Creation stopped before the first guest start because secure-boot
-configuration used a non-canonical template input. This state is resumable.
-Do not use `-CleanupUnattend` for this state.
+The current partial state is an installed, Running owned VM. PowerShell Direct
+succeeded with the setup DPAPI credential, the unattended marker status is
+exactly `powershell-direct-ready`, and read-only inspection shows both DVD
+paths are already null after successful detach commands. Owned answer media and
+the setup credential remain; the final rotated credential is absent. Use Resume
+only. Do not use `-CleanupUnattend`, reinstall, or delete the VM or VHD.
 
 ```powershell
 .\scripts\clean-windows\Invoke-CleanWindowsHyperV.ps1 -Command Create -ResumeUnattended -VMName 'OpenClaw-Clean-Windows' -OwnerId 'openclaw-clean-runner-bkudiess' -VhdPath 'D:\Hyper-V\OpenClaw-Clean-Windows\os.vhdx' -ConfirmOwnedAction
 ```
 
-The command validates VM note/file ownership and unattended ownership. It
-first verifies host configuration. Only if verification fails and the exact
-owned VM is Off does it repair the security configuration with
-`MicrosoftWindows` and the already-owned Windows DVD. The repair treats any
-four-byte host sentinel as an invalid key protector. It establishes a missing
-protector and immediately re-reads and validates the new local protector before
-applying secure-boot firmware. It preserves an existing valid protector, then
-enables vTPM only when disabled and fully re-verifies before starting the VM.
-It runs the same bounded Hyper-V CIM key pulses immediately after that repaired
-pre-first-start VM is running, clears the optical boot prompt, and continues
-the unattended flow. The VM, VHD, media, and credentials are preserved. Do not
-clean up or delete this state.
+The command validates exact VM note/file ownership, unattended ownership, VM,
+VHD, and media bindings. Only the exact `powershell-direct-ready` status may
+accept both expected media as already null. Other statuses require both exact
+owned paths before detaching. Detach readback is bounded and tolerates stale
+Hyper-V reads. Resume reuses the setup DPAPI credential and continues guest
+answer-cache cleanup, owned answer-media deletion, final credential rotation
+and persistence, old setup credential rejection, and complete OS, account, and
+setup verification. The VM and VHD are preserved. Do not clean up, reinstall,
+or delete this state.
 
 Partial failure never deletes a VM or VHD. Before PowerShell Direct readiness,
 owned answer media and the DPAPI setup credential remain for diagnosis. For a

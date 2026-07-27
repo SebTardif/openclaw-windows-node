@@ -298,7 +298,7 @@ public sealed class CleanWindowsRunnerScriptTests
     }
 
     [Fact]
-    public void HyperVRecoveryDocs_PreserveAndResumeTheCurrentSecureBootPartialState()
+    public void HyperVRecoveryDocs_ResumeOnlyTheOwnedInstalledRunningPartialState()
     {
         var docs = File.ReadAllText(Path.Combine(Root, "docs", "CLEAN_WINDOWS_RUNNERS.md"));
         var skill = File.ReadAllText(
@@ -308,20 +308,20 @@ public sealed class CleanWindowsRunnerScriptTests
 
         foreach (var guidance in new[] { docs, skill })
         {
-            Assert.Contains("`MicrosoftWindows`", guidance);
-            Assert.Contains("whitespace/case-normalized", guidance);
-            Assert.Contains("non-empty GUID", guidance);
             Assert.Contains(exactCommand, guidance);
-            Assert.Contains("Do not use `-CleanupUnattend` for this state", guidance);
-            Assert.Contains("owned VM is Off", guidance);
-            Assert.Contains("four-byte host sentinel", guidance);
-            Assert.Contains("immediately re-reads and validates", guidance);
-            Assert.Contains("Ordinary resume paths do not inject keys", guidance);
-            Assert.Contains("configuration was repaired", guidance);
-            Assert.Contains("reverified", guidance);
-            Assert.Contains("VM, VHD", guidance);
-            Assert.Contains("media", guidance);
-            Assert.Contains("credentials", guidance);
+            Assert.Contains("installed, Running owned VM", guidance);
+            Assert.Contains("`powershell-direct-ready`", guidance);
+            Assert.Contains("both DVD", guidance);
+            Assert.Contains("already null", guidance);
+            Assert.Contains("setup DPAPI credential", guidance);
+            Assert.Contains("final rotated credential", guidance);
+            Assert.Contains("Resume", guidance);
+            Assert.Contains("only", guidance);
+            Assert.Contains("Do not use `-CleanupUnattend`", guidance);
+            Assert.Contains("reinstall", guidance);
+            Assert.Contains("delete", guidance);
+            Assert.Contains("exact", guidance);
+            Assert.Contains("old setup credential rejection", guidance);
         }
     }
 
@@ -515,6 +515,174 @@ public sealed class CleanWindowsRunnerScriptTests
             line => line.Contains("Invoke-UnattendedOpticalBootKey", StringComparison.Ordinal));
     }
 
+    [Fact]
+    public void HyperVController_DetachPollingAcceptsImmediateHyperVReadback()
+    {
+        var proof = BuildDetachProof(
+            """
+            $script:getCall++
+            if ($script:getCall -eq 1) { return @($windowsDrive, $answerDrive) }
+            return @()
+            """,
+            """
+            Detach-OwnedInstallationMedia -State $state -RequireBoth -TimeoutSec 1 -PollIntervalMilliseconds 10
+            [Console]::Out.Write("$script:setCall,$script:getCall")
+            """);
+
+        var result = RunPowerShellCommand(proof);
+
+        AssertPowerShellProofSucceeded(result);
+        Assert.Equal("2,2", result.Stdout);
+    }
+
+    [Fact]
+    public void HyperVController_DetachPollingToleratesDelayedStaleHyperVReadback()
+    {
+        var proof = BuildDetachProof(
+            """
+            $script:getCall++
+            if ($script:getCall -le 2) { return @($windowsDrive, $answerDrive) }
+            if ($script:getCall -eq 3) { return @($answerDrive) }
+            return @()
+            """,
+            """
+            Detach-OwnedInstallationMedia -State $state -RequireBoth -TimeoutSec 1 -PollIntervalMilliseconds 10
+            [Console]::Out.Write("$script:setCall,$script:getCall")
+            """);
+
+        var result = RunPowerShellCommand(proof);
+
+        AssertPowerShellProofSucceeded(result);
+        Assert.Equal("2,4", result.Stdout);
+    }
+
+    [Fact]
+    public void HyperVController_DetachPollingTimesOutWithOnlyControllerLocationDiagnostics()
+    {
+        var proof = BuildDetachProof(
+            """
+            $script:getCall++
+            return @($windowsDrive, $answerDrive)
+            """,
+            """
+            try {
+                Detach-OwnedInstallationMedia -State $state -RequireBoth -TimeoutSec 1 -PollIntervalMilliseconds 10
+                throw "Expected detach timeout."
+            } catch {
+                [Console]::Out.Write($_.Exception.Message)
+            }
+            """);
+
+        var result = RunPowerShellCommand(proof);
+
+        AssertPowerShellProofSucceeded(result);
+        Assert.Contains("Timed out waiting for Hyper-V", result.Stdout);
+        Assert.Contains("Windows ISO remains attached at controller 0, location 1", result.Stdout);
+        Assert.Contains("answer ISO remains attached at controller 0, location 2", result.Stdout);
+        Assert.DoesNotContain(@"C:\owned", result.Stdout, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain(".iso", result.Stdout, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void HyperVController_StrictDetachRequiresBothMediaBeforeIssuingAnyDetach()
+    {
+        var proof = BuildDetachProof(
+            """
+            $script:getCall++
+            return @($windowsDrive)
+            """,
+            """
+            try {
+                Detach-OwnedInstallationMedia -State $state -RequireBoth -TimeoutSec 1 -PollIntervalMilliseconds 10
+                throw "Expected strict detach refusal."
+            } catch {
+                [Console]::Out.Write("$script:setCall|$($_.Exception.Message)")
+            }
+            """);
+
+        var result = RunPowerShellCommand(proof);
+
+        AssertPowerShellProofSucceeded(result);
+        Assert.StartsWith("0|", result.Stdout, StringComparison.Ordinal);
+        Assert.Contains("Expected owned answer ISO was not attached", result.Stdout);
+        Assert.Contains("Refusing to issue a partial detach", result.Stdout);
+    }
+
+    [Fact]
+    public void HyperVController_AlreadyDetachedResumeRequiresExactOwnerChecksAndReadinessStatus()
+    {
+        var proof = BuildDetachProof(
+            """
+            $script:getCall++
+            return @()
+            """,
+            """
+            Detach-OwnedInstallationMedia `
+                -State $state `
+                -AllowAlreadyDetachedAfterPowerShellDirectReady `
+                -TimeoutSec 1 `
+                -PollIntervalMilliseconds 10
+            $state.status = "installing"
+            try {
+                Detach-OwnedInstallationMedia `
+                    -State $state `
+                    -AllowAlreadyDetachedAfterPowerShellDirectReady `
+                    -TimeoutSec 1 `
+                    -PollIntervalMilliseconds 10
+                throw "Expected status refusal."
+            } catch {
+                [Console]::Out.Write($_.Exception.Message)
+            }
+            """);
+
+        var result = RunPowerShellCommand(proof);
+
+        AssertPowerShellProofSucceeded(result);
+        Assert.Contains("requires unattended status 'powershell-direct-ready'", result.Stdout);
+
+        var controller = ReadScript("Invoke-CleanWindowsHyperV.ps1");
+        var resumeStart = controller.IndexOf("function Invoke-ResumeUnattendedCommand", StringComparison.Ordinal);
+        var resumeEnd = controller.IndexOf("function Invoke-CreateCommand", resumeStart, StringComparison.Ordinal);
+        var resume = controller[resumeStart..resumeEnd];
+        var vmOwnerCheck = resume.IndexOf("Assert-OwnedVM", StringComparison.Ordinal);
+        var markerBindingCheck = resume.IndexOf("Assert-UnattendStateMatchesVmMarker", StringComparison.Ordinal);
+        var readinessGate = resume.IndexOf(
+            "$allowAlreadyDetachedAfterPowerShellDirectReady =",
+            StringComparison.Ordinal);
+        Assert.True(vmOwnerCheck >= 0);
+        Assert.True(markerBindingCheck > vmOwnerCheck);
+        Assert.True(readinessGate > markerBindingCheck);
+        Assert.Contains("[string]$state.status -ceq \"powershell-direct-ready\"", resume);
+        Assert.Contains("-ExpectedKind \"setup\"", resume);
+        Assert.Contains(
+            "-AllowAlreadyDetachedAfterPowerShellDirectReady:$allowAlreadyDetachedAfterPowerShellDirectReady",
+            resume);
+        Assert.Contains("-RequireAttachedMedia:(-not $allowAlreadyDetachedAfterPowerShellDirectReady)", resume);
+
+        var completionStart = controller.IndexOf(
+            "function Complete-UnattendedInstallation",
+            StringComparison.Ordinal);
+        var completionEnd = controller.IndexOf(
+            "function Invoke-GuestCommandWithTimeout",
+            completionStart,
+            StringComparison.Ordinal);
+        var completion = controller[completionStart..completionEnd];
+        foreach (var requiredContinuation in new[]
+                 {
+                     "Detach-OwnedInstallationMedia",
+                     "Remove-OwnedUnattendMedia",
+                     "Remove-GuestUnattendCache",
+                     "Invoke-GuestInstallationVerification",
+                     "Export-CleanWindowsCredential",
+                     "Set-GuestCredential",
+                     "Assert-OldCredentialRejected",
+                     "Remove-SetupCredentialMaterial",
+                 })
+        {
+            Assert.Contains(requiredContinuation, completion);
+        }
+    }
+
     [Theory]
     [InlineData("Fresh", "Fresh unattended Create requires -GenerateCredential")]
     [InlineData("Resume", "GenerateCredential is accepted only for a fresh unattended Create")]
@@ -578,7 +746,8 @@ public sealed class CleanWindowsRunnerScriptTests
         Assert.DoesNotContain("not '$Expected'", helper, StringComparison.Ordinal);
         Assert.Contains("Open-GuestSession", controller);
         Assert.Contains("$UnattendedInstallTimeoutSec", controller);
-        Assert.Contains("Detach-OwnedInstallationMedia -State $State", controller);
+        Assert.Contains("Detach-OwnedInstallationMedia", controller);
+        Assert.Contains("-State $State", controller);
         Assert.Contains("Set-VMDvdDrive", controller);
         Assert.Contains("Remove-OwnedUnattendMedia -Paths $Paths", controller);
         Assert.Contains("Remove-GuestUnattendCache -Session $setupSession", controller);
@@ -984,6 +1153,58 @@ public sealed class CleanWindowsRunnerScriptTests
 
     private static string ReadScript(string name) =>
         File.ReadAllText(Path.Combine(Root, "scripts", "clean-windows", name));
+
+    private static string BuildDetachProof(string getDvdDriveBody, string testBody)
+    {
+        var controller = ReadScript("Invoke-CleanWindowsHyperV.ps1");
+        var normalize = ExtractPowerShellFunction(
+            controller,
+            "Normalize-ComparisonPath",
+            "Test-StringEquals");
+        var detach = ExtractPowerShellFunction(
+            controller,
+            "Detach-OwnedInstallationMedia",
+            "Assert-BothOwnedInstallationMediaAttached");
+        return string.Concat(
+            "$ErrorActionPreference = 'Stop'\n",
+            "$VMName = 'OpenClaw-Detach-Proof'\n",
+            "$script:InstallationMediaDetachTimeoutSec = 5\n",
+            "$script:InstallationMediaDetachPollIntervalMilliseconds = 250\n",
+            "$script:getCall = 0\n",
+            "$script:setCall = 0\n",
+            "$windowsDrive = [pscustomobject]@{ Path = 'C:\\owned\\windows.iso'; ControllerNumber = 0; ControllerLocation = 1 }\n",
+            "$answerDrive = [pscustomobject]@{ Path = 'C:\\owned\\answer.iso'; ControllerNumber = 0; ControllerLocation = 2 }\n",
+            "$state = [pscustomobject]@{ windowsIsoPath = 'C:\\owned\\windows.iso'; answerIsoPath = 'C:\\owned\\answer.iso'; status = 'powershell-direct-ready' }\n",
+            "function Get-VMDvdDrive { param([string]$VMName, [object]$ErrorAction)\n",
+            getDvdDriveBody,
+            "\n}\n",
+            "function Set-VMDvdDrive { param([string]$VMName, [int]$ControllerNumber, [int]$ControllerLocation, [AllowNull()][string]$Path) $script:setCall++ }\n",
+            normalize,
+            "\n",
+            detach,
+            "\n",
+            testBody,
+            "\n");
+    }
+
+    private static string ExtractPowerShellFunction(
+        string script,
+        string functionName,
+        string nextFunctionName)
+    {
+        var start = script.IndexOf($"function {functionName}", StringComparison.Ordinal);
+        var end = script.IndexOf($"function {nextFunctionName}", start, StringComparison.Ordinal);
+        Assert.True(start >= 0, $"PowerShell function {functionName} was not found.");
+        Assert.True(end > start, $"PowerShell function boundary after {functionName} was not found.");
+        return script[start..end];
+    }
+
+    private static void AssertPowerShellProofSucceeded(ProcessResult result)
+    {
+        Assert.True(
+            result.ExitCode == 0,
+            $"PowerShell proof failed.\nstdout:\n{result.Stdout}\nstderr:\n{result.Stderr}");
+    }
 
     private static ProcessResult RunUnattendValidation(string command, string ownedRoot)
     {
