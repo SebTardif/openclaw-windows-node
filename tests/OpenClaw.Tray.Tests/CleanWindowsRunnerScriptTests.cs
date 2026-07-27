@@ -93,6 +93,11 @@ public sealed class CleanWindowsRunnerScriptTests
             StringComparison.Ordinal);
         var resumeEnd = script.IndexOf("function Invoke-CreateCommand", resumeStart, StringComparison.Ordinal);
         var resume = script[resumeStart..resumeEnd];
+        var invokeCreateEnd = script.IndexOf(
+            "function Invoke-PrepareCommand",
+            resumeEnd,
+            StringComparison.Ordinal);
+        var invokeCreate = script[resumeEnd..invokeCreateEnd];
 
         Assert.Contains("Set-OwnedVmSecurityConfiguration", freshCreate);
         Assert.Contains("Assert-OwnedVM", securitySeam);
@@ -100,15 +105,66 @@ public sealed class CleanWindowsRunnerScriptTests
         Assert.Contains("Expected exactly one DVD drive for the verified Windows ISO", securitySeam);
         Assert.Contains("-FirstBootDevice $windowsDvdDrive", securitySeam);
         Assert.Contains("-SecureBootTemplate $script:WindowsSecureBootTemplate", securitySeam);
-        Assert.True(
-            securitySeam.IndexOf("if (-not $hasKeyProtector)", StringComparison.Ordinal) <
-            securitySeam.IndexOf("Set-VMKeyProtector", StringComparison.Ordinal));
         Assert.Contains("Test-KeyProtectorPresent -KeyProtector $keyProtector", securitySeam);
         Assert.Contains("Hyper-V reports an unset protector as four zero bytes", script);
-        Assert.True(
-            securitySeam.IndexOf("if (-not [bool]$tpmEnabled)", StringComparison.Ordinal) <
-            securitySeam.IndexOf("Enable-VMTPM", StringComparison.Ordinal));
         Assert.Contains("Refusing to change an unknown vTPM configuration", securitySeam);
+
+        var getProtectorIndex = securitySeam.IndexOf("Get-VMKeyProtector", StringComparison.Ordinal);
+        var testProtectorIndex = securitySeam.IndexOf(
+            "Test-KeyProtectorPresent -KeyProtector $keyProtector",
+            StringComparison.Ordinal);
+        var missingProtectorGuardIndex = securitySeam.IndexOf(
+            "if (-not $hasKeyProtector)",
+            StringComparison.Ordinal);
+        var setProtectorIndex = securitySeam.IndexOf("Set-VMKeyProtector", StringComparison.Ordinal);
+        var setFirmwareIndex = securitySeam.IndexOf("Set-VMFirmware", StringComparison.Ordinal);
+        var getSecurityIndex = securitySeam.IndexOf("Get-VMSecurity", StringComparison.Ordinal);
+        var disabledTpmGuardIndex = securitySeam.IndexOf(
+            "if (-not [bool]$tpmEnabled)",
+            StringComparison.Ordinal);
+        var enableTpmIndex = securitySeam.IndexOf("Enable-VMTPM", StringComparison.Ordinal);
+
+        Assert.True(getProtectorIndex >= 0);
+        Assert.True(testProtectorIndex > getProtectorIndex);
+        Assert.True(missingProtectorGuardIndex > testProtectorIndex);
+        Assert.True(setProtectorIndex > missingProtectorGuardIndex);
+        Assert.True(setFirmwareIndex > setProtectorIndex);
+        Assert.True(getSecurityIndex > setFirmwareIndex);
+        Assert.True(disabledTpmGuardIndex > getSecurityIndex);
+        Assert.True(enableTpmIndex > disabledTpmGuardIndex);
+        Assert.Contains(
+            """
+            if (-not $hasKeyProtector) {
+                    Set-VMKeyProtector -VMName $VMName -NewLocalKeyProtector | Out-Null
+                }
+            """,
+            securitySeam);
+        Assert.Single(
+            securitySeam.Split('\n'),
+            line => line.Contains("Set-VMKeyProtector", StringComparison.Ordinal));
+
+        var freshSecurityIndex = freshCreate.IndexOf(
+            "Set-OwnedVmSecurityConfiguration",
+            StringComparison.Ordinal);
+        var freshReverifyIndex = freshCreate.IndexOf(
+            "Verify-HostVmConfiguration",
+            freshSecurityIndex,
+            StringComparison.Ordinal);
+        var freshReturnIndex = freshCreate.IndexOf("return $vm", freshReverifyIndex, StringComparison.Ordinal);
+        Assert.True(freshSecurityIndex >= 0);
+        Assert.True(freshReverifyIndex > freshSecurityIndex);
+        Assert.True(freshReturnIndex > freshReverifyIndex);
+        Assert.Equal(2, invokeCreate.Split('\n').Count(
+            line => line.Contains("$vm = New-OwnedHyperVVm", StringComparison.Ordinal)));
+        Assert.Equal(2, invokeCreate.Split('\n').Count(
+            line => line.Contains("Start-VM -Name $VMName", StringComparison.Ordinal)));
+        Assert.All(
+            invokeCreate
+                .Split("$vm = New-OwnedHyperVVm", StringSplitOptions.None)
+                .Skip(1),
+            freshPath => Assert.True(
+                freshPath.IndexOf("Start-VM -Name $VMName", StringComparison.Ordinal) >= 0,
+                "Every fresh VM path must reuse New-OwnedHyperVVm, which fully verifies the shared security seam before start."));
 
         var stateIndex = resume.IndexOf("Read-OwnedUnattendState", StringComparison.Ordinal);
         var ownedIndex = resume.IndexOf("Assert-OwnedVM", stateIndex, StringComparison.Ordinal);
@@ -166,6 +222,9 @@ public sealed class CleanWindowsRunnerScriptTests
         Assert.True(ensureRunningIndex > repairedFlagIndex);
         Assert.True(repairedConditionIndex > ensureRunningIndex);
         Assert.True(opticalBootKeyIndex > repairedConditionIndex);
+        Assert.Single(
+            resume.Split('\n'),
+            line => line.Contains("Set-OwnedVmSecurityConfiguration", StringComparison.Ordinal));
         Assert.Single(
             resume.Split('\n'),
             line => line.Contains(

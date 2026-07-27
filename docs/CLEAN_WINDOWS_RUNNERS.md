@@ -200,11 +200,12 @@ From an elevated PowerShell session, run exactly:
 
 The command validates the VM note marker, VM marker file, and unattended
 ownership state. It first verifies host configuration. Only after verification
-fails and the exact owned VM is Off may it repair secure boot with
-`MicrosoftWindows`, restore the verified Windows DVD boot device, and create a
-missing key protector or enable a missing vTPM. It preserves an existing key
-protector and enabled vTPM, then re-verifies before starting the VM. Immediately
-after that repaired pre-first-start VM is running, it uses the same bounded
+fails and the exact owned VM is Off may it repair the security configuration.
+The repair establishes a missing key protector before applying secure boot with
+`MicrosoftWindows` and the verified Windows DVD boot device, preserves an
+existing valid key protector, then enables vTPM only when disabled and fully
+re-verifies before starting the VM. Immediately after that repaired
+pre-first-start VM is running, it uses the same bounded
 Hyper-V CIM key pulses to clear the optical boot prompt and continue the
 unattended flow. It does not delete or replace the VM, VHD, attached media, or
 credentials.

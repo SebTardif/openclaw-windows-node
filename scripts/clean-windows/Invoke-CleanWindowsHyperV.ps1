@@ -2098,17 +2098,17 @@ function Set-OwnedVmSecurityConfiguration {
     }
     $windowsDvdDrive = $windowsDvdDrives[0]
 
-    Set-VMFirmware `
-        -VMName $VMName `
-        -EnableSecureBoot On `
-        -SecureBootTemplate $script:WindowsSecureBootTemplate `
-        -FirstBootDevice $windowsDvdDrive | Out-Null
-
     $keyProtector = Get-VMKeyProtector -VMName $VMName -ErrorAction Stop
     $hasKeyProtector = Test-KeyProtectorPresent -KeyProtector $keyProtector
     if (-not $hasKeyProtector) {
         Set-VMKeyProtector -VMName $VMName -NewLocalKeyProtector | Out-Null
     }
+
+    Set-VMFirmware `
+        -VMName $VMName `
+        -EnableSecureBoot On `
+        -SecureBootTemplate $script:WindowsSecureBootTemplate `
+        -FirstBootDevice $windowsDvdDrive | Out-Null
 
     $security = Get-VMSecurity -VMName $VMName -ErrorAction Stop
     $tpmEnabled = Get-PropertyValueOrNull -Object $security -Name "TpmEnabled"
