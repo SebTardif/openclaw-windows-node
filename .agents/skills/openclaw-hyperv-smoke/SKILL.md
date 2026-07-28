@@ -198,13 +198,13 @@ available. Both WSL optional features are disabled at that checkpoint, and
 `wsl.exe --status` returns exit 50 with `WSL is not installed`. This is the
 expected input to normal `Prepare`.
 
-The latest failed `Prepare` reached the first owned restart, then observed
-zero-exit status and nonzero version update-bootstrap output. Its rollback is
-expected to have restored the exact `clean-windows` checkpoint. The driver must
-confirm that exact owned restore and finalized checkpoint marker before the
-next attempt. Retry with normal `Prepare`. Do not use
-`-RecoverPendingCheckpoint`, `-CleanupUnattend`, or an ad hoc lifecycle
-command.
+The current failed `Prepare` reached final WSL verification, then failed before
+Git setup because WinGet/App Installer was unavailable. Its existing rollback
+is expected to have restored the exact `clean-windows` checkpoint, but this
+hotfix does not claim live confirmation. The driver must confirm that exact
+owned restore and finalized checkpoint marker before the next attempt. Retry
+with normal `Prepare`. Do not use `-RecoverPendingCheckpoint`,
+`-CleanupUnattend`, or an ad hoc lifecycle command.
 
 From an elevated PowerShell session, run normal `Prepare` without
 `-RecoverPendingCheckpoint`:
@@ -255,9 +255,26 @@ localized-text classification. Install and update accept only exits `0` and
 `3010`, always request a second bounded restart, and do not re-probe before
 that restart. Update failures include bounded, sanitized version and update
 diagnostics. The helper supplies no interactive input, Store UI, shell text,
-or arbitrary arguments. Final verification after the owned reconnect requires
-enabled features plus structured zero-exit status and version proof before
-Git, PowerShell 7, checkout copy, or `scripts\setup-dev.ps1`.
+or arbitrary arguments. The final verification stage for WSL requires
+zero-exit status and version before the WinGet stage.
+
+After final WSL verification, a fixed PowerShell Direct scriptblock ensures
+the current guest user has official Microsoft WinGet `v1.29.280`. It uses only
+the immutable GitHub release, manually follows at most five HTTPS redirects to
+the two GitHub asset hosts, streams with a shared 1800-second timeout, and
+checks pinned sizes and SHA-256 values before parsing. It safely indexes the
+dependency zip, extracts only the three pinned x64 packages, and requires
+exact Microsoft Authenticode publishers and namespace-independent Appx
+manifest identities. It similarly validates the bundle and its single
+nonstub `AppInstaller_x64.msix` payload before any installation.
+
+The bootstrap uses current-user `Add-AppxPackage`, with no `License1.xml`,
+all-users provisioning, Store UI, source update, or source-agreement prompt.
+Exact existing App Installer version `1.29.280.0` skips downloads only after
+direct executable, WindowsApps alias, `v1.29.280`, and source-list validation.
+All downloads, extraction, and captures use one nonce guest-temp root. Cleanup
+failure is a failed bootstrap. Only then do Git, PowerShell 7, checkout copy,
+and `scripts\setup-dev.ps1` run.
 
 `Prepare` does not install Ubuntu or another distribution. Installed smoke
 provisions its app-owned distribution later. Checkpoint observation, guest

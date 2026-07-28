@@ -479,6 +479,14 @@ public sealed class CleanWindowsRunnerScriptTests
                 normalizedGuidance,
                 StringComparison.OrdinalIgnoreCase);
             Assert.Contains("elevated PowerShell", normalizedGuidance);
+            Assert.Contains("v1.29.280", normalizedGuidance);
+            Assert.Contains("current-user", normalizedGuidance);
+            Assert.Contains("Add-AppxPackage", normalizedGuidance);
+            Assert.Contains("License1.xml", normalizedGuidance);
+            Assert.Contains("five HTTPS redirects", normalizedGuidance);
+            Assert.Contains("nonce", normalizedGuidance);
+            Assert.Contains("cleanup", normalizedGuidance, StringComparison.OrdinalIgnoreCase);
+            Assert.Contains("does not claim live confirmation", normalizedGuidance);
         }
         var normalizedRouting = routing.Replace("\r", "", StringComparison.Ordinal)
             .Replace("\n", " ", StringComparison.Ordinal);
@@ -495,6 +503,14 @@ public sealed class CleanWindowsRunnerScriptTests
         Assert.Contains("confirm", normalizedRouting, StringComparison.OrdinalIgnoreCase);
         Assert.Contains("wsl.exe --update --web-download", normalizedRouting);
         Assert.Contains("without `-RecoverPendingCheckpoint` or cleanup", normalizedRouting);
+        Assert.Contains("v1.29.280", normalizedRouting);
+        Assert.Contains("current-user", normalizedRouting);
+        Assert.Contains("License1.xml", normalizedRouting);
+        Assert.Contains("allowlisted redirects", normalizedRouting);
+        Assert.Contains("nonce", normalizedRouting);
+        Assert.Contains("does not claim live confirmation", normalizedRouting);
+        Assert.Contains("mocks only", normalizedRouting);
+        Assert.Contains("Do not use a VM", normalizedRouting);
     }
 
     [Fact]
@@ -1093,6 +1109,524 @@ public sealed class CleanWindowsRunnerScriptTests
         Assert.True(powershellIndex > gitIndex);
         Assert.True(copyIndex > powershellIndex);
         Assert.True(setupIndex > copyIndex);
+    }
+
+    [Fact]
+    public void HyperVController_WingetBootstrapPinsExactMicrosoftReleaseAndSecurityBoundary()
+    {
+        var controller = ReadScript("Invoke-CleanWindowsHyperV.ps1");
+        var bootstrap = ExtractPowerShellFunction(
+            controller,
+            "Get-GuestWingetBootstrapScriptBlock",
+            "Ensure-GuestWingetAvailable");
+        var ensure = ExtractPowerShellFunction(
+            controller,
+            "Ensure-GuestWingetAvailable",
+            "Ensure-GuestGitInstalled");
+
+        var exactPins = new[]
+        {
+            "v1.29.280",
+            "https://github.com$releasePath/",
+            "Microsoft.DesktopAppInstaller_8wekyb3d8bbwe",
+            "CN=Microsoft Corporation, O=Microsoft Corporation, L=Redmond, S=Washington, C=US",
+            "Microsoft.DesktopAppInstaller_8wekyb3d8bbwe.msixbundle",
+            "216775738",
+            "0809fa9f52e395d6e7de692331dce847ac991952675116bb4d8aae2ddcc20946",
+            "DesktopAppInstaller_Dependencies.zip",
+            "97760717",
+            "3bbfcaa5cb011c48fac48d896d64a5c7c6898859a9f3d01555c8cd000f4e2962",
+            "DesktopAppInstaller_Dependencies.json",
+            "322",
+            "a56ddd79cf9cd056d9546cfeb6958c2b44d20f6221f8518bf17b003717d47a7a",
+            "Microsoft.VCLibs.140.00_14.0.33519.0_x64.appx",
+            "896581",
+            "9c17b521f9d690a1f504da5108ed6eec5669eb3a8fd1331eef43e40d84e74283",
+            "Microsoft.VCLibs.140.00.UWPDesktop_14.0.33728.0_x64.appx",
+            "6757465",
+            "077a3d1a5d0622bd3004dca85f5e192d6e98ec79b83d4aa06766759ea6c09c3d",
+            "Microsoft.WindowsAppRuntime.1.8_8000.616.304.0_x64.appx",
+            "25431545",
+            "a31595cc4b5aebc18466ec24e8d4b566fe0fcafb52d833b6d139b8691d0e5177",
+            "AppInstaller_x64.msix",
+            "62421154",
+            "bdc908068f7563d89ef3405f1a30ae74df8cb0416414ed3613c4d68e2c812ff1",
+            "2026.623.1704.0",
+            "1.29.280.0",
+        };
+        foreach (var pin in exactPins)
+        {
+            Assert.Contains(pin, bootstrap, StringComparison.Ordinal);
+        }
+
+        var vclibsIndex = bootstrap.LastIndexOf(
+            "Name = \"Microsoft.VCLibs.140.00\"",
+            StringComparison.Ordinal);
+        var desktopIndex = bootstrap.LastIndexOf(
+            "Name = \"Microsoft.VCLibs.140.00.UWPDesktop\"",
+            StringComparison.Ordinal);
+        var runtimeIndex = bootstrap.LastIndexOf(
+            "Name = \"Microsoft.WindowsAppRuntime.1.8\"",
+            StringComparison.Ordinal);
+        Assert.True(vclibsIndex >= 0);
+        Assert.True(desktopIndex > vclibsIndex);
+        Assert.True(runtimeIndex > desktopIndex);
+        Assert.DoesNotContain("UI.Xaml", bootstrap, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain(@"x86\", bootstrap, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain(@"arm64\", bootstrap, StringComparison.OrdinalIgnoreCase);
+
+        Assert.Contains("$handler.AllowAutoRedirect = $false", bootstrap);
+        Assert.Contains("$handler.UseCookies = $false", bootstrap);
+        Assert.Contains("$request.Headers.Authorization = $null", bootstrap);
+        Assert.Contains("[Security.Authentication.SslProtocols]::Tls12", bootstrap);
+        Assert.Contains("[Net.SecurityProtocolType]::Tls12", bootstrap);
+        Assert.Contains("$downloadDeadlineUtc = [DateTime]::UtcNow.AddSeconds(1800)", bootstrap);
+        Assert.Contains("$cancellation.CancelAfter([TimeSpan]::FromSeconds($TimeoutSeconds))", bootstrap);
+        Assert.Contains("-TimeoutSeconds $remainingDownloadSeconds", bootstrap);
+        Assert.Contains("release-assets.githubusercontent.com", bootstrap);
+        Assert.Contains("objects.githubusercontent.com", bootstrap);
+        Assert.Contains("$RedirectCount -ge 5", bootstrap);
+        Assert.Contains("ResponseHeadersRead", bootstrap);
+        Assert.Contains("Get-AuthenticodeSignature", bootstrap);
+        Assert.Contains("Add-AppxPackage -Path $BundlePath -ErrorAction Stop", bootstrap);
+        Assert.Contains("@(\"source\", \"list\", \"--disable-interactivity\")", bootstrap);
+        Assert.Contains("@(\"--version\")", bootstrap);
+        Assert.Contains("$process.WaitForExit(60000)", bootstrap);
+        Assert.Contains("Remove-OpenClawWingetTemporaryRoot", bootstrap);
+        Assert.Contains("Get-AppxPackage", bootstrap);
+        Assert.Contains("Get-AppExecutionAlias", bootstrap);
+        Assert.Contains("Microsoft\\WindowsApps\\winget.exe", bootstrap);
+        Assert.Contains("AppxMetadata\\AppxBundleManifest.xml", bootstrap);
+        Assert.Contains("ProcessorArchitecture", bootstrap);
+        Assert.Contains("PackageDependency", bootstrap);
+        Assert.Contains("ExecutionAlias", bootstrap);
+        Assert.Contains("Id\") -ceq \"winget\"", bootstrap);
+        Assert.Contains("Executable\") -cne \"winget.exe\"", bootstrap);
+
+        Assert.DoesNotContain("aka.ms", bootstrap, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("/latest", bootstrap, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("api.github", bootstrap, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("Invoke-WebRequest", bootstrap, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("Start-BitsTransfer", bootstrap, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("License1.xml", bootstrap, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("Add-AppxProvisionedPackage", bootstrap, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("-AllUsers", bootstrap, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("source update", bootstrap, StringComparison.OrdinalIgnoreCase);
+
+        var downloadLoop = bootstrap.IndexOf(
+            "Invoke-OpenClawWingetAssetDownload",
+            bootstrap.IndexOf("function Invoke-OpenClawWingetBootstrap", StringComparison.Ordinal),
+            StringComparison.Ordinal);
+        var topHashLoop = bootstrap.IndexOf(
+            "Assert-OpenClawWingetFile",
+            downloadLoop,
+            StringComparison.Ordinal);
+        var descriptorParse = bootstrap.IndexOf(
+            "Assert-OpenClawWingetDependencyDescriptor",
+            topHashLoop,
+            StringComparison.Ordinal);
+        var firstInstall = bootstrap.IndexOf(
+            "Install-OpenClawWingetValidatedPackages",
+            descriptorParse,
+            StringComparison.Ordinal);
+        Assert.True(downloadLoop >= 0);
+        Assert.True(topHashLoop > downloadLoop);
+        Assert.True(descriptorParse > topHashLoop);
+        Assert.True(firstInstall > descriptorParse);
+
+        Assert.Contains("-TimeoutSec 3000", ensure);
+        Assert.Contains("-ScriptBlock (Get-GuestWingetBootstrapScriptBlock)", ensure);
+        Assert.DoesNotContain("-ArgumentList", ensure, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void HyperVController_OrdersWingetAfterFinalWslAndBeforeEveryToolConsumer()
+    {
+        var controller = ReadScript("Invoke-CleanWindowsHyperV.ps1");
+        var prepare = ExtractPowerShellFunction(
+            controller,
+            "Prepare-GuestPrerequisites",
+            "Verify-HostVmConfiguration");
+        var finalWslIndex = prepare.IndexOf(
+            "$wslProof = Invoke-GuestWslVerificationStage",
+            StringComparison.Ordinal);
+        var wingetIndex = prepare.IndexOf(
+            "Ensure-GuestWingetAvailable",
+            finalWslIndex,
+            StringComparison.Ordinal);
+        var gitIndex = prepare.IndexOf(
+            "Ensure-GuestGitInstalled",
+            wingetIndex,
+            StringComparison.Ordinal);
+        var powershellIndex = prepare.IndexOf(
+            "Ensure-GuestPowerShell7Installed",
+            gitIndex,
+            StringComparison.Ordinal);
+        var setupIndex = prepare.IndexOf(
+            "Running guest setup-dev",
+            powershellIndex,
+            StringComparison.Ordinal);
+
+        Assert.True(finalWslIndex >= 0);
+        Assert.True(wingetIndex > finalWslIndex);
+        Assert.True(gitIndex > wingetIndex);
+        Assert.True(powershellIndex > gitIndex);
+        Assert.True(setupIndex > powershellIndex);
+        Assert.Equal(
+            1,
+            prepare.Split('\n').Count(
+                line => line.Contains("Ensure-GuestWingetAvailable", StringComparison.Ordinal)));
+    }
+
+    [Theory]
+    [InlineData(
+        "https://release-assets.githubusercontent.com/github-production-release-asset/file?sig=secret",
+        "release-assets.githubusercontent.com")]
+    [InlineData(
+        "https://objects.githubusercontent.com/github-production-release-asset/file?jwt=secret",
+        "objects.githubusercontent.com")]
+    public void HyperVController_WingetRedirectPolicyAcceptsOnlyPinnedHttpsAssetHosts(
+        string location,
+        string expectedHost)
+    {
+        var result = RunPowerShellCommand(BuildWingetRedirectProof(
+            statusCode: 302,
+            locationExpression: PsQuote(location),
+            redirectCount: 0));
+
+        AssertPowerShellProofSucceeded(result);
+        Assert.Equal($"accepted|{expectedHost}", result.Stdout);
+        Assert.DoesNotContain("secret", result.Stderr, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData(302, "'http://release-assets.githubusercontent.com/file'", 0, "unsafe redirect")]
+    [InlineData(302, "'https://example.com/file'", 0, "unsafe redirect")]
+    [InlineData(302, "'/relative-stays-on-github'", 0, "unsafe redirect")]
+    [InlineData(302, "$null", 0, "without a Location")]
+    [InlineData(302, "'https://['", 0, "malformed Location")]
+    [InlineData(302, "'https://release-assets.githubusercontent.com/file'", 5, "maximum of 5")]
+    [InlineData(500, "$null", 0, "HTTP status 500")]
+    public void HyperVController_WingetRedirectAndHttpFailuresFailClosed(
+        int statusCode,
+        string locationExpression,
+        int redirectCount,
+        string expectedError)
+    {
+        var result = RunPowerShellCommand(BuildWingetRedirectProof(
+            statusCode,
+            locationExpression,
+            redirectCount));
+
+        AssertPowerShellProofSucceeded(result);
+        Assert.StartsWith("rejected|", result.Stdout, StringComparison.Ordinal);
+        Assert.Contains(expectedError, result.Stdout, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("sig=", result.Stdout, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("jwt=", result.Stdout, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Theory]
+    [InlineData("valid", "accepted")]
+    [InlineData("size", "unexpected size")]
+    [InlineData("hash", "unexpected SHA256")]
+    public void HyperVController_WingetFilePinRejectsSizeAndHashMismatch(
+        string scenario,
+        string expectedOutput)
+    {
+        var result = RunPowerShellCommand(BuildWingetFilePinProof(scenario));
+
+        AssertPowerShellProofSucceeded(result);
+        Assert.Contains(expectedOutput, result.Stdout, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Theory]
+    [InlineData("valid", "accepted")]
+    [InlineData("status", "Valid Authenticode")]
+    [InlineData("publisher", "exact Microsoft signer")]
+    public void HyperVController_WingetSignatureRequiresValidExactMicrosoftPublisher(
+        string scenario,
+        string expectedOutput)
+    {
+        var result = RunPowerShellCommand(BuildWingetSignatureProof(scenario));
+
+        AssertPowerShellProofSucceeded(result);
+        Assert.Contains(expectedOutput, result.Stdout, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Theory]
+    [InlineData("valid", "accepted")]
+    [InlineData("reordered", "entry 0")]
+    [InlineData("version", "entry 1")]
+    [InlineData("extra-field", "entry 0")]
+    [InlineData("extra-dependency", "dependency count")]
+    [InlineData("extra-top-level", "top-level fields")]
+    public void HyperVController_WingetDescriptorRequiresExactOrderedDependenciesWithNoExtras(
+        string scenario,
+        string expectedOutput)
+    {
+        var ownedRoot = Path.Combine(
+            Root,
+            "TestResults",
+            $"winget-descriptor-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(ownedRoot);
+        try
+        {
+            var descriptorPath = Path.Combine(ownedRoot, "dependencies.json");
+            File.WriteAllText(descriptorPath, BuildWingetDescriptorJson(scenario));
+            var result = RunPowerShellCommand(BuildWingetDescriptorProof(descriptorPath));
+
+            AssertPowerShellProofSucceeded(result);
+            Assert.Contains(expectedOutput, result.Stdout, StringComparison.OrdinalIgnoreCase);
+        }
+        finally
+        {
+            if (Directory.Exists(ownedRoot))
+            {
+                Directory.Delete(ownedRoot, recursive: true);
+            }
+        }
+    }
+
+    [Theory]
+    [InlineData("valid", "accepted")]
+    [InlineData("identity", "exact pinned x64 identity")]
+    [InlineData("dependency", "Microsoft.WindowsAppRuntime.1.8")]
+    [InlineData("extra-dependency", "dependency count")]
+    [InlineData("alias", "alias does not match")]
+    public void HyperVController_WingetPayloadManifestRejectsIdentityDependencyAndAliasMismatch(
+        string scenario,
+        string expectedOutput)
+    {
+        var result = RunPowerShellCommand(BuildWingetPayloadManifestProof(scenario));
+
+        AssertPowerShellProofSucceeded(result);
+        Assert.Contains(expectedOutput, result.Stdout, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Theory]
+    [InlineData("valid", "accepted|AppInstaller_x64.msix")]
+    [InlineData("identity", "identity does not match")]
+    [InlineData("payload", "payload does not match")]
+    [InlineData("duplicate", "exactly one nonstub x64")]
+    public void HyperVController_WingetBundleManifestRequiresExactIdentityAndSingleX64Payload(
+        string scenario,
+        string expectedOutput)
+    {
+        var result = RunPowerShellCommand(BuildWingetBundleManifestProof(scenario));
+
+        AssertPowerShellProofSucceeded(result);
+        Assert.Contains(expectedOutput, result.Stdout, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Theory]
+    [InlineData("traversal", "unsafe entry path")]
+    [InlineData("duplicate", "duplicate entry path")]
+    [InlineData("missing", "missing pinned x64 package")]
+    [InlineData("corrupt", "central directory")]
+    [InlineData("existing-destination", "destination already exists")]
+    public void HyperVController_WingetDependencyExtractionFailsClosed(
+        string scenario,
+        string expectedOutput)
+    {
+        var ownedRoot = Path.Combine(
+            Root,
+            "TestResults",
+            $"winget-zip-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(ownedRoot);
+        try
+        {
+            var archivePath = Path.Combine(ownedRoot, "dependencies.zip");
+            if (scenario == "corrupt")
+            {
+                File.WriteAllText(archivePath, "not a zip");
+            }
+            else
+            {
+                using var stream = File.Create(archivePath);
+                using var archive = new System.IO.Compression.ZipArchive(
+                    stream,
+                    System.IO.Compression.ZipArchiveMode.Create);
+                if (scenario == "traversal")
+                {
+                    WriteZipEntry(archive, "../escape.appx", new byte[] { 1 });
+                }
+                else if (scenario == "duplicate")
+                {
+                    WriteZipEntry(archive, "x64/pinned.appx", new byte[] { 1 });
+                    WriteZipEntry(archive, @"x64\pinned.appx", new byte[] { 1 });
+                }
+                else if (scenario == "missing")
+                {
+                    WriteZipEntry(archive, "x64/other.appx", new byte[] { 1 });
+                }
+                else
+                {
+                    WriteZipEntry(archive, "x64/pinned.appx", new byte[] { 1 });
+                }
+            }
+
+            var destination = Path.Combine(ownedRoot, "extracted");
+            if (scenario == "existing-destination")
+            {
+                Directory.CreateDirectory(destination);
+            }
+            var result = RunPowerShellCommand(
+                BuildWingetDependencyExtractionProof(archivePath, destination));
+
+            AssertPowerShellProofSucceeded(result);
+            Assert.StartsWith("rejected|", result.Stdout, StringComparison.Ordinal);
+            Assert.Contains(expectedOutput, result.Stdout, StringComparison.OrdinalIgnoreCase);
+        }
+        finally
+        {
+            if (Directory.Exists(ownedRoot))
+            {
+                Directory.Delete(ownedRoot, recursive: true);
+            }
+        }
+    }
+
+    [Fact]
+    public void HyperVController_WingetZipXmlReaderParsesNamespaceManifestFailClosed()
+    {
+        var ownedRoot = Path.Combine(
+            Root,
+            "TestResults",
+            $"winget-xml-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(ownedRoot);
+        try
+        {
+            var archivePath = Path.Combine(ownedRoot, "pinned.appx");
+            using (var stream = File.Create(archivePath))
+            using (var archive = new System.IO.Compression.ZipArchive(
+                       stream,
+                       System.IO.Compression.ZipArchiveMode.Create))
+            {
+                WriteZipEntry(
+                    archive,
+                    "AppxManifest.xml",
+                    System.Text.Encoding.UTF8.GetBytes(
+                        "<Package xmlns=\"urn:test\"><Identity Name=\"Pinned\" /></Package>"));
+            }
+
+            var result = RunPowerShellCommand(BuildWingetZipXmlProof(archivePath));
+
+            AssertPowerShellProofSucceeded(result);
+            Assert.Equal("Package|Pinned", result.Stdout);
+        }
+        finally
+        {
+            if (Directory.Exists(ownedRoot))
+            {
+                Directory.Delete(ownedRoot, recursive: true);
+            }
+        }
+    }
+
+    [Fact]
+    public void HyperVController_WingetInstallsValidatedX64DependenciesInPinnedOrderBeforeBundle()
+    {
+        var result = RunPowerShellCommand(BuildWingetInstallOrderProof());
+
+        AssertPowerShellProofSucceeded(result);
+        Assert.Equal(
+            "dep1.appx|dep2.appx|dep3.appx|bundle.msixbundle",
+            result.Stdout);
+    }
+
+    [Theory]
+    [InlineData("exact", "accepted|skip")]
+    [InlineData("older", "accepted|install")]
+    [InlineData("missing", "accepted|install")]
+    [InlineData("x86-only", "accepted|install")]
+    [InlineData("newer", "newer than the reproducible pin")]
+    [InlineData("publisher", "unexpected identity")]
+    public void HyperVController_WingetDependencyRegistrationNeverAcceptsUnexpectedX64Package(
+        string scenario,
+        string expectedOutput)
+    {
+        var result = RunPowerShellCommand(BuildWingetDependencyStateProof(scenario));
+
+        AssertPowerShellProofSucceeded(result);
+        Assert.Contains(expectedOutput, result.Stdout, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Theory]
+    [InlineData(false, "accepted")]
+    [InlineData(true, "cleanup rejected")]
+    public void HyperVController_WingetAlreadyInstalledSkipsDownloadsAndCleanupIsAuthoritative(
+        bool cleanupFails,
+        string expectedOutput)
+    {
+        var ownedRoot = Path.Combine(
+            Root,
+            "TestResults",
+            $"winget-existing-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(ownedRoot);
+        try
+        {
+            var result = RunPowerShellCommand(
+                BuildWingetAlreadyInstalledProof(ownedRoot, cleanupFails));
+
+            AssertPowerShellProofSucceeded(result);
+            Assert.Contains(expectedOutput, result.Stdout, StringComparison.OrdinalIgnoreCase);
+            Assert.Contains("downloads=0", result.Stdout, StringComparison.Ordinal);
+            Assert.Contains("installs=0", result.Stdout, StringComparison.Ordinal);
+            if (!cleanupFails)
+            {
+                Assert.Empty(Directory.EnumerateFileSystemEntries(ownedRoot));
+            }
+        }
+        finally
+        {
+            if (Directory.Exists(ownedRoot))
+            {
+                Directory.Delete(ownedRoot, recursive: true);
+            }
+        }
+    }
+
+    [Theory]
+    [InlineData("retry", "accepted|3")]
+    [InlineData("publisher", "exact pinned identity")]
+    [InlineData("newer", "newer than the reproducible pin")]
+    public void HyperVController_WingetRegistrationUsesBoundedExactCurrentUserRetry(
+        string scenario,
+        string expectedOutput)
+    {
+        var result = RunPowerShellCommand(BuildWingetRegistrationProof(scenario));
+
+        AssertPowerShellProofSucceeded(result);
+        Assert.Contains(expectedOutput, result.Stdout, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Theory]
+    [InlineData("valid", "accepted|Version,SourceList")]
+    [InlineData("version", "--version did not return exactly")]
+    [InlineData("source-exit", "source list --disable-interactivity")]
+    [InlineData("source-name", "source list --disable-interactivity")]
+    public void HyperVController_WingetCliRequiresExactVersionAndSourceValidation(
+        string scenario,
+        string expectedOutput)
+    {
+        var result = RunPowerShellCommand(BuildWingetCliValidationProof(scenario));
+
+        AssertPowerShellProofSucceeded(result);
+        Assert.Contains(expectedOutput, result.Stdout, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Theory]
+    [InlineData("retry", "accepted|3")]
+    [InlineData("timeout", "bounded retry")]
+    [InlineData("mismatch", "outside the current-user Microsoft WindowsApps alias")]
+    public void HyperVController_WingetAliasCheckRetriesAndRejectsPathMismatch(
+        string scenario,
+        string expectedOutput)
+    {
+        var result = RunPowerShellCommand(BuildWingetAliasProof(scenario));
+
+        AssertPowerShellProofSucceeded(result);
+        Assert.Contains(expectedOutput, result.Stdout, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]
@@ -2502,6 +3036,592 @@ public sealed class CleanWindowsRunnerScriptTests
         Assert.Contains("does not expose", docs);
         Assert.DoesNotContain("parallels-windows-vm", docs, StringComparison.OrdinalIgnoreCase);
     }
+
+    private static string BuildWingetRedirectProof(
+        int statusCode,
+        string locationExpression,
+        int redirectCount)
+    {
+        var controller = ReadScript("Invoke-CleanWindowsHyperV.ps1");
+        var redirectPolicy = ExtractPowerShellFunction(
+            controller,
+            "Resolve-OpenClawWingetHttpResponse",
+            "Invoke-OpenClawWingetAssetDownload");
+        return string.Concat(
+            "$ErrorActionPreference = 'Stop'\n",
+            redirectPolicy,
+            "\n$current = [Uri]'https://github.com/microsoft/winget-cli/releases/download/v1.29.280/asset'\n",
+            "try {\n",
+            "  $target = Resolve-OpenClawWingetHttpResponse ",
+            "-CurrentUri $current ",
+            $"-StatusCode {statusCode} ",
+            $"-Location ({locationExpression}) ",
+            $"-RedirectCount {redirectCount} ",
+            "-AssetName 'asset'\n",
+            "  $value = if ($null -eq $target) { 'final' } else { [string]$target.Host }\n",
+            "  [Console]::Out.Write('accepted|' + $value)\n",
+            "} catch {\n",
+            "  [Console]::Out.Write('rejected|' + $_.Exception.Message)\n",
+            "}\n");
+    }
+
+    private static string BuildWingetFilePinProof(string scenario)
+    {
+        var controller = ReadScript("Invoke-CleanWindowsHyperV.ps1");
+        var filePin = ExtractPowerShellFunction(
+            controller,
+            "Assert-OpenClawWingetFile",
+            "Assert-OpenClawWingetSignature");
+        var actualSize = scenario == "size" ? 2 : 1;
+        var actualHash = scenario == "hash" ? new string('b', 64) : new string('a', 64);
+        return string.Concat(
+            "$ErrorActionPreference = 'Stop'\n",
+            filePin,
+            "\nfunction Test-Path { [CmdletBinding()] param([string]$LiteralPath, [object]$PathType) return $true }\n",
+            $"function Get-Item {{ [CmdletBinding()] param([string]$LiteralPath, [switch]$Force) [pscustomobject]@{{ Length = [Int64]{actualSize} }} }}\n",
+            "function Get-FileHash { [CmdletBinding()] param([string]$LiteralPath, [string]$Algorithm) ",
+            $"[pscustomobject]@{{ Hash = '{actualHash}' }} }}\n",
+            "try {\n",
+            "  Assert-OpenClawWingetFile -Path 'pinned.appx' -ExpectedSize 1 ",
+            $"-ExpectedSha256 '{new string('a', 64)}' -AssetName 'pinned.appx'\n",
+            "  [Console]::Out.Write('accepted')\n",
+            "} catch { [Console]::Out.Write('rejected|' + $_.Exception.Message) }\n");
+    }
+
+    private static string BuildWingetSignatureProof(string scenario)
+    {
+        var controller = ReadScript("Invoke-CleanWindowsHyperV.ps1");
+        var signature = ExtractPowerShellFunction(
+            controller,
+            "Assert-OpenClawWingetSignature",
+            "Assert-OpenClawWingetSafeZipEntryName");
+        const string publisher =
+            "CN=Microsoft Corporation, O=Microsoft Corporation, L=Redmond, S=Washington, C=US";
+        var status = scenario == "status" ? "NotSigned" : "Valid";
+        var subject = scenario == "publisher" ? "CN=Unexpected" : publisher;
+        return string.Concat(
+            "$ErrorActionPreference = 'Stop'\n",
+            signature,
+            "\nfunction Get-AuthenticodeSignature { [CmdletBinding()] param([string]$LiteralPath) ",
+            $"[pscustomobject]@{{ Status = '{status}'; SignerCertificate = [pscustomobject]@{{ Subject = {PsQuote(subject)} }} }} }}\n",
+            "try {\n",
+            "  Assert-OpenClawWingetSignature -Path 'pinned.appx' ",
+            $"-ExpectedPublisher {PsQuote(publisher)} -AssetName 'pinned.appx'\n",
+            "  [Console]::Out.Write('accepted')\n",
+            "} catch { [Console]::Out.Write('rejected|' + $_.Exception.Message) }\n");
+    }
+
+    private static string BuildWingetDescriptorJson(string scenario)
+    {
+        var dependencies = new List<Dictionary<string, string>>
+        {
+            new()
+            {
+                ["Name"] = "Microsoft.VCLibs.140.00",
+                ["Version"] = "14.0.33519.0",
+            },
+            new()
+            {
+                ["Name"] = "Microsoft.VCLibs.140.00.UWPDesktop",
+                ["Version"] = "14.0.33728.0",
+            },
+            new()
+            {
+                ["Name"] = "Microsoft.WindowsAppRuntime.1.8",
+                ["Version"] = "8000.616.304.0",
+            },
+        };
+        if (scenario == "reordered")
+        {
+            (dependencies[0], dependencies[1]) = (dependencies[1], dependencies[0]);
+        }
+        else if (scenario == "version")
+        {
+            dependencies[1]["Version"] = "14.0.0.0";
+        }
+        else if (scenario == "extra-field")
+        {
+            dependencies[0]["Unexpected"] = "value";
+        }
+        else if (scenario == "extra-dependency")
+        {
+            dependencies.Add(new Dictionary<string, string>
+            {
+                ["Name"] = "Microsoft.UI.Xaml.2.8",
+                ["Version"] = "8.0.0.0",
+            });
+        }
+
+        var descriptor = new Dictionary<string, object>
+        {
+            ["Dependencies"] = dependencies,
+        };
+        if (scenario == "extra-top-level")
+        {
+            descriptor["Unexpected"] = true;
+        }
+        return JsonSerializer.Serialize(descriptor);
+    }
+
+    private static string BuildWingetDescriptorProof(string descriptorPath)
+    {
+        var controller = ReadScript("Invoke-CleanWindowsHyperV.ps1");
+        var descriptor = ExtractPowerShellFunction(
+            controller,
+            "Assert-OpenClawWingetDependencyDescriptor",
+            "Assert-OpenClawAppxManifestIdentity");
+        return string.Concat(
+            "$ErrorActionPreference = 'Stop'\n",
+            descriptor,
+            "\n$expected = @(\n",
+            "  [pscustomobject]@{ Name = 'Microsoft.VCLibs.140.00'; Version = '14.0.33519.0' },\n",
+            "  [pscustomobject]@{ Name = 'Microsoft.VCLibs.140.00.UWPDesktop'; Version = '14.0.33728.0' },\n",
+            "  [pscustomobject]@{ Name = 'Microsoft.WindowsAppRuntime.1.8'; Version = '8000.616.304.0' }\n",
+            ")\n",
+            "try {\n",
+            $"  Assert-OpenClawWingetDependencyDescriptor -Path {PsQuote(descriptorPath)} -ExpectedDependencies $expected\n",
+            "  [Console]::Out.Write('accepted')\n",
+            "} catch { [Console]::Out.Write('rejected|' + $_.Exception.Message) }\n");
+    }
+
+    private static string BuildWingetPayloadManifestProof(string scenario)
+    {
+        var controller = ReadScript("Invoke-CleanWindowsHyperV.ps1");
+        var attributes = ExtractPowerShellFunction(
+            controller,
+            "Get-OpenClawWingetXmlAttribute",
+            "Get-OpenClawWingetDirectXmlChildren");
+        var children = ExtractPowerShellFunction(
+            controller,
+            "Get-OpenClawWingetDirectXmlChildren",
+            "ConvertTo-OpenClawWingetDiagnostic");
+        var identity = ExtractPowerShellFunction(
+            controller,
+            "Assert-OpenClawAppxManifestIdentity",
+            "Assert-OpenClawWingetBundleManifest");
+        var payload = ExtractPowerShellFunction(
+            controller,
+            "Assert-OpenClawWingetPayloadManifest",
+            "Assert-OpenClawWingetCurrentPackageIdentity");
+        const string publisher =
+            "CN=Microsoft Corporation, O=Microsoft Corporation, L=Redmond, S=Washington, C=US";
+        var identityName = scenario == "identity"
+            ? "Microsoft.Unexpected"
+            : "Microsoft.DesktopAppInstaller";
+        var appRuntimeVersion = scenario == "dependency"
+            ? "8000.0.0.0"
+            : "8000.616.304.0";
+        var alias = scenario == "alias" ? "unexpected.exe" : "winget.exe";
+        var extraDependency = scenario == "extra-dependency"
+            ? $"<PackageDependency Name=\"Microsoft.UI.Xaml.2.8\" MinVersion=\"8.0.0.0\" Publisher=\"{publisher}\" />"
+            : string.Empty;
+        var xml = string.Concat(
+            "<Package xmlns=\"urn:test\" xmlns:uap=\"urn:test-uap\">",
+            $"<Identity Name=\"{identityName}\" Version=\"1.29.280.0\" Publisher=\"{publisher}\" ProcessorArchitecture=\"x64\" />",
+            "<Dependencies>",
+            $"<PackageDependency Name=\"Microsoft.WindowsAppRuntime.1.8\" MinVersion=\"{appRuntimeVersion}\" Publisher=\"{publisher}\" />",
+            $"<PackageDependency Name=\"Microsoft.VCLibs.140.00\" MinVersion=\"14.0.33519.0\" Publisher=\"{publisher}\" />",
+            $"<PackageDependency Name=\"Microsoft.VCLibs.140.00.UWPDesktop\" MinVersion=\"14.0.33728.0\" Publisher=\"{publisher}\" />",
+            extraDependency,
+            "</Dependencies>",
+            "<Applications><Application Id=\"winget\" Executable=\"winget.exe\">",
+            $"<Extensions><uap:ExecutionAlias Alias=\"{alias}\" /></Extensions>",
+            "</Application></Applications>",
+            "</Package>");
+        return string.Concat(
+            "$ErrorActionPreference = 'Stop'\n",
+            attributes,
+            "\n",
+            children,
+            "\n",
+            identity,
+            "\n",
+            payload,
+            "\n$expected = @(\n",
+            "  [pscustomobject]@{ Name = 'Microsoft.VCLibs.140.00'; Version = '14.0.33519.0' },\n",
+            "  [pscustomobject]@{ Name = 'Microsoft.VCLibs.140.00.UWPDesktop'; Version = '14.0.33728.0' },\n",
+            "  [pscustomobject]@{ Name = 'Microsoft.WindowsAppRuntime.1.8'; Version = '8000.616.304.0' }\n",
+            ")\n",
+            $"[xml]$document = {PsQuote(xml)}\n",
+            "try {\n",
+            "  Assert-OpenClawWingetPayloadManifest -Document $document ",
+            $"-ExpectedPublisher {PsQuote(publisher)} -ExpectedDependencies $expected\n",
+            "  [Console]::Out.Write('accepted')\n",
+            "} catch { [Console]::Out.Write('rejected|' + $_.Exception.Message) }\n");
+    }
+
+    private static string BuildWingetBundleManifestProof(string scenario)
+    {
+        var controller = ReadScript("Invoke-CleanWindowsHyperV.ps1");
+        var attributes = ExtractPowerShellFunction(
+            controller,
+            "Get-OpenClawWingetXmlAttribute",
+            "Get-OpenClawWingetDirectXmlChildren");
+        var children = ExtractPowerShellFunction(
+            controller,
+            "Get-OpenClawWingetDirectXmlChildren",
+            "ConvertTo-OpenClawWingetDiagnostic");
+        var bundle = ExtractPowerShellFunction(
+            controller,
+            "Assert-OpenClawWingetBundleManifest",
+            "Assert-OpenClawWingetPayloadManifest");
+        const string publisher =
+            "CN=Microsoft Corporation, O=Microsoft Corporation, L=Redmond, S=Washington, C=US";
+        var identityVersion = scenario == "identity" ? "2026.1.1.0" : "2026.623.1704.0";
+        var payloadVersion = scenario == "payload" ? "1.29.279.0" : "1.29.280.0";
+        var duplicate = scenario == "duplicate"
+            ? "<Package Type=\"application\" Architecture=\"x64\" Version=\"1.29.280.0\" FileName=\"Other_x64.msix\" />"
+            : string.Empty;
+        var xml = string.Concat(
+            "<Bundle xmlns=\"urn:test\">",
+            $"<Identity Name=\"Microsoft.DesktopAppInstaller\" Publisher=\"{publisher}\" Version=\"{identityVersion}\" />",
+            "<Packages>",
+            $"<Package Type=\"application\" Architecture=\"x64\" Version=\"{payloadVersion}\" FileName=\"AppInstaller_x64.msix\" />",
+            "<Package Type=\"application\" Architecture=\"x64\" Version=\"1.29.280.0\" FileName=\"AppInstallerStub_x64.msix\" />",
+            duplicate,
+            "</Packages></Bundle>");
+        return string.Concat(
+            "$ErrorActionPreference = 'Stop'\n",
+            attributes,
+            "\n",
+            children,
+            "\n",
+            bundle,
+            $"\n[xml]$document = {PsQuote(xml)}\n",
+            "try {\n",
+            "  $entry = Assert-OpenClawWingetBundleManifest -Document $document ",
+            $"-ExpectedPublisher {PsQuote(publisher)}\n",
+            "  [Console]::Out.Write('accepted|' + $entry)\n",
+            "} catch { [Console]::Out.Write('rejected|' + $_.Exception.Message) }\n");
+    }
+
+    private static string BuildWingetDependencyExtractionProof(
+        string archivePath,
+        string destinationPath)
+    {
+        var controller = ReadScript("Invoke-CleanWindowsHyperV.ps1");
+        var safeName = ExtractPowerShellFunction(
+            controller,
+            "Assert-OpenClawWingetSafeZipEntryName",
+            "New-OpenClawWingetZipEntryIndex");
+        var index = ExtractPowerShellFunction(
+            controller,
+            "New-OpenClawWingetZipEntryIndex",
+            "ConvertFrom-OpenClawWingetXmlBytes");
+        var extract = ExtractPowerShellFunction(
+            controller,
+            "Expand-OpenClawWingetDependencyPackages",
+            "Expand-OpenClawWingetBundlePayload");
+        return string.Concat(
+            "$ErrorActionPreference = 'Stop'\n",
+            safeName,
+            "\n",
+            index,
+            "\n",
+            extract,
+            "\n$expected = @([pscustomobject]@{ ",
+            "Name = 'Pinned.Dependency'; Version = '1.0.0.0'; ",
+            "RelativePath = 'x64\\pinned.appx'; Size = [Int64]1; ",
+            $"Sha256 = '{new string('a', 64)}' }})\n",
+            "try {\n",
+            $"  $result = @(Expand-OpenClawWingetDependencyPackages -ArchivePath {PsQuote(archivePath)} ",
+            $"-DestinationRoot {PsQuote(destinationPath)} -ExpectedDependencies $expected)\n",
+            "  [Console]::Out.Write('accepted|' + $result.Count)\n",
+            "} catch { [Console]::Out.Write('rejected|' + $_.Exception.Message) }\n");
+    }
+
+    private static string BuildWingetZipXmlProof(string archivePath)
+    {
+        var controller = ReadScript("Invoke-CleanWindowsHyperV.ps1");
+        var safeName = ExtractPowerShellFunction(
+            controller,
+            "Assert-OpenClawWingetSafeZipEntryName",
+            "New-OpenClawWingetZipEntryIndex");
+        var index = ExtractPowerShellFunction(
+            controller,
+            "New-OpenClawWingetZipEntryIndex",
+            "ConvertFrom-OpenClawWingetXmlBytes");
+        var convert = ExtractPowerShellFunction(
+            controller,
+            "ConvertFrom-OpenClawWingetXmlBytes",
+            "Read-OpenClawWingetZipXml");
+        var read = ExtractPowerShellFunction(
+            controller,
+            "Read-OpenClawWingetZipXml",
+            "Expand-OpenClawWingetDependencyPackages");
+        return string.Concat(
+            "$ErrorActionPreference = 'Stop'\n",
+            safeName,
+            "\n",
+            index,
+            "\n",
+            convert,
+            "\n",
+            read,
+            "\n$document=Read-OpenClawWingetZipXml ",
+            $"-ArchivePath {PsQuote(archivePath)} -EntryName 'AppxManifest.xml' -ArchiveName 'pinned.appx'\n",
+            "$identity=@($document.SelectNodes(\"//*[local-name()='Identity']\"))[0]\n",
+            "[Console]::Out.Write(([string]$document.DocumentElement.LocalName + '|' + [string]$identity.GetAttribute('Name')))\n");
+    }
+
+    private static string BuildWingetInstallOrderProof()
+    {
+        var controller = ReadScript("Invoke-CleanWindowsHyperV.ps1");
+        var identity = ExtractPowerShellFunction(
+            controller,
+            "Assert-OpenClawWingetCurrentPackageIdentity",
+            "Get-OpenClawWingetCurrentMainPackageState");
+        var state = ExtractPowerShellFunction(
+            controller,
+            "Get-OpenClawWingetDependencyInstallState",
+            "Wait-OpenClawWingetDependencyRegistration");
+        var wait = ExtractPowerShellFunction(
+            controller,
+            "Wait-OpenClawWingetDependencyRegistration",
+            "Install-OpenClawWingetValidatedPackages");
+        var install = ExtractPowerShellFunction(
+            controller,
+            "Install-OpenClawWingetValidatedPackages",
+            "Wait-OpenClawWingetMainPackageRegistration");
+        const string publisher =
+            "CN=Microsoft Corporation, O=Microsoft Corporation, L=Redmond, S=Washington, C=US";
+        return string.Concat(
+            "$ErrorActionPreference = 'Stop'\n",
+            identity,
+            "\n",
+            state,
+            "\n",
+            wait,
+            "\n",
+            install,
+            "\n$deps = @(\n",
+            " [pscustomobject]@{ Name='Dep.One'; Version='1.0.0.0'; LocalPath='dep1.appx' },\n",
+            " [pscustomobject]@{ Name='Dep.Two'; Version='2.0.0.0'; LocalPath='dep2.appx' },\n",
+            " [pscustomobject]@{ Name='Dep.Three'; Version='3.0.0.0'; LocalPath='dep3.appx' }\n",
+            ")\n",
+            "$script:installed = @{}\n",
+            "$script:pathToDependency = @{ 'dep1.appx'=$deps[0]; 'dep2.appx'=$deps[1]; 'dep3.appx'=$deps[2] }\n",
+            "$script:calls = New-Object 'Collections.Generic.List[string]'\n",
+            "function Get-AppxPackage { [CmdletBinding()] param([string]$Name)\n",
+            " if ($script:installed.ContainsKey($Name)) { $d=$script:installed[$Name]; ",
+            $"[pscustomobject]@{{ Name=$d.Name; Publisher={PsQuote(publisher)}; Architecture='X64'; ",
+            "PackageFamilyName=($d.Name + '_8wekyb3d8bbwe'); Version=$d.Version } }\n",
+            "}\n",
+            "function Add-AppxPackage { [CmdletBinding()] param([string]$Path)\n",
+            " $script:calls.Add($Path); if ($script:pathToDependency.ContainsKey($Path)) { ",
+            "$d=$script:pathToDependency[$Path]; $script:installed[$d.Name]=$d } }\n",
+            "Install-OpenClawWingetValidatedPackages -ValidatedDependencies $deps ",
+            $"-BundlePath 'bundle.msixbundle' -ExpectedPublisher {PsQuote(publisher)} ",
+            "-RetryCount 1 -DelayMilliseconds 0\n",
+            "[Console]::Out.Write(($script:calls -join '|'))\n");
+    }
+
+    private static string BuildWingetDependencyStateProof(string scenario)
+    {
+        var controller = ReadScript("Invoke-CleanWindowsHyperV.ps1");
+        var state = ExtractPowerShellFunction(
+            controller,
+            "Get-OpenClawWingetDependencyInstallState",
+            "Wait-OpenClawWingetDependencyRegistration");
+        const string publisher =
+            "CN=Microsoft Corporation, O=Microsoft Corporation, L=Redmond, S=Washington, C=US";
+        var version = scenario switch
+        {
+            "older" => "1.9.0.0",
+            "newer" => "3.0.0.0",
+            _ => "2.0.0.0",
+        };
+        var actualPublisher = scenario == "publisher" ? "CN=Unexpected" : publisher;
+        var architecture = scenario == "x86-only" ? "X86" : "X64";
+        var packageOutput = scenario == "missing"
+            ? string.Empty
+            : string.Concat(
+                "[pscustomobject]@{ Name='Pinned.Dependency'; ",
+                $"Publisher={PsQuote(actualPublisher)}; Architecture='{architecture}'; ",
+                "PackageFamilyName='Pinned.Dependency_8wekyb3d8bbwe'; ",
+                $"Version='{version}' }}");
+        return string.Concat(
+            "$ErrorActionPreference = 'Stop'\n",
+            state,
+            "\nfunction Get-AppxPackage { [CmdletBinding()] param([string]$Name) ",
+            packageOutput,
+            " }\n",
+            "$dependency=[pscustomobject]@{ Name='Pinned.Dependency'; Version='2.0.0.0' }\n",
+            "try {\n",
+            " $state=Get-OpenClawWingetDependencyInstallState -Dependency $dependency ",
+            $"-ExpectedPublisher {PsQuote(publisher)}\n",
+            " [Console]::Out.Write('accepted|' + $state)\n",
+            "} catch { [Console]::Out.Write('rejected|' + $_.Exception.Message) }\n");
+    }
+
+    private static string BuildWingetAlreadyInstalledProof(
+        string ownedRoot,
+        bool cleanupFails)
+    {
+        var controller = ReadScript("Invoke-CleanWindowsHyperV.ps1");
+        var workflow = ExtractPowerShellRange(
+            controller,
+            "        function Invoke-OpenClawWingetBootstrap {",
+            "        $publisher = \"CN=Microsoft Corporation");
+        const string publisher =
+            "CN=Microsoft Corporation, O=Microsoft Corporation, L=Redmond, S=Washington, C=US";
+        const string family = "Microsoft.DesktopAppInstaller_8wekyb3d8bbwe";
+        var cleanupFunction = cleanupFails
+            ? "function Remove-OpenClawWingetTemporaryRoot { param([string]$Path) throw 'mock cleanup failure' }\n"
+            : string.Concat(
+                "function Remove-OpenClawWingetTemporaryRoot { param([string]$Path) ",
+                "$script:cleaned=$Path; Microsoft.PowerShell.Management\\Remove-Item ",
+                "-LiteralPath $Path -Recurse -Force -ErrorAction Stop }\n");
+        return string.Concat(
+            "$ErrorActionPreference = 'Stop'\n",
+            workflow,
+            "\n$script:downloads=0; $script:installs=0; $script:cleaned=$null\n",
+            "function Get-OpenClawWingetCurrentMainPackageState { param($ExpectedPublisher,$ExpectedPackageFamilyName) ",
+            "[pscustomobject]@{ State='exact'; Package=[pscustomobject]@{ Name='Microsoft.DesktopAppInstaller' } } }\n",
+            "function Assert-OpenClawWingetCurrentPackageIdentity { param($Package,$ExpectedName,$ExpectedVersion,$ExpectedPublisher,$ExpectedPackageFamilyName) }\n",
+            "function Resolve-OpenClawWingetDirectExecutable { param($Package) 'C:\\Package\\winget.exe' }\n",
+            "function Wait-OpenClawWingetExecutionAlias { param($ExpectedPackageFamilyName) 'alias' }\n",
+            "function Assert-OpenClawWingetCli { param($WingetPath,$TemporaryRoot) }\n",
+            "function Invoke-OpenClawWingetAssetDownload { $script:downloads++ }\n",
+            "function Install-OpenClawWingetValidatedPackages { $script:installs++ }\n",
+            cleanupFunction,
+            "$top=@([pscustomobject]@{ Name='unused'; Size=1; Sha256='",
+            new string('a', 64),
+            "' }); $deps=@([pscustomobject]@{ Name='unused'; Version='1.0.0.0' }); ",
+            "$payload=[pscustomobject]@{ Name='unused'; Size=1; Sha256='",
+            new string('b', 64),
+            "' }\n",
+            "try {\n",
+            " $proof=Invoke-OpenClawWingetBootstrap ",
+            $"-Publisher {PsQuote(publisher)} -PackageFamilyName '{family}' ",
+            "-ReleaseBase 'https://github.com/release/' -ReleasePath '/release' ",
+            "-TopAssets $top -Dependencies $deps -Payload $payload ",
+            $"-TemporaryBase {PsQuote(ownedRoot)}\n",
+            " [Console]::Out.Write(('accepted|downloads={0}|installs={1}|cleaned={2}' ",
+            "-f $script:downloads,$script:installs,(-not [string]::IsNullOrEmpty($script:cleaned))))\n",
+            "} catch {\n",
+            " [Console]::Out.Write(('cleanup rejected|downloads={0}|installs={1}|error={2}' ",
+            "-f $script:downloads,$script:installs,$_.Exception.Message))\n",
+            "}\n");
+    }
+
+    private static string BuildWingetRegistrationProof(string scenario)
+    {
+        var controller = ReadScript("Invoke-CleanWindowsHyperV.ps1");
+        var identity = ExtractPowerShellFunction(
+            controller,
+            "Assert-OpenClawWingetCurrentPackageIdentity",
+            "Get-OpenClawWingetCurrentMainPackageState");
+        var wait = ExtractPowerShellFunction(
+            controller,
+            "Wait-OpenClawWingetMainPackageRegistration",
+            "Resolve-OpenClawWingetDirectExecutable");
+        const string publisher =
+            "CN=Microsoft Corporation, O=Microsoft Corporation, L=Redmond, S=Washington, C=US";
+        var version = scenario == "newer" ? "1.30.0.0" : "1.29.280.0";
+        var actualPublisher = scenario == "publisher" ? "CN=Unexpected" : publisher;
+        var readyCondition = scenario == "retry" ? "$script:calls -ge 3" : "$true";
+        return string.Concat(
+            "$ErrorActionPreference = 'Stop'\n",
+            identity,
+            "\n",
+            wait,
+            "\n$script:calls=0\n",
+            "function Get-AppxPackage { [CmdletBinding()] param([string]$Name) $script:calls++; ",
+            $"if ({readyCondition}) {{ [pscustomobject]@{{ Name='Microsoft.DesktopAppInstaller'; ",
+            $"Publisher={PsQuote(actualPublisher)}; Architecture='X64'; ",
+            $"PackageFamilyName='Microsoft.DesktopAppInstaller_8wekyb3d8bbwe'; Version='{version}' }} }} }}\n",
+            "try {\n",
+            " $package=Wait-OpenClawWingetMainPackageRegistration ",
+            $"-ExpectedPublisher {PsQuote(publisher)} ",
+            "-ExpectedPackageFamilyName 'Microsoft.DesktopAppInstaller_8wekyb3d8bbwe' ",
+            "-RetryCount 3 -DelayMilliseconds 0\n",
+            " [Console]::Out.Write('accepted|' + $script:calls)\n",
+            "} catch { [Console]::Out.Write('rejected|' + $_.Exception.Message) }\n");
+    }
+
+    private static string BuildWingetCliValidationProof(string scenario)
+    {
+        var controller = ReadScript("Invoke-CleanWindowsHyperV.ps1");
+        var validation = ExtractPowerShellFunction(
+            controller,
+            "Assert-OpenClawWingetCli",
+            "Remove-OpenClawWingetTemporaryRoot");
+        var version = scenario == "version" ? "v1.29.279" : "v1.29.280";
+        var sourceExit = scenario == "source-exit" ? 1 : 0;
+        var sourceText = scenario == "source-name" ? "msstore https://example.invalid" : "winget https://cdn.winget.microsoft.com";
+        return string.Concat(
+            "$ErrorActionPreference = 'Stop'\n",
+            validation,
+            "\n$script:calls=New-Object 'Collections.Generic.List[string]'\n",
+            "function Invoke-OpenClawTrustedWingetProcess { param($WingetPath,$Operation,$TemporaryRoot) ",
+            "$script:calls.Add($Operation); if ($Operation -ceq 'Version') { ",
+            $"[pscustomobject]@{{ ExitCode=0; Stdout='{version}'; Stderr='' }} }} else {{ ",
+            $"[pscustomobject]@{{ ExitCode={sourceExit}; Stdout={PsQuote(sourceText)}; Stderr='' }} }} }}\n",
+            "try {\n",
+            " Assert-OpenClawWingetCli -WingetPath 'C:\\Package\\winget.exe' -TemporaryRoot 'D:\\owned'\n",
+            " [Console]::Out.Write('accepted|' + ($script:calls -join ','))\n",
+            "} catch { [Console]::Out.Write('rejected|' + $_.Exception.Message) }\n");
+    }
+
+    private static string BuildWingetAliasProof(string scenario)
+    {
+        var controller = ReadScript("Invoke-CleanWindowsHyperV.ps1");
+        var alias = ExtractPowerShellFunction(
+            controller,
+            "Wait-OpenClawWingetExecutionAlias",
+            "Assert-OpenClawWingetCli");
+        var wingetResult = scenario switch
+        {
+            "retry" => "if ($script:calls -ge 3) { [pscustomobject]@{ Path=$script:expected } }",
+            "mismatch" => "[pscustomobject]@{ Path='C:\\Unexpected\\winget.exe' }",
+            _ => "$null",
+        };
+        return string.Concat(
+            "$ErrorActionPreference = 'Stop'\n",
+            alias,
+            "\n$env:LOCALAPPDATA='C:\\OpenClawAliasTest'\n",
+            "$script:expected=[IO.Path]::GetFullPath((Join-Path $env:LOCALAPPDATA 'Microsoft\\WindowsApps\\winget.exe'))\n",
+            "$script:calls=0\n",
+            "function Get-Command { [CmdletBinding()] param([Parameter(Position=0)][string]$Name,[object]$CommandType,[switch]$All) ",
+            "if ($Name -ceq 'Get-AppExecutionAlias') { return $null }; ",
+            "if ($Name -ceq 'winget.exe') { $script:calls++; ",
+            wingetResult,
+            " } }\n",
+            "function Test-Path { [CmdletBinding()] param([string]$LiteralPath,[object]$PathType) ",
+            "return ($script:calls -ge 3 -and $LiteralPath -ceq $script:expected) }\n",
+            "try {\n",
+            " $resolved=Wait-OpenClawWingetExecutionAlias ",
+            "-ExpectedPackageFamilyName 'Microsoft.DesktopAppInstaller_8wekyb3d8bbwe' ",
+            "-RetryCount 3 -DelayMilliseconds 0\n",
+            " [Console]::Out.Write('accepted|' + $script:calls)\n",
+            "} catch { [Console]::Out.Write('rejected|' + $_.Exception.Message) }\n");
+    }
+
+    private static void WriteZipEntry(
+        System.IO.Compression.ZipArchive archive,
+        string name,
+        byte[] content)
+    {
+        var entry = archive.CreateEntry(name);
+        using var stream = entry.Open();
+        stream.Write(content);
+    }
+
+    private static string ExtractPowerShellRange(
+        string script,
+        string startMarker,
+        string endMarker)
+    {
+        var start = script.IndexOf(startMarker, StringComparison.Ordinal);
+        var end = script.IndexOf(endMarker, start, StringComparison.Ordinal);
+        Assert.True(start >= 0, $"PowerShell range start marker was not found: {startMarker}");
+        Assert.True(end > start, $"PowerShell range end marker was not found: {endMarker}");
+        return script[start..end];
+    }
+
+    private static string PsQuote(string value) =>
+        $"'{value.Replace("'", "''", StringComparison.Ordinal)}'";
 
     private static string ReadScript(string name) =>
         File.ReadAllText(Path.Combine(Root, "scripts", "clean-windows", name));

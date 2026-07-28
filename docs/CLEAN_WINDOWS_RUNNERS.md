@@ -216,13 +216,14 @@ The final rotated `guest.clixml` credential remains available. At this clean che
 and `wsl.exe --status` returns exit 50 with `WSL is not installed`. That is the
 expected input to the staged preparation flow.
 
-The latest preparation attempt reached the first owned restart, then observed
-zero-exit `wsl.exe --status` and nonzero `wsl.exe --version` update-bootstrap
-output. The failure rollback is expected to have restored the exact
-`clean-windows` checkpoint. Before retrying, the driver must confirm that exact
-owned restore and its finalized checkpoint marker. Then use the normal
-`Prepare` command below. Do not use `-RecoverPendingCheckpoint`,
-`-CleanupUnattend`, or an ad hoc lifecycle command for this retry.
+The current failed preparation attempt reached final WSL verification, then
+failed before Git setup because WinGet/App Installer was unavailable. The
+existing failure rollback is expected to have restored the exact
+`clean-windows` checkpoint, but this hotfix does not claim live confirmation
+of that restore. Before retrying, the driver must confirm that exact owned
+restore and its finalized checkpoint marker. Then use the normal `Prepare`
+command below. Do not use `-RecoverPendingCheckpoint`, `-CleanupUnattend`, or
+an ad hoc lifecycle command for this retry.
 
 From an elevated PowerShell session, use normal `Prepare` without
 `-RecoverPendingCheckpoint`:
@@ -338,8 +339,80 @@ arrays and supplies no standard input, Store UI, shell command text, or
 arbitrary arguments.
 
 After the second reconnect, final verification requires enabled features plus
-zero-exit status and version before Git, PowerShell 7, repository copy, or
-`scripts\setup-dev.ps1`.
+zero-exit status and version. The pinned WinGet bootstrap then runs before Git,
+PowerShell 7, repository copy, or `scripts\setup-dev.ps1`.
+
+#### Pinned WinGet and App Installer bootstrap
+
+`Prepare` installs WinGet only for the PowerShell Direct guest user. It uses
+`Add-AppxPackage` for current-user registration. It never uses all-users
+provisioning, `License1.xml`, Store UI, or an App Installer license file.
+
+The immutable source is the official Microsoft `winget-cli` release
+`v1.29.280` under:
+
+```text
+https://github.com/microsoft/winget-cli/releases/download/v1.29.280/
+```
+
+The three top-level assets are pinned before any parsing or extraction:
+
+| Asset | Bytes | SHA-256 |
+|---|---:|---|
+| `Microsoft.DesktopAppInstaller_8wekyb3d8bbwe.msixbundle` | 216775738 | `0809fa9f52e395d6e7de692331dce847ac991952675116bb4d8aae2ddcc20946` |
+| `DesktopAppInstaller_Dependencies.zip` | 97760717 | `3bbfcaa5cb011c48fac48d896d64a5c7c6898859a9f3d01555c8cd000f4e2962` |
+| `DesktopAppInstaller_Dependencies.json` | 322 | `a56ddd79cf9cd056d9546cfeb6958c2b44d20f6221f8518bf17b003717d47a7a` |
+
+The descriptor must contain exactly these ordered x64 dependencies, with no
+extra dependency such as UI.Xaml:
+
+1. `Microsoft.VCLibs.140.00` version `14.0.33519.0`
+2. `Microsoft.VCLibs.140.00.UWPDesktop` version `14.0.33728.0`
+3. `Microsoft.WindowsAppRuntime.1.8` version `8000.616.304.0`
+
+Downloads use a streaming Windows PowerShell 5.1 `HttpClient` path with a
+shared 1800-second cancellation bound. Automatic redirects, cookies,
+credentials, and authorization headers are disabled. The initial host must be
+`github.com`; up to five HTTPS redirects may target only
+`release-assets.githubusercontent.com` or `objects.githubusercontent.com`.
+Diagnostics include only the safe asset name, host, and status. SAS query
+strings are never printed. TLS is restricted to TLS 1.2 in the handler when
+available; a required global fallback is restored before returning.
+
+The dependency archive is indexed with `ZipArchive`. Every entry path must be
+relative, traversal-free, and unique. Only the three exact x64 package paths
+are extracted. Each package is size and SHA-256 checked before its
+Authenticode signature and namespace-independent Appx manifest are inspected.
+All signers and manifest publishers must be exactly Microsoft. The package
+name, version, publisher, and x64 architecture must match the pin.
+
+The bundle must have a Valid Microsoft Authenticode signature and exact
+`Microsoft.DesktopAppInstaller` bundle identity version `2026.623.1704.0`.
+Only its single nonstub `AppInstaller_x64.msix` entry is extracted. That
+payload is pinned to 62421154 bytes and SHA-256
+`bdc908068f7563d89ef3405f1a30ae74df8cb0416414ed3613c4d68e2c812ff1`.
+Its manifest must identify x64 `Microsoft.DesktopAppInstaller` version
+`1.29.280.0`, the three exact minimum dependencies, application id `winget`,
+root executable `winget.exe`, and alias `winget.exe`.
+
+No package is installed until every downloaded and extracted artifact passes
+all checks. Dependencies install in the pinned order before the bundle.
+Already registered exact x64 dependencies are verified and skipped. Older
+matching dependencies may be upgraded to the pin. Unexpected identity,
+publisher, architecture, or newer versions fail closed.
+
+If exactly one current-user
+`Microsoft.DesktopAppInstaller_8wekyb3d8bbwe` registration already has version
+`1.29.280.0`, `Prepare` validates its exact identity, root `winget.exe`,
+bounded WindowsApps alias and PATH resolution, exact `winget --version` output
+`v1.29.280`, and successful
+`winget source list --disable-interactivity` output containing `winget`. It
+then skips every download. Post-install validation repeats those same checks.
+It never updates sources or accepts source agreements during bootstrap.
+
+Downloads, extraction, and native output captures live under one nonce child
+of the guest temporary directory. The root is removed on success or failure.
+A cleanup failure makes the bootstrap fail.
 
 `Prepare` does not install Ubuntu or any other distribution. The installed
 smoke provisions its app-owned distribution later. Guest commands, restart

@@ -263,9 +263,14 @@ The current owned VM is restored to its exact finalized `clean-windows`
 checkpoint and retains the final rotated credential. Route it through normal
 `Prepare` without `-RecoverPendingCheckpoint`. Prepare uses bounded
 optional-feature, conditional restart, WSL package, conditional restart, and
-final verification stages before tool setup. It does not install Ubuntu or
-another distribution. The installed smoke provisions its app-owned
-distribution later.
+final verification stages before tool setup. After WSL verification it runs a
+fixed current-user WinGet/App Installer bootstrap pinned to official Microsoft
+`winget-cli` `v1.29.280`. The bootstrap uses immutable HTTPS assets, manual
+allowlisted redirects, pinned sizes and SHA-256 hashes, exact Microsoft
+signatures and manifests, x64-only dependency ordering, and a clean nonce
+guest-temp root. It does not use `License1.xml`, all-users provisioning, Store
+UI, or source update. It does not install Ubuntu or another distribution. The
+installed smoke provisions its app-owned distribution later.
 
 After a failed `Prepare`, the driver must first confirm that the rollback
 restored the exact owned `clean-windows` checkpoint and finalized marker. The
@@ -273,7 +278,11 @@ next attempt is normal `Prepare`, without `-RecoverPendingCheckpoint` or
 cleanup. In the package stage, zero-exit status plus nonzero version invokes
 the one fixed `wsl.exe --update --web-download` operation. Accepted update
 exits `0` and `3010` always require the owned reconnect before final status,
-version, and feature verification.
+version, and feature verification. The current failed Prepare is expected to
+have rolled back after WinGet was unavailable, but this hotfix does not claim
+live confirmation. Unit coverage for the bootstrap uses extracted functions
+and mocks only. Do not use a VM or real Appx/network operations for that
+focused lane.
 
 Fresh unattended Hyper-V `Create` requires `-GenerateCredential`, verifies the
 official ISO SHA256, builds a separate answer ISO with Windows IMAPI2, and

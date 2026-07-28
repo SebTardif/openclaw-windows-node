@@ -3688,6 +3688,1785 @@ function Copy-RepoToGuest {
     } -ArgumentList @($guestRepoRoot) | Out-Null
 }
 
+function Get-GuestWingetBootstrapScriptBlock {
+    return {
+        $ErrorActionPreference = "Stop"
+        Set-StrictMode -Version 2.0
+
+        function Get-OpenClawWingetXmlAttribute {
+            param(
+                [Parameter(Mandatory = $true)]
+                [System.Xml.XmlElement]$Element,
+                [Parameter(Mandatory = $true)]
+                [string]$Name
+            )
+
+            if (-not $Element.HasAttribute($Name)) {
+                throw "XML element '$($Element.LocalName)' is missing required attribute '$Name'."
+            }
+            return [string]$Element.GetAttribute($Name)
+        }
+
+        function Get-OpenClawWingetDirectXmlChildren {
+            param(
+                [Parameter(Mandatory = $true)]
+                [System.Xml.XmlNode]$Parent,
+                [Parameter(Mandatory = $true)]
+                [string]$LocalName
+            )
+
+            return @(
+                $Parent.ChildNodes |
+                    Where-Object {
+                        $_ -is [System.Xml.XmlElement] -and
+                        [string]$_.LocalName -ceq $LocalName
+                    }
+            )
+        }
+
+        function ConvertTo-OpenClawWingetDiagnostic {
+            param(
+                [AllowNull()]
+                [string]$Text,
+                [ValidateRange(64, 8192)]
+                [int]$MaxChars = 2048
+            )
+
+            if ([string]::IsNullOrEmpty($Text)) {
+                return ""
+            }
+            $sanitized = [regex]::Replace(
+                $Text,
+                "[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]+",
+                ""
+            )
+            $sanitized = [regex]::Replace(
+                $sanitized,
+                "(?i)\bBearer\s+[A-Za-z0-9._~+/\-=]+",
+                "******"
+            )
+            $sanitized = [regex]::Replace(
+                $sanitized,
+                "(?i)\b(password|passwd|pwd|token|credential|secret|authorization|sig|jwt)\b\s*[:=]\s*[^;,|`r`n\s]*",
+                '$1=[redacted]'
+            )
+            $sanitized = [regex]::Replace(
+                $sanitized,
+                "(?i)(https://[^\s?]+)\?[^\s]+",
+                '$1?[redacted]'
+            )
+            $sanitized = [regex]::Replace($sanitized, "\s+", " ").Trim()
+            if ($sanitized.Length -gt $MaxChars) {
+                return $sanitized.Substring(0, $MaxChars) + " [truncated]"
+            }
+            return $sanitized
+        }
+
+        function Assert-OpenClawWingetInitialAssetUri {
+            param(
+                [Parameter(Mandatory = $true)]
+                [Uri]$Uri,
+                [Parameter(Mandatory = $true)]
+                [string]$AssetName,
+                [Parameter(Mandatory = $true)]
+                [string]$ExpectedReleasePath
+            )
+
+            $expectedPath = "$ExpectedReleasePath/$AssetName"
+            if (
+                -not $Uri.IsAbsoluteUri -or
+                [string]$Uri.Scheme -cne "https" -or
+                -not [string]::Equals(
+                    [string]$Uri.Host,
+                    "github.com",
+                    [StringComparison]::OrdinalIgnoreCase
+                ) -or
+                [int]$Uri.Port -ne 443 -or
+                -not [string]::IsNullOrEmpty([string]$Uri.UserInfo) -or
+                -not [string]::IsNullOrEmpty([string]$Uri.Query) -or
+                -not [string]::IsNullOrEmpty([string]$Uri.Fragment) -or
+                [string]$Uri.AbsolutePath -cne $expectedPath
+            ) {
+                throw "WinGet asset '$AssetName' does not use its exact immutable github.com HTTPS release URL."
+            }
+        }
+
+        function Resolve-OpenClawWingetHttpResponse {
+            param(
+                [Parameter(Mandatory = $true)]
+                [Uri]$CurrentUri,
+                [Parameter(Mandatory = $true)]
+                [int]$StatusCode,
+                [AllowNull()]
+                [object]$Location,
+                [Parameter(Mandatory = $true)]
+                [ValidateRange(0, 5)]
+                [int]$RedirectCount,
+                [Parameter(Mandatory = $true)]
+                [string]$AssetName
+            )
+
+            if ($StatusCode -ge 200 -and $StatusCode -lt 300) {
+                return $null
+            }
+
+            if ($StatusCode -notin [int[]]@(301, 302, 303, 307, 308)) {
+                throw "WinGet asset '$AssetName' request failed at host '$($CurrentUri.Host)' with HTTP status $StatusCode."
+            }
+            if ($RedirectCount -ge 5) {
+                throw "WinGet asset '$AssetName' exceeded the maximum of 5 redirects at host '$($CurrentUri.Host)'."
+            }
+            if ($null -eq $Location) {
+                throw "WinGet asset '$AssetName' received HTTP status $StatusCode without a Location header at host '$($CurrentUri.Host)'."
+            }
+
+            $locationText = if ($Location -is [Uri]) {
+                [string]$Location.OriginalString
+            } else {
+                [string]$Location
+            }
+            if ([string]::IsNullOrWhiteSpace($locationText)) {
+                throw "WinGet asset '$AssetName' received an empty Location header at host '$($CurrentUri.Host)'."
+            }
+
+            try {
+                $redirectUri = [Uri]::new($CurrentUri, $locationText)
+            } catch {
+                throw "WinGet asset '$AssetName' received a malformed Location header at host '$($CurrentUri.Host)'."
+            }
+            $allowedRedirectHosts = [string[]]@(
+                "release-assets.githubusercontent.com",
+                "objects.githubusercontent.com"
+            )
+            $hostAllowed = $false
+            foreach ($allowedHost in $allowedRedirectHosts) {
+                if (
+                    [string]::Equals(
+                        [string]$redirectUri.Host,
+                        $allowedHost,
+                        [StringComparison]::OrdinalIgnoreCase
+                    )
+                ) {
+                    $hostAllowed = $true
+                    break
+                }
+            }
+            if (
+                -not $redirectUri.IsAbsoluteUri -or
+                [string]$redirectUri.Scheme -cne "https" -or
+                [int]$redirectUri.Port -ne 443 -or
+                -not [string]::IsNullOrEmpty([string]$redirectUri.UserInfo) -or
+                -not [string]::IsNullOrEmpty([string]$redirectUri.Fragment) -or
+                -not $hostAllowed
+            ) {
+                throw "WinGet asset '$AssetName' received an unsafe redirect target from host '$($CurrentUri.Host)'."
+            }
+            return $redirectUri
+        }
+
+        function Invoke-OpenClawWingetAssetDownload {
+            param(
+                [Parameter(Mandatory = $true)]
+                [Uri]$InitialUri,
+                [Parameter(Mandatory = $true)]
+                [string]$AssetName,
+                [Parameter(Mandatory = $true)]
+                [Int64]$ExpectedSize,
+                [Parameter(Mandatory = $true)]
+                [string]$DestinationPath,
+                [Parameter(Mandatory = $true)]
+                [string]$ExpectedReleasePath,
+                [Parameter(Mandatory = $true)]
+                [ValidateRange(1, 1800)]
+                [int]$TimeoutSeconds
+            )
+
+            Assert-OpenClawWingetInitialAssetUri `
+                -Uri $InitialUri `
+                -AssetName $AssetName `
+                -ExpectedReleasePath $ExpectedReleasePath
+            if (Test-Path -LiteralPath $DestinationPath) {
+                throw "WinGet asset '$AssetName' destination already exists."
+            }
+
+            Add-Type -AssemblyName System.Net.Http -ErrorAction Stop
+            $handler = New-Object System.Net.Http.HttpClientHandler
+            $client = $null
+            $cancellation = $null
+            $response = $null
+            $request = $null
+            $contentStream = $null
+            $fileStream = $null
+            $downloadFailure = $null
+            $restoreFailure = $null
+            $priorSecurityProtocol = [Net.ServicePointManager]::SecurityProtocol
+            $changedGlobalSecurityProtocol = $false
+            $currentUri = $InitialUri
+            $safeStatus = "none"
+            try {
+                $handler.AllowAutoRedirect = $false
+                $handler.UseCookies = $false
+                $handler.PreAuthenticate = $false
+                $handler.UseDefaultCredentials = $false
+                $handler.Credentials = $null
+                if ($null -ne $handler.PSObject.Properties["DefaultProxyCredentials"]) {
+                    $handler.DefaultProxyCredentials = $null
+                }
+                if ($null -ne $handler.PSObject.Properties["SslProtocols"]) {
+                    $handler.SslProtocols = [Security.Authentication.SslProtocols]::Tls12
+                } else {
+                    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+                    $changedGlobalSecurityProtocol = $true
+                }
+
+                $client = New-Object System.Net.Http.HttpClient($handler)
+                $client.Timeout = [Threading.Timeout]::InfiniteTimeSpan
+                $cancellation = New-Object Threading.CancellationTokenSource
+                $cancellation.CancelAfter([TimeSpan]::FromSeconds($TimeoutSeconds))
+                $redirectCount = 0
+                while ($true) {
+                    $request = New-Object System.Net.Http.HttpRequestMessage(
+                        [System.Net.Http.HttpMethod]::Get,
+                        $currentUri
+                    )
+                    $request.Headers.Authorization = $null
+                    $response = $client.SendAsync(
+                        $request,
+                        [System.Net.Http.HttpCompletionOption]::ResponseHeadersRead,
+                        $cancellation.Token
+                    ).GetAwaiter().GetResult()
+                    $safeStatus = [string][int]$response.StatusCode
+                    $redirectUri = Resolve-OpenClawWingetHttpResponse `
+                        -CurrentUri $currentUri `
+                        -StatusCode ([int]$response.StatusCode) `
+                        -Location $response.Headers.Location `
+                        -RedirectCount $redirectCount `
+                        -AssetName $AssetName
+                    if ($null -ne $redirectUri) {
+                        $response.Dispose()
+                        $response = $null
+                        $request.Dispose()
+                        $request = $null
+                        $currentUri = $redirectUri
+                        $redirectCount++
+                        continue
+                    }
+
+                    $contentLength = $response.Content.Headers.ContentLength
+                    if (
+                        $null -ne $contentLength -and
+                        [Int64]$contentLength -ne $ExpectedSize
+                    ) {
+                        throw "WinGet asset '$AssetName' response length did not match the pinned size."
+                    }
+
+                    $contentStream = $response.Content.ReadAsStreamAsync().GetAwaiter().GetResult()
+                    $fileStream = [IO.File]::Open(
+                        $DestinationPath,
+                        [IO.FileMode]::CreateNew,
+                        [IO.FileAccess]::Write,
+                        [IO.FileShare]::None
+                    )
+                    $buffer = New-Object "byte[]" (1024 * 1024)
+                    [Int64]$totalBytes = 0
+                    while (($read = $contentStream.Read($buffer, 0, $buffer.Length)) -gt 0) {
+                        $totalBytes += [Int64]$read
+                        if ($totalBytes -gt $ExpectedSize) {
+                            throw "WinGet asset '$AssetName' exceeded the pinned size while streaming."
+                        }
+                        $fileStream.Write($buffer, 0, $read)
+                    }
+                    $fileStream.Flush()
+                    if ($totalBytes -ne $ExpectedSize) {
+                        throw "WinGet asset '$AssetName' stream length did not match the pinned size."
+                    }
+                    break
+                }
+            } catch {
+                $downloadFailure = $_
+            } finally {
+                foreach ($disposable in @(
+                    $fileStream,
+                    $contentStream,
+                    $response,
+                    $request,
+                    $cancellation,
+                    $client,
+                    $handler
+                )) {
+                    if ($null -ne $disposable) {
+                        try {
+                            $disposable.Dispose()
+                        } catch {
+                        }
+                    }
+                }
+                if ($changedGlobalSecurityProtocol) {
+                    try {
+                        [Net.ServicePointManager]::SecurityProtocol = $priorSecurityProtocol
+                    } catch {
+                        $restoreFailure = $_
+                    }
+                }
+            }
+
+            if ($null -ne $restoreFailure) {
+                throw "WinGet asset '$AssetName' download could not restore the process TLS policy."
+            }
+            if ($null -ne $downloadFailure) {
+                $failureType = $downloadFailure.Exception.GetType().FullName
+                throw "WinGet asset '$AssetName' download failed at host '$($currentUri.Host)' with HTTP status $safeStatus ($failureType)."
+            }
+        }
+
+        function Assert-OpenClawWingetFile {
+            param(
+                [Parameter(Mandatory = $true)]
+                [string]$Path,
+                [Parameter(Mandatory = $true)]
+                [Int64]$ExpectedSize,
+                [Parameter(Mandatory = $true)]
+                [ValidatePattern("^[0-9a-f]{64}$")]
+                [string]$ExpectedSha256,
+                [Parameter(Mandatory = $true)]
+                [string]$AssetName
+            )
+
+            if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+                throw "Pinned WinGet file '$AssetName' is missing."
+            }
+            $file = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
+            if ([Int64]$file.Length -ne $ExpectedSize) {
+                throw "Pinned WinGet file '$AssetName' has an unexpected size."
+            }
+            $actualHash = (
+                Get-FileHash -LiteralPath $Path -Algorithm SHA256 -ErrorAction Stop
+            ).Hash.ToLowerInvariant()
+            if ($actualHash -cne $ExpectedSha256) {
+                throw "Pinned WinGet file '$AssetName' has an unexpected SHA256."
+            }
+        }
+
+        function Assert-OpenClawWingetSignature {
+            param(
+                [Parameter(Mandatory = $true)]
+                [string]$Path,
+                [Parameter(Mandatory = $true)]
+                [string]$ExpectedPublisher,
+                [Parameter(Mandatory = $true)]
+                [string]$AssetName
+            )
+
+            $signature = Get-AuthenticodeSignature -LiteralPath $Path -ErrorAction Stop
+            if ([string]$signature.Status -cne "Valid") {
+                throw "Pinned WinGet file '$AssetName' does not have a Valid Authenticode signature."
+            }
+            if (
+                $null -eq $signature.SignerCertificate -or
+                [string]$signature.SignerCertificate.Subject -cne $ExpectedPublisher
+            ) {
+                throw "Pinned WinGet file '$AssetName' does not have the exact Microsoft signer subject."
+            }
+        }
+
+        function Assert-OpenClawWingetSafeZipEntryName {
+            param(
+                [Parameter(Mandatory = $true)]
+                [string]$EntryName,
+                [Parameter(Mandatory = $true)]
+                [string]$ArchiveName
+            )
+
+            if ([string]::IsNullOrWhiteSpace($EntryName)) {
+                throw "Archive '$ArchiveName' contains an empty entry name."
+            }
+            $normalized = $EntryName.Replace("/", "\")
+            $isDirectory = $normalized.EndsWith("\", [StringComparison]::Ordinal)
+            $trimmed = if ($isDirectory) {
+                $normalized.TrimEnd("\")
+            } else {
+                $normalized
+            }
+            if (
+                [string]::IsNullOrWhiteSpace($trimmed) -or
+                [IO.Path]::IsPathRooted($trimmed) -or
+                $trimmed.StartsWith("\", [StringComparison]::Ordinal)
+            ) {
+                throw "Archive '$ArchiveName' contains a rooted or empty entry path."
+            }
+            $segments = [string[]]$trimmed.Split([char[]]@("\", "/"))
+            foreach ($segment in $segments) {
+                if (
+                    [string]::IsNullOrEmpty($segment) -or
+                    $segment -ceq "." -or
+                    $segment -ceq ".." -or
+                    $segment.Contains(":") -or
+                    $segment.IndexOf([char]0) -ge 0
+                ) {
+                    throw "Archive '$ArchiveName' contains an unsafe entry path."
+                }
+            }
+            return $trimmed
+        }
+
+        function New-OpenClawWingetZipEntryIndex {
+            param(
+                [Parameter(Mandatory = $true)]
+                [System.IO.Compression.ZipArchive]$Archive,
+                [Parameter(Mandatory = $true)]
+                [string]$ArchiveName
+            )
+
+            $entries = [Collections.Generic.Dictionary[string, object]]::new(
+                [StringComparer]::OrdinalIgnoreCase
+            )
+            foreach ($entry in $Archive.Entries) {
+                $normalized = Assert-OpenClawWingetSafeZipEntryName `
+                    -EntryName ([string]$entry.FullName) `
+                    -ArchiveName $ArchiveName
+                if ($entries.ContainsKey($normalized)) {
+                    throw "Archive '$ArchiveName' contains a duplicate entry path."
+                }
+                $entries.Add($normalized, $entry)
+            }
+            return $entries
+        }
+
+        function ConvertFrom-OpenClawWingetXmlBytes {
+            param(
+                [Parameter(Mandatory = $true)]
+                [byte[]]$Bytes,
+                [Parameter(Mandatory = $true)]
+                [string]$DocumentName
+            )
+
+            $settings = New-Object System.Xml.XmlReaderSettings
+            $settings.DtdProcessing = [System.Xml.DtdProcessing]::Prohibit
+            $settings.XmlResolver = $null
+            $settings.MaxCharactersInDocument = 4MB
+            $stream = New-Object IO.MemoryStream(, $Bytes)
+            $reader = $null
+            try {
+                $reader = [Xml.XmlReader]::Create($stream, $settings)
+                $document = New-Object Xml.XmlDocument
+                $document.PreserveWhitespace = $false
+                $document.XmlResolver = $null
+                $document.Load($reader)
+                return $document
+            } catch {
+                throw "Pinned WinGet XML '$DocumentName' could not be parsed safely."
+            } finally {
+                if ($null -ne $reader) {
+                    $reader.Dispose()
+                }
+                $stream.Dispose()
+            }
+        }
+
+        function Read-OpenClawWingetZipXml {
+            param(
+                [Parameter(Mandatory = $true)]
+                [string]$ArchivePath,
+                [Parameter(Mandatory = $true)]
+                [string]$EntryName,
+                [Parameter(Mandatory = $true)]
+                [string]$ArchiveName
+            )
+
+            Add-Type -AssemblyName System.IO.Compression -ErrorAction Stop
+            $archiveStream = $null
+            $archive = $null
+            $entryStream = $null
+            $memory = $null
+            try {
+                $archiveStream = [IO.File]::Open(
+                    $ArchivePath,
+                    [IO.FileMode]::Open,
+                    [IO.FileAccess]::Read,
+                    [IO.FileShare]::Read
+                )
+                $archive = New-Object System.IO.Compression.ZipArchive(
+                    $archiveStream,
+                    [System.IO.Compression.ZipArchiveMode]::Read,
+                    $false
+                )
+                $entries = New-OpenClawWingetZipEntryIndex `
+                    -Archive $archive `
+                    -ArchiveName $ArchiveName
+                $normalizedEntryName = $EntryName.Replace("/", "\")
+                if (-not $entries.ContainsKey($normalizedEntryName)) {
+                    throw "Archive '$ArchiveName' is missing required entry '$EntryName'."
+                }
+                $entry = $entries[$normalizedEntryName]
+                if (
+                    ([string]$entry.FullName).Replace("/", "\") -cne
+                    $normalizedEntryName
+                ) {
+                    throw "Archive '$ArchiveName' does not use the exact required entry path '$EntryName'."
+                }
+                if ([Int64]$entry.Length -gt 4MB) {
+                    throw "Archive '$ArchiveName' XML entry '$EntryName' exceeds the bounded size."
+                }
+
+                $entryStream = $entry.Open()
+                $memory = New-Object IO.MemoryStream
+                $buffer = New-Object "byte[]" 65536
+                [Int64]$totalBytes = 0
+                while (($read = $entryStream.Read($buffer, 0, $buffer.Length)) -gt 0) {
+                    $totalBytes += [Int64]$read
+                    if ($totalBytes -gt 4MB) {
+                        throw "Archive '$ArchiveName' XML entry '$EntryName' exceeded the bounded size while reading."
+                    }
+                    $memory.Write($buffer, 0, $read)
+                }
+                return ConvertFrom-OpenClawWingetXmlBytes `
+                    -Bytes $memory.ToArray() `
+                    -DocumentName "$ArchiveName/$EntryName"
+            } finally {
+                foreach ($disposable in @($memory, $entryStream, $archive, $archiveStream)) {
+                    if ($null -ne $disposable) {
+                        $disposable.Dispose()
+                    }
+                }
+            }
+        }
+
+        function Expand-OpenClawWingetDependencyPackages {
+            param(
+                [Parameter(Mandatory = $true)]
+                [string]$ArchivePath,
+                [Parameter(Mandatory = $true)]
+                [string]$DestinationRoot,
+                [Parameter(Mandatory = $true)]
+                [object[]]$ExpectedDependencies
+            )
+
+            Add-Type -AssemblyName System.IO.Compression -ErrorAction Stop
+            if (Test-Path -LiteralPath $DestinationRoot) {
+                throw "WinGet dependency extraction destination already exists."
+            }
+            [IO.Directory]::CreateDirectory($DestinationRoot) | Out-Null
+            $canonicalRoot = [IO.Path]::GetFullPath($DestinationRoot).TrimEnd("\") + "\"
+            $archiveStream = $null
+            $archive = $null
+            try {
+                $archiveStream = [IO.File]::Open(
+                    $ArchivePath,
+                    [IO.FileMode]::Open,
+                    [IO.FileAccess]::Read,
+                    [IO.FileShare]::Read
+                )
+                $archive = New-Object System.IO.Compression.ZipArchive(
+                    $archiveStream,
+                    [System.IO.Compression.ZipArchiveMode]::Read,
+                    $false
+                )
+                $entries = New-OpenClawWingetZipEntryIndex `
+                    -Archive $archive `
+                    -ArchiveName "DesktopAppInstaller_Dependencies.zip"
+                $results = New-Object "Collections.Generic.List[object]"
+                foreach ($dependency in $ExpectedDependencies) {
+                    $relativePath = ([string]$dependency.RelativePath).Replace("/", "\")
+                    if (-not $entries.ContainsKey($relativePath)) {
+                        throw "Dependency archive is missing pinned x64 package '$relativePath'."
+                    }
+                    $entry = $entries[$relativePath]
+                    if (
+                        ([string]$entry.FullName).Replace("/", "\") -cne
+                        $relativePath
+                    ) {
+                        throw "Dependency archive does not use exact pinned x64 package path '$relativePath'."
+                    }
+                    if ([Int64]$entry.Length -ne [Int64]$dependency.Size) {
+                        throw "Pinned dependency '$($dependency.Name)' has an unexpected archive entry size."
+                    }
+                    $destinationPath = [IO.Path]::GetFullPath(
+                        (Join-Path $DestinationRoot $relativePath)
+                    )
+                    if (
+                        -not $destinationPath.StartsWith(
+                            $canonicalRoot,
+                            [StringComparison]::OrdinalIgnoreCase
+                        )
+                    ) {
+                        throw "Pinned dependency extraction escaped its nonce temporary root."
+                    }
+                    $destinationDirectory = Split-Path -Parent $destinationPath
+                    [IO.Directory]::CreateDirectory($destinationDirectory) | Out-Null
+                    $entryStream = $null
+                    $destinationStream = $null
+                    try {
+                        $entryStream = $entry.Open()
+                        $destinationStream = [IO.File]::Open(
+                            $destinationPath,
+                            [IO.FileMode]::CreateNew,
+                            [IO.FileAccess]::Write,
+                            [IO.FileShare]::None
+                        )
+                        $buffer = New-Object "byte[]" 1048576
+                        [Int64]$written = 0
+                        while (($read = $entryStream.Read($buffer, 0, $buffer.Length)) -gt 0) {
+                            $written += [Int64]$read
+                            if ($written -gt [Int64]$dependency.Size) {
+                                throw "Pinned dependency '$($dependency.Name)' exceeded its pinned size while extracting."
+                            }
+                            $destinationStream.Write($buffer, 0, $read)
+                        }
+                        $destinationStream.Flush()
+                        if ($written -ne [Int64]$dependency.Size) {
+                            throw "Pinned dependency '$($dependency.Name)' extraction length did not match its pinned size."
+                        }
+                    } finally {
+                        foreach ($disposable in @($destinationStream, $entryStream)) {
+                            if ($null -ne $disposable) {
+                                $disposable.Dispose()
+                            }
+                        }
+                    }
+                    $results.Add([pscustomobject][ordered]@{
+                        Name = [string]$dependency.Name
+                        Version = [string]$dependency.Version
+                        RelativePath = [string]$dependency.RelativePath
+                        Size = [Int64]$dependency.Size
+                        Sha256 = [string]$dependency.Sha256
+                        LocalPath = $destinationPath
+                    })
+                }
+                return [object[]]$results.ToArray()
+            } catch {
+                throw
+            } finally {
+                foreach ($disposable in @($archive, $archiveStream)) {
+                    if ($null -ne $disposable) {
+                        $disposable.Dispose()
+                    }
+                }
+            }
+        }
+
+        function Expand-OpenClawWingetBundlePayload {
+            param(
+                [Parameter(Mandatory = $true)]
+                [string]$BundlePath,
+                [Parameter(Mandatory = $true)]
+                [string]$PayloadEntryName,
+                [Parameter(Mandatory = $true)]
+                [Int64]$ExpectedSize,
+                [Parameter(Mandatory = $true)]
+                [string]$DestinationPath
+            )
+
+            Add-Type -AssemblyName System.IO.Compression -ErrorAction Stop
+            $archiveStream = $null
+            $archive = $null
+            $entryStream = $null
+            $destinationStream = $null
+            try {
+                $archiveStream = [IO.File]::Open(
+                    $BundlePath,
+                    [IO.FileMode]::Open,
+                    [IO.FileAccess]::Read,
+                    [IO.FileShare]::Read
+                )
+                $archive = New-Object System.IO.Compression.ZipArchive(
+                    $archiveStream,
+                    [System.IO.Compression.ZipArchiveMode]::Read,
+                    $false
+                )
+                $entries = New-OpenClawWingetZipEntryIndex `
+                    -Archive $archive `
+                    -ArchiveName "Microsoft.DesktopAppInstaller_8wekyb3d8bbwe.msixbundle"
+                $normalizedEntryName = $PayloadEntryName.Replace("/", "\")
+                if (-not $entries.ContainsKey($normalizedEntryName)) {
+                    throw "App Installer bundle is missing the exact pinned x64 payload."
+                }
+                $entry = $entries[$normalizedEntryName]
+                if (
+                    ([string]$entry.FullName).Replace("/", "\") -cne
+                    $normalizedEntryName
+                ) {
+                    throw "App Installer bundle does not use the exact pinned x64 payload path."
+                }
+                if ([Int64]$entry.Length -ne $ExpectedSize) {
+                    throw "App Installer x64 payload has an unexpected bundle entry size."
+                }
+                if (Test-Path -LiteralPath $DestinationPath) {
+                    throw "App Installer payload extraction destination already exists."
+                }
+                $entryStream = $entry.Open()
+                $destinationStream = [IO.File]::Open(
+                    $DestinationPath,
+                    [IO.FileMode]::CreateNew,
+                    [IO.FileAccess]::Write,
+                    [IO.FileShare]::None
+                )
+                $buffer = New-Object "byte[]" 1048576
+                [Int64]$written = 0
+                while (($read = $entryStream.Read($buffer, 0, $buffer.Length)) -gt 0) {
+                    $written += [Int64]$read
+                    if ($written -gt $ExpectedSize) {
+                        throw "App Installer x64 payload exceeded its pinned size while extracting."
+                    }
+                    $destinationStream.Write($buffer, 0, $read)
+                }
+                $destinationStream.Flush()
+                if ($written -ne $ExpectedSize) {
+                    throw "App Installer x64 payload extraction length did not match its pinned size."
+                }
+                return $DestinationPath
+            } finally {
+                foreach ($disposable in @(
+                    $destinationStream,
+                    $entryStream,
+                    $archive,
+                    $archiveStream
+                )) {
+                    if ($null -ne $disposable) {
+                        $disposable.Dispose()
+                    }
+                }
+            }
+        }
+
+        function Assert-OpenClawWingetDependencyDescriptor {
+            param(
+                [Parameter(Mandatory = $true)]
+                [string]$Path,
+                [Parameter(Mandatory = $true)]
+                [object[]]$ExpectedDependencies
+            )
+
+            try {
+                $descriptor = [IO.File]::ReadAllText($Path, [Text.Encoding]::UTF8) |
+                    ConvertFrom-Json -ErrorAction Stop
+            } catch {
+                throw "Pinned WinGet dependency descriptor could not be parsed."
+            }
+            $topLevelProperties = @($descriptor.PSObject.Properties.Name)
+            if (
+                $topLevelProperties.Count -ne 1 -or
+                [string]$topLevelProperties[0] -cne "Dependencies"
+            ) {
+                throw "Pinned WinGet dependency descriptor has unexpected top-level fields."
+            }
+            $actualDependencies = @($descriptor.Dependencies)
+            if ($actualDependencies.Count -ne $ExpectedDependencies.Count) {
+                throw "Pinned WinGet dependency descriptor has an unexpected dependency count."
+            }
+            for ($index = 0; $index -lt $ExpectedDependencies.Count; $index++) {
+                $actual = $actualDependencies[$index]
+                $expected = $ExpectedDependencies[$index]
+                $propertyNames = @($actual.PSObject.Properties.Name)
+                if (
+                    $propertyNames.Count -ne 2 -or
+                    -not ($propertyNames -ccontains "Name") -or
+                    -not ($propertyNames -ccontains "Version") -or
+                    [string]$actual.Name -cne [string]$expected.Name -or
+                    [string]$actual.Version -cne [string]$expected.Version
+                ) {
+                    throw "Pinned WinGet dependency descriptor entry $index does not match the exact ordered dependency."
+                }
+            }
+        }
+
+        function Assert-OpenClawAppxManifestIdentity {
+            param(
+                [Parameter(Mandatory = $true)]
+                [Xml.XmlDocument]$Document,
+                [Parameter(Mandatory = $true)]
+                [string]$ExpectedName,
+                [Parameter(Mandatory = $true)]
+                [string]$ExpectedVersion,
+                [Parameter(Mandatory = $true)]
+                [string]$ExpectedPublisher,
+                [Parameter(Mandatory = $true)]
+                [string]$DocumentName
+            )
+
+            if (
+                $null -eq $Document.DocumentElement -or
+                [string]$Document.DocumentElement.LocalName -cne "Package"
+            ) {
+                throw "Appx manifest '$DocumentName' does not have a Package root."
+            }
+            $identities = @(
+                Get-OpenClawWingetDirectXmlChildren `
+                    -Parent $Document.DocumentElement `
+                    -LocalName "Identity"
+            )
+            if ($identities.Count -ne 1) {
+                throw "Appx manifest '$DocumentName' must have exactly one direct Identity."
+            }
+            $identity = [Xml.XmlElement]$identities[0]
+            if (
+                (Get-OpenClawWingetXmlAttribute -Element $identity -Name "Name") -cne $ExpectedName -or
+                (Get-OpenClawWingetXmlAttribute -Element $identity -Name "Version") -cne $ExpectedVersion -or
+                (Get-OpenClawWingetXmlAttribute -Element $identity -Name "Publisher") -cne $ExpectedPublisher -or
+                (Get-OpenClawWingetXmlAttribute -Element $identity -Name "ProcessorArchitecture") -cne "x64"
+            ) {
+                throw "Appx manifest '$DocumentName' does not match its exact pinned x64 identity."
+            }
+        }
+
+        function Assert-OpenClawWingetBundleManifest {
+            param(
+                [Parameter(Mandatory = $true)]
+                [Xml.XmlDocument]$Document,
+                [Parameter(Mandatory = $true)]
+                [string]$ExpectedPublisher
+            )
+
+            if (
+                $null -eq $Document.DocumentElement -or
+                [string]$Document.DocumentElement.LocalName -cne "Bundle"
+            ) {
+                throw "App Installer bundle manifest does not have a Bundle root."
+            }
+            $identities = @(
+                Get-OpenClawWingetDirectXmlChildren `
+                    -Parent $Document.DocumentElement `
+                    -LocalName "Identity"
+            )
+            if ($identities.Count -ne 1) {
+                throw "App Installer bundle manifest must have exactly one direct Identity."
+            }
+            $identity = [Xml.XmlElement]$identities[0]
+            if (
+                (Get-OpenClawWingetXmlAttribute -Element $identity -Name "Name") -cne "Microsoft.DesktopAppInstaller" -or
+                (Get-OpenClawWingetXmlAttribute -Element $identity -Name "Publisher") -cne $ExpectedPublisher -or
+                (Get-OpenClawWingetXmlAttribute -Element $identity -Name "Version") -cne "2026.623.1704.0"
+            ) {
+                throw "App Installer bundle manifest identity does not match the exact pin."
+            }
+
+            $nonStubX64Packages = @(
+                $Document.SelectNodes("//*[local-name()='Package']") |
+                    Where-Object {
+                        $_ -is [Xml.XmlElement] -and
+                        [string]$_.GetAttribute("Architecture") -ceq "x64" -and
+                        ([string]$_.GetAttribute("FileName")).IndexOf(
+                            "Stub",
+                            [StringComparison]::OrdinalIgnoreCase
+                        ) -lt 0
+                    }
+            )
+            if ($nonStubX64Packages.Count -ne 1) {
+                throw "App Installer bundle manifest must contain exactly one nonstub x64 package."
+            }
+            $payload = [Xml.XmlElement]$nonStubX64Packages[0]
+            if (
+                (Get-OpenClawWingetXmlAttribute -Element $payload -Name "FileName") -cne "AppInstaller_x64.msix" -or
+                (Get-OpenClawWingetXmlAttribute -Element $payload -Name "Version") -cne "1.29.280.0" -or
+                (Get-OpenClawWingetXmlAttribute -Element $payload -Name "Architecture") -cne "x64" -or
+                (Get-OpenClawWingetXmlAttribute -Element $payload -Name "Type") -cne "application"
+            ) {
+                throw "App Installer bundle manifest x64 payload does not match the exact pin."
+            }
+            return "AppInstaller_x64.msix"
+        }
+
+        function Assert-OpenClawWingetPayloadManifest {
+            param(
+                [Parameter(Mandatory = $true)]
+                [Xml.XmlDocument]$Document,
+                [Parameter(Mandatory = $true)]
+                [string]$ExpectedPublisher,
+                [Parameter(Mandatory = $true)]
+                [object[]]$ExpectedDependencies
+            )
+
+            Assert-OpenClawAppxManifestIdentity `
+                -Document $Document `
+                -ExpectedName "Microsoft.DesktopAppInstaller" `
+                -ExpectedVersion "1.29.280.0" `
+                -ExpectedPublisher $ExpectedPublisher `
+                -DocumentName "AppInstaller_x64.msix"
+            $dependencyNodes = @(
+                $Document.SelectNodes(
+                    "/*[local-name()='Package']/*[local-name()='Dependencies']/*[local-name()='PackageDependency']"
+                )
+            )
+            if ($dependencyNodes.Count -ne $ExpectedDependencies.Count) {
+                throw "App Installer payload manifest has an unexpected package dependency count."
+            }
+            foreach ($expected in $ExpectedDependencies) {
+                $matchingNodes = @(
+                    $dependencyNodes |
+                        Where-Object {
+                            $_ -is [Xml.XmlElement] -and
+                            [string]$_.GetAttribute("Name") -ceq [string]$expected.Name
+                        }
+                )
+                if ($matchingNodes.Count -ne 1) {
+                    throw (
+                        "App Installer payload manifest must contain exactly one dependency named '{0}'." -f
+                        [string]$expected.Name
+                    )
+                }
+                $node = [Xml.XmlElement]$matchingNodes[0]
+                if (
+                    (Get-OpenClawWingetXmlAttribute -Element $node -Name "MinVersion") -cne [string]$expected.Version -or
+                    (Get-OpenClawWingetXmlAttribute -Element $node -Name "Publisher") -cne $ExpectedPublisher
+                ) {
+                    throw (
+                        "App Installer payload manifest dependency '{0}' does not match the exact pin." -f
+                        [string]$expected.Name
+                    )
+                }
+            }
+
+            $wingetApplications = @(
+                $Document.SelectNodes("//*[local-name()='Application']") |
+                    Where-Object {
+                        $_ -is [Xml.XmlElement] -and
+                        [string]$_.GetAttribute("Id") -ceq "winget"
+                    }
+            )
+            if ($wingetApplications.Count -ne 1) {
+                throw "App Installer payload manifest must have exactly one winget application."
+            }
+            $wingetApplication = [Xml.XmlElement]$wingetApplications[0]
+            if (
+                (Get-OpenClawWingetXmlAttribute -Element $wingetApplication -Name "Executable") -cne "winget.exe"
+            ) {
+                throw "App Installer winget application executable does not match the exact pin."
+            }
+            $aliases = @(
+                $wingetApplication.SelectNodes(".//*[local-name()='ExecutionAlias']")
+            )
+            if (
+                $aliases.Count -ne 1 -or
+                (Get-OpenClawWingetXmlAttribute `
+                    -Element ([Xml.XmlElement]$aliases[0]) `
+                    -Name "Alias") -cne "winget.exe"
+            ) {
+                throw "App Installer winget application alias does not match the exact pin."
+            }
+        }
+
+        function Assert-OpenClawWingetCurrentPackageIdentity {
+            param(
+                [Parameter(Mandatory = $true)]
+                [object]$Package,
+                [Parameter(Mandatory = $true)]
+                [string]$ExpectedName,
+                [Parameter(Mandatory = $true)]
+                [string]$ExpectedVersion,
+                [Parameter(Mandatory = $true)]
+                [string]$ExpectedPublisher,
+                [Parameter(Mandatory = $true)]
+                [string]$ExpectedPackageFamilyName
+            )
+
+            if (
+                [string]$Package.Name -cne $ExpectedName -or
+                [string]$Package.Publisher -cne $ExpectedPublisher -or
+                -not [string]::Equals(
+                    [string]$Package.Architecture,
+                    "X64",
+                    [StringComparison]::OrdinalIgnoreCase
+                ) -or
+                [string]$Package.PackageFamilyName -cne $ExpectedPackageFamilyName -or
+                [string]$Package.Version -cne $ExpectedVersion
+            ) {
+                throw "Current-user Appx registration '$ExpectedName' does not match the exact pinned identity."
+            }
+        }
+
+        function Get-OpenClawWingetCurrentMainPackageState {
+            param(
+                [Parameter(Mandatory = $true)]
+                [string]$ExpectedPublisher,
+                [Parameter(Mandatory = $true)]
+                [string]$ExpectedPackageFamilyName
+            )
+
+            $packages = @(
+                Get-AppxPackage `
+                    -Name "Microsoft.DesktopAppInstaller" `
+                    -ErrorAction Stop
+            )
+            if ($packages.Count -gt 1) {
+                throw "Current user has multiple Microsoft.DesktopAppInstaller registrations."
+            }
+            if ($packages.Count -eq 0) {
+                return [pscustomobject][ordered]@{
+                    State = "missing"
+                    Package = $null
+                }
+            }
+
+            $package = $packages[0]
+            if (
+                [string]$package.Name -cne "Microsoft.DesktopAppInstaller" -or
+                [string]$package.Publisher -cne $ExpectedPublisher -or
+                -not [string]::Equals(
+                    [string]$package.Architecture,
+                    "X64",
+                    [StringComparison]::OrdinalIgnoreCase
+                ) -or
+                [string]$package.PackageFamilyName -cne $ExpectedPackageFamilyName
+            ) {
+                throw "Existing current-user Microsoft.DesktopAppInstaller has an unexpected identity."
+            }
+            $actualVersion = [Version][string]$package.Version
+            $pinnedVersion = [Version]"1.29.280.0"
+            if ($actualVersion -gt $pinnedVersion) {
+                throw "Existing current-user Microsoft.DesktopAppInstaller is newer than the reproducible pin."
+            }
+            return [pscustomobject][ordered]@{
+                State = if ($actualVersion -eq $pinnedVersion) { "exact" } else { "older" }
+                Package = $package
+            }
+        }
+
+        function Get-OpenClawWingetDependencyInstallState {
+            param(
+                [Parameter(Mandatory = $true)]
+                [object]$Dependency,
+                [Parameter(Mandatory = $true)]
+                [string]$ExpectedPublisher
+            )
+
+            $packages = @(
+                Get-AppxPackage -Name ([string]$Dependency.Name) -ErrorAction Stop
+            )
+            $x64Packages = @(
+                $packages |
+                    Where-Object {
+                        [string]::Equals(
+                            [string]$_.Architecture,
+                            "X64",
+                            [StringComparison]::OrdinalIgnoreCase
+                        )
+                    }
+            )
+            if ($x64Packages.Count -gt 1) {
+                throw "Current user has multiple x64 registrations for dependency '$($Dependency.Name)'."
+            }
+            if ($x64Packages.Count -eq 0) {
+                return "install"
+            }
+            $package = $x64Packages[0]
+            $expectedFamily = "$($Dependency.Name)_8wekyb3d8bbwe"
+            if (
+                [string]$package.Name -cne [string]$Dependency.Name -or
+                [string]$package.Publisher -cne $ExpectedPublisher -or
+                [string]$package.PackageFamilyName -cne $expectedFamily
+            ) {
+                throw "Existing x64 dependency '$($Dependency.Name)' has an unexpected identity."
+            }
+            $actualVersion = [Version][string]$package.Version
+            $pinnedVersion = [Version][string]$Dependency.Version
+            if ($actualVersion -gt $pinnedVersion) {
+                throw "Existing x64 dependency '$($Dependency.Name)' is newer than the reproducible pin."
+            }
+            if ($actualVersion -eq $pinnedVersion) {
+                return "skip"
+            }
+            return "install"
+        }
+
+        function Wait-OpenClawWingetDependencyRegistration {
+            param(
+                [Parameter(Mandatory = $true)]
+                [object]$Dependency,
+                [Parameter(Mandatory = $true)]
+                [string]$ExpectedPublisher,
+                [ValidateRange(1, 120)]
+                [int]$RetryCount = 30,
+                [ValidateRange(0, 5000)]
+                [int]$DelayMilliseconds = 1000
+            )
+
+            for ($attempt = 1; $attempt -le $RetryCount; $attempt++) {
+                $packages = @(
+                    Get-AppxPackage -Name ([string]$Dependency.Name) -ErrorAction Stop |
+                        Where-Object {
+                            [string]::Equals(
+                                [string]$_.Architecture,
+                                "X64",
+                                [StringComparison]::OrdinalIgnoreCase
+                            )
+                        }
+                )
+                if ($packages.Count -gt 1) {
+                    throw "Current user has multiple x64 registrations for dependency '$($Dependency.Name)'."
+                }
+                if ($packages.Count -eq 1) {
+                    Assert-OpenClawWingetCurrentPackageIdentity `
+                        -Package $packages[0] `
+                        -ExpectedName ([string]$Dependency.Name) `
+                        -ExpectedVersion ([string]$Dependency.Version) `
+                        -ExpectedPublisher $ExpectedPublisher `
+                        -ExpectedPackageFamilyName "$($Dependency.Name)_8wekyb3d8bbwe"
+                    return
+                }
+                if ($attempt -lt $RetryCount -and $DelayMilliseconds -gt 0) {
+                    Start-Sleep -Milliseconds $DelayMilliseconds
+                }
+            }
+            throw "Pinned x64 dependency '$($Dependency.Name)' did not register for the current user within the bounded retry."
+        }
+
+        function Install-OpenClawWingetValidatedPackages {
+            param(
+                [Parameter(Mandatory = $true)]
+                [object[]]$ValidatedDependencies,
+                [Parameter(Mandatory = $true)]
+                [string]$BundlePath,
+                [Parameter(Mandatory = $true)]
+                [string]$ExpectedPublisher,
+                [ValidateRange(1, 120)]
+                [int]$RetryCount = 30,
+                [ValidateRange(0, 5000)]
+                [int]$DelayMilliseconds = 1000
+            )
+
+            foreach ($dependency in $ValidatedDependencies) {
+                $state = Get-OpenClawWingetDependencyInstallState `
+                    -Dependency $dependency `
+                    -ExpectedPublisher $ExpectedPublisher
+                if ([string]$state -ceq "install") {
+                    Add-AppxPackage `
+                        -Path ([string]$dependency.LocalPath) `
+                        -ErrorAction Stop
+                }
+                Wait-OpenClawWingetDependencyRegistration `
+                    -Dependency $dependency `
+                    -ExpectedPublisher $ExpectedPublisher `
+                    -RetryCount $RetryCount `
+                    -DelayMilliseconds $DelayMilliseconds
+            }
+            Add-AppxPackage -Path $BundlePath -ErrorAction Stop
+        }
+
+        function Wait-OpenClawWingetMainPackageRegistration {
+            param(
+                [Parameter(Mandatory = $true)]
+                [string]$ExpectedPublisher,
+                [Parameter(Mandatory = $true)]
+                [string]$ExpectedPackageFamilyName,
+                [ValidateRange(1, 120)]
+                [int]$RetryCount = 60,
+                [ValidateRange(0, 5000)]
+                [int]$DelayMilliseconds = 1000
+            )
+
+            for ($attempt = 1; $attempt -le $RetryCount; $attempt++) {
+                $packages = @(
+                    Get-AppxPackage `
+                        -Name "Microsoft.DesktopAppInstaller" `
+                        -ErrorAction Stop
+                )
+                if ($packages.Count -gt 1) {
+                    throw "Current user has multiple Microsoft.DesktopAppInstaller registrations."
+                }
+                if ($packages.Count -eq 1) {
+                    $package = $packages[0]
+                    $version = [Version][string]$package.Version
+                    if ($version -gt [Version]"1.29.280.0") {
+                        throw "Current-user Microsoft.DesktopAppInstaller became newer than the reproducible pin."
+                    }
+                    if ($version -eq [Version]"1.29.280.0") {
+                        Assert-OpenClawWingetCurrentPackageIdentity `
+                            -Package $package `
+                            -ExpectedName "Microsoft.DesktopAppInstaller" `
+                            -ExpectedVersion "1.29.280.0" `
+                            -ExpectedPublisher $ExpectedPublisher `
+                            -ExpectedPackageFamilyName $ExpectedPackageFamilyName
+                        return $package
+                    }
+                }
+                if ($attempt -lt $RetryCount -and $DelayMilliseconds -gt 0) {
+                    Start-Sleep -Milliseconds $DelayMilliseconds
+                }
+            }
+            throw "Pinned Microsoft.DesktopAppInstaller did not register for the current user within the bounded retry."
+        }
+
+        function Resolve-OpenClawWingetDirectExecutable {
+            param(
+                [Parameter(Mandatory = $true)]
+                [object]$Package
+            )
+
+            if ([string]::IsNullOrWhiteSpace([string]$Package.InstallLocation)) {
+                throw "Current-user Microsoft.DesktopAppInstaller has no install location."
+            }
+            $installRoot = [IO.Path]::GetFullPath([string]$Package.InstallLocation).TrimEnd("\")
+            if (-not (Test-Path -LiteralPath $installRoot -PathType Container)) {
+                throw "Current-user Microsoft.DesktopAppInstaller install location is missing."
+            }
+            $wingetPath = [IO.Path]::GetFullPath((Join-Path $installRoot "winget.exe"))
+            if (
+                [string](Split-Path -Parent $wingetPath).TrimEnd("\") -cne $installRoot -or
+                -not (Test-Path -LiteralPath $wingetPath -PathType Leaf)
+            ) {
+                throw "Pinned Microsoft.DesktopAppInstaller root winget.exe is missing."
+            }
+            return $wingetPath
+        }
+
+        function Read-OpenClawWingetBoundedNativeText {
+            param(
+                [Parameter(Mandatory = $true)]
+                [string]$Path,
+                [ValidateRange(64, 8192)]
+                [int]$MaxChars = 4096
+            )
+
+            if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+                return ""
+            }
+            $stream = $null
+            $reader = $null
+            try {
+                $stream = [IO.File]::Open(
+                    $Path,
+                    [IO.FileMode]::Open,
+                    [IO.FileAccess]::Read,
+                    [IO.FileShare]::ReadWrite
+                )
+                $reader = New-Object IO.StreamReader(
+                    $stream,
+                    [Text.Encoding]::UTF8,
+                    $true,
+                    1024,
+                    $false
+                )
+                $buffer = New-Object "char[]" ($MaxChars + 1)
+                $count = $reader.ReadBlock($buffer, 0, $buffer.Length)
+                $boundedCount = [Math]::Min($count, $MaxChars)
+                $text = if ($boundedCount -eq 0) {
+                    ""
+                } else {
+                    -join $buffer[0..($boundedCount - 1)]
+                }
+                if ($count -gt $MaxChars) {
+                    $text += " [truncated]"
+                }
+                return ConvertTo-OpenClawWingetDiagnostic -Text $text -MaxChars $MaxChars
+            } finally {
+                if ($null -ne $reader) {
+                    $reader.Dispose()
+                } elseif ($null -ne $stream) {
+                    $stream.Dispose()
+                }
+            }
+        }
+
+        function Invoke-OpenClawTrustedWingetProcess {
+            param(
+                [Parameter(Mandatory = $true)]
+                [string]$WingetPath,
+                [Parameter(Mandatory = $true)]
+                [ValidateSet("Version", "SourceList")]
+                [string]$Operation,
+                [Parameter(Mandatory = $true)]
+                [string]$TemporaryRoot
+            )
+
+            $canonicalWingetPath = [IO.Path]::GetFullPath($WingetPath)
+            if (-not (Test-Path -LiteralPath $canonicalWingetPath -PathType Leaf)) {
+                throw "Trusted direct winget.exe path is missing."
+            }
+            [string[]]$nativeArguments = switch ($Operation) {
+                "Version" {
+                    @("--version")
+                    break
+                }
+                "SourceList" {
+                    @("source", "list", "--disable-interactivity")
+                    break
+                }
+                default {
+                    throw "Unsupported trusted winget operation '$Operation'."
+                }
+            }
+
+            $nonce = [Guid]::NewGuid().ToString("N")
+            $stdoutPath = Join-Path $TemporaryRoot ("winget-{0}.stdout.txt" -f $nonce)
+            $stderrPath = Join-Path $TemporaryRoot ("winget-{0}.stderr.txt" -f $nonce)
+            $process = $null
+            $primaryFailure = $null
+            $result = $null
+            $cleanupFailures = New-Object "Collections.Generic.List[string]"
+            try {
+                $process = Start-Process `
+                    -FilePath $canonicalWingetPath `
+                    -ArgumentList $nativeArguments `
+                    -RedirectStandardOutput $stdoutPath `
+                    -RedirectStandardError $stderrPath `
+                    -PassThru `
+                    -WindowStyle Hidden `
+                    -ErrorAction Stop
+                if (-not $process.WaitForExit(60000)) {
+                    try {
+                        $process.Kill()
+                        $process.WaitForExit()
+                    } catch {
+                    }
+                    throw "Trusted winget operation '$Operation' timed out after 60 seconds."
+                }
+                $process.WaitForExit()
+                $result = [pscustomobject][ordered]@{
+                    Operation = $Operation
+                    ExitCode = [int]$process.ExitCode
+                    Stdout = Read-OpenClawWingetBoundedNativeText -Path $stdoutPath
+                    Stderr = Read-OpenClawWingetBoundedNativeText -Path $stderrPath
+                }
+            } catch {
+                $primaryFailure = $_
+            } finally {
+                if ($null -ne $process) {
+                    $process.Dispose()
+                }
+                foreach ($capturePath in [string[]]@($stdoutPath, $stderrPath)) {
+                    if (Test-Path -LiteralPath $capturePath) {
+                        try {
+                            Remove-Item -LiteralPath $capturePath -Force -ErrorAction Stop
+                        } catch {
+                            $cleanupFailures.Add(
+                                (ConvertTo-OpenClawWingetDiagnostic `
+                                    -Text $_.Exception.Message `
+                                    -MaxChars 256)
+                            )
+                        }
+                    }
+                }
+            }
+            if ($cleanupFailures.Count -gt 0) {
+                throw "Trusted winget operation '$Operation' could not remove its temporary capture files."
+            }
+            if ($null -ne $primaryFailure) {
+                $failureType = $primaryFailure.Exception.GetType().FullName
+                throw "Trusted winget operation '$Operation' failed ($failureType)."
+            }
+            if ($null -eq $result) {
+                throw "Trusted winget operation '$Operation' returned no result."
+            }
+            return $result
+        }
+
+        function Wait-OpenClawWingetExecutionAlias {
+            param(
+                [Parameter(Mandatory = $true)]
+                [string]$ExpectedPackageFamilyName,
+                [ValidateRange(1, 120)]
+                [int]$RetryCount = 60,
+                [ValidateRange(0, 5000)]
+                [int]$DelayMilliseconds = 1000
+            )
+
+            $windowsAppsPath = [IO.Path]::GetFullPath(
+                (Join-Path $env:LOCALAPPDATA "Microsoft\WindowsApps\winget.exe")
+            )
+            for ($attempt = 1; $attempt -le $RetryCount; $attempt++) {
+                $aliasCmdlet = Get-Command Get-AppExecutionAlias -ErrorAction SilentlyContinue
+                $aliasReady = $true
+                if ($null -ne $aliasCmdlet) {
+                    $aliasRecords = @(
+                        Get-AppExecutionAlias `
+                            -Name "winget.exe" `
+                            -ErrorAction SilentlyContinue
+                    )
+                    if ($aliasRecords.Count -gt 1) {
+                        throw "Current user has multiple winget.exe AppExecutionAlias registrations."
+                    }
+                    if ($aliasRecords.Count -eq 0) {
+                        $aliasReady = $false
+                    } else {
+                        $record = $aliasRecords[0]
+                        if (
+                            $null -ne $record.PSObject.Properties["PackageFamilyName"] -and
+                            [string]$record.PackageFamilyName -cne $ExpectedPackageFamilyName
+                        ) {
+                            throw "Current-user winget.exe AppExecutionAlias maps to an unexpected package family."
+                        }
+                    }
+                }
+
+                $commands = @(
+                    Get-Command `
+                        winget.exe `
+                        -CommandType Application `
+                        -All `
+                        -ErrorAction SilentlyContinue
+                )
+                $resolvedPaths = @(
+                    $commands |
+                        ForEach-Object {
+                            if (-not [string]::IsNullOrWhiteSpace([string]$_.Path)) {
+                                [IO.Path]::GetFullPath([string]$_.Path)
+                            }
+                        } |
+                        Select-Object -Unique
+                )
+                $unexpectedPaths = @(
+                    $resolvedPaths |
+                        Where-Object {
+                            -not [string]::Equals(
+                                [string]$_,
+                                $windowsAppsPath,
+                                [StringComparison]::OrdinalIgnoreCase
+                            )
+                        }
+                )
+                if ($unexpectedPaths.Count -gt 0) {
+                    throw "PATH resolves winget.exe outside the current-user Microsoft WindowsApps alias."
+                }
+                if (
+                    $aliasReady -and
+                    (Test-Path -LiteralPath $windowsAppsPath -PathType Leaf) -and
+                    $resolvedPaths.Count -eq 1
+                ) {
+                    return $windowsAppsPath
+                }
+                if ($attempt -lt $RetryCount -and $DelayMilliseconds -gt 0) {
+                    Start-Sleep -Milliseconds $DelayMilliseconds
+                }
+            }
+            throw "Current-user winget.exe AppExecutionAlias and PATH did not become ready within the bounded retry."
+        }
+
+        function Assert-OpenClawWingetCli {
+            param(
+                [Parameter(Mandatory = $true)]
+                [string]$WingetPath,
+                [Parameter(Mandatory = $true)]
+                [string]$TemporaryRoot
+            )
+
+            $versionResult = Invoke-OpenClawTrustedWingetProcess `
+                -WingetPath $WingetPath `
+                -Operation "Version" `
+                -TemporaryRoot $TemporaryRoot
+            if (
+                [int]$versionResult.ExitCode -ne 0 -or
+                [string]$versionResult.Stdout -cne "v1.29.280" -or
+                -not [string]::IsNullOrWhiteSpace([string]$versionResult.Stderr)
+            ) {
+                throw "Direct pinned winget.exe --version did not return exactly v1.29.280 with exit code 0."
+            }
+
+            $sourceResult = Invoke-OpenClawTrustedWingetProcess `
+                -WingetPath $WingetPath `
+                -Operation "SourceList" `
+                -TemporaryRoot $TemporaryRoot
+            $sourceOutput = "{0} {1}" -f (
+                [string]$sourceResult.Stdout,
+                [string]$sourceResult.Stderr
+            )
+            if (
+                [int]$sourceResult.ExitCode -ne 0 -or
+                $sourceOutput -notmatch "(?i)\bwinget\b"
+            ) {
+                throw "Direct pinned winget.exe source list --disable-interactivity did not return a winget source with exit code 0."
+            }
+        }
+
+        function Remove-OpenClawWingetTemporaryRoot {
+            param(
+                [Parameter(Mandatory = $true)]
+                [string]$Path
+            )
+
+            if (Test-Path -LiteralPath $Path) {
+                Remove-Item -LiteralPath $Path -Recurse -Force -ErrorAction Stop
+            }
+            if (Test-Path -LiteralPath $Path) {
+                throw "WinGet bootstrap nonce temporary root still exists after cleanup."
+            }
+        }
+
+        function Invoke-OpenClawWingetBootstrap {
+            param(
+                [Parameter(Mandatory = $true)]
+                [string]$Publisher,
+                [Parameter(Mandatory = $true)]
+                [string]$PackageFamilyName,
+                [Parameter(Mandatory = $true)]
+                [string]$ReleaseBase,
+                [Parameter(Mandatory = $true)]
+                [string]$ReleasePath,
+                [Parameter(Mandatory = $true)]
+                [object[]]$TopAssets,
+                [Parameter(Mandatory = $true)]
+                [object[]]$Dependencies,
+                [Parameter(Mandatory = $true)]
+                [object]$Payload,
+                [string]$TemporaryBase = [IO.Path]::GetTempPath()
+            )
+
+            $temporaryBase = [IO.Path]::GetFullPath($TemporaryBase).TrimEnd("\")
+            $temporaryRoot = [IO.Path]::GetFullPath(
+                (Join-Path $temporaryBase ("openclaw-winget-{0}" -f [Guid]::NewGuid().ToString("N")))
+            )
+            if (
+                -not $temporaryRoot.StartsWith(
+                    $temporaryBase + "\",
+                    [StringComparison]::OrdinalIgnoreCase
+                ) -or
+                (Test-Path -LiteralPath $temporaryRoot)
+            ) {
+                throw "Could not allocate a new WinGet bootstrap nonce temporary root."
+            }
+            [IO.Directory]::CreateDirectory($temporaryRoot) | Out-Null
+
+            $primaryFailure = $null
+            $cleanupFailure = $null
+            $result = $null
+            try {
+                $mainState = Get-OpenClawWingetCurrentMainPackageState `
+                    -ExpectedPublisher $Publisher `
+                    -ExpectedPackageFamilyName $PackageFamilyName
+                if ([string]$mainState.State -ceq "exact") {
+                    Assert-OpenClawWingetCurrentPackageIdentity `
+                        -Package $mainState.Package `
+                        -ExpectedName "Microsoft.DesktopAppInstaller" `
+                        -ExpectedVersion "1.29.280.0" `
+                        -ExpectedPublisher $Publisher `
+                        -ExpectedPackageFamilyName $PackageFamilyName
+                    $directWinget = Resolve-OpenClawWingetDirectExecutable `
+                        -Package $mainState.Package
+                    Wait-OpenClawWingetExecutionAlias `
+                        -ExpectedPackageFamilyName $PackageFamilyName | Out-Null
+                    Assert-OpenClawWingetCli `
+                        -WingetPath $directWinget `
+                        -TemporaryRoot $temporaryRoot
+                    $result = [pscustomobject][ordered]@{
+                        Stage = "winget-bootstrap"
+                        AlreadyInstalled = $true
+                        Version = "v1.29.280"
+                    }
+                } else {
+                    $assetPaths = @{}
+                    $downloadDeadlineUtc = [DateTime]::UtcNow.AddSeconds(1800)
+                    foreach ($asset in $TopAssets) {
+                        $remainingDownloadSeconds = [int][Math]::Floor(
+                            ($downloadDeadlineUtc - [DateTime]::UtcNow).TotalSeconds
+                        )
+                        if ($remainingDownloadSeconds -lt 1) {
+                            throw "Pinned WinGet asset downloads exceeded the shared 1800-second timeout."
+                        }
+                        $assetPath = Join-Path $temporaryRoot ([string]$asset.Name)
+                        $assetUri = [Uri]::new($ReleaseBase + [string]$asset.Name)
+                        Invoke-OpenClawWingetAssetDownload `
+                            -InitialUri $assetUri `
+                            -AssetName ([string]$asset.Name) `
+                            -ExpectedSize ([Int64]$asset.Size) `
+                            -DestinationPath $assetPath `
+                            -ExpectedReleasePath $ReleasePath `
+                            -TimeoutSeconds $remainingDownloadSeconds
+                        $assetPaths[[string]$asset.Name] = $assetPath
+                    }
+
+                    foreach ($asset in $TopAssets) {
+                        Assert-OpenClawWingetFile `
+                            -Path ([string]$assetPaths[[string]$asset.Name]) `
+                            -ExpectedSize ([Int64]$asset.Size) `
+                            -ExpectedSha256 ([string]$asset.Sha256) `
+                            -AssetName ([string]$asset.Name)
+                    }
+
+                    $descriptorPath = [string]$assetPaths[
+                        "DesktopAppInstaller_Dependencies.json"
+                    ]
+                    Assert-OpenClawWingetDependencyDescriptor `
+                        -Path $descriptorPath `
+                        -ExpectedDependencies $Dependencies
+
+                    $dependencyArchivePath = [string]$assetPaths[
+                        "DesktopAppInstaller_Dependencies.zip"
+                    ]
+                    $validatedDependencies = @(
+                        Expand-OpenClawWingetDependencyPackages `
+                            -ArchivePath $dependencyArchivePath `
+                            -DestinationRoot (Join-Path $temporaryRoot "dependencies") `
+                            -ExpectedDependencies $Dependencies
+                    )
+                    if ($validatedDependencies.Count -ne $Dependencies.Count) {
+                        throw "Dependency extraction did not return every exact pinned x64 package."
+                    }
+                    foreach ($dependency in $validatedDependencies) {
+                        Assert-OpenClawWingetFile `
+                            -Path ([string]$dependency.LocalPath) `
+                            -ExpectedSize ([Int64]$dependency.Size) `
+                            -ExpectedSha256 ([string]$dependency.Sha256) `
+                            -AssetName ([string]$dependency.RelativePath)
+                        Assert-OpenClawWingetSignature `
+                            -Path ([string]$dependency.LocalPath) `
+                            -ExpectedPublisher $Publisher `
+                            -AssetName ([string]$dependency.RelativePath)
+                        $dependencyManifest = Read-OpenClawWingetZipXml `
+                            -ArchivePath ([string]$dependency.LocalPath) `
+                            -EntryName "AppxManifest.xml" `
+                            -ArchiveName ([string]$dependency.RelativePath)
+                        Assert-OpenClawAppxManifestIdentity `
+                            -Document $dependencyManifest `
+                            -ExpectedName ([string]$dependency.Name) `
+                            -ExpectedVersion ([string]$dependency.Version) `
+                            -ExpectedPublisher $Publisher `
+                            -DocumentName ([string]$dependency.RelativePath)
+                    }
+
+                    $bundlePath = [string]$assetPaths[
+                        "Microsoft.DesktopAppInstaller_8wekyb3d8bbwe.msixbundle"
+                    ]
+                    Assert-OpenClawWingetSignature `
+                        -Path $bundlePath `
+                        -ExpectedPublisher $Publisher `
+                        -AssetName "Microsoft.DesktopAppInstaller_8wekyb3d8bbwe.msixbundle"
+                    $bundleManifest = Read-OpenClawWingetZipXml `
+                        -ArchivePath $bundlePath `
+                        -EntryName "AppxMetadata\AppxBundleManifest.xml" `
+                        -ArchiveName "Microsoft.DesktopAppInstaller_8wekyb3d8bbwe.msixbundle"
+                    $payloadEntryName = Assert-OpenClawWingetBundleManifest `
+                        -Document $bundleManifest `
+                        -ExpectedPublisher $Publisher
+                    $payloadPath = Join-Path $temporaryRoot ([string]$Payload.Name)
+                    Expand-OpenClawWingetBundlePayload `
+                        -BundlePath $bundlePath `
+                        -PayloadEntryName $payloadEntryName `
+                        -ExpectedSize ([Int64]$Payload.Size) `
+                        -DestinationPath $payloadPath | Out-Null
+                    Assert-OpenClawWingetFile `
+                        -Path $payloadPath `
+                        -ExpectedSize ([Int64]$Payload.Size) `
+                        -ExpectedSha256 ([string]$Payload.Sha256) `
+                        -AssetName ([string]$Payload.Name)
+                    Assert-OpenClawWingetSignature `
+                        -Path $payloadPath `
+                        -ExpectedPublisher $Publisher `
+                        -AssetName ([string]$Payload.Name)
+                    $payloadManifest = Read-OpenClawWingetZipXml `
+                        -ArchivePath $payloadPath `
+                        -EntryName "AppxManifest.xml" `
+                        -ArchiveName ([string]$Payload.Name)
+                    Assert-OpenClawWingetPayloadManifest `
+                        -Document $payloadManifest `
+                        -ExpectedPublisher $Publisher `
+                        -ExpectedDependencies $Dependencies
+
+                    Install-OpenClawWingetValidatedPackages `
+                        -ValidatedDependencies $validatedDependencies `
+                        -BundlePath $bundlePath `
+                        -ExpectedPublisher $Publisher
+                    $registeredPackage = Wait-OpenClawWingetMainPackageRegistration `
+                        -ExpectedPublisher $Publisher `
+                        -ExpectedPackageFamilyName $PackageFamilyName
+                    $directWinget = Resolve-OpenClawWingetDirectExecutable `
+                        -Package $registeredPackage
+                    Wait-OpenClawWingetExecutionAlias `
+                        -ExpectedPackageFamilyName $PackageFamilyName | Out-Null
+                    Assert-OpenClawWingetCli `
+                        -WingetPath $directWinget `
+                        -TemporaryRoot $temporaryRoot
+                    $result = [pscustomobject][ordered]@{
+                        Stage = "winget-bootstrap"
+                        AlreadyInstalled = $false
+                        Version = "v1.29.280"
+                    }
+                }
+            } catch {
+                $primaryFailure = $_
+            } finally {
+                try {
+                    Remove-OpenClawWingetTemporaryRoot -Path $temporaryRoot
+                } catch {
+                    $cleanupFailure = $_
+                }
+            }
+
+            if ($null -ne $cleanupFailure) {
+                throw "WinGet bootstrap failed to clean its nonce temporary root."
+            }
+            if ($null -ne $primaryFailure) {
+                throw $primaryFailure
+            }
+            if ($null -eq $result) {
+                throw "WinGet bootstrap returned no result."
+            }
+            return $result
+        }
+
+        $publisher = "CN=Microsoft Corporation, O=Microsoft Corporation, L=Redmond, S=Washington, C=US"
+        $packageFamilyName = "Microsoft.DesktopAppInstaller_8wekyb3d8bbwe"
+        $releaseTag = "v1.29.280"
+        $releasePath = "/microsoft/winget-cli/releases/download/$releaseTag"
+        $releaseBase = "https://github.com$releasePath/"
+        $topAssets = [object[]]@(
+            [pscustomobject][ordered]@{
+                Name = "Microsoft.DesktopAppInstaller_8wekyb3d8bbwe.msixbundle"
+                Size = [Int64]216775738
+                Sha256 = "0809fa9f52e395d6e7de692331dce847ac991952675116bb4d8aae2ddcc20946"
+            },
+            [pscustomobject][ordered]@{
+                Name = "DesktopAppInstaller_Dependencies.zip"
+                Size = [Int64]97760717
+                Sha256 = "3bbfcaa5cb011c48fac48d896d64a5c7c6898859a9f3d01555c8cd000f4e2962"
+            },
+            [pscustomobject][ordered]@{
+                Name = "DesktopAppInstaller_Dependencies.json"
+                Size = [Int64]322
+                Sha256 = "a56ddd79cf9cd056d9546cfeb6958c2b44d20f6221f8518bf17b003717d47a7a"
+            }
+        )
+        $dependencies = [object[]]@(
+            [pscustomobject][ordered]@{
+                Name = "Microsoft.VCLibs.140.00"
+                Version = "14.0.33519.0"
+                RelativePath = "x64\Microsoft.VCLibs.140.00_14.0.33519.0_x64.appx"
+                Size = [Int64]896581
+                Sha256 = "9c17b521f9d690a1f504da5108ed6eec5669eb3a8fd1331eef43e40d84e74283"
+            },
+            [pscustomobject][ordered]@{
+                Name = "Microsoft.VCLibs.140.00.UWPDesktop"
+                Version = "14.0.33728.0"
+                RelativePath = "x64\Microsoft.VCLibs.140.00.UWPDesktop_14.0.33728.0_x64.appx"
+                Size = [Int64]6757465
+                Sha256 = "077a3d1a5d0622bd3004dca85f5e192d6e98ec79b83d4aa06766759ea6c09c3d"
+            },
+            [pscustomobject][ordered]@{
+                Name = "Microsoft.WindowsAppRuntime.1.8"
+                Version = "8000.616.304.0"
+                RelativePath = "x64\Microsoft.WindowsAppRuntime.1.8_8000.616.304.0_x64.appx"
+                Size = [Int64]25431545
+                Sha256 = "a31595cc4b5aebc18466ec24e8d4b566fe0fcafb52d833b6d139b8691d0e5177"
+            }
+        )
+        $payload = [pscustomobject][ordered]@{
+            Name = "AppInstaller_x64.msix"
+            Size = [Int64]62421154
+            Sha256 = "bdc908068f7563d89ef3405f1a30ae74df8cb0416414ed3613c4d68e2c812ff1"
+        }
+
+        Invoke-OpenClawWingetBootstrap `
+            -Publisher $publisher `
+            -PackageFamilyName $packageFamilyName `
+            -ReleaseBase $releaseBase `
+            -ReleasePath $releasePath `
+            -TopAssets $topAssets `
+            -Dependencies $dependencies `
+            -Payload $payload
+    }
+}
+
+function Ensure-GuestWingetAvailable {
+    param(
+        [Parameter(Mandatory = $true)]
+        [System.Management.Automation.Runspaces.PSSession]$Session
+    )
+
+    Write-Step "Ensuring pinned guest WinGet is available"
+    Invoke-GuestCommandWithTimeout `
+        -Session $Session `
+        -OperationName "Bootstrapping pinned guest WinGet" `
+        -TimeoutSec 3000 `
+        -ScriptBlock (Get-GuestWingetBootstrapScriptBlock) | Out-Null
+}
+
 function Ensure-GuestGitInstalled {
     param(
         [Parameter(Mandatory = $true)]
@@ -3792,6 +5571,7 @@ function Prepare-GuestPrerequisites {
             version = [string]$wslProof.version
         } | ConvertTo-Json -Compress)
 
+        Ensure-GuestWingetAvailable -Session $activeSession
         Ensure-GuestGitInstalled -Session $activeSession
         Ensure-GuestPowerShell7Installed -Session $activeSession
         Copy-RepoToGuest -Session $activeSession
