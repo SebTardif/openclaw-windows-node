@@ -1192,10 +1192,18 @@ public sealed class CleanWindowsRunnerScriptTests
         Assert.Contains(
             "@(\"source\", \"export\", \"--name\", \"winget\", \"--disable-interactivity\")",
             bootstrap);
+        Assert.Contains("\"SourceUpdateWinget\"", bootstrap);
+        Assert.Contains("\"source\",", bootstrap);
+        Assert.Contains("\"update\",", bootstrap);
+        Assert.Contains("\"--name\", \"winget\"", bootstrap);
+        Assert.Contains("\"--accept-source-agreements\"", bootstrap);
         Assert.Contains("\"--source\", \"winget\"", bootstrap);
         Assert.Contains("\"--id\", \"Git.Git\"", bootstrap);
         Assert.Contains("@(\"--version\")", bootstrap);
-        Assert.Contains("$process.WaitForExit(60000)", bootstrap);
+        Assert.Contains("$Operation -ceq \"SourceUpdateWinget\"", bootstrap);
+        Assert.Contains("$process.WaitForExit($timeoutMilliseconds)", bootstrap);
+        Assert.Contains("300000", bootstrap);
+        Assert.Contains("60000", bootstrap);
         Assert.Contains("Remove-OpenClawWingetTemporaryRoot", bootstrap);
         Assert.Contains("Get-AppxPackage", bootstrap);
         Assert.Contains("Get-AppExecutionAlias", bootstrap);
@@ -1215,7 +1223,9 @@ public sealed class CleanWindowsRunnerScriptTests
         Assert.DoesNotContain("License1.xml", bootstrap, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("Add-AppxProvisionedPackage", bootstrap, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("-AllUsers", bootstrap, StringComparison.OrdinalIgnoreCase);
-        Assert.DoesNotContain("source update", bootstrap, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("source reset", bootstrap, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("source remove", bootstrap, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("source add", bootstrap, StringComparison.OrdinalIgnoreCase);
 
         var downloadLoop = bootstrap.IndexOf(
             "Invoke-OpenClawWingetAssetDownload",
@@ -1341,6 +1351,23 @@ public sealed class CleanWindowsRunnerScriptTests
 
         AssertPowerShellProofSucceeded(result);
         Assert.Contains(expectedOutput, result.Stdout, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Theory]
+    [InlineData(false, "accepted|source,update,--name,winget,--accept-source-agreements,--disable-interactivity|300000")]
+    [InlineData(true, "timed out after 300 seconds")]
+    public void HyperVController_WingetSourceUpdateUsesTypedArgsAndBoundedTimeout(
+        bool timeout,
+        string expectedOutput)
+    {
+        var result = RunPowerShellCommand(BuildWingetTrustedProcessProof(timeout));
+
+        AssertPowerShellProofSucceeded(result);
+        Assert.Contains(expectedOutput, result.Stdout, StringComparison.OrdinalIgnoreCase);
+        if (timeout)
+        {
+            Assert.Contains("killed=True", result.Stdout, StringComparison.OrdinalIgnoreCase);
+        }
     }
 
     [Theory]
@@ -1576,6 +1603,7 @@ public sealed class CleanWindowsRunnerScriptTests
             Assert.Contains(expectedOutput, result.Stdout, StringComparison.OrdinalIgnoreCase);
             Assert.Contains("downloads=0", result.Stdout, StringComparison.Ordinal);
             Assert.Contains("installs=0", result.Stdout, StringComparison.Ordinal);
+            Assert.Contains("validated=1", result.Stdout, StringComparison.Ordinal);
             if (!cleanupFails)
             {
                 Assert.Empty(Directory.EnumerateFileSystemEntries(ownedRoot));
@@ -1605,13 +1633,14 @@ public sealed class CleanWindowsRunnerScriptTests
     }
 
     [Theory]
-    [InlineData("valid", "accepted|Version,SourceExportWinget,SourceProbeGit")]
+    [InlineData("valid", "accepted|Version,SourceExportWinget,SourceUpdateWinget,SourceProbeGit")]
     [InlineData("version", "--version did not return exactly")]
     [InlineData("source-exit", "source export")]
     [InlineData("source-name", "exactly one source named winget")]
     [InlineData("source-json", "valid JSON")]
-    [InlineData("source-probe-exit", "could not resolve")]
-    [InlineData("source-probe-package", "could not resolve")]
+    [InlineData("source-update-exit", "exitCode=17; stdout=update-out; stderr=update-err")]
+    [InlineData("source-probe-exit", "exitCode=23; stdout=probe-out; stderr=probe-err")]
+    [InlineData("source-probe-package", "exitCode=0; stdout=Found Unexpected.Package")]
     public void HyperVController_WingetCliRequiresExactVersionAndSourceValidation(
         string scenario,
         string expectedOutput)
@@ -1620,6 +1649,30 @@ public sealed class CleanWindowsRunnerScriptTests
 
         AssertPowerShellProofSucceeded(result);
         Assert.Contains(expectedOutput, result.Stdout, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void HyperVController_WingetSourceValidationExportsThenUpdatesThenProbes()
+    {
+        var controller = ReadScript("Invoke-CleanWindowsHyperV.ps1");
+        var validation = ExtractPowerShellFunction(
+            controller,
+            "Assert-OpenClawWingetCli",
+            "Remove-OpenClawWingetTemporaryRoot");
+
+        var exportIndex = validation.IndexOf(
+            "-Operation \"SourceExportWinget\"",
+            StringComparison.Ordinal);
+        var updateIndex = validation.IndexOf(
+            "-Operation \"SourceUpdateWinget\"",
+            StringComparison.Ordinal);
+        var probeIndex = validation.IndexOf(
+            "-Operation \"SourceProbeGit\"",
+            StringComparison.Ordinal);
+
+        Assert.True(exportIndex >= 0);
+        Assert.True(updateIndex > exportIndex);
+        Assert.True(probeIndex > updateIndex);
     }
 
     [Fact]
@@ -3149,6 +3202,37 @@ public sealed class CleanWindowsRunnerScriptTests
             "} catch { [Console]::Out.Write('rejected|' + $_.Exception.Message) }\n");
     }
 
+    private static string BuildWingetTrustedProcessProof(bool timeout)
+    {
+        var controller = ReadScript("Invoke-CleanWindowsHyperV.ps1");
+        var process = ExtractPowerShellFunction(
+            controller,
+            "Invoke-OpenClawTrustedWingetProcess",
+            "Get-OpenClawWingetProcessDiagnostic");
+        return string.Concat(
+            "$ErrorActionPreference='Stop'\n",
+            "function ConvertTo-OpenClawWingetDiagnostic { param($Text,$MaxChars) [string]$Text }\n",
+            "function Read-OpenClawWingetBoundedNativeText { param($Path) '' }\n",
+            process,
+            "\n$script:timeout=",
+            timeout ? "$true" : "$false",
+            "; $script:killed=$false; $script:wait=0; $script:arguments=@()\n",
+            "function Test-Path { param($LiteralPath,$PathType) return ($LiteralPath -ceq 'C:\\Package\\winget.exe') }\n",
+            "function Start-Process {\n",
+            " param($FilePath,[string[]]$ArgumentList,$RedirectStandardOutput,$RedirectStandardError,[switch]$PassThru,$WindowStyle,$ErrorAction)\n",
+            " $script:arguments=@($ArgumentList)\n",
+            " $mock=[pscustomobject]@{ ExitCode=0 }\n",
+            " $mock | Add-Member ScriptMethod WaitForExit { param($milliseconds) if ($null -eq $milliseconds) { return $true }; $script:wait=[int]$milliseconds; return (-not $script:timeout) }\n",
+            " $mock | Add-Member ScriptMethod Kill { $script:killed=$true }\n",
+            " $mock | Add-Member ScriptMethod Dispose { }\n",
+            " return $mock\n",
+            "}\n",
+            "try {\n",
+            " $null=Invoke-OpenClawTrustedWingetProcess -WingetPath 'C:\\Package\\winget.exe' -Operation SourceUpdateWinget -TemporaryRoot 'D:\\owned'\n",
+            " [Console]::Out.Write(('accepted|{0}|{1}' -f ($script:arguments -join ','),$script:wait))\n",
+            "} catch { [Console]::Out.Write(('rejected|{0}|killed={1}' -f $_.Exception.Message,$script:killed)) }\n");
+    }
+
     private static string BuildWingetSignatureProof(string scenario)
     {
         var controller = ReadScript("Invoke-CleanWindowsHyperV.ps1");
@@ -3536,13 +3620,13 @@ public sealed class CleanWindowsRunnerScriptTests
         return string.Concat(
             "$ErrorActionPreference = 'Stop'\n",
             workflow,
-            "\n$script:downloads=0; $script:installs=0; $script:cleaned=$null\n",
+            "\n$script:downloads=0; $script:installs=0; $script:validated=0; $script:cleaned=$null\n",
             "function Get-OpenClawWingetCurrentMainPackageState { param($ExpectedPublisher,$ExpectedPackageFamilyName) ",
             "[pscustomobject]@{ State='exact'; Package=[pscustomobject]@{ Name='Microsoft.DesktopAppInstaller' } } }\n",
             "function Assert-OpenClawWingetCurrentPackageIdentity { param($Package,$ExpectedName,$ExpectedVersion,$ExpectedPublisher,$ExpectedPackageFamilyName) }\n",
             "function Resolve-OpenClawWingetDirectExecutable { param($Package) 'C:\\Package\\winget.exe' }\n",
             "function Wait-OpenClawWingetExecutionAlias { param($ExpectedPackageFamilyName) 'alias' }\n",
-            "function Assert-OpenClawWingetCli { param($WingetPath,$TemporaryRoot) }\n",
+            "function Assert-OpenClawWingetCli { param($WingetPath,$TemporaryRoot) $script:validated++ }\n",
             "function Invoke-OpenClawWingetAssetDownload { $script:downloads++ }\n",
             "function Install-OpenClawWingetValidatedPackages { $script:installs++ }\n",
             cleanupFunction,
@@ -3558,11 +3642,11 @@ public sealed class CleanWindowsRunnerScriptTests
             "-ReleaseBase 'https://github.com/release/' -ReleasePath '/release' ",
             "-TopAssets $top -Dependencies $deps -Payload $payload ",
             $"-TemporaryBase {PsQuote(ownedRoot)}\n",
-            " [Console]::Out.Write(('accepted|downloads={0}|installs={1}|cleaned={2}' ",
-            "-f $script:downloads,$script:installs,(-not [string]::IsNullOrEmpty($script:cleaned))))\n",
+            " [Console]::Out.Write(('accepted|downloads={0}|installs={1}|validated={2}|cleaned={3}' ",
+            "-f $script:downloads,$script:installs,$script:validated,(-not [string]::IsNullOrEmpty($script:cleaned))))\n",
             "} catch {\n",
-            " [Console]::Out.Write(('cleanup rejected|downloads={0}|installs={1}|error={2}' ",
-            "-f $script:downloads,$script:installs,$_.Exception.Message))\n",
+            " [Console]::Out.Write(('cleanup rejected|downloads={0}|installs={1}|validated={2}|error={3}' ",
+            "-f $script:downloads,$script:installs,$script:validated,$_.Exception.Message))\n",
             "}\n");
     }
 
@@ -3608,6 +3692,10 @@ public sealed class CleanWindowsRunnerScriptTests
             controller,
             "Assert-OpenClawWingetCli",
             "Remove-OpenClawWingetTemporaryRoot");
+        var diagnostic = ExtractPowerShellFunction(
+            controller,
+            "Get-OpenClawWingetProcessDiagnostic",
+            "Wait-OpenClawWingetExecutionAlias");
         var version = scenario == "version" ? "v1.29.279" : "v1.29.280";
         var sourceExit = scenario == "source-exit" ? 1 : 0;
         var sourceText = scenario switch
@@ -3616,12 +3704,22 @@ public sealed class CleanWindowsRunnerScriptTests
             "source-json" => "not-json",
             _ => "{\"Name\":\"winget\"}",
         };
-        var sourceProbeExit = scenario == "source-probe-exit" ? 1 : 0;
-        var sourceProbeText = scenario == "source-probe-package"
-            ? "Found Unexpected.Package"
-            : "Found Git [Git.Git]";
+        var sourceProbeExit = scenario == "source-probe-exit" ? 23 : 0;
+        var sourceProbeText = scenario switch
+        {
+            "source-probe-package" => "Found Unexpected.Package",
+            "source-probe-exit" => "probe-out",
+            _ => "Found Git [Git.Git]",
+        };
+        var sourceProbeError = scenario == "source-probe-exit" ? "probe-err" : string.Empty;
+        var sourceUpdateExit = scenario == "source-update-exit" ? 17 : 0;
+        var sourceUpdateText = scenario == "source-update-exit" ? "update-out" : "Done";
+        var sourceUpdateError = scenario == "source-update-exit" ? "update-err" : string.Empty;
         return string.Concat(
             "$ErrorActionPreference = 'Stop'\n",
+            "function ConvertTo-OpenClawWingetDiagnostic { param($Text,$MaxChars) if ([string]::IsNullOrEmpty([string]$Text)) { '<empty>' } else { [string]$Text } }\n",
+            diagnostic,
+            "\n",
             validation,
             "\n$script:calls=New-Object 'Collections.Generic.List[string]'\n",
             "function Invoke-OpenClawTrustedWingetProcess { param($WingetPath,$Operation,$TemporaryRoot) ",
@@ -3629,8 +3727,10 @@ public sealed class CleanWindowsRunnerScriptTests
             $"[pscustomobject]@{{ ExitCode=0; Stdout='{version}'; Stderr='' }} }} ",
             "elseif ($Operation -ceq 'SourceExportWinget') { ",
             $"[pscustomobject]@{{ ExitCode={sourceExit}; Stdout={PsQuote(sourceText)}; Stderr='' }} }} ",
+            "elseif ($Operation -ceq 'SourceUpdateWinget') { ",
+            $"[pscustomobject]@{{ ExitCode={sourceUpdateExit}; Stdout={PsQuote(sourceUpdateText)}; Stderr={PsQuote(sourceUpdateError)} }} }} ",
             "else { ",
-            $"[pscustomobject]@{{ ExitCode={sourceProbeExit}; Stdout={PsQuote(sourceProbeText)}; Stderr='' }} }} }}\n",
+            $"[pscustomobject]@{{ ExitCode={sourceProbeExit}; Stdout={PsQuote(sourceProbeText)}; Stderr={PsQuote(sourceProbeError)} }} }} }}\n",
             "try {\n",
             " Assert-OpenClawWingetCli -WingetPath 'C:\\Package\\winget.exe' -TemporaryRoot 'D:\\owned'\n",
             " [Console]::Out.Write('accepted|' + ($script:calls -join ','))\n",

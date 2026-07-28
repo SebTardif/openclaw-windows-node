@@ -4961,7 +4961,12 @@ function Get-GuestWingetBootstrapScriptBlock {
                 [Parameter(Mandatory = $true)]
                 [string]$WingetPath,
                 [Parameter(Mandatory = $true)]
-                [ValidateSet("Version", "SourceExportWinget", "SourceProbeGit")]
+                [ValidateSet(
+                    "Version",
+                    "SourceExportWinget",
+                    "SourceUpdateWinget",
+                    "SourceProbeGit"
+                )]
                 [string]$Operation,
                 [Parameter(Mandatory = $true)]
                 [string]$TemporaryRoot
@@ -4980,6 +4985,16 @@ function Get-GuestWingetBootstrapScriptBlock {
                     @("source", "export", "--name", "winget", "--disable-interactivity")
                     break
                 }
+                "SourceUpdateWinget" {
+                    @(
+                        "source",
+                        "update",
+                        "--name", "winget",
+                        "--accept-source-agreements",
+                        "--disable-interactivity"
+                    )
+                    break
+                }
                 "SourceProbeGit" {
                     @(
                         "show",
@@ -4995,6 +5010,12 @@ function Get-GuestWingetBootstrapScriptBlock {
                     throw "Unsupported trusted winget operation '$Operation'."
                 }
             }
+            $timeoutMilliseconds = if ($Operation -ceq "SourceUpdateWinget") {
+                300000
+            } else {
+                60000
+            }
+            $timeoutSeconds = [int]($timeoutMilliseconds / 1000)
 
             $nonce = [Guid]::NewGuid().ToString("N")
             $stdoutPath = Join-Path $TemporaryRoot ("winget-{0}.stdout.txt" -f $nonce)
@@ -5012,13 +5033,13 @@ function Get-GuestWingetBootstrapScriptBlock {
                     -PassThru `
                     -WindowStyle Hidden `
                     -ErrorAction Stop
-                if (-not $process.WaitForExit(60000)) {
+                if (-not $process.WaitForExit($timeoutMilliseconds)) {
                     try {
                         $process.Kill()
                         $process.WaitForExit()
                     } catch {
                     }
-                    throw "Trusted winget operation '$Operation' timed out after 60 seconds."
+                    throw "Trusted winget operation '$Operation' timed out after $timeoutSeconds seconds."
                 }
                 $process.WaitForExit()
                 $result = [pscustomobject][ordered]@{
@@ -5052,12 +5073,30 @@ function Get-GuestWingetBootstrapScriptBlock {
             }
             if ($null -ne $primaryFailure) {
                 $failureType = $primaryFailure.Exception.GetType().FullName
-                throw "Trusted winget operation '$Operation' failed ($failureType)."
+                $failureDiagnostic = ConvertTo-OpenClawWingetDiagnostic `
+                    -Text $primaryFailure.Exception.Message `
+                    -MaxChars 512
+                throw "Trusted winget operation '$Operation' failed ($failureType). Diagnostic: $failureDiagnostic"
             }
             if ($null -eq $result) {
                 throw "Trusted winget operation '$Operation' returned no result."
             }
             return $result
+        }
+
+        function Get-OpenClawWingetProcessDiagnostic {
+            param(
+                [Parameter(Mandatory = $true)]
+                [object]$Result
+            )
+
+            $stdout = ConvertTo-OpenClawWingetDiagnostic `
+                -Text ([string]$Result.Stdout) `
+                -MaxChars 1024
+            $stderr = ConvertTo-OpenClawWingetDiagnostic `
+                -Text ([string]$Result.Stderr) `
+                -MaxChars 1024
+            return "exitCode=$([int]$Result.ExitCode); stdout=$stdout; stderr=$stderr"
         }
 
         function Wait-OpenClawWingetExecutionAlias {
@@ -5187,6 +5226,16 @@ function Get-GuestWingetBootstrapScriptBlock {
                 throw "Direct pinned winget.exe source export did not return exactly one source named winget."
             }
 
+            $sourceUpdate = Invoke-OpenClawTrustedWingetProcess `
+                -WingetPath $WingetPath `
+                -Operation "SourceUpdateWinget" `
+                -TemporaryRoot $TemporaryRoot
+            if ([int]$sourceUpdate.ExitCode -ne 0) {
+                $sourceUpdateDiagnostic = Get-OpenClawWingetProcessDiagnostic `
+                    -Result $sourceUpdate
+                throw "The exact winget source update failed. Diagnostic: $sourceUpdateDiagnostic"
+            }
+
             $sourceProbe = Invoke-OpenClawTrustedWingetProcess `
                 -WingetPath $WingetPath `
                 -Operation "SourceProbeGit" `
@@ -5199,7 +5248,9 @@ function Get-GuestWingetBootstrapScriptBlock {
                 [int]$sourceProbe.ExitCode -ne 0 -or
                 $sourceProbeOutput -notmatch "(?i)\bGit\.Git\b"
             ) {
-                throw "The exact winget source could not resolve the pinned Git.Git package noninteractively."
+                $sourceProbeDiagnostic = Get-OpenClawWingetProcessDiagnostic `
+                    -Result $sourceProbe
+                throw "The exact winget source could not resolve the pinned Git.Git package noninteractively. Diagnostic: $sourceProbeDiagnostic"
             }
         }
 
