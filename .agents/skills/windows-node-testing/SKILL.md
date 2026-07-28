@@ -269,10 +269,32 @@ fixed current-user WinGet/App Installer bootstrap pinned to official Microsoft
 allowlisted redirects, pinned sizes and SHA-256 hashes, exact Microsoft
 signatures and manifests, x64-only dependency ordering, and a clean nonce
 guest-temp root. It does not use `License1.xml`, all-users provisioning, Store
-UI. It verifies an exact JSON export for the source named `winget`, performs
-one bounded typed update of only that source, and resolves `Git.Git` through
-that source before package installation. It does not reset, remove, add, or
-touch `msstore`.
+UI.
+
+The separate `Microsoft.Winget.Source` package is mutable catalog data, not an
+immutable App Installer pin. Both App Installer branches first inspect the
+current-user registration and accept only one exact Microsoft publisher,
+neutral architecture, valid nonzero version identity. A valid registration is
+skipped with acquisition `existing`, observed version, and null hash.
+Duplicates or invalid registrations fail. If missing, the bootstrap streams
+`https://cdn.winget.microsoft.com/cache/source2.msix` under the nonce
+temporary root with the shared bounded deadline, a 16 MiB maximum, manual
+HTTPS port 443 redirects restricted to exact
+`cdn.winget.microsoft.com` targets, and no cookies, credentials, or
+authorization. It rejects zero length and `Content-Length` mismatch, then
+requires Authenticode `Valid`, the exact Microsoft signer, and exact
+`Microsoft.Winget.Source` name, publisher, neutral architecture, and valid
+nonzero manifest version before current-user installation and bounded
+registration polling. The runtime SHA-256 and version are evidence, never
+permanent pins. Existing registration evidence honestly has no downloaded
+hash, and redirect query strings are not recorded.
+
+Only after catalog registration does the bootstrap verify an exact JSON export
+for the source named `winget`, perform one bounded typed update of only that
+source, and resolve `Git.Git` through that source before package installation.
+The bootstrap and host proof record catalog acquisition, version, and hash or
+null. The prepared `openclaw-prerequisites` checkpoint freezes the observed
+registration. It does not reset, remove, add, or touch `msstore`.
 All executable WinGet installs use explicit `--source winget`, agreement flags,
 and disabled interactivity, so `msstore` is never queried. It does not install
 Ubuntu or another distribution. The installed smoke provisions its app-owned
@@ -285,8 +307,8 @@ cleanup. In the package stage, zero-exit status plus nonzero version invokes
 the one fixed `wsl.exe --update --web-download` operation. Accepted update
 exits `0` and `3010` always require the owned reconnect before final status,
 version, and feature verification. The current failed Prepare is expected to
-have rolled back after its fresh `winget` catalog did not hydrate before the
-`Git.Git` probe, but this
+have rolled back after the pinned App Installer lacked the separate mutable
+signed catalog package before the `Git.Git` probe, but this
 hotfix does not claim live confirmation. Unit coverage for the bootstrap uses extracted functions
 and mocks only. Do not use a VM or real Appx/network operations for that
 focused lane.

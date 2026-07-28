@@ -1250,7 +1250,278 @@ public sealed class CleanWindowsRunnerScriptTests
 
         Assert.Contains("-TimeoutSec 3000", ensure);
         Assert.Contains("-ScriptBlock (Get-GuestWingetBootstrapScriptBlock)", ensure);
+        Assert.Contains("Get-RequiredGuestStageResult", ensure);
+        Assert.Contains("valid source catalog acquisition", ensure);
+        Assert.Contains("valid nonzero source catalog version", ensure);
+        Assert.Contains("honest source catalog SHA256 evidence", ensure);
         Assert.DoesNotContain("-ArgumentList", ensure, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void HyperVController_WingetCatalogUsesDistinctMutableSignedTrustBoundary()
+    {
+        var controller = ReadScript("Invoke-CleanWindowsHyperV.ps1");
+        var bootstrap = ExtractPowerShellFunction(
+            controller,
+            "Get-GuestWingetBootstrapScriptBlock",
+            "Ensure-GuestWingetAvailable");
+        var catalogDownload = ExtractPowerShellFunction(
+            controller,
+            "Invoke-OpenClawWingetCatalogDownload",
+            "Assert-OpenClawWingetFile");
+        var catalogEvidence = ExtractPowerShellFunction(
+            controller,
+            "Get-OpenClawWingetCatalogFileEvidence",
+            "Ensure-OpenClawWingetCatalog");
+        var catalogWorkflow = ExtractPowerShellFunction(
+            controller,
+            "Ensure-OpenClawWingetCatalog",
+            "Resolve-OpenClawWingetDirectExecutable");
+
+        Assert.Contains(
+            "https://cdn.winget.microsoft.com/cache/source2.msix",
+            bootstrap,
+            StringComparison.Ordinal);
+        Assert.Contains("16777216", bootstrap, StringComparison.Ordinal);
+        Assert.Contains("Microsoft.Winget.Source", bootstrap, StringComparison.Ordinal);
+        Assert.Contains("$handler.AllowAutoRedirect = $false", catalogDownload);
+        Assert.Contains("$handler.UseCookies = $false", catalogDownload);
+        Assert.Contains("$handler.UseDefaultCredentials = $false", catalogDownload);
+        Assert.Contains("$handler.Credentials = $null", catalogDownload);
+        Assert.Contains("$request.Headers.Authorization = $null", catalogDownload);
+        Assert.Contains("ResponseHeadersRead", catalogDownload);
+        Assert.Contains("$cancellation.CancelAfter", catalogDownload);
+        Assert.Contains("$contentStream.ReadAsync(", catalogDownload);
+        Assert.Contains("timed out after the bounded", catalogDownload);
+        Assert.Contains("exceeded the maximum size while streaming", catalogDownload);
+        Assert.Contains("Get-FileHash", catalogEvidence);
+        Assert.Contains(
+            "$catalogPath = Join-Path $TemporaryRoot \"source2.msix\"",
+            catalogWorkflow,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "exceeded the shared 1800-second timeout",
+            catalogWorkflow,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "-TimeoutSeconds $remainingDownloadSeconds",
+            catalogWorkflow,
+            StringComparison.Ordinal);
+        Assert.Contains("Get-AuthenticodeSignature", bootstrap);
+        Assert.Contains("SourceCatalogAcquisition", bootstrap);
+        Assert.Contains("SourceCatalogVersion", bootstrap);
+        Assert.Contains("SourceCatalogSha256", bootstrap);
+        Assert.DoesNotContain("ExpectedSha256", catalogEvidence, StringComparison.Ordinal);
+        Assert.DoesNotContain("ExpectedVersion", catalogEvidence, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("valid", "accepted")]
+    [InlineData("http", "exact official Microsoft HTTPS URL")]
+    [InlineData("host", "exact official Microsoft HTTPS URL")]
+    [InlineData("path", "exact official Microsoft HTTPS URL")]
+    [InlineData("query", "exact official Microsoft HTTPS URL")]
+    [InlineData("fragment", "exact official Microsoft HTTPS URL")]
+    [InlineData("userinfo", "exact official Microsoft HTTPS URL")]
+    [InlineData("port", "exact official Microsoft HTTPS URL")]
+    public void HyperVController_WingetCatalogInitialUrlMustBeExact(
+        string scenario,
+        string expectedOutput)
+    {
+        var result = RunPowerShellCommand(BuildWingetCatalogInitialUriProof(scenario));
+
+        AssertPowerShellProofSucceeded(result);
+        Assert.Contains(expectedOutput, result.Stdout, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Theory]
+    [InlineData(302, "'https://cdn.winget.microsoft.com/cache/next.msix?sig=secret'", 0, "accepted|cdn.winget.microsoft.com")]
+    [InlineData(302, "'/cache/next.msix'", 0, "accepted|cdn.winget.microsoft.com")]
+    [InlineData(302, "'http://cdn.winget.microsoft.com/cache/next.msix'", 0, "unsafe redirect")]
+    [InlineData(302, "'https://example.com/cache/next.msix'", 0, "unsafe redirect")]
+    [InlineData(302, "'https://user@cdn.winget.microsoft.com/cache/next.msix'", 0, "unsafe redirect")]
+    [InlineData(302, "'https://cdn.winget.microsoft.com/cache/next.msix#fragment'", 0, "unsafe redirect")]
+    [InlineData(302, "'https://cdn.winget.microsoft.com:444/cache/next.msix'", 0, "unsafe redirect")]
+    [InlineData(302, "$null", 0, "without a Location")]
+    [InlineData(302, "'https://['", 0, "malformed Location")]
+    [InlineData(302, "'https://cdn.winget.microsoft.com/cache/next.msix'", 5, "maximum of 5")]
+    [InlineData(500, "$null", 0, "HTTP status 500")]
+    public void HyperVController_WingetCatalogRedirectsStayOnExactMicrosoftHost(
+        int statusCode,
+        string locationExpression,
+        int redirectCount,
+        string expectedOutput)
+    {
+        var result = RunPowerShellCommand(BuildWingetCatalogRedirectProof(
+            statusCode,
+            locationExpression,
+            redirectCount));
+
+        AssertPowerShellProofSucceeded(result);
+        Assert.Contains(expectedOutput, result.Stdout, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("sig=secret", result.Stdout, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("sig=secret", result.Stderr, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Theory]
+    [InlineData("valid", "accepted")]
+    [InlineData("no-header", "accepted")]
+    [InlineData("zero-header", "Content-Length must be nonzero")]
+    [InlineData("oversize-header", "Content-Length exceeds")]
+    [InlineData("empty", "download is empty")]
+    [InlineData("oversize-stream", "download exceeds")]
+    [InlineData("mismatch", "does not match Content-Length")]
+    public void HyperVController_WingetCatalogLengthValidationFailsClosed(
+        string scenario,
+        string expectedOutput)
+    {
+        var result = RunPowerShellCommand(BuildWingetCatalogLengthProof(scenario));
+
+        AssertPowerShellProofSucceeded(result);
+        Assert.Contains(expectedOutput, result.Stdout, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Theory]
+    [InlineData("valid", "accepted")]
+    [InlineData("status", "Valid Authenticode")]
+    [InlineData("publisher", "exact Microsoft signer")]
+    public void HyperVController_WingetCatalogRequiresValidExactMicrosoftSignature(
+        string scenario,
+        string expectedOutput)
+    {
+        var result = RunPowerShellCommand(BuildWingetCatalogSignatureProof(scenario));
+
+        AssertPowerShellProofSucceeded(result);
+        Assert.Contains(expectedOutput, result.Stdout, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void HyperVController_WingetCatalogEvidenceUsesRuntimeHashAfterTrustChecks()
+    {
+        var result = RunPowerShellCommand(BuildWingetCatalogFileEvidenceProof());
+
+        AssertPowerShellProofSucceeded(result);
+        Assert.Equal(
+            "accepted|CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC|signature=1|identity=1",
+            result.Stdout);
+    }
+
+    [Theory]
+    [InlineData("valid", "accepted|7.8.9.10")]
+    [InlineData("name", "exact name, publisher, and neutral architecture")]
+    [InlineData("publisher", "exact name, publisher, and neutral architecture")]
+    [InlineData("arch", "exact name, publisher, and neutral architecture")]
+    [InlineData("version", "valid System.Version")]
+    [InlineData("zero-version", "zero version")]
+    public void HyperVController_WingetCatalogManifestRequiresExactMutableIdentity(
+        string scenario,
+        string expectedOutput)
+    {
+        var result = RunPowerShellCommand(BuildWingetCatalogManifestProof(scenario));
+
+        AssertPowerShellProofSucceeded(result);
+        Assert.Contains(expectedOutput, result.Stdout, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Theory]
+    [InlineData("existing", "accepted|existing|7.8.9.10")]
+    [InlineData("missing", "accepted|missing|")]
+    [InlineData("duplicate", "multiple Microsoft.Winget.Source")]
+    [InlineData("name", "unexpected identity")]
+    [InlineData("publisher", "unexpected identity")]
+    [InlineData("arch", "unexpected identity")]
+    [InlineData("version", "valid System.Version")]
+    [InlineData("zero-version", "zero version")]
+    public void HyperVController_WingetCatalogExistingRegistrationIsExactOrRefused(
+        string scenario,
+        string expectedOutput)
+    {
+        var result = RunPowerShellCommand(BuildWingetCatalogRegistrationStateProof(scenario));
+
+        AssertPowerShellProofSucceeded(result);
+        Assert.Contains(expectedOutput, result.Stdout, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Theory]
+    [InlineData("existing", "accepted|existing|7.8.9.10||downloads=0|installs=0")]
+    [InlineData("missing", "accepted|downloaded|7.8.9.10|CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC|downloads=1|installs=1")]
+    public void HyperVController_WingetCatalogSkipsValidExistingOrDownloadsValidatesAndInstalls(
+        string scenario,
+        string expectedOutput)
+    {
+        var result = RunPowerShellCommand(BuildWingetCatalogAcquisitionProof(scenario));
+
+        AssertPowerShellProofSucceeded(result);
+        Assert.Contains(expectedOutput, result.Stdout, StringComparison.Ordinal);
+        Assert.DoesNotContain("?", result.Stdout, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("retry", "accepted|3")]
+    [InlineData("timeout", "bounded retry")]
+    public void HyperVController_WingetCatalogRegistrationPollingIsBounded(
+        string scenario,
+        string expectedOutput)
+    {
+        var result = RunPowerShellCommand(BuildWingetCatalogRegistrationWaitProof(scenario));
+
+        AssertPowerShellProofSucceeded(result);
+        Assert.Contains(expectedOutput, result.Stdout, StringComparison.OrdinalIgnoreCase);
+        if (scenario == "timeout")
+        {
+            Assert.EndsWith("|3", result.Stdout, StringComparison.Ordinal);
+        }
+    }
+
+    [Fact]
+    public void HyperVController_WingetCatalogPrecedesSourceOperationsInBothAppInstallerBranches()
+    {
+        var controller = ReadScript("Invoke-CleanWindowsHyperV.ps1");
+        var workflow = ExtractPowerShellRange(
+            controller,
+            "        function Invoke-OpenClawWingetBootstrap {",
+            "        $publisher = \"CN=Microsoft Corporation");
+        var firstCatalog = workflow.IndexOf(
+            "Ensure-OpenClawWingetCatalog",
+            StringComparison.Ordinal);
+        var firstCli = workflow.IndexOf(
+            "Assert-OpenClawWingetCli",
+            firstCatalog,
+            StringComparison.Ordinal);
+        var firstEvidence = workflow.IndexOf(
+            "SourceCatalogAcquisition",
+            firstCli,
+            StringComparison.Ordinal);
+        var secondCatalog = workflow.IndexOf(
+            "Ensure-OpenClawWingetCatalog",
+            firstCatalog + 1,
+            StringComparison.Ordinal);
+        var secondCli = workflow.IndexOf(
+            "Assert-OpenClawWingetCli",
+            secondCatalog,
+            StringComparison.Ordinal);
+        var secondEvidence = workflow.IndexOf(
+            "SourceCatalogAcquisition",
+            secondCli,
+            StringComparison.Ordinal);
+        var cleanup = workflow.IndexOf(
+            "Remove-OpenClawWingetTemporaryRoot -Path $temporaryRoot",
+            secondEvidence,
+            StringComparison.Ordinal);
+
+        Assert.True(firstCatalog >= 0);
+        Assert.True(firstCli > firstCatalog);
+        Assert.True(firstEvidence > firstCli);
+        Assert.True(secondCatalog > firstEvidence);
+        Assert.True(secondCli > secondCatalog);
+        Assert.True(secondEvidence > secondCli);
+        Assert.True(cleanup > secondEvidence);
+        Assert.Equal(
+            2,
+            workflow.Split('\n').Count(
+                line => line.Contains(
+                    "SourceCatalogSha256 = $catalogEvidence.Sha256",
+                    StringComparison.Ordinal)));
     }
 
     [Fact]
@@ -1606,6 +1877,8 @@ public sealed class CleanWindowsRunnerScriptTests
             Assert.Contains("validated=1", result.Stdout, StringComparison.Ordinal);
             if (!cleanupFails)
             {
+                Assert.Contains("catalog=existing", result.Stdout, StringComparison.Ordinal);
+                Assert.Contains("catalogHashNull=True", result.Stdout, StringComparison.Ordinal);
                 Assert.Empty(Directory.EnumerateFileSystemEntries(ownedRoot));
             }
         }
@@ -3179,6 +3452,301 @@ public sealed class CleanWindowsRunnerScriptTests
             "}\n");
     }
 
+    private static string BuildWingetCatalogInitialUriProof(string scenario)
+    {
+        var controller = ReadScript("Invoke-CleanWindowsHyperV.ps1");
+        var initialPolicy = ExtractPowerShellFunction(
+            controller,
+            "Assert-OpenClawWingetCatalogInitialUri",
+            "Resolve-OpenClawWingetCatalogHttpResponse");
+        var uri = scenario switch
+        {
+            "http" => "http://cdn.winget.microsoft.com/cache/source2.msix",
+            "host" => "https://example.com/cache/source2.msix",
+            "path" => "https://cdn.winget.microsoft.com/cache/other.msix",
+            "query" => "https://cdn.winget.microsoft.com/cache/source2.msix?value=secret",
+            "fragment" => "https://cdn.winget.microsoft.com/cache/source2.msix#fragment",
+            "userinfo" => "https://user@cdn.winget.microsoft.com/cache/source2.msix",
+            "port" => "https://cdn.winget.microsoft.com:444/cache/source2.msix",
+            _ => "https://cdn.winget.microsoft.com/cache/source2.msix",
+        };
+        return string.Concat(
+            "$ErrorActionPreference = 'Stop'\n",
+            initialPolicy,
+            "\ntry {\n",
+            $" Assert-OpenClawWingetCatalogInitialUri -Uri ([Uri]{PsQuote(uri)})\n",
+            " [Console]::Out.Write('accepted')\n",
+            "} catch { [Console]::Out.Write('rejected|' + $_.Exception.Message) }\n");
+    }
+
+    private static string BuildWingetCatalogRedirectProof(
+        int statusCode,
+        string locationExpression,
+        int redirectCount)
+    {
+        var controller = ReadScript("Invoke-CleanWindowsHyperV.ps1");
+        var redirectPolicy = ExtractPowerShellFunction(
+            controller,
+            "Resolve-OpenClawWingetCatalogHttpResponse",
+            "Assert-OpenClawWingetCatalogDownloadLength");
+        return string.Concat(
+            "$ErrorActionPreference = 'Stop'\n",
+            redirectPolicy,
+            "\n$current = [Uri]'https://cdn.winget.microsoft.com/cache/source2.msix'\n",
+            "try {\n",
+            " $target=Resolve-OpenClawWingetCatalogHttpResponse ",
+            "-CurrentUri $current ",
+            $"-StatusCode {statusCode} ",
+            $"-Location ({locationExpression}) ",
+            $"-RedirectCount {redirectCount}\n",
+            " $value=if($null -eq $target){'final'}else{[string]$target.Host}\n",
+            " [Console]::Out.Write('accepted|' + $value)\n",
+            "} catch { [Console]::Out.Write('rejected|' + $_.Exception.Message) }\n");
+    }
+
+    private static string BuildWingetCatalogLengthProof(string scenario)
+    {
+        var controller = ReadScript("Invoke-CleanWindowsHyperV.ps1");
+        var lengthPolicy = ExtractPowerShellFunction(
+            controller,
+            "Assert-OpenClawWingetCatalogDownloadLength",
+            "Invoke-OpenClawWingetCatalogDownload");
+        var contentLength = scenario switch
+        {
+            "no-header" => "$null",
+            "zero-header" => "[Int64]0",
+            "oversize-header" => "[Int64]17",
+            "mismatch" => "[Int64]8",
+            _ => "[Int64]7",
+        };
+        var actualSize = scenario switch
+        {
+            "empty" => 0,
+            "oversize-stream" => 17,
+            _ => 7,
+        };
+        return string.Concat(
+            "$ErrorActionPreference = 'Stop'\n",
+            lengthPolicy,
+            "\ntry {\n",
+            " Assert-OpenClawWingetCatalogDownloadLength ",
+            $"-ContentLength ({contentLength}) -ActualSize {actualSize} ",
+            "-MaximumSize 16 -Completed\n",
+            " [Console]::Out.Write('accepted')\n",
+            "} catch { [Console]::Out.Write('rejected|' + $_.Exception.Message) }\n");
+    }
+
+    private static string BuildWingetCatalogSignatureProof(string scenario)
+    {
+        var controller = ReadScript("Invoke-CleanWindowsHyperV.ps1");
+        var signature = ExtractPowerShellFunction(
+            controller,
+            "Assert-OpenClawWingetCatalogSignature",
+            "Assert-OpenClawWingetSafeZipEntryName");
+        const string publisher =
+            "CN=Microsoft Corporation, O=Microsoft Corporation, L=Redmond, S=Washington, C=US";
+        var status = scenario == "status" ? "NotSigned" : "Valid";
+        var subject = scenario == "publisher" ? "CN=Unexpected" : publisher;
+        return string.Concat(
+            "$ErrorActionPreference = 'Stop'\n",
+            signature,
+            "\nfunction Get-AuthenticodeSignature { [CmdletBinding()] param([string]$LiteralPath) ",
+            $"[pscustomobject]@{{ Status='{status}'; SignerCertificate=[pscustomobject]@{{ Subject={PsQuote(subject)} }} }} }}\n",
+            "try {\n",
+            " Assert-OpenClawWingetCatalogSignature -Path 'source2.msix' ",
+            $"-ExpectedPublisher {PsQuote(publisher)}\n",
+            " [Console]::Out.Write('accepted')\n",
+            "} catch { [Console]::Out.Write('rejected|' + $_.Exception.Message) }\n");
+    }
+
+    private static string BuildWingetCatalogFileEvidenceProof()
+    {
+        var controller = ReadScript("Invoke-CleanWindowsHyperV.ps1");
+        var evidence = ExtractPowerShellFunction(
+            controller,
+            "Get-OpenClawWingetCatalogFileEvidence",
+            "Ensure-OpenClawWingetCatalog");
+        const string publisher =
+            "CN=Microsoft Corporation, O=Microsoft Corporation, L=Redmond, S=Washington, C=US";
+        return string.Concat(
+            "$ErrorActionPreference = 'Stop'\n",
+            evidence,
+            "\n$script:signature=0; $script:identity=0\n",
+            "function Test-Path { [CmdletBinding()] param($LiteralPath,$PathType) $true }\n",
+            "function Get-Item { [CmdletBinding()] param($LiteralPath,[switch]$Force) [pscustomobject]@{ Length=[Int64]7 } }\n",
+            "function Get-FileHash { [CmdletBinding()] param($LiteralPath,$Algorithm) [pscustomobject]@{ Hash=('c' * 64) } }\n",
+            "function Assert-OpenClawWingetCatalogSignature { param($Path,$ExpectedPublisher) $script:signature++ }\n",
+            "function Read-OpenClawWingetZipXml { param($ArchivePath,$EntryName,$ArchiveName) [pscustomobject]@{} }\n",
+            "function Assert-OpenClawWingetCatalogManifest { param($Document,$ExpectedPublisher) $script:identity++; '7.8.9.10' }\n",
+            "$proof=Get-OpenClawWingetCatalogFileEvidence -Path 'source2.msix' ",
+            $"-ExpectedPublisher {PsQuote(publisher)} -MaximumSize 16\n",
+            "[Console]::Out.Write(('accepted|{0}|signature={1}|identity={2}' -f ",
+            "$proof.Sha256,$script:signature,$script:identity))\n");
+    }
+
+    private static string BuildWingetCatalogManifestProof(string scenario)
+    {
+        var controller = ReadScript("Invoke-CleanWindowsHyperV.ps1");
+        var attributes = ExtractPowerShellFunction(
+            controller,
+            "Get-OpenClawWingetXmlAttribute",
+            "Get-OpenClawWingetDirectXmlChildren");
+        var children = ExtractPowerShellFunction(
+            controller,
+            "Get-OpenClawWingetDirectXmlChildren",
+            "ConvertTo-OpenClawWingetDiagnostic");
+        var versionParser = ExtractPowerShellFunction(
+            controller,
+            "Get-OpenClawWingetValidNonzeroVersion",
+            "Assert-OpenClawWingetCatalogManifest");
+        var manifestPolicy = ExtractPowerShellFunction(
+            controller,
+            "Assert-OpenClawWingetCatalogManifest",
+            "Assert-OpenClawWingetBundleManifest");
+        const string publisher =
+            "CN=Microsoft Corporation, O=Microsoft Corporation, L=Redmond, S=Washington, C=US";
+        var name = scenario == "name" ? "Microsoft.Unexpected.Source" : "Microsoft.Winget.Source";
+        var actualPublisher = scenario == "publisher" ? "CN=Unexpected" : publisher;
+        var architecture = scenario == "arch" ? "x64" : "neutral";
+        var version = scenario switch
+        {
+            "version" => "not-a-version",
+            "zero-version" => "0.0.0.0",
+            _ => "7.8.9.10",
+        };
+        var xml = string.Concat(
+            "<Package xmlns=\"urn:test\"><Identity ",
+            $"Name=\"{name}\" Publisher=\"{actualPublisher}\" ",
+            $"ProcessorArchitecture=\"{architecture}\" Version=\"{version}\" />",
+            "</Package>");
+        return string.Concat(
+            "$ErrorActionPreference = 'Stop'\n",
+            attributes,
+            "\n",
+            children,
+            "\n",
+            versionParser,
+            "\n",
+            manifestPolicy,
+            $"\n[xml]$document={PsQuote(xml)}\n",
+            "try {\n",
+            " $version=Assert-OpenClawWingetCatalogManifest -Document $document ",
+            $"-ExpectedPublisher {PsQuote(publisher)}\n",
+            " [Console]::Out.Write('accepted|' + $version)\n",
+            "} catch { [Console]::Out.Write('rejected|' + $_.Exception.Message) }\n");
+    }
+
+    private static string BuildWingetCatalogRegistrationStateProof(string scenario)
+    {
+        var controller = ReadScript("Invoke-CleanWindowsHyperV.ps1");
+        var versionParser = ExtractPowerShellFunction(
+            controller,
+            "Get-OpenClawWingetValidNonzeroVersion",
+            "Assert-OpenClawWingetCatalogManifest");
+        var identity = ExtractPowerShellFunction(
+            controller,
+            "Assert-OpenClawWingetCatalogRegistrationIdentity",
+            "Get-OpenClawWingetCatalogRegistrationState");
+        var state = ExtractPowerShellFunction(
+            controller,
+            "Get-OpenClawWingetCatalogRegistrationState",
+            "Wait-OpenClawWingetCatalogRegistration");
+        const string publisher =
+            "CN=Microsoft Corporation, O=Microsoft Corporation, L=Redmond, S=Washington, C=US";
+        var name = scenario == "name" ? "Microsoft.Unexpected.Source" : "Microsoft.Winget.Source";
+        var actualPublisher = scenario == "publisher" ? "CN=Unexpected" : publisher;
+        var architecture = scenario == "arch" ? "X64" : "Neutral";
+        var version = scenario switch
+        {
+            "version" => "not-a-version",
+            "zero-version" => "0.0.0.0",
+            _ => "7.8.9.10",
+        };
+        var packageOutput = scenario == "missing"
+            ? string.Empty
+            : scenario == "duplicate"
+                ? "$script:package; $script:package"
+                : "$script:package";
+        return string.Concat(
+            "$ErrorActionPreference = 'Stop'\n",
+            versionParser,
+            "\n",
+            identity,
+            "\n",
+            state,
+            "\n$script:package=[pscustomobject]@{ ",
+            $"Name={PsQuote(name)}; Publisher={PsQuote(actualPublisher)}; ",
+            $"Architecture={PsQuote(architecture)}; Version={PsQuote(version)} }}\n",
+            "function Get-AppxPackage { [CmdletBinding()] param([string]$Name) ",
+            packageOutput,
+            " }\ntry {\n",
+            " $proof=Get-OpenClawWingetCatalogRegistrationState ",
+            $"-ExpectedPublisher {PsQuote(publisher)}\n",
+            " [Console]::Out.Write(('accepted|{0}|{1}' -f $proof.State,$proof.Version))\n",
+            "} catch { [Console]::Out.Write('rejected|' + $_.Exception.Message) }\n");
+    }
+
+    private static string BuildWingetCatalogAcquisitionProof(string scenario)
+    {
+        var controller = ReadScript("Invoke-CleanWindowsHyperV.ps1");
+        var acquisition = ExtractPowerShellFunction(
+            controller,
+            "Ensure-OpenClawWingetCatalog",
+            "Resolve-OpenClawWingetDirectExecutable");
+        const string publisher =
+            "CN=Microsoft Corporation, O=Microsoft Corporation, L=Redmond, S=Washington, C=US";
+        var existing = scenario == "existing" ? "$true" : "$false";
+        return string.Concat(
+            "$ErrorActionPreference = 'Stop'\n",
+            acquisition,
+            "\n$script:downloads=0; $script:installs=0\n",
+            "function Get-OpenClawWingetCatalogRegistrationState { param($ExpectedPublisher) ",
+            $"if({existing}){{[pscustomobject]@{{State='existing';Version='7.8.9.10'}}}}",
+            "else{[pscustomobject]@{State='missing';Version=$null}} }\n",
+            "function Invoke-OpenClawWingetCatalogDownload { param($InitialUri,$DestinationPath,$MaximumSize,$TimeoutSeconds) ",
+            "if([string]$InitialUri.OriginalString -cne 'https://cdn.winget.microsoft.com/cache/source2.msix'){throw 'wrong URL'}; ",
+            "if([string]$DestinationPath -cne 'D:\\owned\\source2.msix'){throw 'wrong path'}; ",
+            "if([Int64]$MaximumSize -ne 16777216){throw 'wrong maximum'}; ",
+            "if([int]$TimeoutSeconds -lt 1 -or [int]$TimeoutSeconds -gt 60){throw 'wrong timeout'}; ",
+            "$script:downloads++ }\n",
+            "function Get-OpenClawWingetCatalogFileEvidence { param($Path,$ExpectedPublisher,$MaximumSize) ",
+            "[pscustomobject]@{Version='7.8.9.10';Sha256=('C' * 64)} }\n",
+            "function Add-AppxPackage { [CmdletBinding()] param($Path) $script:installs++ }\n",
+            "function Wait-OpenClawWingetCatalogRegistration { param($ExpectedPublisher,$RetryCount,$DelayMilliseconds) ",
+            "[pscustomobject]@{State='existing';Version='7.8.9.10'} }\n",
+            "try {\n",
+            " $proof=Ensure-OpenClawWingetCatalog ",
+            $"-ExpectedPublisher {PsQuote(publisher)} -TemporaryRoot 'D:\\owned' ",
+            "-DownloadDeadlineUtc ([DateTime]::UtcNow.AddSeconds(60)) ",
+            "-RetryCount 3 -DelayMilliseconds 0\n",
+            " [Console]::Out.Write(('accepted|{0}|{1}|{2}|downloads={3}|installs={4}' -f ",
+            "$proof.Acquisition,$proof.Version,$proof.Sha256,$script:downloads,$script:installs))\n",
+            "} catch { [Console]::Out.Write('rejected|' + $_.Exception.Message) }\n");
+    }
+
+    private static string BuildWingetCatalogRegistrationWaitProof(string scenario)
+    {
+        var controller = ReadScript("Invoke-CleanWindowsHyperV.ps1");
+        var wait = ExtractPowerShellFunction(
+            controller,
+            "Wait-OpenClawWingetCatalogRegistration",
+            "Get-OpenClawWingetCatalogFileEvidence");
+        var ready = scenario == "retry" ? "$script:calls -ge 3" : "$false";
+        return string.Concat(
+            "$ErrorActionPreference = 'Stop'\n",
+            wait,
+            "\n$script:calls=0\n",
+            "function Get-OpenClawWingetCatalogRegistrationState { param($ExpectedPublisher) ",
+            "$script:calls++; ",
+            $"if({ready}){{[pscustomobject]@{{State='existing';Version='7.8.9.10'}}}}",
+            "else{[pscustomobject]@{State='missing';Version=$null}} }\n",
+            "try {\n",
+            " $null=Wait-OpenClawWingetCatalogRegistration -ExpectedPublisher 'publisher' ",
+            "-RetryCount 3 -DelayMilliseconds 0\n",
+            " [Console]::Out.Write('accepted|' + $script:calls)\n",
+            "} catch { [Console]::Out.Write(('rejected|{0}|{1}' -f $_.Exception.Message,$script:calls)) }\n");
+    }
+
     private static string BuildWingetFilePinProof(string scenario)
     {
         var controller = ReadScript("Invoke-CleanWindowsHyperV.ps1");
@@ -3626,6 +4194,8 @@ public sealed class CleanWindowsRunnerScriptTests
             "function Assert-OpenClawWingetCurrentPackageIdentity { param($Package,$ExpectedName,$ExpectedVersion,$ExpectedPublisher,$ExpectedPackageFamilyName) }\n",
             "function Resolve-OpenClawWingetDirectExecutable { param($Package) 'C:\\Package\\winget.exe' }\n",
             "function Wait-OpenClawWingetExecutionAlias { param($ExpectedPackageFamilyName) 'alias' }\n",
+            "function Ensure-OpenClawWingetCatalog { param($ExpectedPublisher,$TemporaryRoot,$DownloadDeadlineUtc) ",
+            "[pscustomobject]@{ Acquisition='existing'; Version='7.8.9.10'; Sha256=$null } }\n",
             "function Assert-OpenClawWingetCli { param($WingetPath,$TemporaryRoot) $script:validated++ }\n",
             "function Invoke-OpenClawWingetAssetDownload { $script:downloads++ }\n",
             "function Install-OpenClawWingetValidatedPackages { $script:installs++ }\n",
@@ -3642,8 +4212,9 @@ public sealed class CleanWindowsRunnerScriptTests
             "-ReleaseBase 'https://github.com/release/' -ReleasePath '/release' ",
             "-TopAssets $top -Dependencies $deps -Payload $payload ",
             $"-TemporaryBase {PsQuote(ownedRoot)}\n",
-            " [Console]::Out.Write(('accepted|downloads={0}|installs={1}|validated={2}|cleaned={3}' ",
-            "-f $script:downloads,$script:installs,$script:validated,(-not [string]::IsNullOrEmpty($script:cleaned))))\n",
+            " [Console]::Out.Write(('accepted|downloads={0}|installs={1}|validated={2}|cleaned={3}|catalog={4}|catalogHashNull={5}' ",
+            "-f $script:downloads,$script:installs,$script:validated,(-not [string]::IsNullOrEmpty($script:cleaned)),",
+            "$proof.SourceCatalogAcquisition,($null -eq $proof.SourceCatalogSha256)))\n",
             "} catch {\n",
             " [Console]::Out.Write(('cleanup rejected|downloads={0}|installs={1}|validated={2}|error={3}' ",
             "-f $script:downloads,$script:installs,$script:validated,$_.Exception.Message))\n",

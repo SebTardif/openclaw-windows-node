@@ -209,6 +209,37 @@ public sealed class WindowsProofSkillContractTests
     }
 
     [Fact]
+    public void HyperVRunnerGuidance_DistinguishesMutableSignedCatalogFromImmutablePins()
+    {
+        var documents = new[]
+        {
+            Read(".agents", "skills", "openclaw-hyperv-smoke", "SKILL.md"),
+            Read(".agents", "skills", "windows-node-testing", "SKILL.md"),
+            Read("docs", "CLEAN_WINDOWS_RUNNERS.md"),
+        };
+
+        Assert.All(
+            documents,
+            text =>
+            {
+                Assert.Contains(
+                    "https://cdn.winget.microsoft.com/cache/source2.msix",
+                    text,
+                    StringComparison.Ordinal);
+                Assert.Contains("Microsoft.Winget.Source", text, StringComparison.Ordinal);
+                Assert.Contains("mutable", text, StringComparison.OrdinalIgnoreCase);
+                Assert.Contains("runtime SHA-256", text, StringComparison.OrdinalIgnoreCase);
+                Assert.Contains("permanent pin", text, StringComparison.OrdinalIgnoreCase);
+                Assert.Contains("existing", text, StringComparison.OrdinalIgnoreCase);
+                Assert.Contains(
+                    "openclaw-prerequisites",
+                    text,
+                    StringComparison.OrdinalIgnoreCase);
+                Assert.Contains("msstore", text, StringComparison.OrdinalIgnoreCase);
+            });
+    }
+
+    [Fact]
     public void ComputerUseProofSkill_DefinesOracleCurationAndFailClosedContracts()
     {
         var skill = Read(".agents", "skills", "windows-computer-use-proof", "SKILL.md");

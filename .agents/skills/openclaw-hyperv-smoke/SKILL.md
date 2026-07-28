@@ -198,9 +198,10 @@ available. Both WSL optional features are disabled at that checkpoint, and
 `wsl.exe --status` returns exit 50 with `WSL is not installed`. This is the
 expected input to normal `Prepare`.
 
-The current failed `Prepare` bootstrapped WinGet and validated the exact source
-export, then failed because the fresh `winget` catalog had not hydrated before
-the `Git.Git` probe. Its existing rollback
+The current failed `Prepare` installed the pinned App Installer and validated
+the source export, then failed because manual repair also requires the mutable
+signed `Microsoft.Winget.Source` catalog package before the `Git.Git` probe.
+Its existing rollback
 is expected to have restored the exact `clean-windows` checkpoint, but this
 hotfix does not claim live confirmation. The driver must confirm that exact
 owned restore and finalized checkpoint marker before the next attempt. Retry
@@ -269,13 +270,39 @@ exact Microsoft Authenticode publishers and namespace-independent Appx
 manifest identities. It similarly validates the bundle and its single
 nonstub `AppInstaller_x64.msix` payload before any installation.
 
+The `Microsoft.Winget.Source` catalog is intentionally mutable and is not part
+of those reproducible pins. The bootstrap first checks for exactly one valid
+current-user registration. It accepts only the exact name and Microsoft
+publisher, neutral architecture, and a valid nonzero version. A valid existing
+registration is skipped with acquisition `existing`, its observed version,
+and a null hash. Duplicates and invalid registrations fail closed.
+
+When missing, the catalog is streamed from the fixed official initial URL
+`https://cdn.winget.microsoft.com/cache/source2.msix` under the existing nonce
+temporary root. It shares the 1800-second deadline, has a 16 MiB maximum,
+rejects zero length and `Content-Length` mismatches, and manually follows at
+most five HTTPS port 443 redirects that remain on exact
+`cdn.winget.microsoft.com` targets without user information or fragments.
+Cookies, credentials, and authorization are disabled. Before current-user
+installation it requires Authenticode `Valid`, the exact Microsoft signer,
+and a safely parsed manifest with exact `Microsoft.Winget.Source` name and
+publisher, neutral architecture, and a valid nonzero `System.Version`. It
+records the runtime SHA-256 and observed version as acquisition `downloaded`.
+Neither value is a permanent pin, and redirect query strings are never
+evidence.
+
 The bootstrap uses current-user `Add-AppxPackage`, with no `License1.xml`,
 all-users provisioning, or Store UI.
-Exact existing App Installer version `1.29.280.0` skips downloads only after
-direct executable, WindowsApps alias, `v1.29.280`, exact JSON export of the
-source named `winget`, a bounded typed update of only that exact source, and
-noninteractive `Git.Git` resolution through that source. Every later package
-install uses explicit `--source winget`, both
+Exact existing App Installer version `1.29.280.0` skips immutable release
+downloads, but both the existing and newly installed App Installer branches
+ensure the signed mutable catalog first. Only then do they validate the direct
+executable, WindowsApps alias, `v1.29.280`, exact JSON export of the source
+named `winget`, a bounded typed update of only that exact source, and
+noninteractive `Git.Git` resolution through that source. The bootstrap and
+host proof record acquisition, observed catalog version, and runtime SHA-256
+or honest null. The prepared `openclaw-prerequisites` checkpoint freezes the
+observed registration. Every later package install uses explicit
+`--source winget`, both
 agreement flags, and disabled interactivity, so `msstore` is never queried.
 The bootstrap does not reset, remove, add, or touch `msstore`.
 All downloads, extraction, and captures use one nonce guest-temp root. Cleanup

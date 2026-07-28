@@ -4019,6 +4019,296 @@ function Get-GuestWingetBootstrapScriptBlock {
             }
         }
 
+        function Assert-OpenClawWingetCatalogInitialUri {
+            param(
+                [Parameter(Mandatory = $true)]
+                [Uri]$Uri
+            )
+
+            $officialUri = "https://cdn.winget.microsoft.com/cache/source2.msix"
+            if (
+                -not $Uri.IsAbsoluteUri -or
+                [string]$Uri.OriginalString -cne $officialUri -or
+                [string]$Uri.Scheme -cne "https" -or
+                -not [string]::Equals(
+                    [string]$Uri.Host,
+                    "cdn.winget.microsoft.com",
+                    [StringComparison]::OrdinalIgnoreCase
+                ) -or
+                [int]$Uri.Port -ne 443 -or
+                -not [string]::IsNullOrEmpty([string]$Uri.UserInfo) -or
+                -not [string]::IsNullOrEmpty([string]$Uri.Query) -or
+                -not [string]::IsNullOrEmpty([string]$Uri.Fragment) -or
+                [string]$Uri.AbsolutePath -cne "/cache/source2.msix"
+            ) {
+                throw "WinGet source catalog does not use the exact official Microsoft HTTPS URL."
+            }
+        }
+
+        function Resolve-OpenClawWingetCatalogHttpResponse {
+            param(
+                [Parameter(Mandatory = $true)]
+                [Uri]$CurrentUri,
+                [Parameter(Mandatory = $true)]
+                [int]$StatusCode,
+                [AllowNull()]
+                [object]$Location,
+                [Parameter(Mandatory = $true)]
+                [ValidateRange(0, 5)]
+                [int]$RedirectCount
+            )
+
+            if ($StatusCode -ge 200 -and $StatusCode -lt 300) {
+                return $null
+            }
+            if ($StatusCode -notin [int[]]@(301, 302, 303, 307, 308)) {
+                throw "WinGet source catalog request failed at host '$($CurrentUri.Host)' with HTTP status $StatusCode."
+            }
+            if ($RedirectCount -ge 5) {
+                throw "WinGet source catalog exceeded the maximum of 5 redirects at host '$($CurrentUri.Host)'."
+            }
+            if ($null -eq $Location) {
+                throw "WinGet source catalog received HTTP status $StatusCode without a Location header at host '$($CurrentUri.Host)'."
+            }
+
+            $locationText = if ($Location -is [Uri]) {
+                [string]$Location.OriginalString
+            } else {
+                [string]$Location
+            }
+            if ([string]::IsNullOrWhiteSpace($locationText)) {
+                throw "WinGet source catalog received an empty Location header at host '$($CurrentUri.Host)'."
+            }
+            try {
+                $redirectUri = [Uri]::new($CurrentUri, $locationText)
+            } catch {
+                throw "WinGet source catalog received a malformed Location header at host '$($CurrentUri.Host)'."
+            }
+            if (
+                -not $redirectUri.IsAbsoluteUri -or
+                [string]$redirectUri.Scheme -cne "https" -or
+                -not [string]::Equals(
+                    [string]$redirectUri.Host,
+                    "cdn.winget.microsoft.com",
+                    [StringComparison]::OrdinalIgnoreCase
+                ) -or
+                [int]$redirectUri.Port -ne 443 -or
+                -not [string]::IsNullOrEmpty([string]$redirectUri.UserInfo) -or
+                -not [string]::IsNullOrEmpty([string]$redirectUri.Fragment)
+            ) {
+                throw "WinGet source catalog received an unsafe redirect target from host '$($CurrentUri.Host)'."
+            }
+            return $redirectUri
+        }
+
+        function Assert-OpenClawWingetCatalogDownloadLength {
+            param(
+                [AllowNull()]
+                [object]$ContentLength,
+                [Parameter(Mandatory = $true)]
+                [Int64]$ActualSize,
+                [Parameter(Mandatory = $true)]
+                [Int64]$MaximumSize,
+                [switch]$Completed
+            )
+
+            if ($MaximumSize -le 0) {
+                throw "WinGet source catalog maximum download size is invalid."
+            }
+            if ($null -ne $ContentLength) {
+                [Int64]$declaredSize = [Int64]$ContentLength
+                if ($declaredSize -le 0) {
+                    throw "WinGet source catalog Content-Length must be nonzero."
+                }
+                if ($declaredSize -gt $MaximumSize) {
+                    throw "WinGet source catalog Content-Length exceeds the maximum download size."
+                }
+            }
+            if ($Completed) {
+                if ($ActualSize -le 0) {
+                    throw "WinGet source catalog download is empty."
+                }
+                if ($ActualSize -gt $MaximumSize) {
+                    throw "WinGet source catalog download exceeds the maximum size."
+                }
+                if (
+                    $null -ne $ContentLength -and
+                    $ActualSize -ne [Int64]$ContentLength
+                ) {
+                    throw "WinGet source catalog stream length does not match Content-Length."
+                }
+            }
+        }
+
+        function Invoke-OpenClawWingetCatalogDownload {
+            param(
+                [Parameter(Mandatory = $true)]
+                [Uri]$InitialUri,
+                [Parameter(Mandatory = $true)]
+                [string]$DestinationPath,
+                [Parameter(Mandatory = $true)]
+                [ValidateRange(1, 67108864)]
+                [Int64]$MaximumSize,
+                [Parameter(Mandatory = $true)]
+                [ValidateRange(1, 1800)]
+                [int]$TimeoutSeconds
+            )
+
+            Assert-OpenClawWingetCatalogInitialUri -Uri $InitialUri
+            if (Test-Path -LiteralPath $DestinationPath) {
+                throw "WinGet source catalog destination already exists."
+            }
+
+            Add-Type -AssemblyName System.Net.Http -ErrorAction Stop
+            $handler = New-Object System.Net.Http.HttpClientHandler
+            $client = $null
+            $cancellation = $null
+            $response = $null
+            $request = $null
+            $contentStream = $null
+            $fileStream = $null
+            $downloadFailure = $null
+            $restoreFailure = $null
+            $downloadTimedOut = $false
+            $disposeFailures = New-Object "Collections.Generic.List[string]"
+            $priorSecurityProtocol = [Net.ServicePointManager]::SecurityProtocol
+            $changedGlobalSecurityProtocol = $false
+            $currentUri = $InitialUri
+            $safeStatus = "none"
+            try {
+                $handler.AllowAutoRedirect = $false
+                $handler.UseCookies = $false
+                $handler.PreAuthenticate = $false
+                $handler.UseDefaultCredentials = $false
+                $handler.Credentials = $null
+                if ($null -ne $handler.PSObject.Properties["DefaultProxyCredentials"]) {
+                    $handler.DefaultProxyCredentials = $null
+                }
+                if ($null -ne $handler.PSObject.Properties["SslProtocols"]) {
+                    $handler.SslProtocols = [Security.Authentication.SslProtocols]::Tls12
+                } else {
+                    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+                    $changedGlobalSecurityProtocol = $true
+                }
+
+                $client = New-Object System.Net.Http.HttpClient($handler)
+                $client.Timeout = [Threading.Timeout]::InfiniteTimeSpan
+                $cancellation = New-Object Threading.CancellationTokenSource
+                $cancellation.CancelAfter([TimeSpan]::FromSeconds($TimeoutSeconds))
+                $redirectCount = 0
+                while ($true) {
+                    $request = New-Object System.Net.Http.HttpRequestMessage(
+                        [System.Net.Http.HttpMethod]::Get,
+                        $currentUri
+                    )
+                    $request.Headers.Authorization = $null
+                    $response = $client.SendAsync(
+                        $request,
+                        [System.Net.Http.HttpCompletionOption]::ResponseHeadersRead,
+                        $cancellation.Token
+                    ).GetAwaiter().GetResult()
+                    $safeStatus = [string][int]$response.StatusCode
+                    $redirectUri = Resolve-OpenClawWingetCatalogHttpResponse `
+                        -CurrentUri $currentUri `
+                        -StatusCode ([int]$response.StatusCode) `
+                        -Location $response.Headers.Location `
+                        -RedirectCount $redirectCount
+                    if ($null -ne $redirectUri) {
+                        $response.Dispose()
+                        $response = $null
+                        $request.Dispose()
+                        $request = $null
+                        $currentUri = $redirectUri
+                        $redirectCount++
+                        continue
+                    }
+
+                    $contentLength = $response.Content.Headers.ContentLength
+                    Assert-OpenClawWingetCatalogDownloadLength `
+                        -ContentLength $contentLength `
+                        -ActualSize 0 `
+                        -MaximumSize $MaximumSize
+                    $contentStream = $response.Content.ReadAsStreamAsync().GetAwaiter().GetResult()
+                    $fileStream = [IO.File]::Open(
+                        $DestinationPath,
+                        [IO.FileMode]::CreateNew,
+                        [IO.FileAccess]::Write,
+                        [IO.FileShare]::None
+                    )
+                    $buffer = New-Object "byte[]" (1024 * 1024)
+                    [Int64]$totalBytes = 0
+                    while (
+                        ($read = $contentStream.ReadAsync(
+                            $buffer,
+                            0,
+                            $buffer.Length,
+                            $cancellation.Token
+                        ).GetAwaiter().GetResult()) -gt 0
+                    ) {
+                        $totalBytes += [Int64]$read
+                        if ($totalBytes -gt $MaximumSize) {
+                            throw "WinGet source catalog exceeded the maximum size while streaming."
+                        }
+                        $fileStream.Write($buffer, 0, $read)
+                    }
+                    $fileStream.Flush()
+                    Assert-OpenClawWingetCatalogDownloadLength `
+                        -ContentLength $contentLength `
+                        -ActualSize $totalBytes `
+                        -MaximumSize $MaximumSize `
+                        -Completed
+                    break
+                }
+            } catch {
+                $downloadFailure = $_
+                if (
+                    $null -ne $cancellation -and
+                    [bool]$cancellation.IsCancellationRequested
+                ) {
+                    $downloadTimedOut = $true
+                }
+            } finally {
+                foreach ($disposable in @(
+                    $fileStream,
+                    $contentStream,
+                    $response,
+                    $request,
+                    $cancellation,
+                    $client,
+                    $handler
+                )) {
+                    if ($null -ne $disposable) {
+                        try {
+                            $disposable.Dispose()
+                        } catch {
+                            $disposeFailures.Add($_.Exception.GetType().FullName)
+                        }
+                    }
+                }
+                if ($changedGlobalSecurityProtocol) {
+                    try {
+                        [Net.ServicePointManager]::SecurityProtocol = $priorSecurityProtocol
+                    } catch {
+                        $restoreFailure = $_
+                    }
+                }
+            }
+
+            if ($disposeFailures.Count -gt 0) {
+                throw "WinGet source catalog download could not dispose its HTTP resources."
+            }
+            if ($null -ne $restoreFailure) {
+                throw "WinGet source catalog download could not restore the process TLS policy."
+            }
+            if ($downloadTimedOut) {
+                throw "WinGet source catalog download timed out after the bounded $TimeoutSeconds seconds at host '$($currentUri.Host)'."
+            }
+            if ($null -ne $downloadFailure) {
+                $failureType = $downloadFailure.Exception.GetType().FullName
+                throw "WinGet source catalog download failed at host '$($currentUri.Host)' with HTTP status $safeStatus ($failureType)."
+            }
+        }
+
         function Assert-OpenClawWingetFile {
             param(
                 [Parameter(Mandatory = $true)]
@@ -4066,6 +4356,26 @@ function Get-GuestWingetBootstrapScriptBlock {
                 [string]$signature.SignerCertificate.Subject -cne $ExpectedPublisher
             ) {
                 throw "Pinned WinGet file '$AssetName' does not have the exact Microsoft signer subject."
+            }
+        }
+
+        function Assert-OpenClawWingetCatalogSignature {
+            param(
+                [Parameter(Mandatory = $true)]
+                [string]$Path,
+                [Parameter(Mandatory = $true)]
+                [string]$ExpectedPublisher
+            )
+
+            $signature = Get-AuthenticodeSignature -LiteralPath $Path -ErrorAction Stop
+            if ([string]$signature.Status -cne "Valid") {
+                throw "WinGet source catalog does not have a Valid Authenticode signature."
+            }
+            if (
+                $null -eq $signature.SignerCertificate -or
+                [string]$signature.SignerCertificate.Subject -cne $ExpectedPublisher
+            ) {
+                throw "WinGet source catalog does not have the exact Microsoft signer subject."
             }
         }
 
@@ -4508,6 +4818,68 @@ function Get-GuestWingetBootstrapScriptBlock {
             }
         }
 
+        function Get-OpenClawWingetValidNonzeroVersion {
+            param(
+                [Parameter(Mandatory = $true)]
+                [string]$VersionText,
+                [Parameter(Mandatory = $true)]
+                [string]$Subject
+            )
+
+            [Version]$parsedVersion = $null
+            if (-not [Version]::TryParse($VersionText, [ref]$parsedVersion)) {
+                throw "$Subject does not contain a valid System.Version."
+            }
+            if (
+                $parsedVersion.Major -eq 0 -and
+                $parsedVersion.Minor -eq 0 -and
+                $parsedVersion.Build -le 0 -and
+                $parsedVersion.Revision -le 0
+            ) {
+                throw "$Subject contains a zero version."
+            }
+            return $parsedVersion
+        }
+
+        function Assert-OpenClawWingetCatalogManifest {
+            param(
+                [Parameter(Mandatory = $true)]
+                [Xml.XmlDocument]$Document,
+                [Parameter(Mandatory = $true)]
+                [string]$ExpectedPublisher
+            )
+
+            if (
+                $null -eq $Document.DocumentElement -or
+                [string]$Document.DocumentElement.LocalName -cne "Package"
+            ) {
+                throw "WinGet source catalog manifest does not have a Package root."
+            }
+            $identities = @(
+                Get-OpenClawWingetDirectXmlChildren `
+                    -Parent $Document.DocumentElement `
+                    -LocalName "Identity"
+            )
+            if ($identities.Count -ne 1) {
+                throw "WinGet source catalog manifest must have exactly one direct Identity."
+            }
+            $identity = [Xml.XmlElement]$identities[0]
+            if (
+                (Get-OpenClawWingetXmlAttribute -Element $identity -Name "Name") -cne "Microsoft.Winget.Source" -or
+                (Get-OpenClawWingetXmlAttribute -Element $identity -Name "Publisher") -cne $ExpectedPublisher -or
+                (Get-OpenClawWingetXmlAttribute -Element $identity -Name "ProcessorArchitecture") -cne "neutral"
+            ) {
+                throw "WinGet source catalog manifest does not match the exact name, publisher, and neutral architecture."
+            }
+            $versionText = Get-OpenClawWingetXmlAttribute `
+                -Element $identity `
+                -Name "Version"
+            $version = Get-OpenClawWingetValidNonzeroVersion `
+                -VersionText $versionText `
+                -Subject "WinGet source catalog manifest"
+            return $version.ToString()
+        }
+
         function Assert-OpenClawWingetBundleManifest {
             param(
                 [Parameter(Mandatory = $true)]
@@ -4883,6 +5255,183 @@ function Get-GuestWingetBootstrapScriptBlock {
                 }
             }
             throw "Pinned Microsoft.DesktopAppInstaller did not register for the current user within the bounded retry."
+        }
+
+        function Assert-OpenClawWingetCatalogRegistrationIdentity {
+            param(
+                [Parameter(Mandatory = $true)]
+                [object]$Package,
+                [Parameter(Mandatory = $true)]
+                [string]$ExpectedPublisher
+            )
+
+            if (
+                [string]$Package.Name -cne "Microsoft.Winget.Source" -or
+                [string]$Package.Publisher -cne $ExpectedPublisher -or
+                -not [string]::Equals(
+                    [string]$Package.Architecture,
+                    "Neutral",
+                    [StringComparison]::OrdinalIgnoreCase
+                )
+            ) {
+                throw "Current-user Microsoft.Winget.Source registration has an unexpected identity."
+            }
+            return Get-OpenClawWingetValidNonzeroVersion `
+                -VersionText ([string]$Package.Version) `
+                -Subject "Current-user Microsoft.Winget.Source registration"
+        }
+
+        function Get-OpenClawWingetCatalogRegistrationState {
+            param(
+                [Parameter(Mandatory = $true)]
+                [string]$ExpectedPublisher
+            )
+
+            $packages = @(
+                Get-AppxPackage `
+                    -Name "Microsoft.Winget.Source" `
+                    -ErrorAction Stop
+            )
+            if ($packages.Count -gt 1) {
+                throw "Current user has multiple Microsoft.Winget.Source registrations."
+            }
+            if ($packages.Count -eq 0) {
+                return [pscustomobject][ordered]@{
+                    State = "missing"
+                    Package = $null
+                    Version = $null
+                }
+            }
+            $version = Assert-OpenClawWingetCatalogRegistrationIdentity `
+                -Package $packages[0] `
+                -ExpectedPublisher $ExpectedPublisher
+            return [pscustomobject][ordered]@{
+                State = "existing"
+                Package = $packages[0]
+                Version = $version.ToString()
+            }
+        }
+
+        function Wait-OpenClawWingetCatalogRegistration {
+            param(
+                [Parameter(Mandatory = $true)]
+                [string]$ExpectedPublisher,
+                [ValidateRange(1, 120)]
+                [int]$RetryCount = 60,
+                [ValidateRange(0, 5000)]
+                [int]$DelayMilliseconds = 1000
+            )
+
+            for ($attempt = 1; $attempt -le $RetryCount; $attempt++) {
+                $state = Get-OpenClawWingetCatalogRegistrationState `
+                    -ExpectedPublisher $ExpectedPublisher
+                if ([string]$state.State -ceq "existing") {
+                    return $state
+                }
+                if ($attempt -lt $RetryCount -and $DelayMilliseconds -gt 0) {
+                    Start-Sleep -Milliseconds $DelayMilliseconds
+                }
+            }
+            throw "Microsoft.Winget.Source did not register for the current user within the bounded retry."
+        }
+
+        function Get-OpenClawWingetCatalogFileEvidence {
+            param(
+                [Parameter(Mandatory = $true)]
+                [string]$Path,
+                [Parameter(Mandatory = $true)]
+                [string]$ExpectedPublisher,
+                [Parameter(Mandatory = $true)]
+                [ValidateRange(1, 67108864)]
+                [Int64]$MaximumSize
+            )
+
+            if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+                throw "Downloaded WinGet source catalog is missing."
+            }
+            $file = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
+            if ([Int64]$file.Length -le 0) {
+                throw "Downloaded WinGet source catalog is empty."
+            }
+            if ([Int64]$file.Length -gt $MaximumSize) {
+                throw "Downloaded WinGet source catalog exceeds the maximum size."
+            }
+            $runtimeSha256 = (
+                Get-FileHash -LiteralPath $Path -Algorithm SHA256 -ErrorAction Stop
+            ).Hash.ToUpperInvariant()
+            if ($runtimeSha256 -cnotmatch "^[0-9A-F]{64}$") {
+                throw "Downloaded WinGet source catalog SHA256 evidence is invalid."
+            }
+            Assert-OpenClawWingetCatalogSignature `
+                -Path $Path `
+                -ExpectedPublisher $ExpectedPublisher
+            $manifest = Read-OpenClawWingetZipXml `
+                -ArchivePath $Path `
+                -EntryName "AppxManifest.xml" `
+                -ArchiveName "source2.msix"
+            $version = Assert-OpenClawWingetCatalogManifest `
+                -Document $manifest `
+                -ExpectedPublisher $ExpectedPublisher
+            return [pscustomobject][ordered]@{
+                Version = $version
+                Sha256 = $runtimeSha256
+            }
+        }
+
+        function Ensure-OpenClawWingetCatalog {
+            param(
+                [Parameter(Mandatory = $true)]
+                [string]$ExpectedPublisher,
+                [Parameter(Mandatory = $true)]
+                [string]$TemporaryRoot,
+                [Parameter(Mandatory = $true)]
+                [DateTime]$DownloadDeadlineUtc,
+                [ValidateRange(1, 120)]
+                [int]$RetryCount = 60,
+                [ValidateRange(0, 5000)]
+                [int]$DelayMilliseconds = 1000
+            )
+
+            $existingState = Get-OpenClawWingetCatalogRegistrationState `
+                -ExpectedPublisher $ExpectedPublisher
+            if ([string]$existingState.State -ceq "existing") {
+                return [pscustomobject][ordered]@{
+                    Acquisition = "existing"
+                    Version = [string]$existingState.Version
+                    Sha256 = $null
+                }
+            }
+
+            $remainingDownloadSeconds = [int][Math]::Floor(
+                ($DownloadDeadlineUtc - [DateTime]::UtcNow).TotalSeconds
+            )
+            if ($remainingDownloadSeconds -lt 1) {
+                throw "WinGet source catalog download exceeded the shared 1800-second timeout."
+            }
+            [Int64]$catalogMaximumSize = 16777216
+            $catalogPath = Join-Path $TemporaryRoot "source2.msix"
+            Invoke-OpenClawWingetCatalogDownload `
+                -InitialUri ([Uri]"https://cdn.winget.microsoft.com/cache/source2.msix") `
+                -DestinationPath $catalogPath `
+                -MaximumSize $catalogMaximumSize `
+                -TimeoutSeconds $remainingDownloadSeconds
+            $fileEvidence = Get-OpenClawWingetCatalogFileEvidence `
+                -Path $catalogPath `
+                -ExpectedPublisher $ExpectedPublisher `
+                -MaximumSize $catalogMaximumSize
+            Add-AppxPackage -Path $catalogPath -ErrorAction Stop
+            $registeredState = Wait-OpenClawWingetCatalogRegistration `
+                -ExpectedPublisher $ExpectedPublisher `
+                -RetryCount $RetryCount `
+                -DelayMilliseconds $DelayMilliseconds
+            if ([string]$registeredState.Version -cne [string]$fileEvidence.Version) {
+                throw "Registered Microsoft.Winget.Source version does not match the validated signed catalog."
+            }
+            return [pscustomobject][ordered]@{
+                Acquisition = "downloaded"
+                Version = [string]$registeredState.Version
+                Sha256 = [string]$fileEvidence.Sha256
+            }
         }
 
         function Resolve-OpenClawWingetDirectExecutable {
@@ -5306,6 +5855,7 @@ function Get-GuestWingetBootstrapScriptBlock {
             $cleanupFailure = $null
             $result = $null
             try {
+                $downloadDeadlineUtc = [DateTime]::UtcNow.AddSeconds(1800)
                 $mainState = Get-OpenClawWingetCurrentMainPackageState `
                     -ExpectedPublisher $Publisher `
                     -ExpectedPackageFamilyName $PackageFamilyName
@@ -5320,6 +5870,10 @@ function Get-GuestWingetBootstrapScriptBlock {
                         -Package $mainState.Package
                     Wait-OpenClawWingetExecutionAlias `
                         -ExpectedPackageFamilyName $PackageFamilyName | Out-Null
+                    $catalogEvidence = Ensure-OpenClawWingetCatalog `
+                        -ExpectedPublisher $Publisher `
+                        -TemporaryRoot $temporaryRoot `
+                        -DownloadDeadlineUtc $downloadDeadlineUtc
                     Assert-OpenClawWingetCli `
                         -WingetPath $directWinget `
                         -TemporaryRoot $temporaryRoot
@@ -5327,10 +5881,12 @@ function Get-GuestWingetBootstrapScriptBlock {
                         Stage = "winget-bootstrap"
                         AlreadyInstalled = $true
                         Version = "v1.29.280"
+                        SourceCatalogAcquisition = [string]$catalogEvidence.Acquisition
+                        SourceCatalogVersion = [string]$catalogEvidence.Version
+                        SourceCatalogSha256 = $catalogEvidence.Sha256
                     }
                 } else {
                     $assetPaths = @{}
-                    $downloadDeadlineUtc = [DateTime]::UtcNow.AddSeconds(1800)
                     foreach ($asset in $TopAssets) {
                         $remainingDownloadSeconds = [int][Math]::Floor(
                             ($downloadDeadlineUtc - [DateTime]::UtcNow).TotalSeconds
@@ -5448,6 +6004,10 @@ function Get-GuestWingetBootstrapScriptBlock {
                         -Package $registeredPackage
                     Wait-OpenClawWingetExecutionAlias `
                         -ExpectedPackageFamilyName $PackageFamilyName | Out-Null
+                    $catalogEvidence = Ensure-OpenClawWingetCatalog `
+                        -ExpectedPublisher $Publisher `
+                        -TemporaryRoot $temporaryRoot `
+                        -DownloadDeadlineUtc $downloadDeadlineUtc
                     Assert-OpenClawWingetCli `
                         -WingetPath $directWinget `
                         -TemporaryRoot $temporaryRoot
@@ -5455,6 +6015,9 @@ function Get-GuestWingetBootstrapScriptBlock {
                         Stage = "winget-bootstrap"
                         AlreadyInstalled = $false
                         Version = "v1.29.280"
+                        SourceCatalogAcquisition = [string]$catalogEvidence.Acquisition
+                        SourceCatalogVersion = [string]$catalogEvidence.Version
+                        SourceCatalogSha256 = $catalogEvidence.Sha256
                     }
                 }
             } catch {
@@ -5548,11 +6111,52 @@ function Ensure-GuestWingetAvailable {
     )
 
     Write-Step "Ensuring pinned guest WinGet is available"
-    Invoke-GuestCommandWithTimeout `
-        -Session $Session `
-        -OperationName "Bootstrapping pinned guest WinGet" `
-        -TimeoutSec 3000 `
-        -ScriptBlock (Get-GuestWingetBootstrapScriptBlock) | Out-Null
+    $bootstrapOutput = @(
+        Invoke-GuestCommandWithTimeout `
+            -Session $Session `
+            -OperationName "Bootstrapping pinned guest WinGet" `
+            -TimeoutSec 3000 `
+            -ScriptBlock (Get-GuestWingetBootstrapScriptBlock)
+    )
+    $result = Get-RequiredGuestStageResult `
+        -Output $bootstrapOutput `
+        -ExpectedStage "winget-bootstrap"
+    if ([string]$result.Version -cne "v1.29.280") {
+        throw "Guest WinGet bootstrap result did not carry the pinned executable version."
+    }
+    $catalogAcquisition = [string]$result.SourceCatalogAcquisition
+    if ($catalogAcquisition -cnotin [string[]]@("existing", "downloaded")) {
+        throw "Guest WinGet bootstrap result did not carry a valid source catalog acquisition."
+    }
+    [Version]$catalogVersion = $null
+    if (
+        -not [Version]::TryParse(
+            [string]$result.SourceCatalogVersion,
+            [ref]$catalogVersion
+        ) -or
+        (
+            $catalogVersion.Major -eq 0 -and
+            $catalogVersion.Minor -eq 0 -and
+            $catalogVersion.Build -le 0 -and
+            $catalogVersion.Revision -le 0
+        )
+    ) {
+        throw "Guest WinGet bootstrap result did not carry a valid nonzero source catalog version."
+    }
+    $catalogSha256 = $result.SourceCatalogSha256
+    if (
+        (
+            $catalogAcquisition -ceq "existing" -and
+            $null -ne $catalogSha256
+        ) -or
+        (
+            $catalogAcquisition -ceq "downloaded" -and
+            [string]$catalogSha256 -cnotmatch "^[0-9A-F]{64}$"
+        )
+    ) {
+        throw "Guest WinGet bootstrap result did not carry honest source catalog SHA256 evidence."
+    }
+    return $result
 }
 
 function Ensure-GuestGitInstalled {
@@ -5659,7 +6263,16 @@ function Prepare-GuestPrerequisites {
             version = [string]$wslProof.version
         } | ConvertTo-Json -Compress)
 
-        Ensure-GuestWingetAvailable -Session $activeSession
+        $wingetProof = Ensure-GuestWingetAvailable -Session $activeSession
+        Write-InfoLine "Guest WinGet bootstrap proof:"
+        Write-Host ([pscustomobject][ordered]@{
+            stage = [string]$wingetProof.Stage
+            alreadyInstalled = [bool]$wingetProof.AlreadyInstalled
+            version = [string]$wingetProof.Version
+            sourceCatalogAcquisition = [string]$wingetProof.SourceCatalogAcquisition
+            sourceCatalogVersion = [string]$wingetProof.SourceCatalogVersion
+            sourceCatalogSha256 = $wingetProof.SourceCatalogSha256
+        } | ConvertTo-Json -Compress)
         Ensure-GuestGitInstalled -Session $activeSession
         Ensure-GuestPowerShell7Installed -Session $activeSession
         Copy-RepoToGuest -Session $activeSession
