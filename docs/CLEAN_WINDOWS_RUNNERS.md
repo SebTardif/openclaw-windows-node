@@ -313,16 +313,21 @@ idempotent stages. The optional-feature stage checks both exact Windows
 features, enables only disabled features with `-NoRestart`, and returns both
 resulting states plus `needsRestart`. The host controller restarts only the
 exact owned VM and reconnects PowerShell Direct when required. The package
-stage then captures fixed `wsl.exe --status` and `--version` invocations as
-bounded, sanitized data. It has three package decisions:
+stage uses a sequential authoritative short-circuit: it invokes and normalizes
+the fixed `wsl.exe --status` operation before deciding whether `--version` is
+safe to invoke. It has three package decisions:
 
 - Zero-exit status and version are ready and require no package operation.
 - Explicit absent status (exit `-1` or `50` plus not-installed output) uses
-  only `wsl.exe --install --no-distribution`. A ready version does not override
-  the absent status. An unrelated version failure still fails closed.
+  only `wsl.exe --install --no-distribution`. This branch never invokes version
+  or update.
 - Zero-exit ready status with any nonzero version exit invokes exactly one
   `wsl.exe --update --web-download`. This branch does not depend on localized
   version text.
+
+An unknown or contradictory status fails before version is invoked. Version is
+normalized only in the ready-status branch, where contradictory zero-exit
+not-installed text still fails closed.
 
 Install and update accept only exits `0` and `3010`. Either successful
 operation always requests the second bounded owned restart. The update result

@@ -3421,86 +3421,78 @@ function Get-GuestWslPackageStageScriptBlock {
         }
 
         $statusResult = Invoke-OpenClawTrustedWslProcess -Operation "Status"
-        $versionResult = Invoke-OpenClawTrustedWslProcess -Operation "Version"
         $statusState = Get-OpenClawWslResultState -Result $statusResult -Label "wsl.exe --status"
-        $versionExitCode = [int]$versionResult.exitCode
-        $versionDiagnostic = Get-OpenClawWslResultDiagnostic -Result $versionResult
-
-        if ($statusState -ceq "ready") {
-            if ($versionExitCode -ne 0) {
-                $updateResult = Invoke-OpenClawTrustedWslProcess -Operation "UpdateWebDownload"
-                $updateExitCode = [int]$updateResult.exitCode
-                if ($updateExitCode -notin [int[]]@(0, 3010)) {
-                    $updateDiagnostic = Get-OpenClawWslResultDiagnostic -Result $updateResult
-                    throw "wsl.exe --update --web-download returned unexpected exit code $updateExitCode. Version diagnostic: $versionDiagnostic Update diagnostic: $updateDiagnostic"
-                }
-
-                return [pscustomobject][ordered]@{
-                    stage = "wsl-package"
-                    scope = "wsl-package-only"
-                    normalizedState = "restart-required"
-                    wasInstalled = $true
-                    installInvoked = $false
-                    installExitCode = $null
-                    updateInvoked = $true
-                    updateExitCode = $updateExitCode
-                    statusExitCode = [int]$statusResult.exitCode
-                    versionExitCode = $versionExitCode
-                    needsRestart = $true
-                }
-            }
-
-            $versionState = Get-OpenClawWslResultState `
-                -Result $versionResult `
-                -Label "wsl.exe --version"
-            if ($versionState -cne "ready") {
-                throw "wsl.exe --version returned unsupported normalized state '$versionState'."
+        if ($statusState -ceq "not-installed") {
+            $installResult = Invoke-OpenClawTrustedWslProcess -Operation "InstallNoDistribution"
+            $installExitCode = [int]$installResult.exitCode
+            if ($installExitCode -notin [int[]]@(0, 3010)) {
+                $installDiagnostic = Get-OpenClawWslResultDiagnostic -Result $installResult
+                throw "wsl.exe --install --no-distribution returned unexpected exit code $installExitCode. Diagnostic: $installDiagnostic"
             }
 
             return [pscustomobject][ordered]@{
                 stage = "wsl-package"
                 scope = "wsl-package-only"
-                normalizedState = "ready"
-                wasInstalled = $true
-                installInvoked = $false
-                installExitCode = $null
+                normalizedState = "restart-required"
+                wasInstalled = $false
+                installInvoked = $true
+                installExitCode = $installExitCode
                 updateInvoked = $false
                 updateExitCode = $null
                 statusExitCode = [int]$statusResult.exitCode
-                versionExitCode = $versionExitCode
-                needsRestart = $false
+                versionExitCode = $null
+                needsRestart = $true
             }
         }
-        if ($statusState -cne "not-installed") {
+        if ($statusState -cne "ready") {
             throw "wsl.exe --status returned unsupported normalized state '$statusState'."
+        }
+
+        $versionResult = Invoke-OpenClawTrustedWslProcess -Operation "Version"
+        $versionExitCode = [int]$versionResult.exitCode
+        $versionDiagnostic = Get-OpenClawWslResultDiagnostic -Result $versionResult
+        if ($versionExitCode -ne 0) {
+            $updateResult = Invoke-OpenClawTrustedWslProcess -Operation "UpdateWebDownload"
+            $updateExitCode = [int]$updateResult.exitCode
+            if ($updateExitCode -notin [int[]]@(0, 3010)) {
+                $updateDiagnostic = Get-OpenClawWslResultDiagnostic -Result $updateResult
+                throw "wsl.exe --update --web-download returned unexpected exit code $updateExitCode. Version diagnostic: $versionDiagnostic Update diagnostic: $updateDiagnostic"
+            }
+
+            return [pscustomobject][ordered]@{
+                stage = "wsl-package"
+                scope = "wsl-package-only"
+                normalizedState = "restart-required"
+                wasInstalled = $true
+                installInvoked = $false
+                installExitCode = $null
+                updateInvoked = $true
+                updateExitCode = $updateExitCode
+                statusExitCode = [int]$statusResult.exitCode
+                versionExitCode = $versionExitCode
+                needsRestart = $true
+            }
         }
 
         $versionState = Get-OpenClawWslResultState `
             -Result $versionResult `
             -Label "wsl.exe --version"
-        if ($versionState -notin [string[]]@("ready", "not-installed")) {
+        if ($versionState -cne "ready") {
             throw "wsl.exe --version returned unsupported normalized state '$versionState'."
-        }
-
-        $installResult = Invoke-OpenClawTrustedWslProcess -Operation "InstallNoDistribution"
-        $installExitCode = [int]$installResult.exitCode
-        if ($installExitCode -notin [int[]]@(0, 3010)) {
-            $installDiagnostic = Get-OpenClawWslResultDiagnostic -Result $installResult
-            throw "wsl.exe --install --no-distribution returned unexpected exit code $installExitCode. Diagnostic: $installDiagnostic"
         }
 
         [pscustomobject][ordered]@{
             stage = "wsl-package"
             scope = "wsl-package-only"
-            normalizedState = "restart-required"
-            wasInstalled = $false
-            installInvoked = $true
-            installExitCode = $installExitCode
+            normalizedState = "ready"
+            wasInstalled = $true
+            installInvoked = $false
+            installExitCode = $null
             updateInvoked = $false
             updateExitCode = $null
             statusExitCode = [int]$statusResult.exitCode
             versionExitCode = $versionExitCode
-            needsRestart = $true
+            needsRestart = $false
         }
     }
 }

@@ -823,11 +823,12 @@ public sealed class CleanWindowsRunnerScriptTests
         AssertPowerShellProofSucceeded(result);
         using var document = JsonDocument.Parse(result.Stdout);
         var proof = document.RootElement;
-        Assert.Equal("Status,Version,InstallNoDistribution", proof.GetProperty("calls").GetString());
+        Assert.Equal("Status,InstallNoDistribution", proof.GetProperty("calls").GetString());
         Assert.True(proof.GetProperty("installInvoked").GetBoolean());
         Assert.Equal(0, proof.GetProperty("installExitCode").GetInt32());
         Assert.False(proof.GetProperty("updateInvoked").GetBoolean());
         Assert.Equal(JsonValueKind.Null, proof.GetProperty("updateExitCode").ValueKind);
+        Assert.Equal(JsonValueKind.Null, proof.GetProperty("versionExitCode").ValueKind);
         Assert.Equal("restart-required", proof.GetProperty("normalizedState").GetString());
         Assert.True(proof.GetProperty("needsRestart").GetBoolean());
     }
@@ -846,14 +847,15 @@ public sealed class CleanWindowsRunnerScriptTests
         AssertPowerShellProofSucceeded(result);
         using var document = JsonDocument.Parse(result.Stdout);
         var proof = document.RootElement;
-        Assert.Equal("Status,Version,InstallNoDistribution", proof.GetProperty("calls").GetString());
+        Assert.Equal("Status,InstallNoDistribution", proof.GetProperty("calls").GetString());
         Assert.Equal(3010, proof.GetProperty("installExitCode").GetInt32());
         Assert.False(proof.GetProperty("updateInvoked").GetBoolean());
+        Assert.Equal(JsonValueKind.Null, proof.GetProperty("versionExitCode").ValueKind);
         Assert.True(proof.GetProperty("needsRestart").GetBoolean());
     }
 
     [Fact]
-    public void HyperVController_StatusAbsentInstallsWhenVersionIsReady()
+    public void HyperVController_StatusAbsentDoesNotProbeVersion()
     {
         var result = RunPowerShellCommand(BuildWslPackageStageProof(
             packageInstalled: false,
@@ -866,9 +868,10 @@ public sealed class CleanWindowsRunnerScriptTests
         AssertPowerShellProofSucceeded(result);
         using var document = JsonDocument.Parse(result.Stdout);
         var proof = document.RootElement;
-        Assert.Equal("Status,Version,InstallNoDistribution", proof.GetProperty("calls").GetString());
+        Assert.Equal("Status,InstallNoDistribution", proof.GetProperty("calls").GetString());
         Assert.True(proof.GetProperty("installInvoked").GetBoolean());
         Assert.False(proof.GetProperty("updateInvoked").GetBoolean());
+        Assert.Equal(JsonValueKind.Null, proof.GetProperty("versionExitCode").ValueKind);
         Assert.True(proof.GetProperty("needsRestart").GetBoolean());
     }
 
@@ -886,7 +889,7 @@ public sealed class CleanWindowsRunnerScriptTests
         AssertPowerShellProofSucceeded(result);
         using var document = JsonDocument.Parse(result.Stdout);
         var proof = document.RootElement;
-        Assert.Equal("Status,Version", proof.GetProperty("calls").GetString());
+        Assert.Equal("Status", proof.GetProperty("calls").GetString());
         Assert.Contains(
             "unexpected exit code -1",
             proof.GetProperty("error").GetString(),
@@ -894,22 +897,44 @@ public sealed class CleanWindowsRunnerScriptTests
     }
 
     [Fact]
-    public void HyperVController_AbsentStatusAndUnrelatedVersionFailureFailsBeforeInstall()
+    public void HyperVController_AbsentStatusShortCircuitsUnrelatedVersionFailure()
     {
         var result = RunPowerShellCommand(BuildWslPackageStageProof(
             packageInstalled: false,
             statusExitCode: 50,
             statusOutput: "WSL is not installed",
             versionExitCode: 7,
-            versionOutput: "The version request could not be completed.",
+            versionOutput: "The version request could not be completed."));
+
+        AssertPowerShellProofSucceeded(result);
+        using var document = JsonDocument.Parse(result.Stdout);
+        var proof = document.RootElement;
+        Assert.Equal("Status,InstallNoDistribution", proof.GetProperty("calls").GetString());
+        Assert.True(proof.GetProperty("installInvoked").GetBoolean());
+        Assert.False(proof.GetProperty("updateInvoked").GetBoolean());
+        Assert.Equal(JsonValueKind.Null, proof.GetProperty("versionExitCode").ValueKind);
+    }
+
+    [Fact]
+    public void HyperVController_InstallFailureIncludesDiagnosticAndDoesNotRetry()
+    {
+        var result = RunPowerShellCommand(BuildWslPackageStageProof(
+            packageInstalled: false,
+            installExitCode: 5,
+            statusExitCode: 50,
+            installOutput: "The package install failed.",
             captureFailure: true));
 
         AssertPowerShellProofSucceeded(result);
         using var document = JsonDocument.Parse(result.Stdout);
         var proof = document.RootElement;
-        Assert.Equal("Status,Version", proof.GetProperty("calls").GetString());
+        Assert.Equal("Status,InstallNoDistribution", proof.GetProperty("calls").GetString());
         Assert.Contains(
-            "wsl.exe --version returned unexpected exit code 7",
+            "wsl.exe --install --no-distribution returned unexpected exit code 5",
+            proof.GetProperty("error").GetString(),
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "stdout: The package install failed.",
             proof.GetProperty("error").GetString(),
             StringComparison.Ordinal);
     }
@@ -991,6 +1016,27 @@ public sealed class CleanWindowsRunnerScriptTests
         Assert.False(proof.GetProperty("updateInvoked").GetBoolean());
         Assert.Equal("ready", proof.GetProperty("normalizedState").GetString());
         Assert.False(proof.GetProperty("needsRestart").GetBoolean());
+    }
+
+    [Fact]
+    public void HyperVController_ReadyStatusAndContradictoryVersionFailsClosed()
+    {
+        var result = RunPowerShellCommand(BuildWslPackageStageProof(
+            packageInstalled: false,
+            statusExitCode: 0,
+            statusOutput: "WSL status ready",
+            versionExitCode: 0,
+            versionOutput: "WSL is not installed",
+            captureFailure: true));
+
+        AssertPowerShellProofSucceeded(result);
+        using var document = JsonDocument.Parse(result.Stdout);
+        var proof = document.RootElement;
+        Assert.Equal("Status,Version", proof.GetProperty("calls").GetString());
+        Assert.Contains(
+            "wsl.exe --version returned exit code 0 with contradictory not-installed output",
+            proof.GetProperty("error").GetString(),
+            StringComparison.Ordinal);
     }
 
     [Fact]
@@ -3280,6 +3326,7 @@ public sealed class CleanWindowsRunnerScriptTests
                 installExitCode = $result.installExitCode
                 updateInvoked = [bool]$result.updateInvoked
                 updateExitCode = $result.updateExitCode
+                versionExitCode = $result.versionExitCode
                 needsRestart = [bool]$result.needsRestart
               } | ConvertTo-Json -Compress))
               """;
