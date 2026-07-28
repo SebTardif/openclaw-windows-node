@@ -65,7 +65,7 @@ Use explicit blocker wording when applicable:
 | Restore a checkpoint | `Restore-VMSnapshot` only after owner-marker validation |
 | Start or stop the guest | `Start-VM` / `Stop-VM` only inside an owned operation |
 | Execute in the guest | PowerShell Direct `Invoke-Command -VMName` or an owned `PSSession` |
-| Copy checkout into the guest | `Copy-Item -ToSession` |
+| Copy committed source into the guest | One validated `git archive` ZIP through `Copy-Item -ToSession` |
 | Retrieve proof artifacts | `Copy-Item -FromSession` |
 
 Do not call lifecycle cmdlets directly to bypass the repository controller.
@@ -198,11 +198,11 @@ available. Both WSL optional features are disabled at that checkpoint, and
 `wsl.exe --status` returns exit 50 with `WSL is not installed`. This is the
 expected input to normal `Prepare`.
 
-The current failed `Prepare` completed the signed WinGet catalog bootstrap and
-Git installation, then WinGet selected the default PowerShell MSIX bundle.
-That bundle failed with `0x80073D19` because PowerShell Direct has no active
-AppX deployment user session. Its existing rollback is expected to have
-restored the exact `clean-windows` checkpoint, but this hotfix does not claim
+The current `Prepare` reached source transfer after WinGet, Git, and
+PowerShell succeeded, but the old recursive checkout copy included more than
+3 GiB of ignored host `bin`/`obj` output. That run is not clean proof even if
+it completes. Do not kill or bypass its existing `finally`; it is expected to
+restore the exact `clean-windows` checkpoint, but this hotfix does not claim
 live confirmation. The driver must confirm that exact owned restore and
 finalized checkpoint marker before the next attempt. Retry with normal
 `Prepare`. Do not use `-RecoverPendingCheckpoint`, `-CleanupUnattend`, or an ad
@@ -322,6 +322,19 @@ native captures with sanitized diagnostics. Failures include decimal and
 eight-digit hexadecimal codes, with an explicit diagnostic for the known
 AppX session error `0x80073D19`.
 
+Source transfer then requires an empty `git status --porcelain=v1
+--untracked-files=all` and creates one deterministic ZIP from exact committed
+`HEAD` with `git archive`. The controller records and bounds HEAD, tracked-file
+and archive-entry counts, compressed and expanded sizes, and SHA-256. Host and
+guest both reject absolute, traversal, duplicate case-insensitive,
+Windows-unsafe, `.git`, `bin`, `obj`, and `TestResults` entries, unexpected
+tree or ZIP types, unsafe symbolic-link targets, and archive count/hash/size
+mismatches. The guest verifies before resetting its repo root, extracts with
+built-in tooling, rejects all resulting reparse points and generated
+directories, writes `openclaw-source-provenance.json`, and initializes the
+disposable Git commit. Exactly one archive crosses PowerShell Direct. Guest
+and host copies are removed in `finally`, and cleanup failure is fatal.
+
 `Prepare` does not install Ubuntu or another distribution. Installed smoke
 provisions its app-owned distribution later. Checkpoint observation, guest
 commands, restarts, and reconnects are bounded. Failed jobs report bounded,
@@ -414,9 +427,10 @@ another operator or smoke lane owns the VM.
 
 ## Transport and cleanup contract
 
-The controller copies the checkout with `Copy-Item -ToSession`, executes with
-PowerShell Direct `Invoke-Command -VMName` or an owned session, and retrieves
-artifacts with `Copy-Item -FromSession`. Commands have bounded timeouts.
+The controller copies exactly one validated clean-HEAD Git archive with
+`Copy-Item -ToSession`, executes with PowerShell Direct
+`Invoke-Command -VMName` or an owned session, and retrieves artifacts with
+`Copy-Item -FromSession`. Commands have bounded timeouts.
 
 Every smoke attempt must stop the owned guest and restore
 `openclaw-prerequisites` in a `finally` path on success or failure. Verify the

@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.IO.Compression;
 using System.Text.Json;
 
 namespace OpenClaw.Tray.Tests;
@@ -2307,7 +2308,15 @@ public sealed class CleanWindowsRunnerScriptTests
 
         Assert.Contains("$script:CleanCheckpointName = \"clean-windows\"", script);
         Assert.Contains("$script:PreparedCheckpointName = \"openclaw-prerequisites\"", script);
-        Assert.Contains("Copy-Item -LiteralPath $sourcePath -Destination $guestRepoRoot -ToSession $Session", script);
+        Assert.Contains("git archive", script, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("-LiteralPath $sourceArchive.ArchivePath", script, StringComparison.Ordinal);
+        Assert.Contains("-Destination $guestArchivePath", script, StringComparison.Ordinal);
+        Assert.Contains("-ToSession $Session", script, StringComparison.Ordinal);
+        Assert.DoesNotContain("Get-RepoTransferItems", script, StringComparison.Ordinal);
+        Assert.DoesNotContain(
+            "Copy-Item -LiteralPath $sourcePath -Destination $guestRepoRoot",
+            script,
+            StringComparison.Ordinal);
         Assert.Contains("Copy-Item -Path $guestArtifacts -Destination $hostArtifacts -FromSession $Session", script);
         Assert.Contains("Wait-Job -Job $job -Timeout $TimeoutSec", script);
         Assert.Contains("LastBootUpTime.ToUniversalTime().Ticks", script);
@@ -2337,6 +2346,204 @@ public sealed class CleanWindowsRunnerScriptTests
         Assert.Contains("cleanupCompleted", script);
         Assert.Contains("finally {", script);
         Assert.Contains("Restore-OwnedCheckpoint -ResolvedVhdPath $ResolvedVhdPath", script);
+    }
+
+    [Fact]
+    public void HyperVController_RequiresCleanHeadAndOneValidatedArchiveTransfer()
+    {
+        var script = ReadScript("Invoke-CleanWindowsHyperV.ps1");
+        var createArchive = ExtractPowerShellFunction(
+            script,
+            "New-CleanWindowsSourceArchive",
+            "Copy-RepoToGuest");
+        var transfer = ExtractPowerShellFunction(
+            script,
+            "Copy-RepoToGuest",
+            "Get-GuestWingetBootstrapScriptBlock");
+
+        Assert.Contains(
+            "@(\"status\", \"--porcelain=v1\", \"--untracked-files=all\")",
+            script,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "@(\"archive\", \"--format=zip\", \"--output=$ArchivePath\", \"HEAD\")",
+            createArchive,
+            StringComparison.Ordinal);
+        Assert.Contains("Assert-CleanCommittedSourceHead", createArchive, StringComparison.Ordinal);
+        Assert.Contains("Source HEAD changed", createArchive, StringComparison.Ordinal);
+        Assert.Contains("[Security.Cryptography.SHA256]::Create()", createArchive, StringComparison.Ordinal);
+        Assert.Contains("$script:SourceArchiveMaximumBytes = 268435456", script, StringComparison.Ordinal);
+        Assert.Contains("$script:SourceArchiveMaximumTrackedFiles = 20000", script, StringComparison.Ordinal);
+        Assert.Contains("$process.WaitForExit($TimeoutSec * 1000)", script, StringComparison.Ordinal);
+        Assert.Contains("Stop-Process -Id $process.Id -Force", script, StringComparison.Ordinal);
+        Assert.Contains("Copy-Item `", transfer, StringComparison.Ordinal);
+        Assert.Equal(1, CountOccurrences(transfer, "-ToSession $Session"));
+        Assert.DoesNotContain("-Recurse", ExtractPowerShellRange(
+            transfer,
+            "            Copy-Item `",
+            "        } catch {"), StringComparison.Ordinal);
+        Assert.Contains("SHA256 mismatch", script, StringComparison.Ordinal);
+        Assert.Contains("Expand-Archive", script, StringComparison.Ordinal);
+        Assert.Contains("openclaw.clean-windows.source-provenance/v1", script, StringComparison.Ordinal);
+        Assert.Contains("Guest staging from $RemoteSourceHead", transfer, StringComparison.Ordinal);
+        Assert.Contains("Cleaning guest source archive transfer", transfer, StringComparison.Ordinal);
+        Assert.Contains("Remove-Item -LiteralPath $hostTransferRoot -Recurse -Force", transfer, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void CleanSourceArchiveUsesCommittedTreeAndExcludesIgnoredGeneratedOutputs()
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"openclaw-source-repo-{Guid.NewGuid():N}");
+        var archiveRoot = Path.Combine(Path.GetTempPath(), $"openclaw-source-archive-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(root);
+        Directory.CreateDirectory(archiveRoot);
+        try
+        {
+            var result = RunPowerShellCommand(BuildCleanSourceArchiveProof(
+                root,
+                Path.Combine(archiveRoot, "source.zip")));
+
+            AssertPowerShellProofSucceeded(result);
+            using var document = JsonDocument.Parse(result.Stdout);
+            var proof = document.RootElement;
+            Assert.Matches("^[0-9a-f]{40}$", proof.GetProperty("sourceHead").GetString() ?? string.Empty);
+            Assert.Equal(3, proof.GetProperty("trackedFileCount").GetInt32());
+            Assert.True(proof.GetProperty("archiveSize").GetInt64() > 0);
+            Assert.Equal(64, (proof.GetProperty("sha256").GetString() ?? string.Empty).Length);
+            Assert.False(proof.GetProperty("hasGeneratedEntries").GetBoolean());
+            Assert.Contains(
+                "requires a clean committed HEAD",
+                proof.GetProperty("dirtyError").GetString(),
+                StringComparison.Ordinal);
+        }
+        finally
+        {
+            DeleteTestDirectory(root);
+            DeleteTestDirectory(archiveRoot);
+        }
+    }
+
+    [Fact]
+    public void SourceArchiveHashMismatchFailsBeforeExtractionAndCleansGuestArchive()
+    {
+        var archivePath = Path.Combine(Path.GetTempPath(), $"openclaw-bad-hash-{Guid.NewGuid():N}.zip");
+        var destination = Path.Combine(Path.GetTempPath(), $"openclaw-bad-hash-dest-{Guid.NewGuid():N}");
+        CreateSourceArchive(archivePath, ("src/app.txt", "safe", 0));
+        try
+        {
+            var result = RunPowerShellCommand(BuildSourceArchiveInstallProof(
+                archivePath,
+                destination,
+                expectedSha256: new string('0', 64),
+                expectedFileCount: 1,
+                install: true));
+
+            AssertPowerShellProofSucceeded(result);
+            using var document = JsonDocument.Parse(result.Stdout);
+            var error = document.RootElement.GetProperty("error").GetString() ?? string.Empty;
+            Assert.True(
+                error.Contains("SHA256 mismatch", StringComparison.Ordinal),
+                $"Expected SHA256 mismatch. Actual: {error}");
+            Assert.False(document.RootElement.GetProperty("archiveExists").GetBoolean());
+            Assert.False(Directory.Exists(destination));
+        }
+        finally
+        {
+            File.Delete(archivePath);
+            if (Directory.Exists(destination))
+            {
+                Directory.Delete(destination, recursive: true);
+            }
+        }
+    }
+
+    [Theory]
+    [InlineData("../escape.txt", "payload", 0, "safe Windows relative path")]
+    [InlineData("C:/escape.txt", "payload", 0, "absolute")]
+    [InlineData("src/bin/stale.dll", "payload", 0, "forbidden generated segment")]
+    [InlineData("openclaw-source-provenance.json", "payload", 0, "reserved provenance file")]
+    [InlineData("safe-link", "../escape.txt", unchecked((int)0xA1FF0000), "symbolic-link target")]
+    public void SourceArchiveRejectsTraversalGeneratedAndUnsafeLinkEntries(
+        string entryName,
+        string content,
+        int externalAttributes,
+        string expectedError)
+    {
+        var archivePath = Path.Combine(Path.GetTempPath(), $"openclaw-unsafe-{Guid.NewGuid():N}.zip");
+        var destination = Path.Combine(Path.GetTempPath(), $"openclaw-unsafe-dest-{Guid.NewGuid():N}");
+        CreateSourceArchive(archivePath, (entryName, content, externalAttributes));
+        try
+        {
+            var hash = Convert.ToHexString(
+                System.Security.Cryptography.SHA256.HashData(File.ReadAllBytes(archivePath)));
+            var result = RunPowerShellCommand(BuildSourceArchiveInstallProof(
+                archivePath,
+                destination,
+                hash,
+                expectedFileCount: 1,
+                install: true));
+
+            AssertPowerShellProofSucceeded(result);
+            using var document = JsonDocument.Parse(result.Stdout);
+            var error = document.RootElement.GetProperty("error").GetString() ?? string.Empty;
+            Assert.True(
+                error.Contains(expectedError, StringComparison.OrdinalIgnoreCase),
+                $"Expected '{expectedError}'. Actual: {error}");
+            Assert.False(document.RootElement.GetProperty("archiveExists").GetBoolean());
+            Assert.False(Directory.Exists(destination));
+        }
+        finally
+        {
+            File.Delete(archivePath);
+            if (Directory.Exists(destination))
+            {
+                Directory.Delete(destination, recursive: true);
+            }
+        }
+    }
+
+    [Fact]
+    public void SourceArchiveExtractionWritesExactHeadProvenanceAndRemovesArchive()
+    {
+        var archivePath = Path.Combine(Path.GetTempPath(), $"openclaw-safe-{Guid.NewGuid():N}.zip");
+        var destination = Path.Combine(Path.GetTempPath(), $"openclaw-safe-dest-{Guid.NewGuid():N}");
+        CreateSourceArchive(
+            archivePath,
+            ("src/app.txt", "source", 0),
+            ("scripts/setup-dev.ps1", "Write-Host ready", 0));
+        try
+        {
+            var hash = Convert.ToHexString(
+                System.Security.Cryptography.SHA256.HashData(File.ReadAllBytes(archivePath)));
+            var result = RunPowerShellCommand(BuildSourceArchiveInstallProof(
+                archivePath,
+                destination,
+                hash,
+                expectedFileCount: 2,
+                install: true));
+
+            AssertPowerShellProofSucceeded(result);
+            using var document = JsonDocument.Parse(result.Stdout);
+            var proof = document.RootElement;
+            Assert.True(string.IsNullOrEmpty(proof.GetProperty("error").GetString()));
+            Assert.False(proof.GetProperty("archiveExists").GetBoolean());
+            Assert.True(proof.GetProperty("destinationExists").GetBoolean());
+            Assert.Equal(
+                "1111111111111111111111111111111111111111",
+                proof.GetProperty("provenanceHead").GetString());
+            Assert.Equal(hash, proof.GetProperty("provenanceSha256").GetString());
+            Assert.Equal(2, proof.GetProperty("provenanceTrackedFileCount").GetInt32());
+            Assert.False(proof.GetProperty("hasGeneratedDirectories").GetBoolean());
+            Assert.False(proof.GetProperty("hasReparsePoints").GetBoolean());
+        }
+        finally
+        {
+            File.Delete(archivePath);
+            if (Directory.Exists(destination))
+            {
+                Directory.Delete(destination, recursive: true);
+            }
+        }
     }
 
     [Fact]
@@ -5448,6 +5655,188 @@ public sealed class CleanWindowsRunnerScriptTests
             "  installArguments = $script:installArguments\n",
             "  error = $errorMessage\n",
             "} | ConvertTo-Json -Compress))\n");
+    }
+
+    private static string BuildCleanSourceArchiveProof(string repositoryRoot, string archivePath)
+    {
+        var controller = ReadScript("Invoke-CleanWindowsHyperV.ps1");
+        var git = ExtractPowerShellFunction(
+            controller,
+            "Invoke-CleanWindowsSourceGit",
+            "Assert-CleanCommittedSourceHead");
+        var clean = ExtractPowerShellFunction(
+            controller,
+            "Assert-CleanCommittedSourceHead",
+            "Get-SourceArchiveInstallScriptBlock");
+        var validator = ExtractPowerShellFunction(
+            controller,
+            "Get-SourceArchiveInstallScriptBlock",
+            "New-CleanWindowsSourceArchive");
+        var create = ExtractPowerShellFunction(
+            controller,
+            "New-CleanWindowsSourceArchive",
+            "Copy-RepoToGuest");
+        return string.Concat(
+            "$ErrorActionPreference = 'Stop'\n",
+            "$script:SourceArchiveMaximumBytes = 268435456\n",
+            "$script:SourceArchiveMaximumExpandedBytes = 536870912\n",
+            "$script:SourceArchiveMaximumTrackedFiles = 20000\n",
+            "$script:SourceProvenanceFileName = 'openclaw-source-provenance.json'\n",
+            "function ConvertTo-SafeGuestDiagnosticText { param([string]$Text) if ($Text) { $Text } else { '<empty>' } }\n",
+            git,
+            "\n",
+            clean,
+            "\n",
+            validator,
+            "\n",
+            create,
+            "\n$repo = ",
+            PsQuote(repositoryRoot),
+            "\n$archivePath = ",
+            PsQuote(archivePath),
+            "\n",
+            "& git -C $repo init -q\n",
+            "& git -C $repo config user.name 'Archive Test'\n",
+            "& git -C $repo config user.email 'archive-test@example.invalid'\n",
+            "New-Item -ItemType Directory -Path (Join-Path $repo 'src') | Out-Null\n",
+            "[IO.File]::WriteAllText((Join-Path $repo '.gitignore'), \"bin/`nobj/`nTestResults/`n\")\n",
+            "[IO.File]::WriteAllText((Join-Path $repo 'README.md'), 'clean source')\n",
+            "[IO.File]::WriteAllText((Join-Path $repo 'src\\app.txt'), 'tracked')\n",
+            "& git -C $repo add -A\n",
+            "& git -C $repo -c commit.gpgSign=false commit -m 'source' --quiet\n",
+            "New-Item -ItemType Directory -Path (Join-Path $repo 'src\\bin') | Out-Null\n",
+            "New-Item -ItemType Directory -Path (Join-Path $repo 'tests\\obj') | Out-Null\n",
+            "[IO.File]::WriteAllText((Join-Path $repo 'src\\bin\\stale.dll'), 'stale')\n",
+            "[IO.File]::WriteAllText((Join-Path $repo 'tests\\obj\\stale.dll'), 'stale')\n",
+            "$proof = New-CleanWindowsSourceArchive -RepositoryRoot $repo -ArchivePath $archivePath\n",
+            "Add-Type -AssemblyName System.IO.Compression.FileSystem\n",
+            "$zip = [IO.Compression.ZipFile]::OpenRead($archivePath)\n",
+            "try { $names = @($zip.Entries | ForEach-Object { $_.FullName }) } finally { $zip.Dispose() }\n",
+            "$hasGenerated = @($names | Where-Object { $_ -match '(^|/)(bin|obj|TestResults)(/|$)' }).Count -ne 0\n",
+            "[IO.File]::WriteAllText((Join-Path $repo 'dirty.txt'), 'dirty')\n",
+            "$dirtyError = $null\n",
+            "try { [void](Assert-CleanCommittedSourceHead -RepositoryRoot $repo) } catch { $dirtyError = $_.Exception.Message }\n",
+            "[Console]::Out.Write(([pscustomobject][ordered]@{\n",
+            " sourceHead = $proof.SourceHead\n",
+            " trackedFileCount = $proof.TrackedFileCount\n",
+            " archiveSize = $proof.ArchiveSize\n",
+            " sha256 = $proof.ArchiveSha256\n",
+            " hasGeneratedEntries = $hasGenerated\n",
+            " dirtyError = $dirtyError\n",
+            "} | ConvertTo-Json -Compress))\n");
+    }
+
+    private static string BuildSourceArchiveInstallProof(
+        string archivePath,
+        string destination,
+        string expectedSha256,
+        int expectedFileCount,
+        bool install)
+    {
+        var controller = ReadScript("Invoke-CleanWindowsHyperV.ps1");
+        var validator = ExtractPowerShellFunction(
+            controller,
+            "Get-SourceArchiveInstallScriptBlock",
+            "New-CleanWindowsSourceArchive");
+        var archiveSize = new FileInfo(archivePath).Length;
+        return string.Concat(
+            "$ErrorActionPreference = 'Stop'\n",
+            validator,
+            "\n$errorMessage = $null\n",
+            "$proof = $null\n",
+            "try {\n",
+            " $proof = & (Get-SourceArchiveInstallScriptBlock) ",
+            PsQuote(archivePath),
+            " ",
+            PsQuote(expectedSha256),
+            " ",
+            expectedFileCount.ToString(System.Globalization.CultureInfo.InvariantCulture),
+            " ",
+            archiveSize.ToString(System.Globalization.CultureInfo.InvariantCulture),
+            " 268435456 536870912 20000 ",
+            "'1111111111111111111111111111111111111111' ",
+            PsQuote(destination),
+            " 'openclaw-source-provenance.json' $",
+            install ? "true" : "false",
+            "\n",
+            "} catch { $errorMessage = $_.Exception.Message }\n",
+            "$provenance = $null\n",
+            "$provenancePath = Join-Path ",
+            PsQuote(destination),
+            " 'openclaw-source-provenance.json'\n",
+            "if (Test-Path -LiteralPath $provenancePath -PathType Leaf) { ",
+            "$provenance = Get-Content -LiteralPath $provenancePath -Raw | ConvertFrom-Json }\n",
+            "$generated = @()\n",
+            "$reparse = @()\n",
+            "if (Test-Path -LiteralPath ",
+            PsQuote(destination),
+            ") {\n",
+            " $generated = @(Get-ChildItem -LiteralPath ",
+            PsQuote(destination),
+            " -Directory -Recurse -Force | Where-Object { @('bin','obj','TestResults') -contains $_.Name })\n",
+            " $reparse = @(Get-ChildItem -LiteralPath ",
+            PsQuote(destination),
+            " -Recurse -Force | Where-Object { ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 })\n",
+            "}\n",
+            "[Console]::Out.Write(([pscustomobject][ordered]@{\n",
+            " error = $errorMessage\n",
+            " archiveExists = Test-Path -LiteralPath ",
+            PsQuote(archivePath),
+            "\n",
+            " destinationExists = Test-Path -LiteralPath ",
+            PsQuote(destination),
+            "\n",
+            " provenanceHead = if ($provenance) { [string]$provenance.sourceHead } else { $null }\n",
+            " provenanceSha256 = if ($provenance) { [string]$provenance.archiveSha256 } else { $null }\n",
+            " provenanceTrackedFileCount = if ($provenance) { [int]$provenance.trackedFileCount } else { 0 }\n",
+            " hasGeneratedDirectories = $generated.Count -ne 0\n",
+            " hasReparsePoints = $reparse.Count -ne 0\n",
+            "} | ConvertTo-Json -Compress))\n");
+    }
+
+    private static void CreateSourceArchive(
+        string archivePath,
+        params (string Name, string Content, int ExternalAttributes)[] entries)
+    {
+        using var archive = ZipFile.Open(archivePath, ZipArchiveMode.Create);
+        foreach (var item in entries)
+        {
+            var entry = archive.CreateEntry(item.Name, CompressionLevel.Optimal);
+            entry.ExternalAttributes = item.ExternalAttributes;
+            using var writer = new StreamWriter(entry.Open(), new System.Text.UTF8Encoding(false));
+            writer.Write(item.Content);
+        }
+    }
+
+    private static int CountOccurrences(string value, string substring)
+    {
+        var count = 0;
+        var index = 0;
+        while ((index = value.IndexOf(substring, index, StringComparison.Ordinal)) >= 0)
+        {
+            count++;
+            index += substring.Length;
+        }
+        return count;
+    }
+
+    private static void DeleteTestDirectory(string path)
+    {
+        if (!Directory.Exists(path))
+        {
+            return;
+        }
+
+        foreach (var file in Directory.EnumerateFiles(path, "*", SearchOption.AllDirectories))
+        {
+            File.SetAttributes(file, FileAttributes.Normal);
+        }
+        foreach (var directory in Directory.EnumerateDirectories(path, "*", SearchOption.AllDirectories))
+        {
+            File.SetAttributes(directory, FileAttributes.Normal);
+        }
+        File.SetAttributes(path, FileAttributes.Normal);
+        Directory.Delete(path, recursive: true);
     }
 
     private static string ExtractPowerShellFunction(

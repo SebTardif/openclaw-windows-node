@@ -477,6 +477,35 @@ MSIX or enable autologon. Native failures include decimal and eight-digit
 hexadecimal exit codes plus bounded sanitized output. `0x80073D19` receives a
 specific AppX deployment-session/user-logged-off diagnostic.
 
+#### Clean committed source transfer
+
+`Prepare` and `Smoke` never recursively copy the host checkout. Before source
+transfer, the controller requires `git status --porcelain=v1
+--untracked-files=all` to be empty and resolves one full committed `HEAD`.
+Ignored host output may still exist, but it cannot enter the payload. The
+controller creates one deterministic `git archive --format=zip` from exact
+`HEAD`, so `.git`, untracked files, ignored `bin`, `obj`, `TestResults`, and
+other stale build output are absent by construction.
+
+The archive contract caps compressed size at 256 MiB, expanded size at 512
+MiB, and tracked files at 20,000. It records the source HEAD, tracked-file and
+archive-entry counts, byte size, expanded size, and SHA-256. Host validation
+requires the archive file count to equal the committed tree count. Entry names
+must be unique under Windows case-insensitive comparison, relative,
+traversal-free, Windows-safe, and free of `.git`, `bin`, `obj`, and
+`TestResults` path segments. Unexpected Git tree or ZIP entry types fail.
+Git symbolic-link entries are accepted only when their UTF-8 target is a safe
+relative non-traversing path. Extraction must materialize no reparse points.
+
+PowerShell Direct transfers exactly that one bounded ZIP. The guest verifies
+its size and SHA-256 and repeats the complete ZIP entry validation before
+resetting the guest repository root. After built-in `Expand-Archive`, it
+requires the exact tracked-file count and no generated directories or reparse
+points. It writes `openclaw-source-provenance.json` with the original host
+HEAD and archive evidence, then initializes and commits the disposable guest
+Git repository. Both guest and host archives are removed in `finally`; cleanup
+failure fails the operation.
+
 Downloads, extraction, and native output captures live under one nonce child
 of the guest temporary directory. The root is removed on success or failure.
 A cleanup failure makes the bootstrap fail.
@@ -511,10 +540,11 @@ limited to the explicit owned path documented above.
   -ConfirmOwnedAction
 ```
 
-The controller transports the checkout with PowerShell Direct
-`Copy-Item -ToSession`, runs the typed `Installed` validation lane by default,
-and retrieves artifacts with `Copy-Item -FromSession`. The VM is stopped and restored to
-`openclaw-prerequisites` in a `finally` path on success or failure.
+The controller transfers one validated clean-HEAD source archive with
+PowerShell Direct `Copy-Item -ToSession`, runs the typed `Installed` validation
+lane by default, and retrieves artifacts with `Copy-Item -FromSession`. The VM
+is stopped and restored to `openclaw-prerequisites` in a `finally` path on
+success or failure.
 
 After `scripts\validate-inno-upgrade-smoke.ps1` is integrated, run the typed
 upgrade lane with an exact official release tag and x64 installer SHA-256:

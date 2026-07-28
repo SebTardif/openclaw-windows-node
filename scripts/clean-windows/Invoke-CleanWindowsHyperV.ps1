@@ -134,6 +134,10 @@ $script:CheckpointRecoveryClockSkewSec = 300
 $script:VhdChainMaxDepth = 32
 $script:GuestPowerShellWingetVersion = "7.6.4.0"
 $script:GuestPowerShellVersion = "7.6.4"
+$script:SourceArchiveMaximumBytes = 268435456
+$script:SourceArchiveMaximumExpandedBytes = 536870912
+$script:SourceArchiveMaximumTrackedFiles = 20000
+$script:SourceProvenanceFileName = "openclaw-source-provenance.json"
 
 Import-Module (Join-Path $PSScriptRoot "CleanWindowsUnattend.psm1") -Force
 
@@ -3599,25 +3603,534 @@ function Get-GuestRepoRoot {
     return (Join-Path $GuestRoot "repo")
 }
 
-function Get-RepoTransferItems {
-    return @(
-        ".config",
-        ".editorconfig",
-        ".gitattributes",
-        ".gitignore",
-        "Directory.Build.props",
-        "GitVersion.yml",
-        "NuGet.Config",
-        "build.ps1",
-        "global.json",
-        "installer.iss",
-        "openclaw-windows-node.slnx",
-        "package-lock.json",
-        "package.json",
-        "scripts",
-        "src",
-        "tests"
+function Invoke-CleanWindowsSourceGit {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$RepositoryRoot,
+        [Parameter(Mandatory = $true)]
+        [string[]]$Arguments,
+        [Parameter(Mandatory = $true)]
+        [string]$OperationName,
+        [ValidateRange(1, 600)]
+        [int]$TimeoutSec = 300
     )
+
+    $gitCommands = @(
+        Get-Command git.exe -CommandType Application -ErrorAction SilentlyContinue
+    )
+    if ($gitCommands.Count -eq 0) {
+        throw "Git is required on the host to create the clean source archive."
+    }
+    $gitPath = [string]$gitCommands[0].Source
+
+    $captureRoot = Join-Path $env:TEMP (
+        "openclaw-source-git-{0}" -f [Guid]::NewGuid().ToString("N"))
+    $stdoutPath = Join-Path $captureRoot "stdout.txt"
+    $stderrPath = Join-Path $captureRoot "stderr.txt"
+    $cleanupError = $null
+    try {
+        New-Item -ItemType Directory -Path $captureRoot -ErrorAction Stop | Out-Null
+        $quotedArguments = @(
+            $Arguments | ForEach-Object {
+                $argument = [string]$_
+                if ($argument.IndexOf('"') -ge 0) {
+                    throw "$OperationName received an unsupported quote in a fixed Git argument."
+                }
+                if ($argument -match '\s') {
+                    '"' + $argument + '"'
+                } else {
+                    $argument
+                }
+            }
+        )
+        $process = Start-Process `
+            -FilePath $gitPath `
+            -WorkingDirectory $RepositoryRoot `
+            -ArgumentList ($quotedArguments -join " ") `
+            -RedirectStandardOutput $stdoutPath `
+            -RedirectStandardError $stderrPath `
+            -PassThru `
+            -WindowStyle Hidden `
+            -ErrorAction Stop
+        if (-not $process.WaitForExit($TimeoutSec * 1000)) {
+            Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+            throw "$OperationName timed out after $TimeoutSec seconds."
+        }
+        $process.WaitForExit()
+        $stdout = if (Test-Path -LiteralPath $stdoutPath -PathType Leaf) {
+            [IO.File]::ReadAllText($stdoutPath)
+        } else {
+            ""
+        }
+        $stderr = if (Test-Path -LiteralPath $stderrPath -PathType Leaf) {
+            [IO.File]::ReadAllText($stderrPath)
+        } else {
+            ""
+        }
+        if ([int]$process.ExitCode -ne 0) {
+            $diagnostic = ConvertTo-SafeGuestDiagnosticText -Text (
+                "stdout='$stdout' stderr='$stderr'")
+            throw "$OperationName failed with exit code $($process.ExitCode). Diagnostic: $diagnostic"
+        }
+        return @(
+            $stdout -split '\r?\n' |
+                Where-Object { -not [string]::IsNullOrEmpty($_) }
+        )
+    } finally {
+        if (Test-Path -LiteralPath $captureRoot) {
+            try {
+                Remove-Item -LiteralPath $captureRoot -Recurse -Force -ErrorAction Stop
+            } catch {
+                $cleanupError = $_.Exception.Message
+            }
+        }
+        if ($cleanupError) {
+            throw "Source Git capture cleanup failed: $cleanupError"
+        }
+    }
+}
+
+function Assert-CleanCommittedSourceHead {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$RepositoryRoot
+    )
+
+    $status = @(
+        Invoke-CleanWindowsSourceGit `
+            -RepositoryRoot $RepositoryRoot `
+            -Arguments @("status", "--porcelain=v1", "--untracked-files=all") `
+            -OperationName "Reading source repository status"
+    )
+    $dirtyEntries = @($status | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+    if ($dirtyEntries.Count -ne 0) {
+        throw (
+            "Clean-machine source transfer requires a clean committed HEAD. " +
+            "The source repository has $($dirtyEntries.Count) staged, unstaged, or untracked entries.")
+    }
+
+    $headOutput = @(
+        Invoke-CleanWindowsSourceGit `
+            -RepositoryRoot $RepositoryRoot `
+            -Arguments @("rev-parse", "--verify", "HEAD") `
+            -OperationName "Resolving source HEAD"
+    )
+    if ($headOutput.Count -ne 1 -or $headOutput[0] -notmatch '^[0-9A-Fa-f]{40,64}$') {
+        throw "Source HEAD did not resolve to one full Git object ID."
+    }
+    return $headOutput[0].ToLowerInvariant()
+}
+
+function Get-SourceArchiveInstallScriptBlock {
+    return {
+        param(
+            [Parameter(Mandatory = $true)]
+            [string]$ArchivePath,
+            [Parameter(Mandatory = $true)]
+            [string]$ExpectedSha256,
+            [Parameter(Mandatory = $true)]
+            [int]$ExpectedTrackedFileCount,
+            [Parameter(Mandatory = $true)]
+            [Int64]$ExpectedArchiveSize,
+            [Parameter(Mandatory = $true)]
+            [Int64]$MaximumArchiveSize,
+            [Parameter(Mandatory = $true)]
+            [Int64]$MaximumExpandedSize,
+            [Parameter(Mandatory = $true)]
+            [int]$MaximumTrackedFileCount,
+            [Parameter(Mandatory = $true)]
+            [string]$SourceHead,
+            [AllowEmptyString()]
+            [string]$DestinationRoot,
+            [Parameter(Mandatory = $true)]
+            [string]$ProvenanceFileName,
+            [Parameter(Mandatory = $true)]
+            [bool]$Install
+        )
+
+        Set-StrictMode -Version 2.0
+        $ErrorActionPreference = "Stop"
+        Add-Type -AssemblyName System.IO.Compression.FileSystem
+
+        function Assert-OpenClawSourceArchivePath {
+            param(
+                [Parameter(Mandatory = $true)]
+                [string]$Path,
+                [Parameter(Mandatory = $true)]
+                [string]$PathKind,
+                [switch]$AllowProvenance
+            )
+
+            if ([string]::IsNullOrWhiteSpace($Path) -or $Path.IndexOf([char]0) -ge 0) {
+                throw "Source archive $PathKind is empty or contains a null character."
+            }
+            $normalized = $Path.Replace("\", "/")
+            if (
+                $normalized.StartsWith("/", [StringComparison]::Ordinal) -or
+                $normalized.StartsWith("//", [StringComparison]::Ordinal) -or
+                $normalized -match '^[A-Za-z]:' -or
+                [IO.Path]::IsPathRooted($normalized)
+            ) {
+                throw "Source archive $PathKind '$Path' is absolute."
+            }
+
+            $trimmed = $normalized.TrimEnd("/")
+            if ([string]::IsNullOrWhiteSpace($trimmed)) {
+                throw "Source archive $PathKind '$Path' has no relative path segments."
+            }
+            $segments = @($trimmed.Split("/"))
+            $forbiddenSegments = @(".git", "bin", "obj", "TestResults")
+            foreach ($segment in $segments) {
+                if (
+                    [string]::IsNullOrWhiteSpace($segment) -or
+                    $segment -ceq "." -or
+                    $segment -ceq ".." -or
+                    $segment.IndexOf(":") -ge 0 -or
+                    $segment -match '[<>:"|?*\x00-\x1F]' -or
+                    $segment.EndsWith(".", [StringComparison]::Ordinal) -or
+                    $segment.EndsWith(" ", [StringComparison]::Ordinal)
+                ) {
+                    throw "Source archive $PathKind '$Path' is not a safe Windows relative path."
+                }
+                if ($forbiddenSegments -contains $segment) {
+                    throw "Source archive $PathKind '$Path' contains forbidden generated segment '$segment'."
+                }
+                $deviceName = ($segment.Split(".")[0]).ToUpperInvariant()
+                if (
+                    $deviceName -match '^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])$'
+                ) {
+                    throw "Source archive $PathKind '$Path' contains reserved Windows name '$segment'."
+                }
+            }
+
+            if (
+                -not $AllowProvenance -and
+                [string]::Equals(
+                    $trimmed,
+                    $ProvenanceFileName,
+                    [StringComparison]::OrdinalIgnoreCase)
+            ) {
+                throw "Source archive already contains reserved provenance file '$ProvenanceFileName'."
+            }
+            return $trimmed
+        }
+
+        function Get-OpenClawSourceArchiveSha256 {
+            param(
+                [Parameter(Mandatory = $true)]
+                [string]$Path
+            )
+
+            $stream = [IO.File]::OpenRead($Path)
+            $algorithm = [Security.Cryptography.SHA256]::Create()
+            try {
+                $bytes = $algorithm.ComputeHash($stream)
+                return (($bytes | ForEach-Object { $_.ToString("X2") }) -join "")
+            } finally {
+                $algorithm.Dispose()
+                $stream.Dispose()
+            }
+        }
+
+        function Read-OpenClawSourceArchiveLinkTarget {
+            param(
+                [Parameter(Mandatory = $true)]
+                [IO.Compression.ZipArchiveEntry]$Entry
+            )
+
+            if ($Entry.Length -le 0 -or $Entry.Length -gt 4096) {
+                throw "Source archive symbolic-link entry '$($Entry.FullName)' has an invalid target length."
+            }
+            $entryStream = $Entry.Open()
+            try {
+                $memory = New-Object IO.MemoryStream
+                try {
+                    $entryStream.CopyTo($memory)
+                    $strictUtf8 = New-Object Text.UTF8Encoding($false, $true)
+                    $target = $strictUtf8.GetString($memory.ToArray())
+                } finally {
+                    $memory.Dispose()
+                }
+            } finally {
+                $entryStream.Dispose()
+            }
+            [void](Assert-OpenClawSourceArchivePath `
+                -Path $target `
+                -PathKind "symbolic-link target" `
+                -AllowProvenance)
+            return $target
+        }
+
+        function Assert-OpenClawSourceArchive {
+            param(
+                [Parameter(Mandatory = $true)]
+                [string]$Path
+            )
+
+            $seenPaths = New-Object 'Collections.Generic.HashSet[string]' (
+                [StringComparer]::OrdinalIgnoreCase)
+            $fileCount = 0
+            $entryCount = 0
+            $linkCount = 0
+            [Int64]$expandedBytes = 0
+            $archive = [IO.Compression.ZipFile]::OpenRead($Path)
+            try {
+                foreach ($entry in $archive.Entries) {
+                    $entryCount++
+                    if ($entryCount -gt ($MaximumTrackedFileCount * 2)) {
+                        throw "Source archive entry count exceeds the bounded maximum."
+                    }
+                    $isDirectory = $entry.FullName.EndsWith("/", [StringComparison]::Ordinal)
+                    $safePath = Assert-OpenClawSourceArchivePath `
+                        -Path $entry.FullName `
+                        -PathKind "entry"
+                    if (-not $seenPaths.Add($safePath)) {
+                        throw "Source archive has duplicate case-insensitive path '$safePath'."
+                    }
+
+                    $attributeBits = [BitConverter]::ToUInt32(
+                        [BitConverter]::GetBytes([int]$entry.ExternalAttributes),
+                        0)
+                    $unixType = [int](($attributeBits -shr 16) -band 0xF000)
+                    if ($isDirectory) {
+                        if ($unixType -ne 0 -and $unixType -ne 0x4000) {
+                            throw "Source archive directory '$safePath' has an unexpected entry type."
+                        }
+                        continue
+                    }
+                    if ($unixType -ne 0 -and $unixType -ne 0x8000 -and $unixType -ne 0xA000) {
+                        throw "Source archive file '$safePath' has an unexpected entry type."
+                    }
+
+                    $fileCount++
+                    if ($fileCount -gt $MaximumTrackedFileCount) {
+                        throw "Source archive tracked file count exceeds the bounded maximum."
+                    }
+                    $expandedBytes += [Int64]$entry.Length
+                    if ($expandedBytes -gt $MaximumExpandedSize) {
+                        throw "Source archive expanded size exceeds the bounded maximum."
+                    }
+                    if ($unixType -eq 0xA000) {
+                        [void](Read-OpenClawSourceArchiveLinkTarget -Entry $entry)
+                        $linkCount++
+                    }
+                }
+            } finally {
+                $archive.Dispose()
+            }
+
+            if ($fileCount -ne $ExpectedTrackedFileCount) {
+                throw (
+                    "Source archive contains $fileCount files; " +
+                    "expected exactly $ExpectedTrackedFileCount tracked files.")
+            }
+            return [pscustomobject][ordered]@{
+                entryCount = $entryCount
+                fileCount = $fileCount
+                expandedBytes = $expandedBytes
+                symbolicLinkCount = $linkCount
+            }
+        }
+
+        $cleanupError = $null
+        try {
+            if (-not (Test-Path -LiteralPath $ArchivePath -PathType Leaf)) {
+                throw "Source archive was not found at the expected path."
+            }
+            $archiveItem = Get-Item -LiteralPath $ArchivePath -Force -ErrorAction Stop
+            if (
+                [Int64]$archiveItem.Length -ne $ExpectedArchiveSize -or
+                [Int64]$archiveItem.Length -le 0 -or
+                [Int64]$archiveItem.Length -gt $MaximumArchiveSize
+            ) {
+                throw (
+                    "Source archive size is $($archiveItem.Length) bytes; " +
+                    "expected $ExpectedArchiveSize within the bounded maximum.")
+            }
+            $actualSha256 = Get-OpenClawSourceArchiveSha256 -Path $ArchivePath
+            if (-not [string]::Equals(
+                    $actualSha256,
+                    $ExpectedSha256,
+                    [StringComparison]::OrdinalIgnoreCase)) {
+                throw "Source archive SHA256 mismatch."
+            }
+            if ($SourceHead -notmatch '^[0-9a-f]{40,64}$') {
+                throw "Source archive provenance HEAD is not a full lowercase Git object ID."
+            }
+
+            $archiveProof = Assert-OpenClawSourceArchive -Path $ArchivePath
+            if ($Install) {
+                if ([string]::IsNullOrWhiteSpace($DestinationRoot)) {
+                    throw "Guest source archive destination root is required."
+                }
+                $canonicalDestination = [IO.Path]::GetFullPath($DestinationRoot)
+                if (
+                    [string]::Equals(
+                        $canonicalDestination.TrimEnd("\"),
+                        [IO.Path]::GetPathRoot($canonicalDestination).TrimEnd("\"),
+                        [StringComparison]::OrdinalIgnoreCase)
+                ) {
+                    throw "Guest source archive destination cannot be a drive root."
+                }
+
+                if (Test-Path -LiteralPath $canonicalDestination) {
+                    Remove-Item -LiteralPath $canonicalDestination -Recurse -Force -ErrorAction Stop
+                }
+                New-Item -ItemType Directory -Path $canonicalDestination -ErrorAction Stop | Out-Null
+                Expand-Archive `
+                    -LiteralPath $ArchivePath `
+                    -DestinationPath $canonicalDestination `
+                    -Force `
+                    -ErrorAction Stop
+
+                $reparseItems = @(
+                    Get-ChildItem -LiteralPath $canonicalDestination -Recurse -Force -ErrorAction Stop |
+                        Where-Object { ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 }
+                )
+                if ($reparseItems.Count -ne 0) {
+                    throw "Extracted source contains $($reparseItems.Count) reparse points."
+                }
+                $generatedDirectories = @(
+                    Get-ChildItem -LiteralPath $canonicalDestination -Directory -Recurse -Force -ErrorAction Stop |
+                        Where-Object { @("bin", "obj", "TestResults") -contains $_.Name }
+                )
+                if ($generatedDirectories.Count -ne 0) {
+                    throw "Extracted source contains forbidden generated directories."
+                }
+                $extractedFiles = @(
+                    Get-ChildItem -LiteralPath $canonicalDestination -File -Recurse -Force -ErrorAction Stop
+                )
+                if ($extractedFiles.Count -ne $ExpectedTrackedFileCount) {
+                    throw (
+                        "Extracted source contains $($extractedFiles.Count) files; " +
+                        "expected exactly $ExpectedTrackedFileCount.")
+                }
+
+                $provenance = [pscustomobject][ordered]@{
+                    schema = "openclaw.clean-windows.source-provenance/v1"
+                    sourceHead = $SourceHead
+                    trackedFileCount = $ExpectedTrackedFileCount
+                    archiveSize = $ExpectedArchiveSize
+                    archiveSha256 = $ExpectedSha256.ToUpperInvariant()
+                    archiveEntryCount = [int]$archiveProof.entryCount
+                    expandedBytes = [Int64]$archiveProof.expandedBytes
+                }
+                $provenancePath = Join-Path $canonicalDestination $ProvenanceFileName
+                $utf8NoBom = New-Object Text.UTF8Encoding($false)
+                [IO.File]::WriteAllText(
+                    $provenancePath,
+                    ($provenance | ConvertTo-Json -Depth 4),
+                    $utf8NoBom)
+            }
+
+            return [pscustomobject][ordered]@{
+                sourceHead = $SourceHead
+                sha256 = $actualSha256
+                archiveSize = [Int64]$archiveItem.Length
+                trackedFileCount = [int]$archiveProof.fileCount
+                archiveEntryCount = [int]$archiveProof.entryCount
+                expandedBytes = [Int64]$archiveProof.expandedBytes
+                symbolicLinkCount = [int]$archiveProof.symbolicLinkCount
+                installed = $Install
+            }
+        } finally {
+            if ($Install -and (Test-Path -LiteralPath $ArchivePath)) {
+                try {
+                    Remove-Item -LiteralPath $ArchivePath -Force -ErrorAction Stop
+                } catch {
+                    $cleanupError = $_.Exception.Message
+                }
+            }
+            if ($cleanupError) {
+                throw "Guest source archive cleanup failed: $cleanupError"
+            }
+        }
+    }
+}
+
+function New-CleanWindowsSourceArchive {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$RepositoryRoot,
+        [Parameter(Mandatory = $true)]
+        [string]$ArchivePath
+    )
+
+    $sourceHead = Assert-CleanCommittedSourceHead -RepositoryRoot $RepositoryRoot
+    $treeModes = @(
+        Invoke-CleanWindowsSourceGit `
+            -RepositoryRoot $RepositoryRoot `
+            -Arguments @("ls-tree", "-r", "--full-tree", "--format=%(objectmode)", "HEAD") `
+            -OperationName "Reading source HEAD tree"
+    )
+    $treeModes = @($treeModes | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+    if ($treeModes.Count -le 0 -or $treeModes.Count -gt $script:SourceArchiveMaximumTrackedFiles) {
+        throw "Source HEAD tracked file count '$($treeModes.Count)' is outside the bounded range."
+    }
+    $unexpectedModes = @(
+        $treeModes | Where-Object { $_ -cne "100644" -and $_ -cne "100755" -and $_ -cne "120000" }
+    )
+    if ($unexpectedModes.Count -ne 0) {
+        throw "Source HEAD contains unsupported Git tree entry modes."
+    }
+
+    [void](
+        Invoke-CleanWindowsSourceGit `
+            -RepositoryRoot $RepositoryRoot `
+            -Arguments @("archive", "--format=zip", "--output=$ArchivePath", "HEAD") `
+            -OperationName "Creating deterministic source archive")
+    if (-not (Test-Path -LiteralPath $ArchivePath -PathType Leaf)) {
+        throw "Git archive completed without creating the expected source archive."
+    }
+    $archiveItem = Get-Item -LiteralPath $ArchivePath -Force -ErrorAction Stop
+    if (
+        [Int64]$archiveItem.Length -le 0 -or
+        [Int64]$archiveItem.Length -gt $script:SourceArchiveMaximumBytes
+    ) {
+        throw "Source archive size '$($archiveItem.Length)' is outside the bounded range."
+    }
+    $hashStream = [IO.File]::OpenRead($ArchivePath)
+    $hashAlgorithm = [Security.Cryptography.SHA256]::Create()
+    try {
+        $archiveSha256 = (
+            ($hashAlgorithm.ComputeHash($hashStream) |
+                ForEach-Object { $_.ToString("X2") }) -join "")
+    } finally {
+        $hashAlgorithm.Dispose()
+        $hashStream.Dispose()
+    }
+    $validation = @(
+        & (Get-SourceArchiveInstallScriptBlock) `
+            $ArchivePath `
+            $archiveSha256 `
+            $treeModes.Count `
+            ([Int64]$archiveItem.Length) `
+            $script:SourceArchiveMaximumBytes `
+            $script:SourceArchiveMaximumExpandedBytes `
+            $script:SourceArchiveMaximumTrackedFiles `
+            $sourceHead `
+            "" `
+            $script:SourceProvenanceFileName `
+            $false
+    )
+    if ($validation.Count -ne 1) {
+        throw "Source archive validation returned $($validation.Count) results; expected one."
+    }
+
+    $confirmedHead = Assert-CleanCommittedSourceHead -RepositoryRoot $RepositoryRoot
+    if (-not [string]::Equals($sourceHead, $confirmedHead, [StringComparison]::Ordinal)) {
+        throw "Source HEAD changed while the clean source archive was being created."
+    }
+    return [pscustomobject][ordered]@{
+        SourceHead = $sourceHead
+        ArchivePath = $ArchivePath
+        ArchiveSize = [Int64]$archiveItem.Length
+        ArchiveSha256 = $archiveSha256
+        TrackedFileCount = $treeModes.Count
+        ArchiveEntryCount = [int]$validation[0].archiveEntryCount
+        ExpandedBytes = [Int64]$validation[0].expandedBytes
+        SymbolicLinkCount = [int]$validation[0].symbolicLinkCount
+    }
 }
 
 function Copy-RepoToGuest {
@@ -3627,67 +4140,185 @@ function Copy-RepoToGuest {
     )
 
     $guestRepoRoot = Get-GuestRepoRoot
-    Write-Step "Copying repository into the guest"
+    $transferNonce = [Guid]::NewGuid().ToString("N")
+    $hostTransferRoot = Join-Path $env:TEMP "openclaw-clean-source-$transferNonce"
+    $hostArchivePath = Join-Path $hostTransferRoot "source.zip"
+    $guestTransferRoot = Join-Path $GuestRoot "transfer"
+    $guestArchivePath = Join-Path $guestTransferRoot "source-$transferNonce.zip"
+    $guestCleanupError = $null
+    $hostCleanupError = $null
+    Write-Step "Transferring clean committed source archive into the guest"
 
-    Invoke-GuestCommandWithTimeout -Session $Session -OperationName "Resetting guest repo root" -TimeoutSec 300 -ScriptBlock {
-        param($RemoteRepoRoot)
-        if (Test-Path -LiteralPath $RemoteRepoRoot) {
-            Remove-Item -LiteralPath $RemoteRepoRoot -Recurse -Force
+    try {
+        New-Item -ItemType Directory -Path $hostTransferRoot -ErrorAction Stop | Out-Null
+        $sourceArchive = New-CleanWindowsSourceArchive `
+            -RepositoryRoot $script:RepoRoot `
+            -ArchivePath $hostArchivePath
+        Write-InfoLine (
+            "Source archive: HEAD={0} files={1} entries={2} bytes={3} SHA256={4}" -f
+                $sourceArchive.SourceHead,
+                $sourceArchive.TrackedFileCount,
+                $sourceArchive.ArchiveEntryCount,
+                $sourceArchive.ArchiveSize,
+                $sourceArchive.ArchiveSha256)
+
+        Invoke-GuestCommandWithTimeout `
+            -Session $Session `
+            -OperationName "Preparing guest source archive transfer" `
+            -TimeoutSec 60 `
+            -ScriptBlock {
+                param($RemoteTransferRoot, $RemoteArchivePath)
+                New-Item -ItemType Directory -Path $RemoteTransferRoot -Force -ErrorAction Stop | Out-Null
+                if (Test-Path -LiteralPath $RemoteArchivePath) {
+                    Remove-Item -LiteralPath $RemoteArchivePath -Force -ErrorAction Stop
+                }
+            } `
+            -ArgumentList @($guestTransferRoot, $guestArchivePath) | Out-Null
+
+        $transferStopwatch = [Diagnostics.Stopwatch]::StartNew()
+        try {
+            Copy-Item `
+                -LiteralPath $sourceArchive.ArchivePath `
+                -Destination $guestArchivePath `
+                -ToSession $Session `
+                -Force `
+                -ErrorAction Stop
+        } catch {
+            throw (
+                "Single-file source archive transfer failed after {0:N1} seconds " +
+                "(bytes={1}, SHA256={2}, HEAD={3}): {4}" -f
+                    $transferStopwatch.Elapsed.TotalSeconds,
+                    $sourceArchive.ArchiveSize,
+                    $sourceArchive.ArchiveSha256,
+                    $sourceArchive.SourceHead,
+                    $_.Exception.Message)
+        } finally {
+            $transferStopwatch.Stop()
         }
-        New-Item -ItemType Directory -Force -Path $RemoteRepoRoot | Out-Null
-    } -ArgumentList @($guestRepoRoot) | Out-Null
 
-    foreach ($item in Get-RepoTransferItems) {
-        $sourcePath = Join-Path $script:RepoRoot $item
-        if (-not (Test-Path -LiteralPath $sourcePath)) {
-            throw "Repository transfer item was not found: $sourcePath"
+        $installOutput = @(
+            Invoke-GuestCommandWithTimeout `
+                -Session $Session `
+                -OperationName "Verifying and extracting guest source archive" `
+                -TimeoutSec 600 `
+                -ScriptBlock (Get-SourceArchiveInstallScriptBlock) `
+                -ArgumentList @(
+                    $guestArchivePath,
+                    $sourceArchive.ArchiveSha256,
+                    $sourceArchive.TrackedFileCount,
+                    $sourceArchive.ArchiveSize,
+                    $script:SourceArchiveMaximumBytes,
+                    $script:SourceArchiveMaximumExpandedBytes,
+                    $script:SourceArchiveMaximumTrackedFiles,
+                    $sourceArchive.SourceHead,
+                    $guestRepoRoot,
+                    $script:SourceProvenanceFileName,
+                    $true)
+        )
+        if (
+            $installOutput.Count -ne 1 -or
+            -not [bool]$installOutput[0].installed -or
+            [string]$installOutput[0].sourceHead -cne [string]$sourceArchive.SourceHead -or
+            [string]$installOutput[0].sha256 -cne [string]$sourceArchive.ArchiveSha256 -or
+            [int]$installOutput[0].trackedFileCount -ne [int]$sourceArchive.TrackedFileCount
+        ) {
+            throw "Guest source archive proof did not match the exact host archive."
         }
 
-        Copy-Item -LiteralPath $sourcePath -Destination $guestRepoRoot -ToSession $Session -Recurse -Force
-    }
+        Invoke-GuestCommandWithTimeout `
+            -Session $Session `
+            -OperationName "Initializing guest git repo" `
+            -TimeoutSec 600 `
+            -ScriptBlock {
+                param($RemoteRepoRoot, $RemoteSourceHead, $RemoteProvenanceFileName)
 
-    Invoke-GuestCommandWithTimeout -Session $Session -OperationName "Initializing guest git repo" -TimeoutSec 600 -ScriptBlock {
-        param($RemoteRepoRoot)
+                $git = Get-Command git -ErrorAction SilentlyContinue
+                if ($null -eq $git) {
+                    throw "Git is not available in the guest."
+                }
 
-        $git = Get-Command git -ErrorAction SilentlyContinue
-        if ($null -eq $git) {
-            throw "Git is not available in the guest."
+                Set-Location $RemoteRepoRoot
+                if (Test-Path -LiteralPath (Join-Path $RemoteRepoRoot ".git")) {
+                    Remove-Item -LiteralPath (Join-Path $RemoteRepoRoot ".git") -Recurse -Force
+                }
+
+                & git init | Out-Null
+                if ($LASTEXITCODE -ne 0) {
+                    throw "git init failed with exit code $LASTEXITCODE."
+                }
+
+                & git branch -M main 2>$null | Out-Null
+                & git config user.name "OpenClaw Clean Windows Runner"
+                if ($LASTEXITCODE -ne 0) {
+                    throw "git config user.name failed with exit code $LASTEXITCODE."
+                }
+
+                & git config user.email "openclaw-clean-windows@example.invalid"
+                if ($LASTEXITCODE -ne 0) {
+                    throw "git config user.email failed with exit code $LASTEXITCODE."
+                }
+
+                & git add -A
+                if ($LASTEXITCODE -ne 0) {
+                    throw "git add failed with exit code $LASTEXITCODE."
+                }
+
+                $status = @(& git status --short)
+                if ($status.Count -gt 0) {
+                    & git commit -m "Guest staging from $RemoteSourceHead" --quiet
+                    if ($LASTEXITCODE -ne 0) {
+                        throw "git commit failed with exit code $LASTEXITCODE."
+                    }
+                }
+
+                $provenancePath = Join-Path $RemoteRepoRoot $RemoteProvenanceFileName
+                $provenance = Get-Content -LiteralPath $provenancePath -Raw -ErrorAction Stop |
+                    ConvertFrom-Json -ErrorAction Stop
+                if (
+                    [string]$provenance.schema -cne "openclaw.clean-windows.source-provenance/v1" -or
+                    [string]$provenance.sourceHead -cne $RemoteSourceHead
+                ) {
+                    throw "Guest source provenance does not match the exact host HEAD."
+                }
+                $finalStatus = @(& git status --porcelain)
+                if ($LASTEXITCODE -ne 0 -or $finalStatus.Count -ne 0) {
+                    throw "Guest staging repository is not clean after its provenance commit."
+                }
+            } `
+            -ArgumentList @(
+                $guestRepoRoot,
+                $sourceArchive.SourceHead,
+                $script:SourceProvenanceFileName) | Out-Null
+    } finally {
+        try {
+            Invoke-GuestCommandWithTimeout `
+                -Session $Session `
+                -OperationName "Cleaning guest source archive transfer" `
+                -TimeoutSec 60 `
+                -ScriptBlock {
+                    param($RemoteArchivePath)
+                    if (Test-Path -LiteralPath $RemoteArchivePath) {
+                        Remove-Item -LiteralPath $RemoteArchivePath -Force -ErrorAction Stop
+                    }
+                } `
+                -ArgumentList @($guestArchivePath) | Out-Null
+        } catch {
+            $guestCleanupError = $_.Exception.Message
         }
-
-        Set-Location $RemoteRepoRoot
-        if (Test-Path -LiteralPath (Join-Path $RemoteRepoRoot ".git")) {
-            Remove-Item -LiteralPath (Join-Path $RemoteRepoRoot ".git") -Recurse -Force
-        }
-
-        & git init | Out-Null
-        if ($LASTEXITCODE -ne 0) {
-            throw "git init failed with exit code $LASTEXITCODE."
-        }
-
-        & git branch -M main 2>$null | Out-Null
-        & git config user.name "OpenClaw Clean Windows Runner"
-        if ($LASTEXITCODE -ne 0) {
-            throw "git config user.name failed with exit code $LASTEXITCODE."
-        }
-
-        & git config user.email "openclaw-clean-windows@example.invalid"
-        if ($LASTEXITCODE -ne 0) {
-            throw "git config user.email failed with exit code $LASTEXITCODE."
-        }
-
-        & git add -A
-        if ($LASTEXITCODE -ne 0) {
-            throw "git add failed with exit code $LASTEXITCODE."
-        }
-
-        $status = @(& git status --short)
-        if ($status.Count -gt 0) {
-            & git commit -m "Guest staging" --quiet
-            if ($LASTEXITCODE -ne 0) {
-                throw "git commit failed with exit code $LASTEXITCODE."
+        if (Test-Path -LiteralPath $hostTransferRoot) {
+            try {
+                Remove-Item -LiteralPath $hostTransferRoot -Recurse -Force -ErrorAction Stop
+            } catch {
+                $hostCleanupError = $_.Exception.Message
             }
         }
-    } -ArgumentList @($guestRepoRoot) | Out-Null
+        if ($guestCleanupError -or $hostCleanupError) {
+            throw (
+                "Source archive cleanup failed. guest='{0}' host='{1}'" -f
+                    $(if ($guestCleanupError) { $guestCleanupError } else { "<none>" }),
+                    $(if ($hostCleanupError) { $hostCleanupError } else { "<none>" }))
+        }
+    }
 }
 
 function Get-GuestWingetBootstrapScriptBlock {
