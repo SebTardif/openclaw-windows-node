@@ -469,6 +469,11 @@ public sealed class CleanWindowsRunnerScriptTests
             Assert.Contains("app-owned distribution", normalizedGuidance);
             Assert.Contains("optional-feature stage", normalizedGuidance);
             Assert.Contains("package stage", normalizedGuidance);
+            Assert.Contains("confirm", normalizedGuidance, StringComparison.OrdinalIgnoreCase);
+            Assert.Contains("zero-exit", normalizedGuidance);
+            Assert.Contains("nonzero version", normalizedGuidance);
+            Assert.Contains("wsl.exe --update --web-download", normalizedGuidance);
+            Assert.Contains("exactly one", normalizedGuidance);
             Assert.Contains(
                 "final verification",
                 normalizedGuidance,
@@ -487,6 +492,9 @@ public sealed class CleanWindowsRunnerScriptTests
         Assert.Contains("normal `Prepare`", normalizedRouting);
         Assert.Contains("without `-RecoverPendingCheckpoint`", normalizedRouting);
         Assert.Contains("does not install Ubuntu", normalizedRouting);
+        Assert.Contains("confirm", normalizedRouting, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("wsl.exe --update --web-download", normalizedRouting);
+        Assert.Contains("without `-RecoverPendingCheckpoint` or cleanup", normalizedRouting);
     }
 
     [Fact]
@@ -683,6 +691,80 @@ public sealed class CleanWindowsRunnerScriptTests
         }
     }
 
+    [Fact]
+    public void HyperVController_NativeWslHelperCapturesVersionExitOneWithoutFailingJob()
+    {
+        var ownedRoot = Path.Combine(
+            Root,
+            "TestResults",
+            $"wsl-native-version-{Guid.NewGuid():N}");
+        try
+        {
+            var result = RunPowerShellCommand(BuildNativeWslHelperProof(
+                ownedRoot,
+                operation: "Version",
+                exitCode: 1));
+
+            AssertPowerShellProofSucceeded(result);
+            using var document = JsonDocument.Parse(result.Stdout);
+            var proof = document.RootElement;
+            Assert.Equal("Completed", proof.GetProperty("jobState").GetString());
+            Assert.Equal(1, proof.GetProperty("exitCode").GetInt32());
+            Assert.Equal("--version", proof.GetProperty("wslArgumentsAtLaunch").GetString());
+            Assert.Contains(
+                "WSL must be updated",
+                proof.GetProperty("stderr").GetString(),
+                StringComparison.Ordinal);
+            Assert.Equal(0, proof.GetProperty("remainingCaptureFiles").GetInt32());
+        }
+        finally
+        {
+            if (Directory.Exists(ownedRoot))
+            {
+                Directory.Delete(ownedRoot, recursive: true);
+            }
+        }
+    }
+
+    [Fact]
+    public void HyperVController_NativeWslHelperUsesExactWebDownloadUpdateArguments()
+    {
+        var ownedRoot = Path.Combine(
+            Root,
+            "TestResults",
+            $"wsl-native-update-{Guid.NewGuid():N}");
+        try
+        {
+            var result = RunPowerShellCommand(BuildNativeWslHelperProof(
+                ownedRoot,
+                operation: "UpdateWebDownload",
+                exitCode: 3010));
+
+            AssertPowerShellProofSucceeded(result);
+            using var document = JsonDocument.Parse(result.Stdout);
+            var proof = document.RootElement;
+            Assert.Equal("Completed", proof.GetProperty("jobState").GetString());
+            Assert.Equal(3010, proof.GetProperty("exitCode").GetInt32());
+            Assert.EndsWith(
+                @"\System32\wsl.exe",
+                proof.GetProperty("wslPathAtLaunch").GetString(),
+                StringComparison.OrdinalIgnoreCase);
+            Assert.Equal(
+                "--update --web-download",
+                proof.GetProperty("wslArgumentsAtLaunch").GetString());
+            Assert.True(proof.GetProperty("waitAtLaunch").GetBoolean());
+            Assert.True(proof.GetProperty("passThruAtLaunch").GetBoolean());
+            Assert.Equal(0, proof.GetProperty("remainingCaptureFiles").GetInt32());
+        }
+        finally
+        {
+            if (Directory.Exists(ownedRoot))
+            {
+                Directory.Delete(ownedRoot, recursive: true);
+            }
+        }
+    }
+
     [Theory]
     [InlineData(-1)]
     [InlineData(50)]
@@ -698,10 +780,14 @@ public sealed class CleanWindowsRunnerScriptTests
             controller,
             "Get-GuestWslPackageStageScriptBlock",
             "Invoke-GuestWslPackageStage");
+        var trustedWslSurface = nativeHelper + packageStage;
 
         Assert.Contains("@(\"--install\", \"--no-distribution\")", nativeHelper);
+        Assert.Contains("@(\"--update\", \"--web-download\")", nativeHelper);
         Assert.Contains("[string[]]$nativeArguments", nativeHelper);
-        Assert.Contains("[ValidateSet(\"Status\", \"Version\", \"InstallNoDistribution\")]", nativeHelper);
+        Assert.Contains("[ValidateSet(", nativeHelper);
+        Assert.Contains("\"InstallNoDistribution\"", nativeHelper);
+        Assert.Contains("\"UpdateWebDownload\"", nativeHelper);
         Assert.Contains("Start-Process", nativeHelper);
         Assert.Contains("-RedirectStandardOutput", nativeHelper);
         Assert.Contains("-RedirectStandardError", nativeHelper);
@@ -709,11 +795,22 @@ public sealed class CleanWindowsRunnerScriptTests
         Assert.Contains("-PassThru", nativeHelper);
         Assert.Contains("finally {", nativeHelper);
         Assert.Contains("Remove-Item -LiteralPath $capturePath", nativeHelper);
-        Assert.DoesNotContain("Invoke-Expression", nativeHelper, StringComparison.OrdinalIgnoreCase);
-        Assert.DoesNotContain("--web-download", nativeHelper, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("-WindowStyle Hidden", nativeHelper);
+        Assert.DoesNotContain("Invoke-Expression", trustedWslSurface, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("Read-Host", trustedWslSurface, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("ReadKey", trustedWslSurface, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("TypeKey", trustedWslSurface, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("SendKeys", trustedWslSurface, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("StandardInput", trustedWslSurface, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("ms-windows-store", trustedWslSurface, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("Microsoft Store", trustedWslSurface, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("cmd.exe", trustedWslSurface, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("-ArgumentList $Operation", nativeHelper, StringComparison.Ordinal);
         Assert.Contains("$installExitCode -notin [int[]]@(0, 3010)", packageStage);
+        Assert.Contains("$updateExitCode -notin [int[]]@(0, 3010)", packageStage);
         Assert.Contains("$exitCode -in [int[]]@(-1, 50) -and $notInstalled", packageStage);
         Assert.DoesNotContain("post-install", packageStage, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("post-update", packageStage, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("$restartReported", packageStage, StringComparison.Ordinal);
 
         var result = RunPowerShellCommand(BuildWslPackageStageProof(
@@ -729,6 +826,8 @@ public sealed class CleanWindowsRunnerScriptTests
         Assert.Equal("Status,Version,InstallNoDistribution", proof.GetProperty("calls").GetString());
         Assert.True(proof.GetProperty("installInvoked").GetBoolean());
         Assert.Equal(0, proof.GetProperty("installExitCode").GetInt32());
+        Assert.False(proof.GetProperty("updateInvoked").GetBoolean());
+        Assert.Equal(JsonValueKind.Null, proof.GetProperty("updateExitCode").ValueKind);
         Assert.Equal("restart-required", proof.GetProperty("normalizedState").GetString());
         Assert.True(proof.GetProperty("needsRestart").GetBoolean());
     }
@@ -749,6 +848,7 @@ public sealed class CleanWindowsRunnerScriptTests
         var proof = document.RootElement;
         Assert.Equal("Status,Version,InstallNoDistribution", proof.GetProperty("calls").GetString());
         Assert.Equal(3010, proof.GetProperty("installExitCode").GetInt32());
+        Assert.False(proof.GetProperty("updateInvoked").GetBoolean());
         Assert.True(proof.GetProperty("needsRestart").GetBoolean());
     }
 
@@ -768,6 +868,7 @@ public sealed class CleanWindowsRunnerScriptTests
         var proof = document.RootElement;
         Assert.Equal("Status,Version,InstallNoDistribution", proof.GetProperty("calls").GetString());
         Assert.True(proof.GetProperty("installInvoked").GetBoolean());
+        Assert.False(proof.GetProperty("updateInvoked").GetBoolean());
         Assert.True(proof.GetProperty("needsRestart").GetBoolean());
     }
 
@@ -793,14 +894,14 @@ public sealed class CleanWindowsRunnerScriptTests
     }
 
     [Fact]
-    public void HyperVController_ReadyStatusAndAbsentVersionFailsAsContradictory()
+    public void HyperVController_AbsentStatusAndUnrelatedVersionFailureFailsBeforeInstall()
     {
         var result = RunPowerShellCommand(BuildWslPackageStageProof(
             packageInstalled: false,
-            statusExitCode: 0,
-            statusOutput: "WSL status ready",
-            versionExitCode: 50,
-            versionOutput: "WSL is not installed",
+            statusExitCode: 50,
+            statusOutput: "WSL is not installed",
+            versionExitCode: 7,
+            versionOutput: "The version request could not be completed.",
             captureFailure: true));
 
         AssertPowerShellProofSucceeded(result);
@@ -808,9 +909,72 @@ public sealed class CleanWindowsRunnerScriptTests
         var proof = document.RootElement;
         Assert.Equal("Status,Version", proof.GetProperty("calls").GetString());
         Assert.Contains(
-            "status reported ready",
+            "wsl.exe --version returned unexpected exit code 7",
             proof.GetProperty("error").GetString(),
             StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(3010)]
+    public void HyperVController_ReadyStatusAndVersionExitOneUpdatesOnceAndAlwaysRestarts(
+        int updateExitCode)
+    {
+        var result = RunPowerShellCommand(BuildWslPackageStageProof(
+            packageInstalled: false,
+            statusExitCode: 0,
+            statusOutput: "WSL status ready",
+            versionExitCode: 1,
+            versionOutput:
+                "Press any key to install WSL. Operation aborted. WSL must be updated. Run wsl.exe --update.",
+            updateExitCode: updateExitCode));
+
+        AssertPowerShellProofSucceeded(result);
+        using var document = JsonDocument.Parse(result.Stdout);
+        var proof = document.RootElement;
+        Assert.Equal("Status,Version,UpdateWebDownload", proof.GetProperty("calls").GetString());
+        Assert.Equal("restart-required", proof.GetProperty("normalizedState").GetString());
+        Assert.False(proof.GetProperty("installInvoked").GetBoolean());
+        Assert.Equal(JsonValueKind.Null, proof.GetProperty("installExitCode").ValueKind);
+        Assert.True(proof.GetProperty("updateInvoked").GetBoolean());
+        Assert.Equal(updateExitCode, proof.GetProperty("updateExitCode").GetInt32());
+        Assert.True(proof.GetProperty("needsRestart").GetBoolean());
+    }
+
+    [Fact]
+    public void HyperVController_UpdateFailureDiagnosticIsBoundedAndSanitized()
+    {
+        var result = RunPowerShellCommand(BuildWslPackageStageProof(
+            packageInstalled: false,
+            statusExitCode: 0,
+            statusOutput: "WSL status ready",
+            versionExitCode: 1,
+            versionOutput: "token=versionsecret; " + new string('v', 3000),
+            updateExitCode: 5,
+            updateOutput: "Bearer updatesecretvalue " + new string('u', 3000),
+            updateError: "password=updatepassword; authorization=authvalue;",
+            captureFailure: true));
+
+        AssertPowerShellProofSucceeded(result);
+        using var document = JsonDocument.Parse(result.Stdout);
+        var proof = document.RootElement;
+        var error = proof.GetProperty("error").GetString()!;
+        Assert.Equal("Status,Version,UpdateWebDownload", proof.GetProperty("calls").GetString());
+        Assert.Contains(
+            "wsl.exe --update --web-download returned unexpected exit code 5",
+            error,
+            StringComparison.Ordinal);
+        Assert.Contains("Version diagnostic:", error, StringComparison.Ordinal);
+        Assert.Contains("Update diagnostic:", error, StringComparison.Ordinal);
+        Assert.Contains("stdout:", error, StringComparison.Ordinal);
+        Assert.Contains("stderr:", error, StringComparison.Ordinal);
+        Assert.Contains("[redacted]", error, StringComparison.Ordinal);
+        Assert.Contains("[truncated]", error, StringComparison.Ordinal);
+        Assert.DoesNotContain("versionsecret", error, StringComparison.Ordinal);
+        Assert.DoesNotContain("updatesecretvalue", error, StringComparison.Ordinal);
+        Assert.DoesNotContain("updatepassword", error, StringComparison.Ordinal);
+        Assert.DoesNotContain("authvalue", error, StringComparison.Ordinal);
+        Assert.True(error.Length <= 2300, $"Diagnostic length was {error.Length}.");
     }
 
     [Fact]
@@ -824,6 +988,7 @@ public sealed class CleanWindowsRunnerScriptTests
         Assert.Equal("Status,Version", proof.GetProperty("calls").GetString());
         Assert.True(proof.GetProperty("wasInstalled").GetBoolean());
         Assert.False(proof.GetProperty("installInvoked").GetBoolean());
+        Assert.False(proof.GetProperty("updateInvoked").GetBoolean());
         Assert.Equal("ready", proof.GetProperty("normalizedState").GetString());
         Assert.False(proof.GetProperty("needsRestart").GetBoolean());
     }
@@ -915,9 +1080,13 @@ public sealed class CleanWindowsRunnerScriptTests
             "Restart-GuestAndReconnect",
             secondGuardIndex,
             StringComparison.Ordinal);
+        var helperAfterSecondReconnectIndex = prepare.IndexOf(
+            "Install-GuestWslNativeHelper",
+            secondRestartIndex,
+            StringComparison.Ordinal);
         var finalVerificationIndex = prepare.IndexOf(
             "Invoke-GuestWslVerificationStage",
-            secondRestartIndex,
+            helperAfterSecondReconnectIndex,
             StringComparison.Ordinal);
 
         Assert.True(featureIndex >= 0);
@@ -926,13 +1095,66 @@ public sealed class CleanWindowsRunnerScriptTests
         Assert.True(packageIndex > firstRestartIndex);
         Assert.True(secondGuardIndex > packageIndex);
         Assert.True(secondRestartIndex > secondGuardIndex);
-        Assert.True(finalVerificationIndex > secondRestartIndex);
+        Assert.True(helperAfterSecondReconnectIndex > secondRestartIndex);
+        Assert.True(finalVerificationIndex > helperAfterSecondReconnectIndex);
         Assert.Equal(
             2,
             prepare.Split('\n').Count(
                 line => line.Contains("Restart-GuestAndReconnect", StringComparison.Ordinal)));
+        Assert.Equal(
+            1,
+            prepare.Split('\n').Count(
+                line => line.Contains(
+                    "$packageResult = Invoke-GuestWslPackageStage",
+                    StringComparison.Ordinal)));
+        Assert.Equal(
+            1,
+            prepare.Split('\n').Count(
+                line => line.Contains(
+                    "$wslProof = Invoke-GuestWslVerificationStage",
+                    StringComparison.Ordinal)));
         Assert.Contains("-ResolvedVhdPath $ResolvedVhdPath", prepare);
         Assert.Contains("-ExpectedOwnerId $ExpectedOwnerId", prepare);
+    }
+
+    [Fact]
+    public void HyperVController_PrepareFailureRestoresExactCleanCheckpoint()
+    {
+        var controller = ReadScript("Invoke-CleanWindowsHyperV.ps1");
+        var prepare = ExtractPowerShellFunction(
+            controller,
+            "Invoke-PrepareCommand",
+            "Invoke-VerifyCommand");
+        var prerequisitesIndex = prepare.IndexOf(
+            "$session = Prepare-GuestPrerequisites",
+            StringComparison.Ordinal);
+        var catchIndex = prepare.IndexOf("} catch {", prerequisitesIndex, StringComparison.Ordinal);
+        var stopIndex = prepare.IndexOf(
+            "Stop-VMGracefully",
+            catchIndex,
+            StringComparison.Ordinal);
+        var restoreIndex = prepare.IndexOf(
+            "Restore-OwnedCheckpoint",
+            stopIndex,
+            StringComparison.Ordinal);
+        var cleanCheckpointIndex = prepare.IndexOf(
+            "-OwnedCheckpointName $script:CleanCheckpointName",
+            restoreIndex,
+            StringComparison.Ordinal);
+        var throwIndex = prepare.IndexOf(
+            "        throw",
+            cleanCheckpointIndex,
+            StringComparison.Ordinal);
+
+        Assert.True(prerequisitesIndex >= 0);
+        Assert.True(catchIndex > prerequisitesIndex);
+        Assert.True(stopIndex > catchIndex);
+        Assert.True(restoreIndex > stopIndex);
+        Assert.True(cleanCheckpointIndex > restoreIndex);
+        Assert.True(throwIndex > cleanCheckpointIndex);
+        var rollback = prepare[catchIndex..throwIndex];
+        Assert.DoesNotContain("Recover-PendingOwnedCheckpoint", rollback, StringComparison.Ordinal);
+        Assert.DoesNotContain("CleanupUnattend", rollback, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -2788,7 +3010,10 @@ public sealed class CleanWindowsRunnerScriptTests
             "[Console]::Out.Write(($result | ConvertTo-Json -Compress))\n");
     }
 
-    private static string BuildNativeWslHelperProof(string ownedRoot)
+    private static string BuildNativeWslHelperProof(
+        string ownedRoot,
+        string operation = "Status",
+        int exitCode = 50)
     {
         var controller = ReadScript("Invoke-CleanWindowsHyperV.ps1");
         var getter = ExtractPowerShellFunction(
@@ -2796,6 +3021,18 @@ public sealed class CleanWindowsRunnerScriptTests
             "Get-GuestWslNativeHelperInstallerScriptBlock",
             "Install-GuestWslNativeHelper");
         var escapedOwnedRoot = ownedRoot.Replace("'", "''", StringComparison.Ordinal);
+        var escapedOperation = operation.Replace("'", "''", StringComparison.Ordinal);
+        var stdoutExpression = operation switch
+        {
+            "UpdateWebDownload" => "'Update completed.'",
+            _ => "''",
+        };
+        var stderrExpression = operation switch
+        {
+            "Status" => "('WSL is not installed ' + [char]0x03A9)",
+            "Version" => "'Press any key to install WSL. Operation aborted. WSL must be updated.'",
+            _ => "''",
+        };
         return string.Concat(
             "$ErrorActionPreference = 'Stop'\n",
             "$job = Start-Job -ScriptBlock {\n",
@@ -2807,6 +3044,10 @@ public sealed class CleanWindowsRunnerScriptTests
             "  $env:TMP = $OwnedRoot\n",
             "  [Environment]::SetEnvironmentVariable('WSL_UTF8', 'prior-value', [EnvironmentVariableTarget]::Process)\n",
             "  $script:wslUtf8AtLaunch = ''\n",
+            "  $script:wslPathAtLaunch = ''\n",
+            "  $script:wslArgumentsAtLaunch = @()\n",
+            "  $script:waitAtLaunch = $false\n",
+            "  $script:passThruAtLaunch = $false\n",
             "  function global:Test-Path {\n",
             "    [CmdletBinding()]\n",
             "    param([string]$LiteralPath, [object]$PathType)\n",
@@ -2825,12 +3066,24 @@ public sealed class CleanWindowsRunnerScriptTests
             "      [object]$WindowStyle\n",
             "    )\n",
             "    $script:wslUtf8AtLaunch = [Environment]::GetEnvironmentVariable('WSL_UTF8', [EnvironmentVariableTarget]::Process)\n",
-            "    [IO.File]::WriteAllText($RedirectStandardOutput, '', [Text.Encoding]::UTF8)\n",
-            "    [IO.File]::WriteAllText($RedirectStandardError, ('WSL is not installed ' + [char]0x03A9), [Text.Encoding]::UTF8)\n",
-            "    return [pscustomobject]@{ ExitCode = 50 }\n",
+            "    $script:wslPathAtLaunch = $FilePath\n",
+            "    $script:wslArgumentsAtLaunch = [string[]]@($ArgumentList)\n",
+            "    $script:waitAtLaunch = [bool]$Wait\n",
+            "    $script:passThruAtLaunch = [bool]$PassThru\n",
+            "    [IO.File]::WriteAllText($RedirectStandardOutput, ",
+            stdoutExpression,
+            ", [Text.Encoding]::UTF8)\n",
+            "    [IO.File]::WriteAllText($RedirectStandardError, ",
+            stderrExpression,
+            ", [Text.Encoding]::UTF8)\n",
+            "    return [pscustomobject]@{ ExitCode = ",
+            exitCode,
+            " }\n",
             "  }\n",
             "  & (Get-GuestWslNativeHelperInstallerScriptBlock) | Out-Null\n",
-            "  $nativeResult = Invoke-OpenClawTrustedWslProcess -Operation 'Status'\n",
+            "  $nativeResult = Invoke-OpenClawTrustedWslProcess -Operation '",
+            escapedOperation,
+            "'\n",
             "  [pscustomobject][ordered]@{\n",
             "    exitCode = [int]$nativeResult.exitCode\n",
             "    stdout = [string]$nativeResult.stdout\n",
@@ -2838,6 +3091,10 @@ public sealed class CleanWindowsRunnerScriptTests
             "    utf8Decoded = [string]$nativeResult.stderr -like ('*' + [char]0x03A9)\n",
             "    wslUtf8AtLaunch = $script:wslUtf8AtLaunch\n",
             "    wslUtf8After = [Environment]::GetEnvironmentVariable('WSL_UTF8', [EnvironmentVariableTarget]::Process)\n",
+            "    wslPathAtLaunch = $script:wslPathAtLaunch\n",
+            "    wslArgumentsAtLaunch = $script:wslArgumentsAtLaunch -join ' '\n",
+            "    waitAtLaunch = $script:waitAtLaunch\n",
+            "    passThruAtLaunch = $script:passThruAtLaunch\n",
             "    remainingCaptureFiles = @(Get-ChildItem -LiteralPath $OwnedRoot -Filter 'openclaw-wsl-*.txt' -File -Recurse).Count\n",
             "  }\n",
             "} -ArgumentList '",
@@ -2855,6 +3112,10 @@ public sealed class CleanWindowsRunnerScriptTests
             "  utf8Decoded = [bool]$payload.utf8Decoded\n",
             "  wslUtf8AtLaunch = [string]$payload.wslUtf8AtLaunch\n",
             "  wslUtf8After = [string]$payload.wslUtf8After\n",
+            "  wslPathAtLaunch = [string]$payload.wslPathAtLaunch\n",
+            "  wslArgumentsAtLaunch = [string]$payload.wslArgumentsAtLaunch\n",
+            "  waitAtLaunch = [bool]$payload.waitAtLaunch\n",
+            "  passThruAtLaunch = [bool]$payload.passThruAtLaunch\n",
             "  remainingCaptureFiles = [int]$payload.remainingCaptureFiles\n",
             "} | ConvertTo-Json -Compress))\n");
     }
@@ -2924,6 +3185,9 @@ public sealed class CleanWindowsRunnerScriptTests
         int versionExitCode = 50,
         string versionOutput = "WSL is not installed",
         string installOutput = "The operation completed successfully.",
+        int updateExitCode = 0,
+        string updateOutput = "The update completed successfully.",
+        string updateError = "",
         bool captureFailure = false)
     {
         var controller = ReadScript("Invoke-CleanWindowsHyperV.ps1");
@@ -2934,6 +3198,8 @@ public sealed class CleanWindowsRunnerScriptTests
         var escapedStatusOutput = statusOutput.Replace("'", "''", StringComparison.Ordinal);
         var escapedVersionOutput = versionOutput.Replace("'", "''", StringComparison.Ordinal);
         var escapedInstallOutput = installOutput.Replace("'", "''", StringComparison.Ordinal);
+        var escapedUpdateOutput = updateOutput.Replace("'", "''", StringComparison.Ordinal);
+        var escapedUpdateError = updateError.Replace("'", "''", StringComparison.Ordinal);
         var resultBody = packageInstalled
             ? """
               return [pscustomobject]@{
@@ -2944,6 +3210,20 @@ public sealed class CleanWindowsRunnerScriptTests
               }
               """
             : string.Concat(
+                "  if ($Operation -eq 'UpdateWebDownload') {\n",
+                "    return [pscustomobject]@{\n",
+                "      operation = $Operation\n",
+                "      exitCode = ",
+                updateExitCode,
+                "\n",
+                "      stdout = '",
+                escapedUpdateOutput,
+                "'\n",
+                "      stderr = '",
+                escapedUpdateError,
+                "'\n",
+                "    }\n",
+                "  }\n",
                 "  if ($Operation -eq 'InstallNoDistribution') {\n",
                 "    return [pscustomobject]@{\n",
                 "      operation = $Operation\n",
@@ -2998,6 +3278,8 @@ public sealed class CleanWindowsRunnerScriptTests
                 wasInstalled = [bool]$result.wasInstalled
                 installInvoked = [bool]$result.installInvoked
                 installExitCode = $result.installExitCode
+                updateInvoked = [bool]$result.updateInvoked
+                updateExitCode = $result.updateExitCode
                 needsRestart = [bool]$result.needsRestart
               } | ConvertTo-Json -Compress))
               """;

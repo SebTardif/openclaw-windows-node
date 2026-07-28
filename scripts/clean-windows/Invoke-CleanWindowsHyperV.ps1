@@ -3087,7 +3087,12 @@ function Get-GuestWslNativeHelperInstallerScriptBlock {
             [CmdletBinding()]
             param(
                 [Parameter(Mandatory = $true)]
-                [ValidateSet("Status", "Version", "InstallNoDistribution")]
+                [ValidateSet(
+                    "Status",
+                    "Version",
+                    "InstallNoDistribution",
+                    "UpdateWebDownload"
+                )]
                 [string]$Operation
             )
 
@@ -3198,6 +3203,10 @@ function Get-GuestWslNativeHelperInstallerScriptBlock {
                     @("--install", "--no-distribution")
                     break
                 }
+                "UpdateWebDownload" {
+                    @("--update", "--web-download")
+                    break
+                }
                 default {
                     throw "Unsupported trusted WSL operation '$Operation'."
                 }
@@ -3301,7 +3310,8 @@ function Get-GuestWslNativeHelperInstallerScriptBlock {
             allowedOperations = [string[]]@(
                 "Status",
                 "Version",
-                "InstallNoDistribution"
+                "InstallNoDistribution",
+                "UpdateWebDownload"
             )
         }
     }
@@ -3332,12 +3342,44 @@ function Get-GuestWslPackageStageScriptBlock {
                 [object]$Result
             )
 
-            $combined = ("{0}`n{1}" -f [string]$Result.stdout, [string]$Result.stderr).Trim()
-            $combined = [regex]::Replace($combined, "\s+", " ")
-            if ($combined.Length -gt 1024) {
-                return $combined.Substring(0, 1024) + " [truncated]"
+            $parts = foreach ($field in ([ordered]@{
+                stdout = [string]$Result.stdout
+                stderr = [string]$Result.stderr
+            }).GetEnumerator()) {
+                $diagnostic = [string]$field.Value
+                if ($diagnostic.Length -gt 2048) {
+                    $diagnostic = $diagnostic.Substring(0, 2048) + " [truncated input]"
+                }
+                $diagnostic = [regex]::Replace(
+                    $diagnostic,
+                    "[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]+",
+                    ""
+                )
+                $diagnostic = [regex]::Replace(
+                    $diagnostic,
+                    "(?i)\bBearer\s+[A-Za-z0-9._~+/\-=]+",
+                    "******"
+                )
+                $diagnostic = [regex]::Replace(
+                    $diagnostic,
+                    "(?i)\b(password|passwd|pwd|token|credential|secret|authorization)\b\s*[:=]\s*[^;,|`r`n]*",
+                    '$1=[redacted]'
+                )
+                $diagnostic = [regex]::Replace(
+                    $diagnostic,
+                    "(?i)(?:--?)(password|passwd|pwd|token|credential|secret|authorization)\s+(?:'[^']*'|`"[^`"]*`"|[^\s;,|]+)",
+                    '--$1 [redacted]'
+                )
+                $diagnostic = [regex]::Replace($diagnostic, "\s+", " ").Trim()
+                if ($diagnostic.Length -gt 448) {
+                    $diagnostic = $diagnostic.Substring(0, 448) + " [truncated]"
+                }
+                if ([string]::IsNullOrEmpty($diagnostic)) {
+                    $diagnostic = "<empty>"
+                }
+                "{0}: {1}" -f [string]$field.Key, $diagnostic
             }
-            return $combined
+            return ($parts -join " | ")
         }
 
         function Get-OpenClawWslResultState {
@@ -3381,12 +3423,40 @@ function Get-GuestWslPackageStageScriptBlock {
         $statusResult = Invoke-OpenClawTrustedWslProcess -Operation "Status"
         $versionResult = Invoke-OpenClawTrustedWslProcess -Operation "Version"
         $statusState = Get-OpenClawWslResultState -Result $statusResult -Label "wsl.exe --status"
-        $versionState = Get-OpenClawWslResultState -Result $versionResult -Label "wsl.exe --version"
+        $versionExitCode = [int]$versionResult.exitCode
+        $versionDiagnostic = Get-OpenClawWslResultDiagnostic -Result $versionResult
 
         if ($statusState -ceq "ready") {
-            if ($versionState -cne "ready") {
-                throw "wsl.exe --status reported ready while wsl.exe --version reported '$versionState'."
+            if ($versionExitCode -ne 0) {
+                $updateResult = Invoke-OpenClawTrustedWslProcess -Operation "UpdateWebDownload"
+                $updateExitCode = [int]$updateResult.exitCode
+                if ($updateExitCode -notin [int[]]@(0, 3010)) {
+                    $updateDiagnostic = Get-OpenClawWslResultDiagnostic -Result $updateResult
+                    throw "wsl.exe --update --web-download returned unexpected exit code $updateExitCode. Version diagnostic: $versionDiagnostic Update diagnostic: $updateDiagnostic"
+                }
+
+                return [pscustomobject][ordered]@{
+                    stage = "wsl-package"
+                    scope = "wsl-package-only"
+                    normalizedState = "restart-required"
+                    wasInstalled = $true
+                    installInvoked = $false
+                    installExitCode = $null
+                    updateInvoked = $true
+                    updateExitCode = $updateExitCode
+                    statusExitCode = [int]$statusResult.exitCode
+                    versionExitCode = $versionExitCode
+                    needsRestart = $true
+                }
             }
+
+            $versionState = Get-OpenClawWslResultState `
+                -Result $versionResult `
+                -Label "wsl.exe --version"
+            if ($versionState -cne "ready") {
+                throw "wsl.exe --version returned unsupported normalized state '$versionState'."
+            }
+
             return [pscustomobject][ordered]@{
                 stage = "wsl-package"
                 scope = "wsl-package-only"
@@ -3394,13 +3464,22 @@ function Get-GuestWslPackageStageScriptBlock {
                 wasInstalled = $true
                 installInvoked = $false
                 installExitCode = $null
+                updateInvoked = $false
+                updateExitCode = $null
                 statusExitCode = [int]$statusResult.exitCode
-                versionExitCode = [int]$versionResult.exitCode
+                versionExitCode = $versionExitCode
                 needsRestart = $false
             }
         }
         if ($statusState -cne "not-installed") {
             throw "wsl.exe --status returned unsupported normalized state '$statusState'."
+        }
+
+        $versionState = Get-OpenClawWslResultState `
+            -Result $versionResult `
+            -Label "wsl.exe --version"
+        if ($versionState -notin [string[]]@("ready", "not-installed")) {
+            throw "wsl.exe --version returned unsupported normalized state '$versionState'."
         }
 
         $installResult = Invoke-OpenClawTrustedWslProcess -Operation "InstallNoDistribution"
@@ -3417,8 +3496,10 @@ function Get-GuestWslPackageStageScriptBlock {
             wasInstalled = $false
             installInvoked = $true
             installExitCode = $installExitCode
+            updateInvoked = $false
+            updateExitCode = $null
             statusExitCode = [int]$statusResult.exitCode
-            versionExitCode = [int]$versionResult.exitCode
+            versionExitCode = $versionExitCode
             needsRestart = $true
         }
     }

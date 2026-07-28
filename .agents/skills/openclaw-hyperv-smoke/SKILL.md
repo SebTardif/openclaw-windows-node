@@ -198,6 +198,14 @@ available. Both WSL optional features are disabled at that checkpoint, and
 `wsl.exe --status` returns exit 50 with `WSL is not installed`. This is the
 expected input to normal `Prepare`.
 
+The latest failed `Prepare` reached the first owned restart, then observed
+zero-exit status and nonzero version update-bootstrap output. Its rollback is
+expected to have restored the exact `clean-windows` checkpoint. The driver must
+confirm that exact owned restore and finalized checkpoint marker before the
+next attempt. Retry with normal `Prepare`. Do not use
+`-RecoverPendingCheckpoint`, `-CleanupUnattend`, or an ad hoc lifecycle
+command.
+
 From an elevated PowerShell session, run normal `Prepare` without
 `-RecoverPendingCheckpoint`:
 
@@ -239,12 +247,17 @@ features, enables only disabled features with `-NoRestart`, and returns both
 states plus `needsRestart`. The host controller restarts and reconnects only
 the exact owned VM when required. The package stage uses a fixed native helper
 that captures bounded `wsl.exe --status` and `--version` output without sending
-native stderr to the PowerShell job error stream. When absent, it runs only
-`wsl.exe --install --no-distribution`; no `--web-download` fallback is used.
-After a successful install invocation, the package stage always requests a
-second bounded restart. Final verification requires structured zero-exit status
-and version proof before Git, PowerShell 7, checkout copy, or
-`scripts\setup-dev.ps1`.
+native stderr to the PowerShell job error stream. Ready status and version
+require no operation. Explicit absent status uses only
+`wsl.exe --install --no-distribution`. Ready status with any nonzero version
+exit invokes exactly one fixed `wsl.exe --update --web-download`, without
+localized-text classification. Install and update accept only exits `0` and
+`3010`, always request a second bounded restart, and do not re-probe before
+that restart. Update failures include bounded, sanitized version and update
+diagnostics. The helper supplies no interactive input, Store UI, shell text,
+or arbitrary arguments. Final verification after the owned reconnect requires
+enabled features plus structured zero-exit status and version proof before
+Git, PowerShell 7, checkout copy, or `scripts\setup-dev.ps1`.
 
 `Prepare` does not install Ubuntu or another distribution. Installed smoke
 provisions its app-owned distribution later. Checkpoint observation, guest

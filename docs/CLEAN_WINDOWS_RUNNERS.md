@@ -216,6 +216,14 @@ The final rotated `guest.clixml` credential remains available. At this clean che
 and `wsl.exe --status` returns exit 50 with `WSL is not installed`. That is the
 expected input to the staged preparation flow.
 
+The latest preparation attempt reached the first owned restart, then observed
+zero-exit `wsl.exe --status` and nonzero `wsl.exe --version` update-bootstrap
+output. The failure rollback is expected to have restored the exact
+`clean-windows` checkpoint. Before retrying, the driver must confirm that exact
+owned restore and its finalized checkpoint marker. Then use the normal
+`Prepare` command below. Do not use `-RecoverPendingCheckpoint`,
+`-CleanupUnattend`, or an ad hoc lifecycle command for this retry.
+
 From an elevated PowerShell session, use normal `Prepare` without
 `-RecoverPendingCheckpoint`:
 
@@ -306,11 +314,27 @@ features, enables only disabled features with `-NoRestart`, and returns both
 resulting states plus `needsRestart`. The host controller restarts only the
 exact owned VM and reconnects PowerShell Direct when required. The package
 stage then captures fixed `wsl.exe --status` and `--version` invocations as
-bounded data. When the package is absent, it runs only
-`wsl.exe --install --no-distribution`, accepts only documented success or
-restart exits, and always requests a second bounded restart after a successful
-install invocation. Final verification requires zero-exit status and version proof before Git,
-PowerShell 7, repository copy, or `scripts\setup-dev.ps1`.
+bounded, sanitized data. It has three package decisions:
+
+- Zero-exit status and version are ready and require no package operation.
+- Explicit absent status (exit `-1` or `50` plus not-installed output) uses
+  only `wsl.exe --install --no-distribution`. A ready version does not override
+  the absent status. An unrelated version failure still fails closed.
+- Zero-exit ready status with any nonzero version exit invokes exactly one
+  `wsl.exe --update --web-download`. This branch does not depend on localized
+  version text.
+
+Install and update accept only exits `0` and `3010`. Either successful
+operation always requests the second bounded owned restart. The update result
+is authoritative, and the package stage does not re-probe status or version
+before that restart. A nonzero update failure reports bounded, sanitized
+version and update diagnostics. The trusted helper has fixed typed argument
+arrays and supplies no standard input, Store UI, shell command text, or
+arbitrary arguments.
+
+After the second reconnect, final verification requires enabled features plus
+zero-exit status and version before Git, PowerShell 7, repository copy, or
+`scripts\setup-dev.ps1`.
 
 `Prepare` does not install Ubuntu or any other distribution. The installed
 smoke provisions its app-owned distribution later. Guest commands, restart

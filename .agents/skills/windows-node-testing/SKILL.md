@@ -267,6 +267,14 @@ final verification stages before tool setup. It does not install Ubuntu or
 another distribution. The installed smoke provisions its app-owned
 distribution later.
 
+After a failed `Prepare`, the driver must first confirm that the rollback
+restored the exact owned `clean-windows` checkpoint and finalized marker. The
+next attempt is normal `Prepare`, without `-RecoverPendingCheckpoint` or
+cleanup. In the package stage, zero-exit status plus nonzero version invokes
+the one fixed `wsl.exe --update --web-download` operation. Accepted update
+exits `0` and `3010` always require the owned reconnect before final status,
+version, and feature verification.
+
 Fresh unattended Hyper-V `Create` requires `-GenerateCredential`, verifies the
 official ISO SHA256, builds a separate answer ISO with Windows IMAPI2, and
 mounts and validates that ISO before any VM or VHD creation. It then waits a
