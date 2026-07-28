@@ -300,6 +300,18 @@ and disabled interactivity, so `msstore` is never queried. It does not install
 Ubuntu or another distribution. The installed smoke provisions its app-owned
 distribution later.
 
+The PowerShell 7 package is an additional exact selection contract:
+`Microsoft.PowerShell` version `7.6.4.0`, installer type `wix`, machine scope,
+and source `winget`. The audited community manifest identifies
+`PowerShell-7.6.4-win-x64.msi` with SHA-256
+`d11942df52fd12470169797abfa4781d9480efdc81000ba4fa55a5b921ed8dd0`;
+WinGet enforces that manifest hash. The controller must not select or retry
+the default MSIX bundle, because PowerShell Direct does not provide the active
+AppX user session it needs. Post-install proof requires the exact
+`C:\Program Files\PowerShell\7\pwsh.exe` path and engine version `7.6.4`.
+Error `0x80073D19` is reported as the known AppX
+deployment-session/user-logged-off regression.
+
 After a failed `Prepare`, the driver must first confirm that the rollback
 restored the exact owned `clean-windows` checkpoint and finalized marker. The
 next attempt is normal `Prepare`, without `-RecoverPendingCheckpoint` or
@@ -307,11 +319,10 @@ cleanup. In the package stage, zero-exit status plus nonzero version invokes
 the one fixed `wsl.exe --update --web-download` operation. Accepted update
 exits `0` and `3010` always require the owned reconnect before final status,
 version, and feature verification. The current failed Prepare is expected to
-have rolled back after the pinned App Installer lacked the separate mutable
-signed catalog package before the `Git.Git` probe, but this
-hotfix does not claim live confirmation. Unit coverage for the bootstrap uses extracted functions
-and mocks only. Do not use a VM or real Appx/network operations for that
-focused lane.
+have rolled back after the default PowerShell MSIX failed with `0x80073D19`,
+but this hotfix does not claim live confirmation. Unit coverage for the
+bootstrap and pinned PowerShell installer uses extracted functions and mocks
+only. Do not use a VM or real Appx/network operations for that focused lane.
 
 Fresh unattended Hyper-V `Create` requires `-GenerateCredential`, verifies the
 official ISO SHA256, builds a separate answer ISO with Windows IMAPI2, and

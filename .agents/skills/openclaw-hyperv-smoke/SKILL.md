@@ -198,15 +198,15 @@ available. Both WSL optional features are disabled at that checkpoint, and
 `wsl.exe --status` returns exit 50 with `WSL is not installed`. This is the
 expected input to normal `Prepare`.
 
-The current failed `Prepare` installed the pinned App Installer and validated
-the source export, then failed because manual repair also requires the mutable
-signed `Microsoft.Winget.Source` catalog package before the `Git.Git` probe.
-Its existing rollback
-is expected to have restored the exact `clean-windows` checkpoint, but this
-hotfix does not claim live confirmation. The driver must confirm that exact
-owned restore and finalized checkpoint marker before the next attempt. Retry
-with normal `Prepare`. Do not use `-RecoverPendingCheckpoint`,
-`-CleanupUnattend`, or an ad hoc lifecycle command.
+The current failed `Prepare` completed the signed WinGet catalog bootstrap and
+Git installation, then WinGet selected the default PowerShell MSIX bundle.
+That bundle failed with `0x80073D19` because PowerShell Direct has no active
+AppX deployment user session. Its existing rollback is expected to have
+restored the exact `clean-windows` checkpoint, but this hotfix does not claim
+live confirmation. The driver must confirm that exact owned restore and
+finalized checkpoint marker before the next attempt. Retry with normal
+`Prepare`. Do not use `-RecoverPendingCheckpoint`, `-CleanupUnattend`, or an ad
+hoc lifecycle command.
 
 From an elevated PowerShell session, run normal `Prepare` without
 `-RecoverPendingCheckpoint`:
@@ -308,6 +308,19 @@ The bootstrap does not reset, remove, add, or touch `msstore`.
 All downloads, extraction, and captures use one nonce guest-temp root. Cleanup
 failure is a failed bootstrap. Only then do Git, PowerShell 7, checkout copy,
 and `scripts\setup-dev.ps1` run.
+
+PowerShell installation is pinned to community package version `7.6.4.0` and
+uses exact `--installer-type wix --scope machine --source winget` arguments.
+This selects the machine-safe `PowerShell-7.6.4-win-x64.msi`; the audited
+community manifest SHA-256 is
+`d11942df52fd12470169797abfa4781d9480efdc81000ba4fa55a5b921ed8dd0`, and
+WinGet enforces that manifest hash. The controller never falls back to MSIX
+and never enables autologon. It then requires the exact machine path
+`C:\Program Files\PowerShell\7\pwsh.exe`, PATH resolution to that path, and
+reported engine version `7.6.4`. Installation and version probes use bounded
+native captures with sanitized diagnostics. Failures include decimal and
+eight-digit hexadecimal codes, with an explicit diagnostic for the known
+AppX session error `0x80073D19`.
 
 `Prepare` does not install Ubuntu or another distribution. Installed smoke
 provisions its app-owned distribution later. Checkpoint observation, guest

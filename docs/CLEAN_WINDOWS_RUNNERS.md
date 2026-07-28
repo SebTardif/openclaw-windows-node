@@ -464,6 +464,19 @@ shared developer setup, and the installed-smoke Inno bootstrap uses explicit
 `--source winget`, source and package agreement flags, and disabled
 interactivity, so `msstore` is never queried.
 
+PowerShell 7 is pinned separately to community package version `7.6.4.0`.
+`Prepare` requires `--installer-type wix`, `--scope machine`, and
+`--source winget`, so WinGet selects `PowerShell-7.6.4-win-x64.msi` instead of
+the default MSIX bundle. The audited community manifest SHA-256 for that MSI
+is `d11942df52fd12470169797abfa4781d9480efdc81000ba4fa55a5b921ed8dd0`;
+WinGet enforces the manifest hash during installation. After installation,
+the controller requires `C:\Program Files\PowerShell\7\pwsh.exe`, requires
+`pwsh.exe` on PATH to resolve to that exact machine path, and executes it
+noninteractively to require engine version `7.6.4`. It does not retry with
+MSIX or enable autologon. Native failures include decimal and eight-digit
+hexadecimal exit codes plus bounded sanitized output. `0x80073D19` receives a
+specific AppX deployment-session/user-logged-off diagnostic.
+
 Downloads, extraction, and native output captures live under one nonce child
 of the guest temporary directory. The root is removed on success or failure.
 A cleanup failure makes the bootstrap fail.

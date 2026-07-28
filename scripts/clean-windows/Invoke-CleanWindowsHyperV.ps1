@@ -132,6 +132,8 @@ $script:CheckpointCreationWindowSec = 900
 $script:LegacyCheckpointRecoveryWindowSec = 21600
 $script:CheckpointRecoveryClockSkewSec = 300
 $script:VhdChainMaxDepth = 32
+$script:GuestPowerShellWingetVersion = "7.6.4.0"
+$script:GuestPowerShellVersion = "7.6.4"
 
 Import-Module (Join-Path $PSScriptRoot "CleanWindowsUnattend.psm1") -Force
 
@@ -6187,6 +6189,234 @@ function Ensure-GuestGitInstalled {
     } | Out-Null
 }
 
+function Get-GuestPowerShell7InstallScriptBlock {
+    return {
+        param(
+            [Parameter(Mandatory = $true)]
+            [string]$WingetPackageVersion,
+            [Parameter(Mandatory = $true)]
+            [string]$ExpectedPowerShellVersion
+        )
+
+        function ConvertTo-OpenClawPowerShellToolDiagnostic {
+            param(
+                [AllowNull()]
+                [string]$Text,
+                [int]$MaximumLength = 1024
+            )
+
+            if ([string]::IsNullOrWhiteSpace($Text)) {
+                return "<empty>"
+            }
+
+            $safe = $Text -replace '[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]', '?'
+            $safe = $safe -replace '(?i)\b(authorization|password|passwd|pwd|secret|token|api[-_]?key)\s*[:=]\s*\S+', '$1=<redacted>'
+            $safe = $safe -replace '(?i)\b(Bearer|Basic)\s+[A-Za-z0-9._~+/\-=]+', '$1 <redacted>'
+            $safe = $safe -replace '(https?://[^?\s]+)\?[^\s]+', '$1?<redacted>'
+            $safe = ($safe -replace '\s+', ' ').Trim()
+            if ($safe.Length -gt $MaximumLength) {
+                $safe = $safe.Substring(0, $MaximumLength) + "...<truncated>"
+            }
+            return $safe
+        }
+
+        function Get-OpenClawNativeExitCodeHex {
+            param(
+                [Parameter(Mandatory = $true)]
+                [int]$ExitCode
+            )
+
+            $unsignedExitCode = [BitConverter]::ToUInt32(
+                [BitConverter]::GetBytes($ExitCode),
+                0)
+            return "0x{0:X8}" -f $unsignedExitCode
+        }
+
+        function Invoke-OpenClawPowerShellToolProcess {
+            param(
+                [Parameter(Mandatory = $true)]
+                [ValidateSet("InstallPinnedWix", "ReadInstalledVersion")]
+                [string]$Operation,
+                [Parameter(Mandatory = $true)]
+                [string]$ExecutablePath,
+                [Parameter(Mandatory = $true)]
+                [string]$PackageVersion
+            )
+
+            switch ($Operation) {
+                "InstallPinnedWix" {
+                    $arguments = [string[]]@(
+                        "install",
+                        "--id", "Microsoft.PowerShell",
+                        "-e",
+                        "--version", $PackageVersion,
+                        "--installer-type", "wix",
+                        "--scope", "machine",
+                        "--source", "winget",
+                        "--accept-source-agreements",
+                        "--accept-package-agreements",
+                        "--disable-interactivity")
+                }
+                "ReadInstalledVersion" {
+                    $arguments = [string[]]@(
+                        "-NoLogo",
+                        "-NoProfile",
+                        "-NonInteractive",
+                        "-Command",
+                        '$PSVersionTable.PSVersion.ToString()')
+                }
+            }
+
+            $captureRoot = Join-Path $env:TEMP (
+                "openclaw-powershell7-{0}" -f [Guid]::NewGuid().ToString("N"))
+            $stdoutPath = Join-Path $captureRoot "stdout.txt"
+            $stderrPath = Join-Path $captureRoot "stderr.txt"
+            $cleanupFailure = $null
+            try {
+                New-Item -ItemType Directory -Path $captureRoot -ErrorAction Stop | Out-Null
+                $process = Start-Process `
+                    -FilePath $ExecutablePath `
+                    -ArgumentList $arguments `
+                    -RedirectStandardOutput $stdoutPath `
+                    -RedirectStandardError $stderrPath `
+                    -Wait `
+                    -PassThru `
+                    -WindowStyle Hidden `
+                    -ErrorAction Stop
+                $stdout = if (Test-Path -LiteralPath $stdoutPath -PathType Leaf) {
+                    Get-Content -LiteralPath $stdoutPath -Raw -ErrorAction Stop
+                } else {
+                    ""
+                }
+                $stderr = if (Test-Path -LiteralPath $stderrPath -PathType Leaf) {
+                    Get-Content -LiteralPath $stderrPath -Raw -ErrorAction Stop
+                } else {
+                    ""
+                }
+
+                return [pscustomobject][ordered]@{
+                    operation = $Operation
+                    exitCode = [int]$process.ExitCode
+                    stdout = ConvertTo-OpenClawPowerShellToolDiagnostic -Text $stdout
+                    stderr = ConvertTo-OpenClawPowerShellToolDiagnostic -Text $stderr
+                }
+            } finally {
+                if (Test-Path -LiteralPath $captureRoot) {
+                    try {
+                        Remove-Item -LiteralPath $captureRoot -Recurse -Force -ErrorAction Stop
+                    } catch {
+                        $cleanupFailure = $_.Exception.Message
+                    }
+                }
+                if ($cleanupFailure) {
+                    throw "PowerShell 7 tool capture cleanup failed: $cleanupFailure"
+                }
+            }
+        }
+
+        function Assert-OpenClawPowerShell7 {
+            param(
+                [Parameter(Mandatory = $true)]
+                [string]$ExpectedPath,
+                [Parameter(Mandatory = $true)]
+                [string]$ExpectedVersion
+            )
+
+            if (-not (Test-Path -LiteralPath $ExpectedPath -PathType Leaf)) {
+                throw "PowerShell 7 is not installed at the expected machine path '$ExpectedPath'."
+            }
+
+            $versionResult = Invoke-OpenClawPowerShellToolProcess `
+                -Operation "ReadInstalledVersion" `
+                -ExecutablePath $ExpectedPath `
+                -PackageVersion $WingetPackageVersion
+            if ([int]$versionResult.exitCode -ne 0) {
+                $versionHex = Get-OpenClawNativeExitCodeHex -ExitCode ([int]$versionResult.exitCode)
+                throw (
+                    (
+                        "Installed pwsh.exe version check failed with exit code {0} ({1}). " +
+                        "stdout='{2}' stderr='{3}'"
+                    ) -f
+                        $versionResult.exitCode,
+                        $versionHex,
+                        $versionResult.stdout,
+                        $versionResult.stderr)
+            }
+
+            $reportedVersion = [string]$versionResult.stdout
+            if (-not [string]::Equals(
+                    $reportedVersion,
+                    $ExpectedVersion,
+                    [StringComparison]::Ordinal)) {
+                throw (
+                    "Installed pwsh.exe reported version '{0}'; expected exact version '{1}'." -f
+                        $reportedVersion,
+                        $ExpectedVersion)
+            }
+
+            $resolvedCommand = Get-Command pwsh.exe -CommandType Application -ErrorAction Stop
+            $resolvedPath = [IO.Path]::GetFullPath([string]$resolvedCommand.Source)
+            $canonicalExpectedPath = [IO.Path]::GetFullPath($ExpectedPath)
+            if (-not [string]::Equals(
+                    $resolvedPath,
+                    $canonicalExpectedPath,
+                    [StringComparison]::OrdinalIgnoreCase)) {
+                throw (
+                    "pwsh.exe resolves to '{0}'; expected trusted machine path '{1}'." -f
+                        $resolvedPath,
+                        $canonicalExpectedPath)
+            }
+        }
+
+        $expectedPwshPath = Join-Path $env:ProgramFiles "PowerShell\7\pwsh.exe"
+        if (Test-Path -LiteralPath $expectedPwshPath -PathType Leaf) {
+            try {
+                Assert-OpenClawPowerShell7 `
+                    -ExpectedPath $expectedPwshPath `
+                    -ExpectedVersion $ExpectedPowerShellVersion
+                return
+            } catch {
+                # A wrong or incomplete existing installation is repaired only through the exact pinned Wix package.
+            }
+        }
+
+        $wingetCommand = Get-Command winget.exe -CommandType Application -ErrorAction SilentlyContinue
+        if (-not $wingetCommand) {
+            throw "winget is not available in the guest. Install App Installer, then retry Prepare."
+        }
+
+        $installResult = Invoke-OpenClawPowerShellToolProcess `
+            -Operation "InstallPinnedWix" `
+            -ExecutablePath ([string]$wingetCommand.Source) `
+            -PackageVersion $WingetPackageVersion
+        if ([int]$installResult.exitCode -ne 0) {
+            $installHex = Get-OpenClawNativeExitCodeHex -ExitCode ([int]$installResult.exitCode)
+            $knownHint = if ($installHex -ceq "0x80073D19") {
+                " This is the known AppX deployment-session/user-logged-off failure; the pinned Wix selection must not fall back to MSIX."
+            } else {
+                ""
+            }
+            throw (
+                (
+                    "winget failed to install pinned PowerShell {0} Wix for machine scope with exit code {1} ({2}).{3} " +
+                    "stdout='{4}' stderr='{5}'"
+                ) -f
+                    $WingetPackageVersion,
+                    $installResult.exitCode,
+                    $installHex,
+                    $knownHint,
+                    $installResult.stdout,
+                    $installResult.stderr)
+        }
+
+        $env:Path = [Environment]::GetEnvironmentVariable("Path", "Machine") + ";" +
+            [Environment]::GetEnvironmentVariable("Path", "User")
+        Assert-OpenClawPowerShell7 `
+            -ExpectedPath $expectedPwshPath `
+            -ExpectedVersion $ExpectedPowerShellVersion
+    }
+}
+
 function Ensure-GuestPowerShell7Installed {
     param(
         [Parameter(Mandatory = $true)]
@@ -6194,25 +6424,14 @@ function Ensure-GuestPowerShell7Installed {
     )
 
     Write-Step "Ensuring guest PowerShell 7 is installed"
-    Invoke-GuestCommandWithTimeout -Session $Session -OperationName "Installing guest PowerShell 7" -TimeoutSec 1800 -ScriptBlock {
-        if (Get-Command pwsh.exe -ErrorAction SilentlyContinue) {
-            return
-        }
-
-        if (-not (Get-Command winget -ErrorAction SilentlyContinue)) {
-            throw "winget is not available in the guest. Install App Installer, then retry Prepare."
-        }
-
-        & winget install --id Microsoft.PowerShell -e --scope machine --source winget --accept-source-agreements --accept-package-agreements --disable-interactivity
-        if ($LASTEXITCODE -ne 0) {
-            throw "winget failed to install PowerShell 7 with exit code $LASTEXITCODE."
-        }
-
-        $env:Path = [Environment]::GetEnvironmentVariable("Path", "Machine") + ";" + [Environment]::GetEnvironmentVariable("Path", "User")
-        if (-not (Get-Command pwsh.exe -ErrorAction SilentlyContinue)) {
-            throw "PowerShell 7 was installed but pwsh.exe is not available on PATH in the guest session."
-        }
-    } | Out-Null
+    Invoke-GuestCommandWithTimeout `
+        -Session $Session `
+        -OperationName "Installing guest PowerShell 7" `
+        -TimeoutSec 1800 `
+        -ScriptBlock (Get-GuestPowerShell7InstallScriptBlock) `
+        -ArgumentList @(
+            $script:GuestPowerShellWingetVersion,
+            $script:GuestPowerShellVersion) | Out-Null
 }
 
 function Prepare-GuestPrerequisites {

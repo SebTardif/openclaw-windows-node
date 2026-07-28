@@ -1963,9 +1963,12 @@ public sealed class CleanWindowsRunnerScriptTests
             controller,
             StringComparison.Ordinal);
         Assert.Contains(
-            "winget install --id Microsoft.PowerShell -e --scope machine --source winget --accept-source-agreements --accept-package-agreements --disable-interactivity",
+            "$script:GuestPowerShellWingetVersion = \"7.6.4.0\"",
             controller,
             StringComparison.Ordinal);
+        Assert.Contains("\"--installer-type\", \"wix\"", controller, StringComparison.Ordinal);
+        Assert.Contains("\"--scope\", \"machine\"", controller, StringComparison.Ordinal);
+        Assert.Contains("\"--source\", \"winget\"", controller, StringComparison.Ordinal);
         Assert.Contains("\"--source\", \"winget\"", setupInstall, StringComparison.Ordinal);
         Assert.Contains("\"--accept-source-agreements\"", setupInstall, StringComparison.Ordinal);
         Assert.Contains("\"--accept-package-agreements\"", setupInstall, StringComparison.Ordinal);
@@ -1998,6 +2001,99 @@ public sealed class CleanWindowsRunnerScriptTests
         Assert.All(
             executableInstallLines,
             line => Assert.Contains("--source winget", line, StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
+    public void GuestPowerShell7InstallPinsExactMachineWixAndValidatesExactEngine()
+    {
+        var controller = ReadScript("Invoke-CleanWindowsHyperV.ps1");
+        var worker = ExtractPowerShellFunction(
+            controller,
+            "Get-GuestPowerShell7InstallScriptBlock",
+            "Ensure-GuestPowerShell7Installed");
+
+        Assert.Contains("\"--id\", \"Microsoft.PowerShell\"", worker, StringComparison.Ordinal);
+        Assert.Contains("\"--version\", $PackageVersion", worker, StringComparison.Ordinal);
+        Assert.Contains("\"--installer-type\", \"wix\"", worker, StringComparison.Ordinal);
+        Assert.Contains("\"--scope\", \"machine\"", worker, StringComparison.Ordinal);
+        Assert.Contains("\"--source\", \"winget\"", worker, StringComparison.Ordinal);
+        Assert.Contains("\"--accept-source-agreements\"", worker, StringComparison.Ordinal);
+        Assert.Contains("\"--accept-package-agreements\"", worker, StringComparison.Ordinal);
+        Assert.Contains("\"--disable-interactivity\"", worker, StringComparison.Ordinal);
+        Assert.Contains("PowerShell\\7\\pwsh.exe", worker, StringComparison.Ordinal);
+        Assert.Contains("$PSVersionTable.PSVersion.ToString()", worker, StringComparison.Ordinal);
+        Assert.Contains("[StringComparison]::Ordinal", worker, StringComparison.Ordinal);
+        Assert.DoesNotContain("\"msix\"", worker, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("--force", worker, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Theory]
+    [InlineData("install", "InstallPinnedWix,ReadInstalledVersion", "7.6.4", null)]
+    [InlineData("existing", "ReadInstalledVersion", "7.6.4", null)]
+    [InlineData("wrong-version", "InstallPinnedWix,ReadInstalledVersion", "7.6.3", "expected exact version '7.6.4'")]
+    [InlineData("wrong-path", "InstallPinnedWix,ReadInstalledVersion", "7.6.4", "expected trusted machine path")]
+    public void GuestPowerShell7InstallValidatesInstallPathAndVersion(
+        string scenario,
+        string expectedCalls,
+        string reportedVersion,
+        string? expectedError)
+    {
+        var result = RunPowerShellCommand(BuildPowerShell7InstallProof(
+            scenario,
+            reportedVersion,
+            installExitCode: 0));
+
+        AssertPowerShellProofSucceeded(result);
+        using var document = JsonDocument.Parse(result.Stdout);
+        var root = document.RootElement;
+        var actualCalls = root.GetProperty("calls").GetString();
+        var capturedError = root.GetProperty("error").GetString();
+        Assert.True(
+            string.Equals(expectedCalls, actualCalls, StringComparison.Ordinal),
+            $"Expected calls '{expectedCalls}', got '{actualCalls}'. Error: {capturedError}");
+        var arguments = root.GetProperty("installArguments").GetString() ?? string.Empty;
+        if (scenario != "existing")
+        {
+            Assert.Contains(
+                "install|--id|Microsoft.PowerShell|-e|--version|7.6.4.0|--installer-type|wix|--scope|machine|--source|winget",
+                arguments,
+                StringComparison.Ordinal);
+            Assert.DoesNotContain("msix", arguments, StringComparison.OrdinalIgnoreCase);
+        }
+
+        var error = capturedError;
+        if (expectedError is null)
+        {
+            Assert.True(string.IsNullOrEmpty(error), error);
+        }
+        else
+        {
+            Assert.Contains(expectedError, error, StringComparison.Ordinal);
+        }
+    }
+
+    [Fact]
+    public void GuestPowerShell7InstallReportsKnownAppxSessionFailureWithoutRetry()
+    {
+        var result = RunPowerShellCommand(BuildPowerShell7InstallProof(
+            "appx-failure",
+            reportedVersion: "7.6.4",
+            installExitCode: -2147009255));
+
+        AssertPowerShellProofSucceeded(result);
+        using var document = JsonDocument.Parse(result.Stdout);
+        var root = document.RootElement;
+        var error = root.GetProperty("error").GetString() ?? string.Empty;
+        Assert.True(
+            string.Equals(
+                "InstallPinnedWix",
+                root.GetProperty("calls").GetString(),
+                StringComparison.Ordinal),
+            $"Expected one pinned Wix install call. Error: {error}");
+        Assert.Contains("-2147009255", error, StringComparison.Ordinal);
+        Assert.Contains("0x80073D19", error, StringComparison.Ordinal);
+        Assert.Contains("AppX deployment-session/user-logged-off", error, StringComparison.Ordinal);
+        Assert.Contains("must not fall back to MSIX", error, StringComparison.Ordinal);
     }
 
     [Theory]
@@ -2224,9 +2320,10 @@ public sealed class CleanWindowsRunnerScriptTests
         Assert.Contains("\"-ConfirmCleanMachineReleaseIdentity\"", script);
         Assert.Contains("$validationArguments", script);
         Assert.Contains("function Ensure-GuestPowerShell7Installed", script);
-        Assert.Contains(
-            "winget install --id Microsoft.PowerShell -e --scope machine --source winget",
-            script);
+        Assert.Contains("$script:GuestPowerShellWingetVersion = \"7.6.4.0\"", script);
+        Assert.Contains("\"--installer-type\", \"wix\"", script);
+        Assert.Contains("\"--scope\", \"machine\"", script);
+        Assert.Contains("\"--source\", \"winget\"", script);
         Assert.Contains("Ensure-GuestPowerShell7Installed -Session $activeSession", script);
         Assert.True(
             script.IndexOf("Ensure-GuestPowerShell7Installed -Session $activeSession", StringComparison.Ordinal) <
@@ -5273,6 +5370,83 @@ public sealed class CleanWindowsRunnerScriptTests
             "  jobState = $jobState\n",
             "  jobRemoved = $jobRemoved\n",
             "  diagnostic = $diagnostic\n",
+            "} | ConvertTo-Json -Compress))\n");
+    }
+
+    private static string BuildPowerShell7InstallProof(
+        string scenario,
+        string reportedVersion,
+        int installExitCode)
+    {
+        var controller = ReadScript("Invoke-CleanWindowsHyperV.ps1");
+        var getter = ExtractPowerShellFunction(
+            controller,
+            "Get-GuestPowerShell7InstallScriptBlock",
+            "Ensure-GuestPowerShell7Installed");
+        return string.Concat(
+            "$ErrorActionPreference = 'Stop'\n",
+            "$env:ProgramFiles = 'C:\\PinnedPrograms'\n",
+            "$script:expectedPwshPath = 'C:\\PinnedPrograms\\PowerShell\\7\\pwsh.exe'\n",
+            "$script:installed = ",
+            scenario == "existing" ? "$true" : "$false",
+            "\n",
+            "$script:calls = New-Object 'Collections.Generic.List[string]'\n",
+            "$script:installArguments = ''\n",
+            "function global:Get-Command {\n",
+            "  [CmdletBinding()]\n",
+            "  param([string]$Name, [object]$CommandType)\n",
+            "  if ($Name -eq 'winget.exe') { return [pscustomobject]@{ Source='C:\\WindowsApps\\winget.exe' } }\n",
+            "  if ($Name -eq 'pwsh.exe' -and $script:installed) {\n",
+            scenario == "wrong-path"
+                ? "    return [pscustomobject]@{ Source='C:\\Unexpected\\pwsh.exe' }\n"
+                : "    return [pscustomobject]@{ Source=$script:expectedPwshPath }\n",
+            "  }\n",
+            "  return $null\n",
+            "}\n",
+            "function global:Test-Path {\n",
+            "  [CmdletBinding()]\n",
+            "  param([string]$LiteralPath, [object]$PathType)\n",
+            "  if ($LiteralPath -eq $script:expectedPwshPath) { return $script:installed }\n",
+            "  return Microsoft.PowerShell.Management\\Test-Path -LiteralPath $LiteralPath\n",
+            "}\n",
+            "function global:Start-Process {\n",
+            "  [CmdletBinding()]\n",
+            "  param(\n",
+            "    [string]$FilePath,\n",
+            "    [string[]]$ArgumentList,\n",
+            "    [string]$RedirectStandardOutput,\n",
+            "    [string]$RedirectStandardError,\n",
+            "    [switch]$Wait,\n",
+            "    [switch]$PassThru,\n",
+            "    [object]$WindowStyle)\n",
+            "  $operation = if ($ArgumentList[0] -eq 'install') { 'InstallPinnedWix' } else { 'ReadInstalledVersion' }\n",
+            "  [void]$script:calls.Add($operation)\n",
+            "  if ($operation -eq 'InstallPinnedWix') {\n",
+            "    $script:installArguments = $ArgumentList -join '|'\n",
+            "    $script:installed = ",
+            installExitCode == 0 ? "$true" : "$false",
+            "\n",
+            "    Microsoft.PowerShell.Management\\Set-Content -LiteralPath $RedirectStandardOutput -Value 'installer output' -NoNewline\n",
+            "    Microsoft.PowerShell.Management\\Set-Content -LiteralPath $RedirectStandardError -Value '' -NoNewline\n",
+            "    return [pscustomobject]@{ ExitCode = ",
+            installExitCode.ToString(System.Globalization.CultureInfo.InvariantCulture),
+            " }\n",
+            "  }\n",
+            "  Microsoft.PowerShell.Management\\Set-Content -LiteralPath $RedirectStandardOutput -Value ",
+            PsQuote(reportedVersion),
+            " -NoNewline\n",
+            "  Microsoft.PowerShell.Management\\Set-Content -LiteralPath $RedirectStandardError -Value '' -NoNewline\n",
+            "  return [pscustomobject]@{ ExitCode = 0 }\n",
+            "}\n",
+            getter,
+            "\n$errorMessage = $null\n",
+            "try {\n",
+            "  & (Get-GuestPowerShell7InstallScriptBlock) '7.6.4.0' '7.6.4'\n",
+            "} catch { $errorMessage = $_.Exception.Message }\n",
+            "[Console]::Out.Write(([pscustomobject][ordered]@{\n",
+            "  calls = $script:calls -join ','\n",
+            "  installArguments = $script:installArguments\n",
+            "  error = $errorMessage\n",
             "} | ConvertTo-Json -Compress))\n");
     }
 
