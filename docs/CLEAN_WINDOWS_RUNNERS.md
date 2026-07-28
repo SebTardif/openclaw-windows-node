@@ -216,8 +216,9 @@ The final rotated `guest.clixml` credential remains available. At this clean che
 and `wsl.exe --status` returns exit 50 with `WSL is not installed`. That is the
 expected input to the staged preparation flow.
 
-The current failed preparation attempt reached final WSL verification, then
-failed before Git setup because WinGet/App Installer was unavailable. The
+The current failed preparation attempt bootstrapped WinGet successfully, then
+failed before Git setup because an unqualified install queried `msstore` and
+encountered its interactive region agreement. The
 existing failure rollback is expected to have restored the exact
 `clean-windows` checkpoint, but this hotfix does not claim live confirmation
 of that restore. Before retrying, the driver must confirm that exact owned
@@ -405,10 +406,13 @@ If exactly one current-user
 `Microsoft.DesktopAppInstaller_8wekyb3d8bbwe` registration already has version
 `1.29.280.0`, `Prepare` validates its exact identity, root `winget.exe`,
 bounded WindowsApps alias and PATH resolution, exact `winget --version` output
-`v1.29.280`, and successful
-`winget source list --disable-interactivity` output containing `winget`. It
-then skips every download. Post-install validation repeats those same checks.
-It never updates sources or accepts source agreements during bootstrap.
+`v1.29.280`, an exact JSON export for the source named `winget`, and successful
+noninteractive resolution of `Git.Git` through `--source winget`. It then
+skips every download. Post-install validation repeats those same checks. It
+never resets, removes, or updates sources. Every package install in Prepare,
+shared developer setup, and the installed-smoke Inno bootstrap uses explicit
+`--source winget`, source and package agreement flags, and disabled
+interactivity, so `msstore` is never queried.
 
 Downloads, extraction, and native output captures live under one nonce child
 of the guest temporary directory. The root is removed on success or failure.

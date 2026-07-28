@@ -269,8 +269,12 @@ fixed current-user WinGet/App Installer bootstrap pinned to official Microsoft
 allowlisted redirects, pinned sizes and SHA-256 hashes, exact Microsoft
 signatures and manifests, x64-only dependency ordering, and a clean nonce
 guest-temp root. It does not use `License1.xml`, all-users provisioning, Store
-UI, or source update. It does not install Ubuntu or another distribution. The
-installed smoke provisions its app-owned distribution later.
+UI, or source update. It verifies an exact JSON export for the source named
+`winget` and resolves `Git.Git` through that source before package installation.
+All executable WinGet installs use explicit `--source winget`, agreement flags,
+and disabled interactivity, so `msstore` is never queried. It does not install
+Ubuntu or another distribution. The installed smoke provisions its app-owned
+distribution later.
 
 After a failed `Prepare`, the driver must first confirm that the rollback
 restored the exact owned `clean-windows` checkpoint and finalized marker. The
@@ -279,8 +283,8 @@ cleanup. In the package stage, zero-exit status plus nonzero version invokes
 the one fixed `wsl.exe --update --web-download` operation. Accepted update
 exits `0` and `3010` always require the owned reconnect before final status,
 version, and feature verification. The current failed Prepare is expected to
-have rolled back after WinGet was unavailable, but this hotfix does not claim
-live confirmation. Unit coverage for the bootstrap uses extracted functions
+have rolled back after an unqualified Git install queried `msstore`, but this
+hotfix does not claim live confirmation. Unit coverage for the bootstrap uses extracted functions
 and mocks only. Do not use a VM or real Appx/network operations for that
 focused lane.
 

@@ -198,8 +198,9 @@ available. Both WSL optional features are disabled at that checkpoint, and
 `wsl.exe --status` returns exit 50 with `WSL is not installed`. This is the
 expected input to normal `Prepare`.
 
-The current failed `Prepare` reached final WSL verification, then failed before
-Git setup because WinGet/App Installer was unavailable. Its existing rollback
+The current failed `Prepare` bootstrapped WinGet successfully, then failed
+before Git setup because an unqualified install queried `msstore` and reached
+its interactive region agreement. Its existing rollback
 is expected to have restored the exact `clean-windows` checkpoint, but this
 hotfix does not claim live confirmation. The driver must confirm that exact
 owned restore and finalized checkpoint marker before the next attempt. Retry
@@ -271,7 +272,11 @@ nonstub `AppInstaller_x64.msix` payload before any installation.
 The bootstrap uses current-user `Add-AppxPackage`, with no `License1.xml`,
 all-users provisioning, Store UI, source update, or source-agreement prompt.
 Exact existing App Installer version `1.29.280.0` skips downloads only after
-direct executable, WindowsApps alias, `v1.29.280`, and source-list validation.
+direct executable, WindowsApps alias, `v1.29.280`, exact JSON export of the
+source named `winget`, and noninteractive `Git.Git` resolution through that
+source. Every later package install uses explicit `--source winget`, both
+agreement flags, and disabled interactivity, so `msstore` is never queried.
+The bootstrap does not reset, remove, or update ordinary host sources.
 All downloads, extraction, and captures use one nonce guest-temp root. Cleanup
 failure is a failed bootstrap. Only then do Git, PowerShell 7, checkout copy,
 and `scripts\setup-dev.ps1` run.

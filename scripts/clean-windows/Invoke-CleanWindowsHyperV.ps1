@@ -4961,7 +4961,7 @@ function Get-GuestWingetBootstrapScriptBlock {
                 [Parameter(Mandatory = $true)]
                 [string]$WingetPath,
                 [Parameter(Mandatory = $true)]
-                [ValidateSet("Version", "SourceList")]
+                [ValidateSet("Version", "SourceExportWinget", "SourceProbeGit")]
                 [string]$Operation,
                 [Parameter(Mandatory = $true)]
                 [string]$TemporaryRoot
@@ -4976,8 +4976,19 @@ function Get-GuestWingetBootstrapScriptBlock {
                     @("--version")
                     break
                 }
-                "SourceList" {
-                    @("source", "list", "--disable-interactivity")
+                "SourceExportWinget" {
+                    @("source", "export", "--name", "winget", "--disable-interactivity")
+                    break
+                }
+                "SourceProbeGit" {
+                    @(
+                        "show",
+                        "--id", "Git.Git",
+                        "-e",
+                        "--source", "winget",
+                        "--accept-source-agreements",
+                        "--disable-interactivity"
+                    )
                     break
                 }
                 default {
@@ -5152,17 +5163,43 @@ function Get-GuestWingetBootstrapScriptBlock {
 
             $sourceResult = Invoke-OpenClawTrustedWingetProcess `
                 -WingetPath $WingetPath `
-                -Operation "SourceList" `
+                -Operation "SourceExportWinget" `
                 -TemporaryRoot $TemporaryRoot
-            $sourceOutput = "{0} {1}" -f (
-                [string]$sourceResult.Stdout,
-                [string]$sourceResult.Stderr
-            )
             if (
                 [int]$sourceResult.ExitCode -ne 0 -or
-                $sourceOutput -notmatch "(?i)\bwinget\b"
+                -not [string]::IsNullOrWhiteSpace([string]$sourceResult.Stderr)
             ) {
-                throw "Direct pinned winget.exe source list --disable-interactivity did not return a winget source with exit code 0."
+                throw "Direct pinned winget.exe source export for the exact winget source did not return exit code 0."
+            }
+            try {
+                $sourceRecords = @(
+                    ConvertFrom-Json `
+                        -InputObject ([string]$sourceResult.Stdout) `
+                        -ErrorAction Stop
+                )
+            } catch {
+                throw "Direct pinned winget.exe source export did not return valid JSON."
+            }
+            if (
+                $sourceRecords.Count -ne 1 -or
+                [string]$sourceRecords[0].Name -cne "winget"
+            ) {
+                throw "Direct pinned winget.exe source export did not return exactly one source named winget."
+            }
+
+            $sourceProbe = Invoke-OpenClawTrustedWingetProcess `
+                -WingetPath $WingetPath `
+                -Operation "SourceProbeGit" `
+                -TemporaryRoot $TemporaryRoot
+            $sourceProbeOutput = "{0} {1}" -f (
+                [string]$sourceProbe.Stdout,
+                [string]$sourceProbe.Stderr
+            )
+            if (
+                [int]$sourceProbe.ExitCode -ne 0 -or
+                $sourceProbeOutput -notmatch "(?i)\bGit\.Git\b"
+            ) {
+                throw "The exact winget source could not resolve the pinned Git.Git package noninteractively."
             }
         }
 
@@ -5483,7 +5520,7 @@ function Ensure-GuestGitInstalled {
             throw "winget is not available in the guest. Install App Installer, then retry Prepare."
         }
 
-        & winget install --id Git.Git -e --accept-source-agreements --accept-package-agreements --disable-interactivity
+        & winget install --id Git.Git -e --source winget --accept-source-agreements --accept-package-agreements --disable-interactivity
         if ($LASTEXITCODE -ne 0) {
             throw "winget failed to install Git with exit code $LASTEXITCODE."
         }
@@ -5511,7 +5548,7 @@ function Ensure-GuestPowerShell7Installed {
             throw "winget is not available in the guest. Install App Installer, then retry Prepare."
         }
 
-        & winget install --id Microsoft.PowerShell -e --scope machine --accept-source-agreements --accept-package-agreements --disable-interactivity
+        & winget install --id Microsoft.PowerShell -e --scope machine --source winget --accept-source-agreements --accept-package-agreements --disable-interactivity
         if ($LASTEXITCODE -ne 0) {
             throw "winget failed to install PowerShell 7 with exit code $LASTEXITCODE."
         }

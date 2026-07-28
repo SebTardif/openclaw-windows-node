@@ -114,7 +114,7 @@ function Get-WebView2RuntimeVersion {
 function Install-WingetPackage($id, $displayName) {
     if ($CheckOnly) {
         Write-WarningMessage "$displayName is missing."
-        Write-Info "Install with: winget install --id $id -e"
+        Write-Info "Install with: winget install --id $id -e --source winget"
         return
     }
 
@@ -127,6 +127,7 @@ function Install-WingetPackage($id, $displayName) {
         "install",
         "--id", $id,
         "-e",
+        "--source", "winget",
         "--accept-source-agreements",
         "--accept-package-agreements",
         "--disable-interactivity"

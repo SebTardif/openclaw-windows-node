@@ -1189,7 +1189,11 @@ public sealed class CleanWindowsRunnerScriptTests
         Assert.Contains("ResponseHeadersRead", bootstrap);
         Assert.Contains("Get-AuthenticodeSignature", bootstrap);
         Assert.Contains("Add-AppxPackage -Path $BundlePath -ErrorAction Stop", bootstrap);
-        Assert.Contains("@(\"source\", \"list\", \"--disable-interactivity\")", bootstrap);
+        Assert.Contains(
+            "@(\"source\", \"export\", \"--name\", \"winget\", \"--disable-interactivity\")",
+            bootstrap);
+        Assert.Contains("\"--source\", \"winget\"", bootstrap);
+        Assert.Contains("\"--id\", \"Git.Git\"", bootstrap);
         Assert.Contains("@(\"--version\")", bootstrap);
         Assert.Contains("$process.WaitForExit(60000)", bootstrap);
         Assert.Contains("Remove-OpenClawWingetTemporaryRoot", bootstrap);
@@ -1601,10 +1605,13 @@ public sealed class CleanWindowsRunnerScriptTests
     }
 
     [Theory]
-    [InlineData("valid", "accepted|Version,SourceList")]
+    [InlineData("valid", "accepted|Version,SourceExportWinget,SourceProbeGit")]
     [InlineData("version", "--version did not return exactly")]
-    [InlineData("source-exit", "source list --disable-interactivity")]
-    [InlineData("source-name", "source list --disable-interactivity")]
+    [InlineData("source-exit", "source export")]
+    [InlineData("source-name", "exactly one source named winget")]
+    [InlineData("source-json", "valid JSON")]
+    [InlineData("source-probe-exit", "could not resolve")]
+    [InlineData("source-probe-package", "could not resolve")]
     public void HyperVController_WingetCliRequiresExactVersionAndSourceValidation(
         string scenario,
         string expectedOutput)
@@ -1613,6 +1620,58 @@ public sealed class CleanWindowsRunnerScriptTests
 
         AssertPowerShellProofSucceeded(result);
         Assert.Contains(expectedOutput, result.Stdout, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void WingetInstallsUseOnlyTheExplicitCommunitySource()
+    {
+        var controller = ReadScript("Invoke-CleanWindowsHyperV.ps1");
+        var setupDev = File.ReadAllText(Path.Combine(Root, "scripts", "setup-dev.ps1"));
+        var setupInstall = ExtractPowerShellFunction(
+            setupDev,
+            "Install-WingetPackage",
+            "ConvertTo-GitSafeDirectoryPath");
+
+        Assert.Contains(
+            "winget install --id Git.Git -e --source winget --accept-source-agreements --accept-package-agreements --disable-interactivity",
+            controller,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "winget install --id Microsoft.PowerShell -e --scope machine --source winget --accept-source-agreements --accept-package-agreements --disable-interactivity",
+            controller,
+            StringComparison.Ordinal);
+        Assert.Contains("\"--source\", \"winget\"", setupInstall, StringComparison.Ordinal);
+        Assert.Contains("\"--accept-source-agreements\"", setupInstall, StringComparison.Ordinal);
+        Assert.Contains("\"--accept-package-agreements\"", setupInstall, StringComparison.Ordinal);
+        Assert.Contains("\"--disable-interactivity\"", setupInstall, StringComparison.Ordinal);
+        Assert.DoesNotContain("msstore", controller, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("msstore", setupInstall, StringComparison.OrdinalIgnoreCase);
+        foreach (var packageId in new[]
+        {
+            "Git.Git",
+            "Microsoft.PowerShell",
+            "Microsoft.DotNet.SDK.10",
+            "OpenJS.NodeJS.LTS",
+            "Microsoft.WindowsSDK.10.0.26100",
+            "Microsoft.EdgeWebView2Runtime",
+        })
+        {
+            Assert.Contains(packageId, controller + setupDev, StringComparison.Ordinal);
+        }
+
+        var executableInstallLines = Directory
+            .EnumerateFiles(Path.Combine(Root, "scripts"), "*.ps1", SearchOption.AllDirectories)
+            .SelectMany(File.ReadLines)
+            .Select(line => line.TrimStart())
+            .Where(line =>
+                line.StartsWith("winget install ", StringComparison.OrdinalIgnoreCase) ||
+                line.StartsWith("& winget install ", StringComparison.OrdinalIgnoreCase))
+            .ToArray();
+
+        Assert.NotEmpty(executableInstallLines);
+        Assert.All(
+            executableInstallLines,
+            line => Assert.Contains("--source winget", line, StringComparison.OrdinalIgnoreCase));
     }
 
     [Theory]
@@ -1839,7 +1898,9 @@ public sealed class CleanWindowsRunnerScriptTests
         Assert.Contains("\"-ConfirmCleanMachineReleaseIdentity\"", script);
         Assert.Contains("$validationArguments", script);
         Assert.Contains("function Ensure-GuestPowerShell7Installed", script);
-        Assert.Contains("winget install --id Microsoft.PowerShell -e --scope machine", script);
+        Assert.Contains(
+            "winget install --id Microsoft.PowerShell -e --scope machine --source winget",
+            script);
         Assert.Contains("Ensure-GuestPowerShell7Installed -Session $activeSession", script);
         Assert.True(
             script.IndexOf("Ensure-GuestPowerShell7Installed -Session $activeSession", StringComparison.Ordinal) <
@@ -3549,15 +3610,27 @@ public sealed class CleanWindowsRunnerScriptTests
             "Remove-OpenClawWingetTemporaryRoot");
         var version = scenario == "version" ? "v1.29.279" : "v1.29.280";
         var sourceExit = scenario == "source-exit" ? 1 : 0;
-        var sourceText = scenario == "source-name" ? "msstore https://example.invalid" : "winget https://cdn.winget.microsoft.com";
+        var sourceText = scenario switch
+        {
+            "source-name" => "{\"Name\":\"msstore\"}",
+            "source-json" => "not-json",
+            _ => "{\"Name\":\"winget\"}",
+        };
+        var sourceProbeExit = scenario == "source-probe-exit" ? 1 : 0;
+        var sourceProbeText = scenario == "source-probe-package"
+            ? "Found Unexpected.Package"
+            : "Found Git [Git.Git]";
         return string.Concat(
             "$ErrorActionPreference = 'Stop'\n",
             validation,
             "\n$script:calls=New-Object 'Collections.Generic.List[string]'\n",
             "function Invoke-OpenClawTrustedWingetProcess { param($WingetPath,$Operation,$TemporaryRoot) ",
             "$script:calls.Add($Operation); if ($Operation -ceq 'Version') { ",
-            $"[pscustomobject]@{{ ExitCode=0; Stdout='{version}'; Stderr='' }} }} else {{ ",
-            $"[pscustomobject]@{{ ExitCode={sourceExit}; Stdout={PsQuote(sourceText)}; Stderr='' }} }} }}\n",
+            $"[pscustomobject]@{{ ExitCode=0; Stdout='{version}'; Stderr='' }} }} ",
+            "elseif ($Operation -ceq 'SourceExportWinget') { ",
+            $"[pscustomobject]@{{ ExitCode={sourceExit}; Stdout={PsQuote(sourceText)}; Stderr='' }} }} ",
+            "else { ",
+            $"[pscustomobject]@{{ ExitCode={sourceProbeExit}; Stdout={PsQuote(sourceProbeText)}; Stderr='' }} }} }}\n",
             "try {\n",
             " Assert-OpenClawWingetCli -WingetPath 'C:\\Package\\winget.exe' -TemporaryRoot 'D:\\owned'\n",
             " [Console]::Out.Write('accepted|' + ($script:calls -join ','))\n",
