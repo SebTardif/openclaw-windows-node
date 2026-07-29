@@ -8147,6 +8147,151 @@ function Get-GuestSetupDevCheckScriptBlock {
     }
 }
 
+function Get-GuestVerificationSummaryScriptBlock {
+    return {
+        function ConvertTo-OpenClawVerifyDiagnostic {
+            param(
+                [AllowNull()]
+                [string]$Text,
+                [int]$MaximumLength = 1024
+            )
+
+            if ([string]::IsNullOrWhiteSpace($Text)) {
+                return "<empty>"
+            }
+            $safe = $Text -replace '[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]', '?'
+            $safe = $safe -replace '(?i)\b(authorization|password|passwd|pwd|secret|token|api[-_]?key)\s*[:=]\s*\S+', '$1=<redacted>'
+            $safe = $safe -replace '(?i)\b(Bearer|Basic)\s+[A-Za-z0-9._~+/\-=]+', '$1 <redacted>'
+            $safe = $safe -replace '(https?://[^?\s]+)\?[^\s]+', '$1?<redacted>'
+            $safe = ($safe -replace '\s+', ' ').Trim()
+            if ($safe.Length -gt $MaximumLength) {
+                return $safe.Substring(0, $MaximumLength) + "...<truncated>"
+            }
+            return $safe
+        }
+
+        function Resolve-OpenClawVerifyApplication {
+            param(
+                [Parameter(Mandatory = $true)]
+                [ValidateSet("git.exe", "dotnet.exe", "node.exe", "npm.cmd")]
+                [string]$Name
+            )
+
+            $commands = @(
+                Get-Command $Name -CommandType Application -ErrorAction SilentlyContinue
+            )
+            if ($commands.Count -ne 1) {
+                throw "Guest verification requires exactly one resolved Application named '$Name'."
+            }
+            $resolvedPath = [IO.Path]::GetFullPath([string]$commands[0].Source)
+            if ([IO.Path]::GetFileName($resolvedPath) -cne $Name) {
+                throw "Guest verification resolved '$Name' to an unexpected application path."
+            }
+            return $resolvedPath
+        }
+
+        function Invoke-OpenClawVerifyNativeVersion {
+            param(
+                [Parameter(Mandatory = $true)]
+                [string]$Label,
+                [Parameter(Mandatory = $true)]
+                [string]$ExecutablePath,
+                [Parameter(Mandatory = $true)]
+                [string]$VersionPattern
+            )
+
+            $captureRoot = Join-Path $env:TEMP (
+                "openclaw-verify-{0}" -f [Guid]::NewGuid().ToString("N"))
+            $stdoutPath = Join-Path $captureRoot "stdout.txt"
+            $stderrPath = Join-Path $captureRoot "stderr.txt"
+            $cleanupFailure = $null
+            try {
+                New-Item -ItemType Directory -Path $captureRoot -ErrorAction Stop | Out-Null
+                $process = Start-Process `
+                    -FilePath $ExecutablePath `
+                    -ArgumentList ([string[]]@("--version")) `
+                    -RedirectStandardOutput $stdoutPath `
+                    -RedirectStandardError $stderrPath `
+                    -PassThru `
+                    -WindowStyle Hidden `
+                    -ErrorAction Stop
+                # Windows PowerShell 5.1 requires opening the handle before exit to retain ExitCode.
+                $null = $process.Handle
+                if (-not $process.WaitForExit(60000)) {
+                    Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+                    throw "Guest verification command '$Label' timed out after 60 seconds."
+                }
+                $process.WaitForExit()
+                $stdout = if (Test-Path -LiteralPath $stdoutPath -PathType Leaf) {
+                    [IO.File]::ReadAllText($stdoutPath)
+                } else {
+                    ""
+                }
+                $stderr = if (Test-Path -LiteralPath $stderrPath -PathType Leaf) {
+                    [IO.File]::ReadAllText($stderrPath)
+                } else {
+                    ""
+                }
+                if ([int]$process.ExitCode -ne 0) {
+                    $safeStdout = ConvertTo-OpenClawVerifyDiagnostic -Text $stdout
+                    $safeStderr = ConvertTo-OpenClawVerifyDiagnostic -Text $stderr
+                    throw (
+                        "Guest verification command '$Label' failed with exit code $($process.ExitCode). " +
+                        "stdout='$safeStdout' stderr='$safeStderr'")
+                }
+                $version = $stdout.Trim()
+                if ($version -notmatch $VersionPattern) {
+                    $safeVersion = ConvertTo-OpenClawVerifyDiagnostic -Text $version
+                    throw "Guest verification command '$Label' returned invalid version '$safeVersion'."
+                }
+                return $version
+            } finally {
+                if (Test-Path -LiteralPath $captureRoot) {
+                    try {
+                        Remove-Item -LiteralPath $captureRoot -Recurse -Force -ErrorAction Stop
+                    } catch {
+                        $cleanupFailure = $_.Exception.Message
+                    }
+                }
+                if ($cleanupFailure) {
+                    throw "Guest verification capture cleanup failed for '$Label': $cleanupFailure"
+                }
+            }
+        }
+
+        $windowsSdkPath = "${env:ProgramFiles(x86)}\Windows Kits\10\Include"
+        if (-not (Test-Path -LiteralPath $windowsSdkPath -PathType Container)) {
+            throw "Windows SDK is not present in the guest."
+        }
+
+        $gitPath = Resolve-OpenClawVerifyApplication -Name "git.exe"
+        $dotnetPath = Resolve-OpenClawVerifyApplication -Name "dotnet.exe"
+        $nodePath = Resolve-OpenClawVerifyApplication -Name "node.exe"
+        $npmPath = Resolve-OpenClawVerifyApplication -Name "npm.cmd"
+        [ordered]@{
+            computerName = $env:COMPUTERNAME
+            userName = [Environment]::UserName
+            gitVersion = Invoke-OpenClawVerifyNativeVersion `
+                -Label "git.exe" `
+                -ExecutablePath $gitPath `
+                -VersionPattern '^git version \d+\.\d+\.\d+(?:\.[0-9A-Za-z.-]+)?$'
+            dotnetVersion = Invoke-OpenClawVerifyNativeVersion `
+                -Label "dotnet.exe" `
+                -ExecutablePath $dotnetPath `
+                -VersionPattern '^10\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$'
+            nodeVersion = Invoke-OpenClawVerifyNativeVersion `
+                -Label "node.exe" `
+                -ExecutablePath $nodePath `
+                -VersionPattern '^v\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$'
+            npmVersion = Invoke-OpenClawVerifyNativeVersion `
+                -Label "npm.cmd" `
+                -ExecutablePath $npmPath `
+                -VersionPattern '^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$'
+            windowsSdkPresent = $true
+        } | ConvertTo-Json -Depth 5
+    }
+}
+
 function Prepare-GuestPrerequisites {
     param(
         [Parameter(Mandatory = $true)]
@@ -8801,22 +8946,11 @@ function Invoke-VerifyCommand {
         param($Session)
         Install-GuestWslNativeHelper -Session $Session
         $wslProof = Invoke-GuestWslVerificationStage -Session $Session
-        $verifyResult = Invoke-GuestCommandWithTimeout -Session $Session -OperationName "Verifying guest readiness" -TimeoutSec $GuestCommandTimeoutSec -ScriptBlock {
-            $windowsSdkPath = "${env:ProgramFiles(x86)}\Windows Kits\10\Include"
-            if (-not (Test-Path -LiteralPath $windowsSdkPath)) {
-                throw "Windows SDK is not present in the guest."
-            }
-
-            [ordered]@{
-                computerName = $env:COMPUTERNAME
-                userName = [Environment]::UserName
-                gitVersion = (& git --version 2>&1 | Out-String).Trim()
-                dotnetVersion = (& dotnet --version 2>&1 | Out-String).Trim()
-                nodeVersion = (& node --version 2>&1 | Out-String).Trim()
-                npmVersion = (& npm --version 2>&1 | Out-String).Trim()
-                windowsSdkPresent = (Test-Path -LiteralPath $windowsSdkPath)
-            } | ConvertTo-Json -Depth 5
-        }
+        $verifyResult = Invoke-GuestCommandWithTimeout `
+            -Session $Session `
+            -OperationName "Verifying guest readiness" `
+            -TimeoutSec $GuestCommandTimeoutSec `
+            -ScriptBlock (Get-GuestVerificationSummaryScriptBlock)
 
         $toolSummaryJson = $verifyResult | Select-Object -Last 1
         if ($null -eq $toolSummaryJson) {

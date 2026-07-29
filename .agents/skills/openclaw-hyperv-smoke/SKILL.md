@@ -428,7 +428,11 @@ intent for explicit recovery. Recovery is never automatic.
 `Verify` restores the owned `openclaw-prerequisites` checkpoint and checks
 Gen2/x64 host configuration, nested virtualization, guest readiness, WSL2,
 and OpenClaw prerequisites without claiming a distribution or installed-app
-proof.
+proof. Its summary resolves `git.exe`, `dotnet.exe`, `node.exe`, and
+`npm.cmd` only as Windows Applications and runs each exact path through
+bounded redirected native capture. It never selects `npm.ps1`; exit zero and
+the expected version shape are required, including semantic version output
+from `npm.cmd`.
 
 ## Smoke: Installed lane
 

@@ -371,6 +371,12 @@ and nonzero Git diagnostics uses extracted functions, temporary Git
 repositories, and mocks only. Do not use a VM or real Appx/network operations
 for that focused lane.
 
+Clean-runner `Verify` summary checks must resolve `git.exe`, `dotnet.exe`,
+`node.exe`, and `npm.cmd` as Windows Applications and invoke those exact paths
+through bounded redirected native capture. Never use ambiguous `npm`, because
+PowerShell Direct execution policy can select `npm.ps1`. Require exit zero and
+the expected version shape, including semantic version output from `npm.cmd`.
+
 Fresh unattended Hyper-V `Create` requires `-GenerateCredential`, verifies the
 official ISO SHA256, builds a separate answer ISO with Windows IMAPI2, and
 mounts and validates that ISO before any VM or VHD creation. It then waits a

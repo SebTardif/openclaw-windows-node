@@ -2456,6 +2456,85 @@ public sealed class CleanWindowsRunnerScriptTests
         }
     }
 
+    [Fact]
+    public void GuestVerifySummaryUsesExplicitBoundedWindowsApplications()
+    {
+        var controller = ReadScript("Invoke-CleanWindowsHyperV.ps1");
+        var getter = ExtractPowerShellFunction(
+            controller,
+            "Get-GuestVerificationSummaryScriptBlock",
+            "Prepare-GuestPrerequisites");
+        var verify = ExtractPowerShellFunction(
+            controller,
+            "Invoke-VerifyCommand",
+            "Invoke-SmokeCommand");
+
+        foreach (var application in new[] { "git.exe", "dotnet.exe", "node.exe", "npm.cmd" })
+        {
+            Assert.Contains(
+                $"Resolve-OpenClawVerifyApplication -Name \"{application}\"",
+                getter,
+                StringComparison.Ordinal);
+        }
+        Assert.Contains("-CommandType Application", getter, StringComparison.Ordinal);
+        Assert.Contains("-RedirectStandardOutput $stdoutPath", getter, StringComparison.Ordinal);
+        Assert.Contains("-RedirectStandardError $stderrPath", getter, StringComparison.Ordinal);
+        Assert.Contains("$process.WaitForExit(60000)", getter, StringComparison.Ordinal);
+        Assert.Contains("-ExecutablePath $npmPath", getter, StringComparison.Ordinal);
+        Assert.Contains("-Label \"npm.cmd\"", getter, StringComparison.Ordinal);
+        Assert.Contains(@"'^\d+\.\d+\.\d+", getter, StringComparison.Ordinal);
+        Assert.DoesNotContain("& npm ", getter, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("npm.ps1", getter, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("2>&1", getter, StringComparison.Ordinal);
+        Assert.Contains(
+            "-ScriptBlock (Get-GuestVerificationSummaryScriptBlock)",
+            verify,
+            StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("success", null)]
+    [InlineData("npm-nonzero", "npm.cmd' failed with exit code 23")]
+    [InlineData("npm-invalid-version", "npm.cmd' returned invalid version")]
+    public void GuestVerifySummaryExecutesCanonicalNpmCmdWithoutExecutionPolicyAmbiguity(
+        string scenario,
+        string? expectedError)
+    {
+        var tempRoot = Path.Combine(
+            Path.GetTempPath(),
+            $"openclaw-verify-summary-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(tempRoot);
+        try
+        {
+            var result = RunPowerShellCommand(BuildGuestVerifySummaryProof(scenario, tempRoot));
+
+            AssertPowerShellProofSucceeded(result);
+            using var document = JsonDocument.Parse(result.Stdout);
+            var proof = document.RootElement;
+            var error = proof.GetProperty("error").GetString();
+            if (expectedError is null)
+            {
+                Assert.True(string.IsNullOrEmpty(error), error);
+                Assert.Equal("11.5.0", proof.GetProperty("npmVersion").GetString());
+            }
+            else
+            {
+                Assert.Contains(expectedError, error, StringComparison.Ordinal);
+            }
+            Assert.Equal(
+                "git.exe:Application,dotnet.exe:Application,node.exe:Application,npm.cmd:Application",
+                proof.GetProperty("commandRequests").GetString());
+            var processPaths = proof.GetProperty("processPaths").GetString() ?? string.Empty;
+            Assert.Contains(@"C:\Program Files\nodejs\npm.cmd", processPaths, StringComparison.Ordinal);
+            Assert.DoesNotContain("npm.ps1", processPaths, StringComparison.OrdinalIgnoreCase);
+            Assert.Equal(0, proof.GetProperty("remainingCaptureDirectories").GetInt32());
+        }
+        finally
+        {
+            DeleteTestDirectory(tempRoot);
+        }
+    }
+
     [Theory]
     [InlineData("retry", "accepted|3")]
     [InlineData("timeout", "bounded retry")]
@@ -6462,6 +6541,83 @@ public sealed class CleanWindowsRunnerScriptTests
             " installCalls = $script:installCalls\n",
             " reconnectCalls = $script:reconnectCalls\n",
             " removedSessions = $script:removedSessions\n",
+            "} | ConvertTo-Json -Compress))\n");
+    }
+
+    private static string BuildGuestVerifySummaryProof(string scenario, string tempRoot)
+    {
+        var controller = ReadScript("Invoke-CleanWindowsHyperV.ps1");
+        var getter = ExtractPowerShellFunction(
+            controller,
+            "Get-GuestVerificationSummaryScriptBlock",
+            "Prepare-GuestPrerequisites");
+        return string.Concat(
+            "$ErrorActionPreference = 'Stop'\n",
+            "$env:TEMP = ", PsQuote(tempRoot), "\n",
+            "$env:COMPUTERNAME = 'VERIFY-GUEST'\n",
+            "$script:scenario = ", PsQuote(scenario), "\n",
+            "$script:commandRequests = [System.Collections.Generic.List[string]]::new()\n",
+            "$script:processPaths = [System.Collections.Generic.List[string]]::new()\n",
+            "$script:nextId = 500\n",
+            "function global:Get-Command {\n",
+            " param($Name, $CommandType, $ErrorAction)\n",
+            " [void]$script:commandRequests.Add(\"$Name`:$CommandType\")\n",
+            " $source = switch ($Name) {\n",
+            "  'git.exe' { 'C:\\Program Files\\Git\\cmd\\git.exe' }\n",
+            "  'dotnet.exe' { 'C:\\Program Files\\dotnet\\dotnet.exe' }\n",
+            "  'node.exe' { 'C:\\Program Files\\nodejs\\node.exe' }\n",
+            "  'npm.cmd' { 'C:\\Program Files\\nodejs\\npm.cmd' }\n",
+            "  default { throw \"Unexpected command resolution '$Name'.\" }\n",
+            " }\n",
+            " return [pscustomobject]@{ Source = $source }\n",
+            "}\n",
+            "function global:Test-Path {\n",
+            " param($LiteralPath, $PathType)\n",
+            " if ([string]$LiteralPath -like '*Windows Kits\\10\\Include') { return $true }\n",
+            " if ($PSBoundParameters.ContainsKey('PathType')) {\n",
+            "  return Microsoft.PowerShell.Management\\Test-Path -LiteralPath $LiteralPath -PathType $PathType\n",
+            " }\n",
+            " return Microsoft.PowerShell.Management\\Test-Path -LiteralPath $LiteralPath\n",
+            "}\n",
+            "function global:Start-Process {\n",
+            " param($FilePath, $ArgumentList, $RedirectStandardOutput, $RedirectStandardError, ",
+            "[switch]$PassThru, $WindowStyle, $ErrorAction)\n",
+            " [void]$script:processPaths.Add([string]$FilePath)\n",
+            " $leaf = [IO.Path]::GetFileName([string]$FilePath)\n",
+            " $stdout = switch ($leaf) {\n",
+            "  'git.exe' { 'git version 2.50.1.windows.1' }\n",
+            "  'dotnet.exe' { '10.0.302' }\n",
+            "  'node.exe' { 'v24.18.0' }\n",
+            "  'npm.cmd' { if ($script:scenario -eq 'npm-invalid-version') { 'not-semver' } else { '11.5.0' } }\n",
+            "  default { throw \"Unexpected process '$FilePath'.\" }\n",
+            " }\n",
+            " $exitCode = if ($leaf -eq 'npm.cmd' -and $script:scenario -eq 'npm-nonzero') { 23 } else { 0 }\n",
+            " $stderr = if ($leaf -eq 'npm.cmd' -and $script:scenario -eq 'npm-nonzero') ",
+            "{ 'npm failure details' } elseif ($leaf -eq 'npm.cmd') { 'benign npm stderr' } else { '' }\n",
+            " Microsoft.PowerShell.Management\\Set-Content -LiteralPath $RedirectStandardOutput -Value $stdout -NoNewline\n",
+            " Microsoft.PowerShell.Management\\Set-Content -LiteralPath $RedirectStandardError -Value $stderr -NoNewline\n",
+            " $script:nextId++\n",
+            " $process = [pscustomobject]@{ Id = $script:nextId; ExitCode = $exitCode; Handle = 1 }\n",
+            " $process | Add-Member -MemberType ScriptMethod -Name WaitForExit ",
+            "-Value { param([int]$Milliseconds) ",
+            "if ($PSBoundParameters.ContainsKey('Milliseconds')) { return $true } }\n",
+            " return $process\n",
+            "}\n",
+            getter,
+            "\n$errorMessage = $null\n",
+            "$summary = $null\n",
+            "try {\n",
+            " $summaryJson = & (Get-GuestVerificationSummaryScriptBlock)\n",
+            " $summary = $summaryJson | ConvertFrom-Json -ErrorAction Stop\n",
+            "} catch { $errorMessage = $_.Exception.Message }\n",
+            "$remaining = @(Microsoft.PowerShell.Management\\Get-ChildItem ",
+            "-LiteralPath $env:TEMP -Directory -ErrorAction SilentlyContinue).Count\n",
+            "[Console]::Out.Write(([pscustomobject][ordered]@{\n",
+            " error = $errorMessage\n",
+            " npmVersion = if ($summary) { [string]$summary.npmVersion } else { $null }\n",
+            " commandRequests = $script:commandRequests -join ','\n",
+            " processPaths = $script:processPaths -join ','\n",
+            " remainingCaptureDirectories = $remaining\n",
             "} | ConvertTo-Json -Compress))\n");
     }
 

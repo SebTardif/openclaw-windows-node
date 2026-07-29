@@ -592,6 +592,14 @@ limited to the explicit owned path documented above.
   -ConfirmOwnedAction
 ```
 
+The Verify summary resolves exactly `git.exe`, `dotnet.exe`, `node.exe`, and
+`npm.cmd` as Windows `Application` commands, then executes each resolved path
+through bounded native stdout/stderr capture. It never invokes ambiguous
+`npm` or `npm.ps1`, so the guest execution policy cannot redirect the check to
+the PowerShell shim. Every command must exit zero and return its expected
+version shape; npm specifically requires semantic version output. Capture
+cleanup is mandatory.
+
 The controller transfers one validated clean-HEAD source archive with
 PowerShell Direct `Copy-Item -ToSession`, runs the typed `Installed` validation
 lane by default, and retrieves artifacts with `Copy-Item -FromSession`. The VM
