@@ -198,15 +198,16 @@ available. Both WSL optional features are disabled at that checkpoint, and
 `wsl.exe --status` returns exit 50 with `WSL is not installed`. This is the
 expected input to normal `Prepare`.
 
-The current `Prepare` reached source transfer after WinGet, Git, and
-PowerShell succeeded, but the old recursive checkout copy included more than
-3 GiB of ignored host `bin`/`obj` output. That run is not clean proof even if
-it completes. Do not kill or bypass its existing `finally`; it is expected to
-restore the exact `clean-windows` checkpoint, but this hotfix does not claim
-live confirmation. The driver must confirm that exact owned restore and
-finalized checkpoint marker before the next attempt. Retry with normal
-`Prepare`. Do not use `-RecoverPendingCheckpoint`, `-CleanupUnattend`, or an ad
-hoc lifecycle command.
+The obsolete `Prepare` reached source transfer after WinGet, Git, and
+PowerShell succeeded, but its recursive checkout copy included more than 3
+GiB of ignored host `bin`/`obj` output. After about 58 minutes it failed
+because exit-zero Git line-ending warning stderr surfaced as a failed
+PowerShell Direct job. That run is not clean proof. Its existing `finally`
+was expected to restore the exact `clean-windows` checkpoint, but this hotfix
+does not claim live confirmation. The driver must confirm that exact owned
+restore and finalized checkpoint marker before the next attempt. Retry with
+normal `Prepare`. Do not use `-RecoverPendingCheckpoint`,
+`-CleanupUnattend`, or an ad hoc lifecycle command.
 
 From an elevated PowerShell session, run normal `Prepare` without
 `-RecoverPendingCheckpoint`:
@@ -332,8 +333,14 @@ tree or ZIP types, unsafe symbolic-link targets, and archive count/hash/size
 mismatches. The guest verifies before resetting its repo root, extracts with
 built-in tooling, rejects all resulting reparse points and generated
 directories, writes `openclaw-source-provenance.json`, and initializes the
-disposable Git commit. Exactly one archive crosses PowerShell Direct. Guest
-and host copies are removed in `finally`, and cleanup failure is fatal.
+disposable Git commit. Guest staging first sets repository-local
+`core.autocrlf=false` and `core.safecrlf=true`, then runs only fixed Git
+operations through bounded redirected native processes. Exit-zero stderr is
+returned as sanitized bounded warning evidence; nonzero exits fail closed.
+Pre/post source-tree SHA-256 digests must match, LF working-tree bytes remain
+unchanged, and final porcelain status must be empty. Exactly one archive
+crosses PowerShell Direct. Guest and host copies are removed in `finally`,
+and cleanup failure is fatal.
 
 `Prepare` does not install Ubuntu or another distribution. Installed smoke
 provisions its app-owned distribution later. Checkpoint observation, guest

@@ -503,8 +503,17 @@ resetting the guest repository root. After built-in `Expand-Archive`, it
 requires the exact tracked-file count and no generated directories or reparse
 points. It writes `openclaw-source-provenance.json` with the original host
 HEAD and archive evidence, then initializes and commits the disposable guest
-Git repository. Both guest and host archives are removed in `finally`; cleanup
-failure fails the operation.
+Git repository. Before staging, the guest sets repository-local
+`core.autocrlf=false` and `core.safecrlf=true`. Every fixed Git operation runs
+through a bounded native-process helper with redirected stdout and stderr, so
+exit-zero warnings remain bounded diagnostics instead of failing a PowerShell
+Direct job. Nonzero exits fail with sanitized bounded diagnostics. The
+controller hashes every extracted source file before and after staging,
+excluding only `.git`, and requires identical digests plus an empty final
+`git status --porcelain`. This proves staging did not rewrite LF working-tree
+bytes and that the source provenance is part of the clean commit. Both guest
+and host archives are removed in `finally`; cleanup failure fails the
+operation.
 
 Downloads, extraction, and native output captures live under one nonce child
 of the guest temporary directory. The root is removed on success or failure.

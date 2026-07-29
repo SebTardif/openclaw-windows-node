@@ -3652,6 +3652,8 @@ function Invoke-CleanWindowsSourceGit {
             -PassThru `
             -WindowStyle Hidden `
             -ErrorAction Stop
+        # Windows PowerShell 5.1 requires opening the handle before exit to retain ExitCode.
+        $null = $process.Handle
         if (-not $process.WaitForExit($TimeoutSec * 1000)) {
             Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
             throw "$OperationName timed out after $TimeoutSec seconds."
@@ -4048,6 +4050,297 @@ function Get-SourceArchiveInstallScriptBlock {
     }
 }
 
+function Get-GuestSourceStagingScriptBlock {
+    return {
+        param(
+            [Parameter(Mandatory = $true)]
+            [string]$RepositoryRoot,
+            [Parameter(Mandatory = $true)]
+            [string]$SourceHead,
+            [Parameter(Mandatory = $true)]
+            [string]$ProvenanceFileName,
+            [ValidateRange(1, 300)]
+            [int]$NativeTimeoutSec
+        )
+
+        Set-StrictMode -Version 2.0
+        $ErrorActionPreference = "Stop"
+
+        function ConvertTo-OpenClawGuestGitDiagnostic {
+            param(
+                [AllowNull()]
+                [string]$Text,
+                [int]$MaximumLength = 1024
+            )
+
+            if ([string]::IsNullOrWhiteSpace($Text)) {
+                return "<empty>"
+            }
+            $safe = $Text -replace '[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]', '?'
+            $safe = $safe -replace '(?i)\b(authorization|password|passwd|pwd|secret|token|api[-_]?key)\s*[:=]\s*\S+', '$1=<redacted>'
+            $safe = $safe -replace '(?i)\b(Bearer|Basic)\s+[A-Za-z0-9._~+/\-=]+', '$1 <redacted>'
+            $safe = $safe -replace '(https?://[^?\s]+)\?[^\s]+', '$1?<redacted>'
+            $safe = ($safe -replace '\s+', ' ').Trim()
+            if ($safe.Length -gt $MaximumLength) {
+                return $safe.Substring(0, $MaximumLength) + "...<truncated>"
+            }
+            return $safe
+        }
+
+        function Get-OpenClawGuestSourceFileSha256 {
+            param(
+                [Parameter(Mandatory = $true)]
+                [string]$Path
+            )
+
+            $stream = [IO.File]::OpenRead($Path)
+            $algorithm = [Security.Cryptography.SHA256]::Create()
+            try {
+                return (($algorithm.ComputeHash($stream) |
+                    ForEach-Object { $_.ToString("X2") }) -join "")
+            } finally {
+                $algorithm.Dispose()
+                $stream.Dispose()
+            }
+        }
+
+        function Get-OpenClawGuestSourceTreeSha256 {
+            param(
+                [Parameter(Mandatory = $true)]
+                [string]$Root
+            )
+
+            $canonicalRoot = [IO.Path]::GetFullPath($Root).TrimEnd("\")
+            $rootPrefix = $canonicalRoot + "\"
+            $records = New-Object 'Collections.Generic.List[string]'
+            foreach ($file in Get-ChildItem -LiteralPath $canonicalRoot -File -Recurse -Force -ErrorAction Stop) {
+                $fullPath = [IO.Path]::GetFullPath([string]$file.FullName)
+                if (-not $fullPath.StartsWith($rootPrefix, [StringComparison]::OrdinalIgnoreCase)) {
+                    throw "Guest source digest encountered a file outside the repository root."
+                }
+                $relativePath = $fullPath.Substring($rootPrefix.Length).Replace("\", "/")
+                if (
+                    $relativePath.StartsWith(".git/", [StringComparison]::OrdinalIgnoreCase) -or
+                    [string]::Equals($relativePath, ".git", [StringComparison]::OrdinalIgnoreCase)
+                ) {
+                    continue
+                }
+                $fileHash = Get-OpenClawGuestSourceFileSha256 -Path $fullPath
+                [void]$records.Add("$relativePath|$fileHash")
+            }
+            if ($records.Count -eq 0) {
+                throw "Guest source digest found no repository files."
+            }
+            $orderedRecords = $records.ToArray()
+            [Array]::Sort($orderedRecords, [StringComparer]::Ordinal)
+            $manifestBytes = (New-Object Text.UTF8Encoding($false)).GetBytes(
+                ($orderedRecords -join "`n"))
+            $algorithm = [Security.Cryptography.SHA256]::Create()
+            try {
+                return (($algorithm.ComputeHash($manifestBytes) |
+                    ForEach-Object { $_.ToString("X2") }) -join "")
+            } finally {
+                $algorithm.Dispose()
+            }
+        }
+
+        function Invoke-OpenClawGuestGitProcess {
+            param(
+                [Parameter(Mandatory = $true)]
+                [ValidateSet(
+                    "Init",
+                    "BranchMain",
+                    "ConfigUserName",
+                    "ConfigUserEmail",
+                    "ConfigAutoCrlf",
+                    "ConfigSafeCrlf",
+                    "AddAll",
+                    "Commit",
+                    "Status")]
+                [string]$Operation,
+                [Parameter(Mandatory = $true)]
+                [string]$GitPath,
+                [Parameter(Mandatory = $true)]
+                [string]$WorkingDirectory,
+                [Parameter(Mandatory = $true)]
+                [string]$CaptureRoot
+            )
+
+            switch ($Operation) {
+                "Init" { $arguments = [string[]]@("init") }
+                "BranchMain" { $arguments = [string[]]@("branch", "-M", "main") }
+                "ConfigUserName" {
+                    $arguments = [string[]]@(
+                        "config", "--local", "user.name", "OpenClaw Clean Windows Runner")
+                }
+                "ConfigUserEmail" {
+                    $arguments = [string[]]@(
+                        "config", "--local", "user.email", "openclaw-clean-windows@example.invalid")
+                }
+                "ConfigAutoCrlf" {
+                    $arguments = [string[]]@("config", "--local", "core.autocrlf", "false")
+                }
+                "ConfigSafeCrlf" {
+                    $arguments = [string[]]@("config", "--local", "core.safecrlf", "true")
+                }
+                "AddAll" { $arguments = [string[]]@("add", "-A") }
+                "Commit" {
+                    $arguments = [string[]]@(
+                        "commit", "-m", "Guest staging from $SourceHead", "--quiet")
+                }
+                "Status" { $arguments = [string[]]@("status", "--porcelain") }
+            }
+
+            $quotedArguments = @(
+                $arguments | ForEach-Object {
+                    $argument = [string]$_
+                    if ($argument.IndexOf('"') -ge 0) {
+                        throw "Guest Git operation '$Operation' contains an unsupported quote."
+                    }
+                    if ($argument -match '\s') {
+                        '"' + $argument + '"'
+                    } else {
+                        $argument
+                    }
+                }
+            )
+            $stdoutPath = Join-Path $CaptureRoot "$Operation.stdout.txt"
+            $stderrPath = Join-Path $CaptureRoot "$Operation.stderr.txt"
+            $process = Start-Process `
+                -FilePath $GitPath `
+                -WorkingDirectory $WorkingDirectory `
+                -ArgumentList ($quotedArguments -join " ") `
+                -RedirectStandardOutput $stdoutPath `
+                -RedirectStandardError $stderrPath `
+                -PassThru `
+                -WindowStyle Hidden `
+                -ErrorAction Stop
+            # Windows PowerShell 5.1 requires opening the handle before exit to retain ExitCode.
+            $null = $process.Handle
+            if (-not $process.WaitForExit($NativeTimeoutSec * 1000)) {
+                Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+                throw "Guest Git operation '$Operation' timed out after $NativeTimeoutSec seconds."
+            }
+            $process.WaitForExit()
+            $stdout = if (Test-Path -LiteralPath $stdoutPath -PathType Leaf) {
+                [IO.File]::ReadAllText($stdoutPath)
+            } else {
+                ""
+            }
+            $stderr = if (Test-Path -LiteralPath $stderrPath -PathType Leaf) {
+                [IO.File]::ReadAllText($stderrPath)
+            } else {
+                ""
+            }
+            $safeStdout = ConvertTo-OpenClawGuestGitDiagnostic -Text $stdout
+            $safeStderr = ConvertTo-OpenClawGuestGitDiagnostic -Text $stderr
+            if ([int]$process.ExitCode -ne 0) {
+                throw (
+                    "Guest Git operation '{0}' failed with exit code {1}. stdout='{2}' stderr='{3}'" -f
+                        $Operation,
+                        $process.ExitCode,
+                        $safeStdout,
+                        $safeStderr)
+            }
+            return [pscustomobject][ordered]@{
+                operation = $Operation
+                exitCode = [int]$process.ExitCode
+                hasStdout = -not [string]::IsNullOrWhiteSpace($stdout)
+                hasStderr = -not [string]::IsNullOrWhiteSpace($stderr)
+                stdout = $safeStdout
+                stderr = $safeStderr
+            }
+        }
+
+        if ($SourceHead -notmatch '^[0-9a-f]{40,64}$') {
+            throw "Guest staging source HEAD is not a full lowercase Git object ID."
+        }
+        $canonicalRoot = [IO.Path]::GetFullPath($RepositoryRoot)
+        $provenancePath = Join-Path $canonicalRoot $ProvenanceFileName
+        $provenance = Get-Content -LiteralPath $provenancePath -Raw -ErrorAction Stop |
+            ConvertFrom-Json -ErrorAction Stop
+        if (
+            [string]$provenance.schema -cne "openclaw.clean-windows.source-provenance/v1" -or
+            [string]$provenance.sourceHead -cne $SourceHead
+        ) {
+            throw "Guest source provenance does not match the exact host HEAD."
+        }
+
+        $gitCommands = @(
+            Get-Command git.exe -CommandType Application -ErrorAction SilentlyContinue
+        )
+        if ($gitCommands.Count -eq 0) {
+            throw "Git is not available in the guest."
+        }
+        $gitPath = [string]$gitCommands[0].Source
+        $captureRoot = Join-Path $env:TEMP (
+            "openclaw-guest-git-{0}" -f [Guid]::NewGuid().ToString("N"))
+        $warnings = New-Object 'Collections.Generic.List[string]'
+        $cleanupError = $null
+        try {
+            New-Item -ItemType Directory -Path $captureRoot -ErrorAction Stop | Out-Null
+            $beforeSha256 = Get-OpenClawGuestSourceTreeSha256 -Root $canonicalRoot
+            foreach ($operation in @(
+                    "Init",
+                    "BranchMain",
+                    "ConfigUserName",
+                    "ConfigUserEmail",
+                    "ConfigAutoCrlf",
+                    "ConfigSafeCrlf",
+                    "AddAll",
+                    "Commit")) {
+                $result = Invoke-OpenClawGuestGitProcess `
+                    -Operation $operation `
+                    -GitPath $gitPath `
+                    -WorkingDirectory $canonicalRoot `
+                    -CaptureRoot $captureRoot
+                if ([bool]$result.hasStderr) {
+                    [void]$warnings.Add("$operation`: $($result.stderr)")
+                }
+            }
+
+            $statusResult = Invoke-OpenClawGuestGitProcess `
+                -Operation "Status" `
+                -GitPath $gitPath `
+                -WorkingDirectory $canonicalRoot `
+                -CaptureRoot $captureRoot
+            if ([bool]$statusResult.hasStderr) {
+                [void]$warnings.Add("Status: $($statusResult.stderr)")
+            }
+            if ([bool]$statusResult.hasStdout) {
+                throw "Guest staging repository is not clean after its provenance commit: $($statusResult.stdout)"
+            }
+            $afterSha256 = Get-OpenClawGuestSourceTreeSha256 -Root $canonicalRoot
+            if (-not [string]::Equals(
+                    $beforeSha256,
+                    $afterSha256,
+                    [StringComparison]::Ordinal)) {
+                throw "Guest Git staging mutated extracted source bytes."
+            }
+
+            return [pscustomobject][ordered]@{
+                sourceHead = $SourceHead
+                beforeSha256 = $beforeSha256
+                afterSha256 = $afterSha256
+                warningCount = $warnings.Count
+                warnings = @($warnings)
+                clean = $true
+            }
+        } finally {
+            if (Test-Path -LiteralPath $captureRoot) {
+                try {
+                    Remove-Item -LiteralPath $captureRoot -Recurse -Force -ErrorAction Stop
+                } catch {
+                    $cleanupError = $_.Exception.Message
+                }
+            }
+            if ($cleanupError) {
+                throw "Guest Git capture cleanup failed: $cleanupError"
+            }
+        }
+    }
+}
+
 function New-CleanWindowsSourceArchive {
     param(
         [Parameter(Mandatory = $true)]
@@ -4225,70 +4518,32 @@ function Copy-RepoToGuest {
             throw "Guest source archive proof did not match the exact host archive."
         }
 
-        Invoke-GuestCommandWithTimeout `
-            -Session $Session `
-            -OperationName "Initializing guest git repo" `
-            -TimeoutSec 600 `
-            -ScriptBlock {
-                param($RemoteRepoRoot, $RemoteSourceHead, $RemoteProvenanceFileName)
-
-                $git = Get-Command git -ErrorAction SilentlyContinue
-                if ($null -eq $git) {
-                    throw "Git is not available in the guest."
-                }
-
-                Set-Location $RemoteRepoRoot
-                if (Test-Path -LiteralPath (Join-Path $RemoteRepoRoot ".git")) {
-                    Remove-Item -LiteralPath (Join-Path $RemoteRepoRoot ".git") -Recurse -Force
-                }
-
-                & git init | Out-Null
-                if ($LASTEXITCODE -ne 0) {
-                    throw "git init failed with exit code $LASTEXITCODE."
-                }
-
-                & git branch -M main 2>$null | Out-Null
-                & git config user.name "OpenClaw Clean Windows Runner"
-                if ($LASTEXITCODE -ne 0) {
-                    throw "git config user.name failed with exit code $LASTEXITCODE."
-                }
-
-                & git config user.email "openclaw-clean-windows@example.invalid"
-                if ($LASTEXITCODE -ne 0) {
-                    throw "git config user.email failed with exit code $LASTEXITCODE."
-                }
-
-                & git add -A
-                if ($LASTEXITCODE -ne 0) {
-                    throw "git add failed with exit code $LASTEXITCODE."
-                }
-
-                $status = @(& git status --short)
-                if ($status.Count -gt 0) {
-                    & git commit -m "Guest staging from $RemoteSourceHead" --quiet
-                    if ($LASTEXITCODE -ne 0) {
-                        throw "git commit failed with exit code $LASTEXITCODE."
-                    }
-                }
-
-                $provenancePath = Join-Path $RemoteRepoRoot $RemoteProvenanceFileName
-                $provenance = Get-Content -LiteralPath $provenancePath -Raw -ErrorAction Stop |
-                    ConvertFrom-Json -ErrorAction Stop
-                if (
-                    [string]$provenance.schema -cne "openclaw.clean-windows.source-provenance/v1" -or
-                    [string]$provenance.sourceHead -cne $RemoteSourceHead
-                ) {
-                    throw "Guest source provenance does not match the exact host HEAD."
-                }
-                $finalStatus = @(& git status --porcelain)
-                if ($LASTEXITCODE -ne 0 -or $finalStatus.Count -ne 0) {
-                    throw "Guest staging repository is not clean after its provenance commit."
-                }
-            } `
-            -ArgumentList @(
-                $guestRepoRoot,
-                $sourceArchive.SourceHead,
-                $script:SourceProvenanceFileName) | Out-Null
+        $stagingOutput = @(
+            Invoke-GuestCommandWithTimeout `
+                -Session $Session `
+                -OperationName "Initializing guest git repo" `
+                -TimeoutSec 600 `
+                -ScriptBlock (Get-GuestSourceStagingScriptBlock) `
+                -ArgumentList @(
+                    $guestRepoRoot,
+                    $sourceArchive.SourceHead,
+                    $script:SourceProvenanceFileName,
+                    120)
+        )
+        if (
+            $stagingOutput.Count -ne 1 -or
+            -not [bool]$stagingOutput[0].clean -or
+            [string]$stagingOutput[0].sourceHead -cne [string]$sourceArchive.SourceHead -or
+            [string]$stagingOutput[0].beforeSha256 -cne [string]$stagingOutput[0].afterSha256
+        ) {
+            throw "Guest Git staging proof did not preserve exact extracted source bytes."
+        }
+        if ([int]$stagingOutput[0].warningCount -gt 0) {
+            Write-InfoLine (
+                "Guest Git staging completed with {0} bounded warning diagnostics: {1}" -f
+                    $stagingOutput[0].warningCount,
+                    (@($stagingOutput[0].warnings) -join " | "))
+        }
     } finally {
         try {
             Invoke-GuestCommandWithTimeout `

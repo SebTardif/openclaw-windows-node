@@ -323,7 +323,12 @@ safe relative symbolic-link payloads. The guest verifies before reset,
 extracts with built-in tooling, rejects reparse points and generated
 directories, and records the original HEAD plus archive evidence in
 `openclaw-source-provenance.json`. Exactly one source archive is transferred
-and both copies are removed in `finally`.
+and both copies are removed in `finally`. Guest Git staging sets local
+`core.autocrlf=false` and `core.safecrlf=true` before `git add`, redirects
+bounded stdout/stderr for every fixed native Git operation, accepts sanitized
+warning stderr only with exit zero, and fails nonzero exits. Matching pre/post
+source-tree SHA-256 digests, unchanged LF bytes, and empty final porcelain
+status are required.
 
 After a failed `Prepare`, the driver must first confirm that the rollback
 restored the exact owned `clean-windows` checkpoint and finalized marker. The
@@ -331,13 +336,15 @@ next attempt is normal `Prepare`, without `-RecoverPendingCheckpoint` or
 cleanup. In the package stage, zero-exit status plus nonzero version invokes
 the one fixed `wsl.exe --update --web-download` operation. Accepted update
 exits `0` and `3010` always require the owned reconnect before final status,
-version, and feature verification. The current long-running Prepare used the
-obsolete recursive source copy and cannot count as clean proof; allow its
-existing `finally` to complete and confirm the expected clean-checkpoint
-restore before retry. This hotfix does not claim live confirmation. Unit
-coverage for bootstrap, pinned PowerShell, and clean source archive logic uses
-extracted functions, temporary Git repositories, and mocks only. Do not use a
-VM or real Appx/network operations for that focused lane.
+version, and feature verification. The obsolete recursive-copy Prepare
+eventually failed when harmless exit-zero Git warning stderr made its
+PowerShell Direct job fail. It cannot count as clean proof. Confirm that its
+existing `finally` restored the exact owned clean checkpoint before retry.
+This hotfix does not claim live confirmation. Unit coverage for bootstrap,
+pinned PowerShell, clean source archive, LF preservation, warning-success,
+and nonzero Git diagnostics uses extracted functions, temporary Git
+repositories, and mocks only. Do not use a VM or real Appx/network operations
+for that focused lane.
 
 Fresh unattended Hyper-V `Create` requires `-GenerateCredential`, verifies the
 official ISO SHA256, builds a separate answer ISO with Windows IMAPI2, and

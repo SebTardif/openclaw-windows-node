@@ -2360,6 +2360,10 @@ public sealed class CleanWindowsRunnerScriptTests
             script,
             "Copy-RepoToGuest",
             "Get-GuestWingetBootstrapScriptBlock");
+        var staging = ExtractPowerShellFunction(
+            script,
+            "Get-GuestSourceStagingScriptBlock",
+            "New-CleanWindowsSourceArchive");
 
         Assert.Contains(
             "@(\"status\", \"--porcelain=v1\", \"--untracked-files=all\")",
@@ -2385,7 +2389,31 @@ public sealed class CleanWindowsRunnerScriptTests
         Assert.Contains("SHA256 mismatch", script, StringComparison.Ordinal);
         Assert.Contains("Expand-Archive", script, StringComparison.Ordinal);
         Assert.Contains("openclaw.clean-windows.source-provenance/v1", script, StringComparison.Ordinal);
-        Assert.Contains("Guest staging from $RemoteSourceHead", transfer, StringComparison.Ordinal);
+        Assert.Contains("Guest staging from $SourceHead", staging, StringComparison.Ordinal);
+        Assert.Contains("@(\"config\", \"--local\", \"core.autocrlf\", \"false\")", staging, StringComparison.Ordinal);
+        Assert.Contains("@(\"config\", \"--local\", \"core.safecrlf\", \"true\")", staging, StringComparison.Ordinal);
+        var stagingWorkflow = ExtractPowerShellRange(
+            staging,
+            "            foreach ($operation in @(",
+            "            $statusResult = Invoke-OpenClawGuestGitProcess");
+        Assert.True(
+            stagingWorkflow.IndexOf("\"ConfigAutoCrlf\"", StringComparison.Ordinal) <
+            stagingWorkflow.IndexOf("\"AddAll\"", StringComparison.Ordinal));
+        Assert.True(
+            stagingWorkflow.IndexOf("\"ConfigSafeCrlf\"", StringComparison.Ordinal) <
+            stagingWorkflow.IndexOf("\"AddAll\"", StringComparison.Ordinal));
+        Assert.Contains("$beforeSha256", staging, StringComparison.Ordinal);
+        Assert.Contains("$afterSha256", staging, StringComparison.Ordinal);
+        Assert.Contains("Guest Git staging mutated extracted source bytes.", staging, StringComparison.Ordinal);
+        Assert.Contains("-RedirectStandardOutput $stdoutPath", staging, StringComparison.Ordinal);
+        Assert.Contains("-RedirectStandardError $stderrPath", staging, StringComparison.Ordinal);
+        Assert.Contains("$null = $process.Handle", staging, StringComparison.Ordinal);
+        Assert.Contains("$process.WaitForExit($NativeTimeoutSec * 1000)", staging, StringComparison.Ordinal);
+        Assert.Contains("Stop-Process -Id $process.Id -Force", staging, StringComparison.Ordinal);
+        Assert.Contains("Remove-Item -LiteralPath $captureRoot -Recurse -Force", staging, StringComparison.Ordinal);
+        Assert.DoesNotContain("& git", staging, StringComparison.Ordinal);
+        Assert.Contains("-ScriptBlock (Get-GuestSourceStagingScriptBlock)", transfer, StringComparison.Ordinal);
+        Assert.Contains("$stagingOutput[0].warningCount", transfer, StringComparison.Ordinal);
         Assert.Contains("Cleaning guest source archive transfer", transfer, StringComparison.Ordinal);
         Assert.Contains("Remove-Item -LiteralPath $hostTransferRoot -Recurse -Force", transfer, StringComparison.Ordinal);
     }
@@ -2545,6 +2573,179 @@ public sealed class CleanWindowsRunnerScriptTests
             }
         }
     }
+
+        [Fact]
+        public void GuestSourceStagingPreservesLfBytesWithLocalAutoCrlfDisabled()
+        {
+            var archivePath = Path.Combine(Path.GetTempPath(), $"openclaw-lf-{Guid.NewGuid():N}.zip");
+            var destination = Path.Combine(Path.GetTempPath(), $"openclaw-lf-dest-{Guid.NewGuid():N}");
+            const string lfContent = "line one\nline two\n";
+            CreateSourceArchive(
+                archivePath,
+                ("src/lf.txt", lfContent, 0));
+            try
+            {
+                var hash = Convert.ToHexString(
+                    System.Security.Cryptography.SHA256.HashData(File.ReadAllBytes(archivePath)));
+                var install = RunPowerShellCommand(BuildSourceArchiveInstallProof(
+                    archivePath,
+                    destination,
+                    hash,
+                    expectedFileCount: 1,
+                    install: true));
+                AssertPowerShellProofSucceeded(install);
+                using (var document = JsonDocument.Parse(install.Stdout))
+                {
+                    Assert.True(string.IsNullOrEmpty(
+                        document.RootElement.GetProperty("error").GetString()));
+                }
+
+                var result = RunPowerShellCommand(BuildGuestSourceStagingProof(destination));
+
+                AssertPowerShellProofSucceeded(result);
+                using var proofDocument = JsonDocument.Parse(result.Stdout);
+                var proof = proofDocument.RootElement;
+                Assert.True(proof.GetProperty("clean").GetBoolean());
+                Assert.Equal(
+                    proof.GetProperty("beforeSha256").GetString(),
+                    proof.GetProperty("afterSha256").GetString());
+                Assert.Equal("false", proof.GetProperty("autoCrlf").GetString());
+                Assert.Equal("true", proof.GetProperty("safeCrlf").GetString());
+                Assert.Equal(string.Empty, proof.GetProperty("status").GetString());
+                Assert.Equal(lfContent, File.ReadAllText(Path.Combine(destination, "src", "lf.txt")));
+                Assert.DoesNotContain(
+                    (byte)'\r',
+                    File.ReadAllBytes(Path.Combine(destination, "src", "lf.txt")));
+            }
+            finally
+            {
+                File.Delete(archivePath);
+                DeleteTestDirectory(destination);
+            }
+        }
+
+        [Fact]
+        public void GuestSourceStagingTreatsExitZeroStderrAsBoundedWarning()
+        {
+            var archivePath = Path.Combine(Path.GetTempPath(), $"openclaw-warning-{Guid.NewGuid():N}.zip");
+            var destination = Path.Combine(Path.GetTempPath(), $"openclaw-warning-dest-{Guid.NewGuid():N}");
+            CreateSourceArchive(archivePath, ("src/lf.txt", "line\n", 0));
+            try
+            {
+                var hash = Convert.ToHexString(
+                    System.Security.Cryptography.SHA256.HashData(File.ReadAllBytes(archivePath)));
+                var install = RunPowerShellCommand(BuildSourceArchiveInstallProof(
+                    archivePath,
+                    destination,
+                    hash,
+                    expectedFileCount: 1,
+                    install: true));
+                AssertPowerShellProofSucceeded(install);
+
+                var result = RunPowerShellCommand(BuildGuestSourceStagingMockProof(
+                    destination,
+                    addExitCode: 0,
+                    addStderr: "LF will be replaced by CRLF"));
+
+                AssertPowerShellProofSucceeded(result);
+                using var document = JsonDocument.Parse(result.Stdout);
+                var proof = document.RootElement;
+                Assert.True(string.IsNullOrEmpty(proof.GetProperty("error").GetString()));
+                Assert.True(proof.GetProperty("clean").GetBoolean());
+                Assert.Equal(1, proof.GetProperty("warningCount").GetInt32());
+                Assert.Contains(
+                    "AddAll: LF will be replaced by CRLF",
+                    proof.GetProperty("warnings").GetString(),
+                    StringComparison.Ordinal);
+                Assert.Equal(
+                    "Init,BranchMain,ConfigUserName,ConfigUserEmail,ConfigAutoCrlf,ConfigSafeCrlf,AddAll,Commit,Status",
+                    proof.GetProperty("calls").GetString());
+            }
+            finally
+            {
+                File.Delete(archivePath);
+                DeleteTestDirectory(destination);
+            }
+        }
+
+        [Fact]
+        public void GuestSourceStagingDetectsRealGitFailureUnderWindowsPowerShell()
+        {
+            var archivePath = Path.Combine(Path.GetTempPath(), $"openclaw-real-git-fail-{Guid.NewGuid():N}.zip");
+            var destination = Path.Combine(Path.GetTempPath(), $"openclaw-real-git-fail-dest-{Guid.NewGuid():N}");
+            CreateSourceArchive(archivePath, ("src/lf.txt", "line\n", 0));
+            try
+            {
+                var hash = Convert.ToHexString(
+                    System.Security.Cryptography.SHA256.HashData(File.ReadAllBytes(archivePath)));
+                var install = RunPowerShellCommand(BuildSourceArchiveInstallProof(
+                    archivePath,
+                    destination,
+                    hash,
+                    expectedFileCount: 1,
+                    install: true));
+                AssertPowerShellProofSucceeded(install);
+
+                var result = RunPowerShellCommand(
+                    BuildGuestSourceStagingRealCommitFailureProof(destination));
+
+                AssertPowerShellProofSucceeded(result);
+                using var document = JsonDocument.Parse(result.Stdout);
+                var proof = document.RootElement;
+                Assert.Equal(5, proof.GetProperty("powerShellMajor").GetInt32());
+                Assert.Contains(
+                    "Guest Git operation 'Commit' failed with exit code",
+                    proof.GetProperty("error").GetString(),
+                    StringComparison.Ordinal);
+                Assert.Contains(
+                    "stderr='",
+                    proof.GetProperty("error").GetString(),
+                    StringComparison.Ordinal);
+            }
+            finally
+            {
+                File.Delete(archivePath);
+                DeleteTestDirectory(destination);
+            }
+        }
+
+        [Fact]
+        public void GuestSourceStagingNonzeroGitExitIncludesBoundedDiagnostics()
+        {
+            var archivePath = Path.Combine(Path.GetTempPath(), $"openclaw-git-fail-{Guid.NewGuid():N}.zip");
+            var destination = Path.Combine(Path.GetTempPath(), $"openclaw-git-fail-dest-{Guid.NewGuid():N}");
+            CreateSourceArchive(archivePath, ("src/lf.txt", "line\n", 0));
+            try
+            {
+                var hash = Convert.ToHexString(
+                    System.Security.Cryptography.SHA256.HashData(File.ReadAllBytes(archivePath)));
+                var install = RunPowerShellCommand(BuildSourceArchiveInstallProof(
+                    archivePath,
+                    destination,
+                    hash,
+                    expectedFileCount: 1,
+                    install: true));
+                AssertPowerShellProofSucceeded(install);
+
+                var result = RunPowerShellCommand(BuildGuestSourceStagingMockProof(
+                    destination,
+                    addExitCode: 23,
+                    addStderr: "index write failed"));
+
+                AssertPowerShellProofSucceeded(result);
+                using var document = JsonDocument.Parse(result.Stdout);
+                var error = document.RootElement.GetProperty("error").GetString() ?? string.Empty;
+                Assert.Contains("Guest Git operation 'AddAll'", error, StringComparison.Ordinal);
+                Assert.Contains("exit code 23", error, StringComparison.Ordinal);
+                Assert.Contains("stderr='index write failed'", error, StringComparison.Ordinal);
+                Assert.DoesNotContain("Commit", document.RootElement.GetProperty("calls").GetString(), StringComparison.Ordinal);
+            }
+            finally
+            {
+                File.Delete(archivePath);
+                DeleteTestDirectory(destination);
+            }
+        }
 
     [Fact]
     public void HyperVController_CheckpointCreationWritesPendingIntentBeforeMutationAndFinalizesAfterObservation()
@@ -5671,7 +5872,7 @@ public sealed class CleanWindowsRunnerScriptTests
         var validator = ExtractPowerShellFunction(
             controller,
             "Get-SourceArchiveInstallScriptBlock",
-            "New-CleanWindowsSourceArchive");
+            "Get-GuestSourceStagingScriptBlock");
         var create = ExtractPowerShellFunction(
             controller,
             "New-CleanWindowsSourceArchive",
@@ -5737,7 +5938,7 @@ public sealed class CleanWindowsRunnerScriptTests
         var validator = ExtractPowerShellFunction(
             controller,
             "Get-SourceArchiveInstallScriptBlock",
-            "New-CleanWindowsSourceArchive");
+            "Get-GuestSourceStagingScriptBlock");
         var archiveSize = new FileInfo(archivePath).Length;
         return string.Concat(
             "$ErrorActionPreference = 'Stop'\n",
@@ -5791,6 +5992,138 @@ public sealed class CleanWindowsRunnerScriptTests
             " provenanceTrackedFileCount = if ($provenance) { [int]$provenance.trackedFileCount } else { 0 }\n",
             " hasGeneratedDirectories = $generated.Count -ne 0\n",
             " hasReparsePoints = $reparse.Count -ne 0\n",
+            "} | ConvertTo-Json -Compress))\n");
+    }
+
+    private static string BuildGuestSourceStagingProof(string destination)
+    {
+        var controller = ReadScript("Invoke-CleanWindowsHyperV.ps1");
+        var staging = ExtractPowerShellFunction(
+            controller,
+            "Get-GuestSourceStagingScriptBlock",
+            "New-CleanWindowsSourceArchive");
+        return string.Concat(
+            "$ErrorActionPreference = 'Stop'\n",
+            staging,
+            "\n$proof = & (Get-GuestSourceStagingScriptBlock) ",
+            PsQuote(destination),
+            " '1111111111111111111111111111111111111111' ",
+            "'openclaw-source-provenance.json' 60\n",
+            "$autoCrlf = (& git -C ",
+            PsQuote(destination),
+            " config --local core.autocrlf) -join ''\n",
+            "$safeCrlf = (& git -C ",
+            PsQuote(destination),
+            " config --local core.safecrlf) -join ''\n",
+            "$status = (& git -C ",
+            PsQuote(destination),
+            " status --porcelain) -join \"`n\"\n",
+            "[Console]::Out.Write(([pscustomobject][ordered]@{\n",
+            " clean = [bool]$proof.clean\n",
+            " beforeSha256 = [string]$proof.beforeSha256\n",
+            " afterSha256 = [string]$proof.afterSha256\n",
+            " autoCrlf = [string]$autoCrlf\n",
+            " safeCrlf = [string]$safeCrlf\n",
+            " status = [string]$status\n",
+            "} | ConvertTo-Json -Compress))\n");
+    }
+
+    private static string BuildGuestSourceStagingMockProof(
+        string destination,
+        int addExitCode,
+        string addStderr)
+    {
+        var controller = ReadScript("Invoke-CleanWindowsHyperV.ps1");
+        var staging = ExtractPowerShellFunction(
+            controller,
+            "Get-GuestSourceStagingScriptBlock",
+            "New-CleanWindowsSourceArchive");
+        return string.Concat(
+            "$ErrorActionPreference = 'Stop'\n",
+            "$script:calls = [System.Collections.Generic.List[string]]::new()\n",
+            "$script:nextId = 100\n",
+            "$script:processes = @{}\n",
+            "function global:Get-Command { [pscustomobject]@{ Source = 'C:\\Program Files\\Git\\cmd\\git.exe' } }\n",
+            "function global:Start-Process {\n",
+            " param($FilePath, $ArgumentList, $WorkingDirectory, $RedirectStandardOutput, ",
+            "$RedirectStandardError, [switch]$PassThru, [switch]$NoNewWindow, ",
+            "$WindowStyle, $ErrorAction)\n",
+            " $operation = switch -Regex ($ArgumentList) {\n",
+            "  '^init$' { 'Init'; break }\n",
+            "  '^branch -M main$' { 'BranchMain'; break }\n",
+            "  '^config --local user.name' { 'ConfigUserName'; break }\n",
+            "  '^config --local user.email' { 'ConfigUserEmail'; break }\n",
+            "  '^config --local core.autocrlf' { 'ConfigAutoCrlf'; break }\n",
+            "  '^config --local core.safecrlf' { 'ConfigSafeCrlf'; break }\n",
+            "  '^add -A$' { 'AddAll'; break }\n",
+            "  '^commit ' { 'Commit'; break }\n",
+            "  '^status --porcelain$' { 'Status'; break }\n",
+            "  default { throw \"Unexpected Git arguments: $ArgumentList\" }\n",
+            " }\n",
+            " [void]$script:calls.Add($operation)\n",
+            " Set-Content -LiteralPath $RedirectStandardOutput -Value '' -NoNewline\n",
+            " $exitCode = 0\n",
+            " $stderr = ''\n",
+            " if ($operation -eq 'AddAll') { $exitCode = ",
+            addExitCode.ToString(System.Globalization.CultureInfo.InvariantCulture),
+            "; $stderr = ",
+            PsQuote(addStderr),
+            " }\n",
+            " Set-Content -LiteralPath $RedirectStandardError -Value $stderr -NoNewline\n",
+            " $script:nextId++\n",
+            " $process = [pscustomobject]@{ Id = $script:nextId; HasExited = $true; ExitCode = $exitCode; Handle = 1 }\n",
+            " $process | Add-Member -MemberType ScriptMethod -Name WaitForExit ",
+            "-Value { param([int]$Milliseconds) ",
+            "if ($PSBoundParameters.ContainsKey('Milliseconds')) { return $true } }\n",
+            " $script:processes[$process.Id] = $process\n",
+            " return $process\n",
+            "}\n",
+            "function global:Wait-Process { param($Id, $Timeout, $ErrorAction) }\n",
+            "function global:Get-Process { param($Id, $ErrorAction) return $script:processes[$Id] }\n",
+            staging,
+            "\n$errorMessage = $null\n",
+            "$proof = $null\n",
+            "try { $proof = & (Get-GuestSourceStagingScriptBlock) ",
+            PsQuote(destination),
+            " '1111111111111111111111111111111111111111' ",
+            "'openclaw-source-provenance.json' 60 } catch { $errorMessage = $_.Exception.Message }\n",
+            "[Console]::Out.Write(([pscustomobject][ordered]@{\n",
+            " error = $errorMessage\n",
+            " clean = if ($proof) { [bool]$proof.clean } else { $false }\n",
+            " warningCount = if ($proof) { [int]$proof.warningCount } else { 0 }\n",
+            " warnings = if ($proof) { @($proof.warnings) -join ' | ' } else { '' }\n",
+            " calls = $script:calls -join ','\n",
+            "} | ConvertTo-Json -Compress))\n");
+    }
+
+    private static string BuildGuestSourceStagingRealCommitFailureProof(string destination)
+    {
+        var controller = ReadScript("Invoke-CleanWindowsHyperV.ps1");
+        var staging = ExtractPowerShellFunction(
+            controller,
+            "Get-GuestSourceStagingScriptBlock",
+            "New-CleanWindowsSourceArchive");
+        return string.Concat(
+            "$ErrorActionPreference = 'Stop'\n",
+            staging,
+            "\n& git -C ",
+            PsQuote(destination),
+            " init --quiet\n",
+            "if ($LASTEXITCODE -ne 0) { throw 'Test Git initialization failed.' }\n",
+            "$hookPath = Join-Path ",
+            PsQuote(destination),
+            " '.git\\hooks\\pre-commit'\n",
+            "[IO.File]::WriteAllText($hookPath, \"#!/bin/sh`nexit 23`n\", ",
+            "(New-Object Text.UTF8Encoding($false)))\n",
+            "$errorMessage = $null\n",
+            "try { [void](& (Get-GuestSourceStagingScriptBlock) ",
+            PsQuote(destination),
+            " '1111111111111111111111111111111111111111' ",
+            "'openclaw-source-provenance.json' 60) } ",
+            "catch { $errorMessage = $_.Exception.Message }\n",
+            "[Console]::Out.Write(([pscustomobject][ordered]@{\n",
+            " powerShellMajor = [int]$PSVersionTable.PSVersion.Major\n",
+            " error = $errorMessage\n",
             "} | ConvertTo-Json -Compress))\n");
     }
 
