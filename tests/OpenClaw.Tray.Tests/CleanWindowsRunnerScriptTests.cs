@@ -2196,6 +2196,38 @@ public sealed class CleanWindowsRunnerScriptTests
     }
 
     [Theory]
+    [InlineData(false, "Installing guest developer prerequisite 'DotNet10'")]
+    [InlineData(true, "Verifying guest developer prerequisite 'DotNet10'")]
+    public void GuestDeveloperPrerequisiteWorkerRunsActualControlPathUnderPowerShell5(
+        bool verifyOnly,
+        string expectedOperationName)
+    {
+        var result = RunPowerShellCommand(
+            BuildDeveloperPrerequisiteWorkerControlProof(verifyOnly));
+
+        AssertPowerShellProofSucceeded(result);
+        using var document = JsonDocument.Parse(result.Stdout);
+        var proof = document.RootElement;
+        Assert.True(string.IsNullOrEmpty(proof.GetProperty("error").GetString()));
+        Assert.Equal(5, proof.GetProperty("powerShellMajor").GetInt32());
+        Assert.Equal(expectedOperationName, proof.GetProperty("operationName").GetString());
+        Assert.Equal(verifyOnly, proof.GetProperty("argumentVerifyOnly").GetBoolean());
+        Assert.Equal("DotNet10", proof.GetProperty("packageKey").GetString());
+
+        var controller = ReadScript("Invoke-CleanWindowsHyperV.ps1");
+        var stagedCode = ExtractPowerShellFunction(
+            controller,
+            "Get-GuestDeveloperPrerequisiteScriptBlock",
+            "Prepare-GuestPrerequisites");
+        Assert.False(
+            System.Text.RegularExpressions.Regex.IsMatch(
+                stagedCode,
+                @"-\w+\s+\(\s*(if|switch|foreach|try)\b",
+                System.Text.RegularExpressions.RegexOptions.IgnoreCase),
+            "Staged prerequisite code must not pass a statement block directly as a command argument.");
+    }
+
+    [Theory]
     [InlineData("DotNet10")]
     [InlineData("NodeLts")]
     [InlineData("WindowsSdk26100")]
@@ -6191,6 +6223,58 @@ public sealed class CleanWindowsRunnerScriptTests
             " installExitCode = if ($proof) { $proof.installExitCode } else { $null }\n",
             " calls = $script:calls -join ','\n",
             " installArguments = $script:installArguments\n",
+            "} | ConvertTo-Json -Compress))\n");
+    }
+
+    private static string BuildDeveloperPrerequisiteWorkerControlProof(bool verifyOnly)
+    {
+        var controller = ReadScript("Invoke-CleanWindowsHyperV.ps1");
+        var resultValidator = ExtractPowerShellFunction(
+            controller,
+            "Get-RequiredGuestStageResult",
+            "Get-GuestOptionalFeatureStageScriptBlock");
+        var scriptBlockGetter = ExtractPowerShellFunction(
+            controller,
+            "Get-GuestDeveloperPrerequisiteScriptBlock",
+            "Get-GuestBootIdentity");
+        var worker = ExtractPowerShellFunction(
+            controller,
+            "Invoke-GuestDeveloperPrerequisiteWorker",
+            "Ensure-GuestDeveloperPrerequisite");
+        return string.Concat(
+            "$ErrorActionPreference = 'Stop'\n",
+            "$script:operationName = $null\n",
+            "$script:argumentVerifyOnly = $null\n",
+            "function Invoke-GuestCommandWithTimeout {\n",
+            " param($Session, $OperationName, $TimeoutSec, $ScriptBlock, $ArgumentList)\n",
+            " $script:operationName = [string]$OperationName\n",
+            " $script:argumentVerifyOnly = [bool]$ArgumentList[1]\n",
+            " return [pscustomobject][ordered]@{\n",
+            "  stage = 'developer-prerequisite'\n",
+            "  packageKey = [string]$ArgumentList[0]\n",
+            "  verified = $true\n",
+            "  needsRestart = $false\n",
+            " }\n",
+            "}\n",
+            resultValidator,
+            "\n",
+            scriptBlockGetter,
+            "\n",
+            worker,
+            "\n$session = [Runtime.Serialization.FormatterServices]::GetUninitializedObject(",
+            "[System.Management.Automation.Runspaces.PSSession])\n",
+            "$errorMessage = $null\n",
+            "$proof = $null\n",
+            "try { $proof = Invoke-GuestDeveloperPrerequisiteWorker ",
+            "-Session $session -PackageKey 'DotNet10' -VerifyOnly $",
+            verifyOnly ? "true" : "false",
+            " } catch { $errorMessage = $_.Exception.Message }\n",
+            "[Console]::Out.Write(([pscustomobject][ordered]@{\n",
+            " error = $errorMessage\n",
+            " powerShellMajor = [int]$PSVersionTable.PSVersion.Major\n",
+            " operationName = $script:operationName\n",
+            " argumentVerifyOnly = [bool]$script:argumentVerifyOnly\n",
+            " packageKey = if ($proof) { [string]$proof.packageKey } else { $null }\n",
             "} | ConvertTo-Json -Compress))\n");
     }
 

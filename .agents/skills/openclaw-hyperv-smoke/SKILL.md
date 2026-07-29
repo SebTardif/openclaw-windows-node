@@ -218,6 +218,15 @@ verify the package transition. Its existing `finally` is expected to restore
 `clean-windows`, but this change does not claim live confirmation. Confirm the
 exact owned finalized checkpoint before normal retry.
 
+The sixteenth real `Prepare` reached the staged developer-prerequisite
+controller but failed before any package installation because Windows
+PowerShell 5.1 treated an inline parenthesized `if` command argument as a
+command named `if`. The controller now assigns that operation label before
+invocation, and an executable Windows PowerShell 5.1 regression covers both
+install and verify-only worker paths. Its existing `finally` is expected to
+restore `clean-windows`, but this change does not claim live confirmation.
+Confirm the exact owned finalized checkpoint before normal retry.
+
 From an elevated PowerShell session, run normal `Prepare` without
 `-RecoverPendingCheckpoint`:
 

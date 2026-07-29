@@ -7759,15 +7759,15 @@ function Invoke-GuestDeveloperPrerequisiteWorker {
         [bool]$VerifyOnly
     )
 
+    $operationName = if ($VerifyOnly) {
+        "Verifying guest developer prerequisite '$PackageKey'"
+    } else {
+        "Installing guest developer prerequisite '$PackageKey'"
+    }
     $output = @(
         Invoke-GuestCommandWithTimeout `
             -Session $Session `
-            -OperationName (
-                if ($VerifyOnly) {
-                    "Verifying guest developer prerequisite '$PackageKey'"
-                } else {
-                    "Installing guest developer prerequisite '$PackageKey'"
-                }) `
+            -OperationName $operationName `
             -TimeoutSec 2400 `
             -ScriptBlock (Get-GuestDeveloperPrerequisiteScriptBlock) `
             -ArgumentList @($PackageKey, $VerifyOnly, 2100)
