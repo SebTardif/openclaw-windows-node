@@ -236,6 +236,17 @@ installed 10.x SDK. Its existing `finally` is expected to restore
 `clean-windows`, but this change does not claim live confirmation. Confirm the
 exact owned finalized checkpoint before normal retry.
 
+The eighteenth real `Prepare` installed and verified .NET 10 and Node LTS.
+The Windows SDK installer then recycled the PowerShell Direct target process
+without rebooting Windows. The old recovery reconnected on the original boot
+but waited only for a boot-identity advance and timed out. Recovery now accepts
+only package verification on the exact owner-bound Running VM ID. It records
+`session-loss-reboot` for a newer verified boot or
+`session-recycle-same-boot` for verified service/session recycling, and polls
+same-boot verify-only attempts without repeating install. Its existing
+`finally` restored `clean-windows`; this implementation does not independently
+operate or inspect the VM.
+
 From an elevated PowerShell session, run normal `Prepare` without
 `-RecoverPendingCheckpoint`:
 
@@ -366,10 +377,14 @@ diagnostics, and no MSIX fallback.
 Each stage first applies setup-dev's real availability check and skips an
 already-present package. Exit zero requires immediate verification. A
 reboot-required result triggers the exact owned restart. Installer-initiated
-reboot or PowerShell Direct socket loss requires bounded passive reconnect to
-the same owned VM with a newer boot identity. The controller then invokes
-verify-only and never blindly repeats the install. Same-boot failures retain
-package-specific diagnostics. After source staging, only
+reboot or PowerShell Direct socket loss requires bounded reconnect to the same
+owner-bound Running VM ID followed by verify-only. A verified newer boot
+records `session-loss-reboot`; a verified original boot records
+`session-recycle-same-boot`. Missing same-boot software gets bounded
+reconnect/verify-only polling, while newer-boot missing software, regressed
+boot identity, changed VM identity, and non-Running state fail closed. The
+controller never repeats install and preserves original installation plus
+verification diagnostics. After source staging, only
 `scripts\setup-dev.ps1 -CheckOnly` runs; Prepare never invokes its mutating
 install mode.
 

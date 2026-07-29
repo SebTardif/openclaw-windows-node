@@ -503,12 +503,17 @@ proves the machine installation.
 Exit `3010` and WinGet
 `APPINSTALLER_CLI_ERROR_INSTALL_REBOOT_REQUIRED_TO_FINISH` request an exact
 owned restart. Installer-initiated reboot and PowerShell Direct socket loss
-use bounded passive reconnect instead. The controller records the pre-install
-boot identity, accepts only the same owned VM with a newer boot identity, then
-runs verify-only. A same-boot package failure keeps its package-specific
-bounded diagnostics. Missing software after reconnect fails instead of
-reinstalling. Each proof records package, pinned selection, whether install
-ran, transition type, and observed verification.
+use bounded transition-aware recovery instead. Every reconnect requires the
+same owner-bound Running VM ID, reads boot identity, and invokes package
+verify-only without repeating install. Verified software on a newer boot
+records `session-loss-reboot`; verified software on the original boot records
+`session-recycle-same-boot`. If same-boot verification is initially missing,
+the controller polls bounded reconnect and verify-only attempts for installer
+completion. A newer-boot verification failure, regressed boot identity,
+changed VM ID, or non-Running VM fails closed. Timeout diagnostics preserve
+the original install failure and latest verification failure. Each proof
+records package, pinned selection, whether install ran, the verified
+transition type, and observed verification.
 
 #### Clean committed source transfer
 

@@ -7711,7 +7711,7 @@ function Get-GuestBootIdentity {
     return [Int64]$output[0]
 }
 
-function Wait-ForGuestPackageRebootAndReconnect {
+function Wait-ForGuestPackageTransitionAndVerify {
     param(
         [Parameter(Mandatory = $true)]
         [System.Management.Automation.Runspaces.PSSession]$Session,
@@ -7724,7 +7724,13 @@ function Wait-ForGuestPackageRebootAndReconnect {
         [Parameter(Mandatory = $true)]
         [Int64]$PreviousBootTicks,
         [Parameter(Mandatory = $true)]
-        [string]$PackageKey
+        [string]$PackageKey,
+        [AllowNull()]
+        [object]$OriginalInstallFailure,
+        [ValidateRange(1, 3600)]
+        [int]$TimeoutSec = $GuestRestartTimeoutSec,
+        [ValidateRange(1, 60)]
+        [int]$PollIntervalSec = 5
     )
 
     $ownedVm = Assert-OwnedVM `
@@ -7732,20 +7738,33 @@ function Wait-ForGuestPackageRebootAndReconnect {
         -ExpectedOwnerId $ExpectedOwnerId
     $ownedVmId = ([Guid]$ownedVm.Id).ToString("D")
     Remove-PSSession -Session $Session -ErrorAction SilentlyContinue
-    $deadline = (Get-Date).AddSeconds($GuestRestartTimeoutSec)
-    $lastError = $null
+    $deadline = (Get-Date).AddSeconds($TimeoutSec)
+    $lastReconnectError = $null
+    $lastVerificationError = $null
+    $originalFailureText = if ($null -eq $OriginalInstallFailure) {
+        ""
+    } else {
+        " Original install failure: " + (
+            ConvertTo-SafeGuestDiagnosticText -Value $OriginalInstallFailure -MaxChars 1024)
+    }
     do {
+        $candidateVm = Assert-OwnedVM `
+            -ResolvedVhdPath $ResolvedVhdPath `
+            -ExpectedOwnerId $ExpectedOwnerId
+        $candidateVmId = ([Guid]$candidateVm.Id).ToString("D")
+        if ($candidateVmId -cne $ownedVmId) {
+            throw (
+                "Exact owned VM identity changed while recovering package '$PackageKey': " +
+                "expected '$ownedVmId', observed '$candidateVmId'.")
+        }
+        if ([string]$candidateVm.State -cne "Running") {
+            throw (
+                "Exact owned VM '$ownedVmId' is not Running while recovering package '$PackageKey'.")
+        }
+
         $candidateSession = $null
+        $currentBootTicks = $null
         try {
-            $candidateVm = Assert-OwnedVM `
-                -ResolvedVhdPath $ResolvedVhdPath `
-                -ExpectedOwnerId $ExpectedOwnerId
-            if (
-                ([Guid]$candidateVm.Id).ToString("D") -cne $ownedVmId -or
-                [string]$candidateVm.State -cne "Running"
-            ) {
-                throw "Exact owned VM identity or running state is not ready after package transition."
-            }
             $candidateSession = New-PSSession `
                 -VMName $VMName `
                 -Credential $GuestCredential `
@@ -7753,24 +7772,70 @@ function Wait-ForGuestPackageRebootAndReconnect {
             $currentBootTicks = Get-GuestBootIdentity `
                 -Session $candidateSession `
                 -OperationName "Reading guest boot identity after package '$PackageKey'"
-            if ([Int64]$currentBootTicks -gt $PreviousBootTicks) {
-                return $candidateSession
-            }
-            throw (
-                "PowerShell Direct reconnected after package '$PackageKey', but the guest boot identity did not advance.")
         } catch {
-            $lastError = $_
+            $lastReconnectError = $_
         }
-        if ($null -ne $candidateSession) {
+        if ($null -eq $currentBootTicks) {
+            if ($null -ne $candidateSession) {
+                Remove-PSSession -Session $candidateSession -ErrorAction SilentlyContinue
+            }
+            Start-Sleep -Seconds $PollIntervalSec
+            continue
+        }
+        if ([Int64]$currentBootTicks -lt $PreviousBootTicks) {
             Remove-PSSession -Session $candidateSession -ErrorAction SilentlyContinue
+            throw (
+                "Guest boot identity regressed while recovering package '$PackageKey': " +
+                "previous='$PreviousBootTicks', observed='$currentBootTicks'.")
         }
-        Start-Sleep -Seconds 5
+
+        try {
+            $proof = Invoke-GuestDeveloperPrerequisiteWorker `
+                -Session $candidateSession `
+                -PackageKey $PackageKey `
+                -VerifyOnly $true
+        } catch {
+            $lastVerificationError = $_
+            Remove-PSSession -Session $candidateSession -ErrorAction SilentlyContinue
+            if ([Int64]$currentBootTicks -gt $PreviousBootTicks) {
+                $safeVerificationError = ConvertTo-SafeGuestDiagnosticText `
+                    -Value $lastVerificationError `
+                    -MaxChars 1024
+                throw (
+                    "Developer prerequisite package '$PackageKey' remained unavailable after a newer owned boot." +
+                    $originalFailureText +
+                    " Verification failure: $safeVerificationError")
+            }
+            Start-Sleep -Seconds $PollIntervalSec
+            continue
+        }
+
+        $transition = if ([Int64]$currentBootTicks -gt $PreviousBootTicks) {
+            "session-loss-reboot"
+        } elseif ([Int64]$currentBootTicks -eq $PreviousBootTicks) {
+            "session-recycle-same-boot"
+        } else {
+            throw "Guest boot identity classification failed for package '$PackageKey'."
+        }
+        return [pscustomobject]@{
+            Session = $candidateSession
+            Proof = $proof
+            Transition = $transition
+            BootTicks = [Int64]$currentBootTicks
+        }
     } while ((Get-Date) -lt $deadline)
 
-    $safeLastError = ConvertTo-SafeGuestDiagnosticText -Value $lastError -MaxChars 512
+    $safeReconnectError = ConvertTo-SafeGuestDiagnosticText `
+        -Value $lastReconnectError `
+        -MaxChars 512
+    $safeVerificationError = ConvertTo-SafeGuestDiagnosticText `
+        -Value $lastVerificationError `
+        -MaxChars 1024
     throw (
-        "Developer prerequisite package '$PackageKey' did not complete a fresh owned reboot and reconnect " +
-        "within $GuestRestartTimeoutSec seconds. Last error: $safeLastError")
+        "Developer prerequisite package '$PackageKey' did not verify after an exact owned PowerShell Direct " +
+        "reconnect within $TimeoutSec seconds." +
+        $originalFailureText +
+        " Last reconnect failure: $safeReconnectError Last verification failure: $safeVerificationError")
 }
 
 function Invoke-GuestDeveloperPrerequisiteWorker {
@@ -7831,6 +7896,7 @@ function Ensure-GuestDeveloperPrerequisite {
     $activeSession = $Session
     $installAttempted = $false
     $transition = "none"
+    $recoveredProof = $null
     $previousBootTicks = Get-GuestBootIdentity `
         -Session $activeSession `
         -OperationName "Reading guest boot identity before package '$PackageKey'"
@@ -7858,40 +7924,34 @@ function Ensure-GuestDeveloperPrerequisite {
                 throw $installFailure
             }
 
-            try {
-                $installAttempted = $true
-                $transition = "session-loss-reboot"
-                $activeSession = Wait-ForGuestPackageRebootAndReconnect `
-                    -Session $activeSession `
-                    -GuestCredential $GuestCredential `
-                    -ResolvedVhdPath $ResolvedVhdPath `
-                    -ExpectedOwnerId $ExpectedOwnerId `
-                    -PreviousBootTicks $previousBootTicks `
-                    -PackageKey $PackageKey
-            } catch {
-                $safeInstallFailure = ConvertTo-SafeGuestDiagnosticText `
-                    -Value $installFailure `
-                    -MaxChars 1024
-                $safeReconnectFailure = ConvertTo-SafeGuestDiagnosticText `
-                    -Value $_ `
-                    -MaxChars 1024
-                throw (
-                    "Developer prerequisite package '$PackageKey' lost its guest session without a verified " +
-                    "fresh owned reboot. Install failure: $safeInstallFailure Reconnect failure: $safeReconnectFailure")
-            }
+            $installAttempted = $true
+            $recovery = Wait-ForGuestPackageTransitionAndVerify `
+                -Session $activeSession `
+                -GuestCredential $GuestCredential `
+                -ResolvedVhdPath $ResolvedVhdPath `
+                -ExpectedOwnerId $ExpectedOwnerId `
+                -PreviousBootTicks $previousBootTicks `
+                -PackageKey $PackageKey `
+                -OriginalInstallFailure $installFailure
+            $activeSession = $recovery.Session
+            $recoveredProof = $recovery.Proof
+            $transition = [string]$recovery.Transition
             $installResult = $null
         }
 
         if ($null -ne $installResult -and [bool]$installResult.needsRestart) {
             if ([bool]$installResult.rebootInitiated) {
-                $transition = "installer-initiated-reboot"
-                $activeSession = Wait-ForGuestPackageRebootAndReconnect `
+                $recovery = Wait-ForGuestPackageTransitionAndVerify `
                     -Session $activeSession `
                     -GuestCredential $GuestCredential `
                     -ResolvedVhdPath $ResolvedVhdPath `
                     -ExpectedOwnerId $ExpectedOwnerId `
                     -PreviousBootTicks $previousBootTicks `
-                    -PackageKey $PackageKey
+                    -PackageKey $PackageKey `
+                    -OriginalInstallFailure $null
+                $activeSession = $recovery.Session
+                $recoveredProof = $recovery.Proof
+                $transition = [string]$recovery.Transition
             } else {
                 $transition = "owned-required-reboot"
                 $activeSession = Restart-GuestAndReconnect `
@@ -7902,7 +7962,9 @@ function Ensure-GuestDeveloperPrerequisite {
             }
         }
 
-        $proof = if (
+        $proof = if ($null -ne $recoveredProof) {
+            $recoveredProof
+        } elseif (
             $null -eq $installResult -or
             [bool]$installResult.needsRestart
         ) {

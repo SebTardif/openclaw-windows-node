@@ -2182,7 +2182,7 @@ public sealed class CleanWindowsRunnerScriptTests
     }
 
     [Fact]
-    public void GuestDeveloperPrerequisiteOrchestrationVerifiesRebootAndNeverBlindlyReinstalls()
+    public void GuestDeveloperPrerequisiteOrchestrationUsesVerifiedTransitionRecoveryWithoutReinstall()
     {
         var controller = ReadScript("Invoke-CleanWindowsHyperV.ps1");
         var ensure = ExtractPowerShellFunction(
@@ -2191,19 +2191,88 @@ public sealed class CleanWindowsRunnerScriptTests
             "Ensure-GuestDeveloperPrerequisites");
         var reconnect = ExtractPowerShellFunction(
             controller,
-            "Wait-ForGuestPackageRebootAndReconnect",
+            "Wait-ForGuestPackageTransitionAndVerify",
             "Invoke-GuestDeveloperPrerequisiteWorker");
 
         Assert.Contains("Get-GuestBootIdentity", ensure, StringComparison.Ordinal);
         Assert.Contains("Probing guest session after package", ensure, StringComparison.Ordinal);
-        Assert.Contains("Wait-ForGuestPackageRebootAndReconnect", ensure, StringComparison.Ordinal);
+        Assert.Contains("Wait-ForGuestPackageTransitionAndVerify", ensure, StringComparison.Ordinal);
         Assert.Contains("Restart-GuestAndReconnect", ensure, StringComparison.Ordinal);
         Assert.Contains("-VerifyOnly $true", ensure, StringComparison.Ordinal);
         Assert.Equal(1, CountOccurrences(ensure, "-VerifyOnly $false"));
+        Assert.Contains("$recoveredProof = $recovery.Proof", ensure, StringComparison.Ordinal);
+        Assert.Contains("if ($null -ne $recoveredProof)", ensure, StringComparison.Ordinal);
         Assert.Contains("[Int64]$currentBootTicks -gt $PreviousBootTicks", reconnect, StringComparison.Ordinal);
+        Assert.Contains("[Int64]$currentBootTicks -eq $PreviousBootTicks", reconnect, StringComparison.Ordinal);
+        Assert.Contains("[Int64]$currentBootTicks -lt $PreviousBootTicks", reconnect, StringComparison.Ordinal);
+        Assert.Contains("\"session-loss-reboot\"", reconnect, StringComparison.Ordinal);
+        Assert.Contains("\"session-recycle-same-boot\"", reconnect, StringComparison.Ordinal);
+        Assert.Contains("-VerifyOnly $true", reconnect, StringComparison.Ordinal);
         Assert.Contains("Assert-OwnedVM", reconnect, StringComparison.Ordinal);
         Assert.Contains("exact owned VM", reconnect, StringComparison.OrdinalIgnoreCase);
-        Assert.Contains("lost its guest session without a verified", ensure, StringComparison.Ordinal);
+        Assert.Contains("OriginalInstallFailure", reconnect, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("same-boot-verified", "session-recycle-same-boot", 1)]
+    [InlineData("same-boot-delayed", "session-recycle-same-boot", 2)]
+    [InlineData("newer-boot-verified", "session-loss-reboot", 1)]
+    public void GuestPackageTransitionRecoveryAcceptsOnlyVerifiedTransitions(
+        string scenario,
+        string expectedTransition,
+        int expectedVerifyCalls)
+    {
+        var result = RunPowerShellCommand(BuildGuestPackageTransitionProof(scenario));
+
+        AssertPowerShellProofSucceeded(result);
+        using var document = JsonDocument.Parse(result.Stdout);
+        var proof = document.RootElement;
+        Assert.True(string.IsNullOrEmpty(proof.GetProperty("error").GetString()));
+        Assert.Equal(expectedTransition, proof.GetProperty("transition").GetString());
+        Assert.True(proof.GetProperty("verified").GetBoolean());
+        Assert.Equal(expectedVerifyCalls, proof.GetProperty("verifyCalls").GetInt32());
+        Assert.Equal(0, proof.GetProperty("installCalls").GetInt32());
+    }
+
+    [Theory]
+    [InlineData("same-boot-never", "did not verify after an exact owned PowerShell Direct reconnect", 3)]
+    [InlineData("newer-boot-missing", "remained unavailable after a newer owned boot", 1)]
+    public void GuestPackageTransitionRecoveryFailsWithOriginalAndVerificationDiagnostics(
+        string scenario,
+        string expectedError,
+        int expectedVerifyCalls)
+    {
+        var result = RunPowerShellCommand(BuildGuestPackageTransitionProof(scenario));
+
+        AssertPowerShellProofSucceeded(result);
+        using var document = JsonDocument.Parse(result.Stdout);
+        var proof = document.RootElement;
+        var error = proof.GetProperty("error").GetString() ?? string.Empty;
+        Assert.Contains(expectedError, error, StringComparison.Ordinal);
+        Assert.Contains("original install socket failure", error, StringComparison.Ordinal);
+        Assert.Contains("verification not ready", error, StringComparison.Ordinal);
+        Assert.Equal(expectedVerifyCalls, proof.GetProperty("verifyCalls").GetInt32());
+        Assert.Equal(0, proof.GetProperty("installCalls").GetInt32());
+    }
+
+    [Theory]
+    [InlineData("boot-regressed", "boot identity regressed")]
+    [InlineData("vm-id-changed", "VM identity changed")]
+    [InlineData("vm-not-running", "is not Running")]
+    public void GuestPackageTransitionRecoveryFailsClosedOnOwnedVmInvariantChanges(
+        string scenario,
+        string expectedError)
+    {
+        var result = RunPowerShellCommand(BuildGuestPackageTransitionProof(scenario));
+
+        AssertPowerShellProofSucceeded(result);
+        using var document = JsonDocument.Parse(result.Stdout);
+        var proof = document.RootElement;
+        Assert.Contains(
+            expectedError,
+            proof.GetProperty("error").GetString(),
+            StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(0, proof.GetProperty("installCalls").GetInt32());
     }
 
     [Theory]
@@ -6304,6 +6373,95 @@ public sealed class CleanWindowsRunnerScriptTests
             " operationName = $script:operationName\n",
             " argumentVerifyOnly = [bool]$script:argumentVerifyOnly\n",
             " packageKey = if ($proof) { [string]$proof.packageKey } else { $null }\n",
+            "} | ConvertTo-Json -Compress))\n");
+    }
+
+    private static string BuildGuestPackageTransitionProof(string scenario)
+    {
+        var controller = ReadScript("Invoke-CleanWindowsHyperV.ps1");
+        var recovery = ExtractPowerShellFunction(
+            controller,
+            "Wait-ForGuestPackageTransitionAndVerify",
+            "Invoke-GuestDeveloperPrerequisiteWorker");
+        return string.Concat(
+            "$ErrorActionPreference = 'Stop'\n",
+            "$script:scenario = ", PsQuote(scenario), "\n",
+            "$script:ownedCalls = 0\n",
+            "$script:reconnectCalls = 0\n",
+            "$script:verifyCalls = 0\n",
+            "$script:installCalls = 0\n",
+            "$script:removedSessions = 0\n",
+            "$script:clock = [DateTime]'2026-07-29T00:00:00Z'\n",
+            "function global:Get-Date { $script:clock = $script:clock.AddSeconds(1); return $script:clock }\n",
+            "function global:Start-Sleep { param([int]$Seconds) }\n",
+            "function global:Assert-OwnedVM {\n",
+            " param($ResolvedVhdPath, $ExpectedOwnerId)\n",
+            " $script:ownedCalls++\n",
+            " $id = if ($script:scenario -eq 'vm-id-changed' -and $script:ownedCalls -gt 1) ",
+            "{ [Guid]'22222222-2222-2222-2222-222222222222' } ",
+            "else { [Guid]'11111111-1111-1111-1111-111111111111' }\n",
+            " $state = if ($script:scenario -eq 'vm-not-running' -and $script:ownedCalls -gt 1) ",
+            "{ 'Off' } else { 'Running' }\n",
+            " return [pscustomobject]@{ Id = $id; State = $state }\n",
+            "}\n",
+            "function global:Remove-PSSession {\n",
+            " param($Session, $ErrorAction)\n",
+            " $script:removedSessions++\n",
+            "}\n",
+            "function global:New-PSSession {\n",
+            " param($VMName, $Credential, $ErrorAction)\n",
+            " $script:reconnectCalls++\n",
+            " return [Runtime.Serialization.FormatterServices]::GetUninitializedObject(",
+            "[System.Management.Automation.Runspaces.PSSession])\n",
+            "}\n",
+            "function global:Get-GuestBootIdentity {\n",
+            " param($Session, $OperationName)\n",
+            " if ($script:scenario -eq 'boot-regressed') { return [Int64]90 }\n",
+            " if ($script:scenario -like 'newer-boot-*') { return [Int64]200 }\n",
+            " return [Int64]100\n",
+            "}\n",
+            "function global:Invoke-GuestDeveloperPrerequisiteWorker {\n",
+            " param($Session, $PackageKey, [bool]$VerifyOnly)\n",
+            " if (-not $VerifyOnly) { $script:installCalls++; throw 'unexpected install call' }\n",
+            " $script:verifyCalls++\n",
+            " if ($script:scenario -eq 'same-boot-delayed' -and $script:verifyCalls -eq 1) ",
+            "{ throw 'verification not ready' }\n",
+            " if ($script:scenario -eq 'same-boot-never' -or $script:scenario -eq 'newer-boot-missing') ",
+            "{ throw 'verification not ready' }\n",
+            " return [pscustomobject]@{ stage = 'developer-prerequisite'; packageKey = $PackageKey; verified = $true }\n",
+            "}\n",
+            "function global:ConvertTo-SafeGuestDiagnosticText {\n",
+            " param($Value, [int]$MaxChars)\n",
+            " if ($null -eq $Value) { return '<empty>' }\n",
+            " $text = if ($Value -is [System.Management.Automation.ErrorRecord]) ",
+            "{ [string]$Value.Exception.Message } elseif ($Value -is [Exception]) ",
+            "{ [string]$Value.Message } else { [string]$Value }\n",
+            " if ($text.Length -gt $MaxChars) { return $text.Substring(0, $MaxChars) }\n",
+            " return $text\n",
+            "}\n",
+            recovery,
+            "\n$session = [Runtime.Serialization.FormatterServices]::GetUninitializedObject(",
+            "[System.Management.Automation.Runspaces.PSSession])\n",
+            "$credential = [Runtime.Serialization.FormatterServices]::GetUninitializedObject(",
+            "[System.Management.Automation.PSCredential])\n",
+            "$result = $null\n",
+            "$errorMessage = $null\n",
+            "try {\n",
+            " $result = Wait-ForGuestPackageTransitionAndVerify ",
+            "-Session $session -GuestCredential $credential -ResolvedVhdPath 'D:\\owned\\os.vhdx' ",
+            "-ExpectedOwnerId 'owner' -PreviousBootTicks 100 -PackageKey 'WindowsSdk26100' ",
+            "-OriginalInstallFailure ([InvalidOperationException]::new('original install socket failure')) ",
+            "-TimeoutSec 3 -PollIntervalSec 1\n",
+            "} catch { $errorMessage = $_.Exception.Message }\n",
+            "[Console]::Out.Write(([pscustomobject][ordered]@{\n",
+            " error = $errorMessage\n",
+            " transition = if ($result) { [string]$result.Transition } else { $null }\n",
+            " verified = if ($result) { [bool]$result.Proof.verified } else { $false }\n",
+            " bootTicks = if ($result) { [Int64]$result.BootTicks } else { $null }\n",
+            " verifyCalls = $script:verifyCalls\n",
+            " installCalls = $script:installCalls\n",
+            " reconnectCalls = $script:reconnectCalls\n",
+            " removedSessions = $script:removedSessions\n",
             "} | ConvertTo-Json -Compress))\n");
     }
 

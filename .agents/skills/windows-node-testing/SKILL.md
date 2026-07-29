@@ -325,8 +325,14 @@ Existing availability skips install; exit zero requires immediate
 verification.
 
 Reboot-required results use the exact owned restart. Installer-initiated
-reboot or PowerShell Direct loss must reconnect to the same owned VM with a
-newer boot identity and run verify-only. It must not repeat the install.
+reboot or PowerShell Direct loss must reconnect only to the same owner-bound
+Running VM ID and run verify-only. Verified newer boot records
+`session-loss-reboot`; verified same boot records
+`session-recycle-same-boot`. Missing same-boot software gets bounded
+reconnect/verify-only polling. A newer boot without the package, regressed
+boot identity, changed VM identity, or non-Running VM fails closed. Recovery
+preserves original install and verification diagnostics and never repeats the
+install.
 After source staging, the controller runs only
 `scripts\setup-dev.ps1 -CheckOnly`, never its mutating package mode. Focused
 tests use extracted workers and mocks; they do not operate the VM or WinGet.
