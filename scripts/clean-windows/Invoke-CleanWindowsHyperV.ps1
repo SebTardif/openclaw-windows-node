@@ -7446,6 +7446,17 @@ function Get-GuestDeveloperPrerequisiteScriptBlock {
                     if (-not $dotnet) {
                         return [pscustomobject]@{ present = $false; evidence = "dotnet.exe unavailable" }
                     }
+                    $expectedDotNetPath = Join-Path $env:ProgramFiles "dotnet\dotnet.exe"
+                    $dotnetPath = [IO.Path]::GetFullPath([string]$dotnet.Source)
+                    if (-not [string]::Equals(
+                        $dotnetPath,
+                        $expectedDotNetPath,
+                        [StringComparison]::OrdinalIgnoreCase)) {
+                        return [pscustomobject]@{
+                            present = $false
+                            evidence = "dotnet.exe is not installed at the trusted machine path"
+                        }
+                    }
                     $result = Invoke-OpenClawPrerequisiteProcess `
                         -Operation "DotNetListSdks" `
                         -ExecutablePath ([string]$dotnet.Source) `
@@ -7526,6 +7537,7 @@ function Get-GuestDeveloperPrerequisiteScriptBlock {
                     id = "Microsoft.DotNet.SDK.10"
                     version = "10.0.302"
                     installerType = "burn"
+                    scope = $null
                 }
             }
             "NodeLts" {
@@ -7534,6 +7546,7 @@ function Get-GuestDeveloperPrerequisiteScriptBlock {
                     id = "OpenJS.NodeJS.LTS"
                     version = "24.18.0"
                     installerType = "wix"
+                    scope = "machine"
                 }
             }
             "WindowsSdk26100" {
@@ -7542,6 +7555,7 @@ function Get-GuestDeveloperPrerequisiteScriptBlock {
                     id = "Microsoft.WindowsSDK.10.0.26100"
                     version = "10.0.26100.7705"
                     installerType = "burn"
+                    scope = "machine"
                 }
             }
             "WebView2" {
@@ -7550,9 +7564,11 @@ function Get-GuestDeveloperPrerequisiteScriptBlock {
                     id = "Microsoft.EdgeWebView2Runtime"
                     version = "150.0.4078.83"
                     installerType = "exe"
+                    scope = "machine"
                 }
             }
         }
+        $scope = if ($null -eq $spec.scope) { $null } else { [string]$spec.scope }
 
         $initialVerification = Get-OpenClawPrerequisiteVerification -Key $PackageKey
         if ([bool]$initialVerification.present) {
@@ -7562,6 +7578,7 @@ function Get-GuestDeveloperPrerequisiteScriptBlock {
                 packageId = [string]$spec.id
                 packageVersion = [string]$spec.version
                 installerType = [string]$spec.installerType
+                scope = $scope
                 alreadyInstalled = $true
                 installed = $false
                 verified = $true
@@ -7583,18 +7600,22 @@ function Get-GuestDeveloperPrerequisiteScriptBlock {
         if (-not $winget) {
             throw "winget.exe is unavailable while installing developer prerequisite '$PackageKey'."
         }
-        $installArguments = [string[]]@(
+        $installArguments = @(
             "install",
             "--id", [string]$spec.id,
             "-e",
             "--version", [string]$spec.version,
-            "--installer-type", [string]$spec.installerType,
-            "--scope", "machine",
+            "--installer-type", [string]$spec.installerType)
+        if ($null -ne $scope) {
+            $installArguments += @("--scope", $scope)
+        }
+        $installArguments += @(
             "--source", "winget",
             "--silent",
             "--accept-source-agreements",
             "--accept-package-agreements",
             "--disable-interactivity")
+        $installArguments = [string[]]$installArguments
         $installResult = Invoke-OpenClawPrerequisiteProcess `
             -Operation "Install" `
             -ExecutablePath ([string]$winget.Source) `
@@ -7604,15 +7625,17 @@ function Get-GuestDeveloperPrerequisiteScriptBlock {
         $rebootInitiated = $exitCode -eq 1641 -or $exitCode -eq -1978334965
         if ($exitCode -ne 0 -and -not $rebootRequiredToFinish -and -not $rebootInitiated) {
             $exitHex = Get-OpenClawPrerequisiteExitHex -ExitCode $exitCode
+            $scopeEvidence = if ($null -eq $scope) { "inherent" } else { $scope }
             throw (
                 (
-                    "winget failed to install developer prerequisite '{0}' ({1} {2}, installer={3}, scope=machine) " +
-                    "with exit code {4} ({5}). stdout='{6}' stderr='{7}'"
+                    "winget failed to install developer prerequisite '{0}' ({1} {2}, installer={3}, scope={4}) " +
+                    "with exit code {5} ({6}). stdout='{7}' stderr='{8}'"
                 ) -f
                     $PackageKey,
                     $spec.id,
                     $spec.version,
                     $spec.installerType,
+                    $scopeEvidence,
                     $exitCode,
                     $exitHex,
                     $installResult.stdout,
@@ -7625,6 +7648,7 @@ function Get-GuestDeveloperPrerequisiteScriptBlock {
                 packageId = [string]$spec.id
                 packageVersion = [string]$spec.version
                 installerType = [string]$spec.installerType
+                scope = $scope
                 alreadyInstalled = $false
                 installed = $true
                 verified = $false
@@ -7651,6 +7675,7 @@ function Get-GuestDeveloperPrerequisiteScriptBlock {
             packageId = [string]$spec.id
             packageVersion = [string]$spec.version
             installerType = [string]$spec.installerType
+            scope = $scope
             alreadyInstalled = $false
             installed = $true
             verified = $true

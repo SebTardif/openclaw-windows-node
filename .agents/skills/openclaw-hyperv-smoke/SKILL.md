@@ -227,6 +227,15 @@ install and verify-only worker paths. Its existing `finally` is expected to
 restore `clean-windows`, but this change does not claim live confirmation.
 Confirm the exact owned finalized checkpoint before normal retry.
 
+The seventeenth real `Prepare` reached the .NET 10 package stage, where WinGet
+reported `0x8A150010` because the manifest has no `Scope` and the controller
+had applied `--scope machine` universally. The .NET Burn selection now omits
+the scope filter and records null scope evidence; Node, Windows SDK, and
+WebView2 retain exact machine scope. The .NET verification still requires an
+installed 10.x SDK. Its existing `finally` is expected to restore
+`clean-windows`, but this change does not claim live confirmation. Confirm the
+exact owned finalized checkpoint before normal retry.
+
 From an elevated PowerShell session, run normal `Prepare` without
 `-RecoverPendingCheckpoint`:
 
@@ -347,9 +356,12 @@ native WinGet operation: `.NET 10 SDK` as
 `Microsoft.DotNet.SDK.10` `10.0.302` `burn`, Node LTS as
 `OpenJS.NodeJS.LTS` `24.18.0` `wix`, Windows SDK as
 `Microsoft.WindowsSDK.10.0.26100` `10.0.26100.7705` `burn`, and WebView2 as
-`Microsoft.EdgeWebView2Runtime` `150.0.4078.83` `exe`. Every operation uses
-machine scope, exact source `winget`, silent/noninteractive agreement flags,
-redirected bounded diagnostics, and no MSIX fallback.
+`Microsoft.EdgeWebView2Runtime` `150.0.4078.83` `exe`. The .NET Burn manifest
+has no `Scope`, so that typed selection omits `--scope` and records null scope
+evidence while its SDK verification proves installation. The other three
+typed selections retain exact machine scope. Every operation uses source
+`winget`, silent/noninteractive agreement flags, redirected bounded
+diagnostics, and no MSIX fallback.
 
 Each stage first applies setup-dev's real availability check and skips an
 already-present package. Exit zero requires immediate verification. A

@@ -480,22 +480,25 @@ specific AppX deployment-session/user-logged-off diagnostic.
 
 The remaining developer prerequisites are also controller-owned stages before
 source transfer. Each stage uses exactly one bounded native WinGet install
-with redirected, sanitized stdout and stderr, machine scope, source `winget`,
-silent/noninteractive agreement flags, and one exact version and installer
-type:
+with redirected, sanitized stdout and stderr, package-specific optional scope,
+source `winget`, silent/noninteractive agreement flags, and one exact version
+and installer type:
 
-| Stage | Package | Version | Installer type |
-|---|---|---:|---|
-| .NET 10 | `Microsoft.DotNet.SDK.10` | `10.0.302` | `burn` |
-| Node LTS | `OpenJS.NodeJS.LTS` | `24.18.0` | `wix` |
-| Windows SDK | `Microsoft.WindowsSDK.10.0.26100` | `10.0.26100.7705` | `burn` |
-| WebView2 | `Microsoft.EdgeWebView2Runtime` | `150.0.4078.83` | `exe` |
+| Stage | Package | Version | Installer type | Scope filter |
+|---|---|---:|---|---|
+| .NET 10 | `Microsoft.DotNet.SDK.10` | `10.0.302` | `burn` | Omitted. The Burn installer is machine-wide, but its manifest has no `Scope`. |
+| Node LTS | `OpenJS.NodeJS.LTS` | `24.18.0` | `wix` | `machine` |
+| Windows SDK | `Microsoft.WindowsSDK.10.0.26100` | `10.0.26100.7705` | `burn` | `machine` |
+| WebView2 | `Microsoft.EdgeWebView2Runtime` | `150.0.4078.83` | `exe` | `machine` |
 
 Before installing, each stage uses the same availability contract as
 `setup-dev.ps1`: a 10.x SDK from `dotnet --list-sdks`, both `node` and `npm`,
 a numeric Windows SDK Include directory, or a valid WebView2 runtime
 registration. Existing prerequisites skip their WinGet operation. A
 successful install must immediately pass the same check.
+The .NET proof records a null scope filter rather than claiming a manifest
+filter that was not applied; its post-install SDK-path/version check still
+proves the machine installation.
 
 Exit `3010` and WinGet
 `APPINSTALLER_CLI_ERROR_INSTALL_REBOOT_REQUIRED_TO_FINISH` request an exact

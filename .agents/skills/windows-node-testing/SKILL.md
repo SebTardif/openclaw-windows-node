@@ -316,10 +316,13 @@ Prepare owns four package stages before clean source transfer:
 `Microsoft.DotNet.SDK.10` `10.0.302` `burn`, `OpenJS.NodeJS.LTS` `24.18.0`
 `wix`, `Microsoft.WindowsSDK.10.0.26100` `10.0.26100.7705` `burn`, and
 `Microsoft.EdgeWebView2Runtime` `150.0.4078.83` `exe`. Each uses one bounded
-native WinGet operation with exact version, installer type, machine scope,
-source `winget`, silent/noninteractive agreement flags, and redirected
-sanitized diagnostics. Existing availability skips install; exit zero
-requires immediate verification.
+native WinGet operation with exact version, installer type, source `winget`,
+silent/noninteractive agreement flags, and redirected sanitized diagnostics.
+The .NET Burn manifest has no `Scope`, so its typed selection omits
+`--scope` and records null scope evidence; its SDK verification still proves
+installation. Node, Windows SDK, and WebView2 retain exact machine scope.
+Existing availability skips install; exit zero requires immediate
+verification.
 
 Reboot-required results use the exact owned restart. Installer-initiated
 reboot or PowerShell Direct loss must reconnect to the same owned VM with a

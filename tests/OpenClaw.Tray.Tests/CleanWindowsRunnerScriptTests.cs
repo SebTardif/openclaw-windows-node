@@ -2098,7 +2098,7 @@ public sealed class CleanWindowsRunnerScriptTests
     }
 
     [Fact]
-    public void GuestDeveloperPrerequisitesUseExactPinnedMachineInstallersBeforeSourceTransfer()
+    public void GuestDeveloperPrerequisitesUseExactPinnedPackageSelectionsBeforeSourceTransfer()
     {
         var controller = ReadScript("Invoke-CleanWindowsHyperV.ps1");
         var worker = ExtractPowerShellFunction(
@@ -2118,19 +2118,30 @@ public sealed class CleanWindowsRunnerScriptTests
             "Prepare-GuestPrerequisites",
             "Verify-HostVmConfiguration");
 
-        foreach (var spec in new[]
+        foreach (var spec in new (string Id, string Version, string InstallerType, string? Scope)[]
         {
-            ("Microsoft.DotNet.SDK.10", "10.0.302", "burn"),
-            ("OpenJS.NodeJS.LTS", "24.18.0", "wix"),
-            ("Microsoft.WindowsSDK.10.0.26100", "10.0.26100.7705", "burn"),
-            ("Microsoft.EdgeWebView2Runtime", "150.0.4078.83", "exe"),
+            ("Microsoft.DotNet.SDK.10", "10.0.302", "burn", null),
+            ("OpenJS.NodeJS.LTS", "24.18.0", "wix", "machine"),
+            ("Microsoft.WindowsSDK.10.0.26100", "10.0.26100.7705", "burn", "machine"),
+            ("Microsoft.EdgeWebView2Runtime", "150.0.4078.83", "exe", "machine"),
         })
         {
-            Assert.Contains($"id = \"{spec.Item1}\"", worker, StringComparison.Ordinal);
-            Assert.Contains($"version = \"{spec.Item2}\"", worker, StringComparison.Ordinal);
-            Assert.Contains($"installerType = \"{spec.Item3}\"", worker, StringComparison.Ordinal);
+            Assert.Contains($"id = \"{spec.Id}\"", worker, StringComparison.Ordinal);
+            Assert.Contains($"version = \"{spec.Version}\"", worker, StringComparison.Ordinal);
+            Assert.Contains($"installerType = \"{spec.InstallerType}\"", worker, StringComparison.Ordinal);
+            Assert.Contains(
+                spec.Scope is null ? "scope = $null" : $"scope = \"{spec.Scope}\"",
+                worker,
+                StringComparison.Ordinal);
         }
-        Assert.Contains("\"--scope\", \"machine\"", worker, StringComparison.Ordinal);
+        Assert.Equal(3, CountOccurrences(worker, "scope = \"machine\""));
+        Assert.Contains("if ($null -ne $scope)", worker, StringComparison.Ordinal);
+        Assert.Contains("$installArguments += @(\"--scope\", $scope)", worker, StringComparison.Ordinal);
+        Assert.Contains(
+            "Join-Path $env:ProgramFiles \"dotnet\\dotnet.exe\"",
+            worker,
+            StringComparison.Ordinal);
+        Assert.Contains("[StringComparison]::OrdinalIgnoreCase", worker, StringComparison.Ordinal);
         Assert.Contains("\"--source\", \"winget\"", worker, StringComparison.Ordinal);
         Assert.Contains("\"--silent\"", worker, StringComparison.Ordinal);
         Assert.Contains("\"--accept-source-agreements\"", worker, StringComparison.Ordinal);
@@ -2250,13 +2261,14 @@ public sealed class CleanWindowsRunnerScriptTests
     }
 
     [Theory]
-    [InlineData("DotNet10", "Microsoft.DotNet.SDK.10")]
-    [InlineData("NodeLts", "OpenJS.NodeJS.LTS")]
-    [InlineData("WindowsSdk26100", "Microsoft.WindowsSDK.10.0.26100")]
-    [InlineData("WebView2", "Microsoft.EdgeWebView2Runtime")]
+    [InlineData("DotNet10", "Microsoft.DotNet.SDK.10", null)]
+    [InlineData("NodeLts", "OpenJS.NodeJS.LTS", "machine")]
+    [InlineData("WindowsSdk26100", "Microsoft.WindowsSDK.10.0.26100", "machine")]
+    [InlineData("WebView2", "Microsoft.EdgeWebView2Runtime", "machine")]
     public void GuestDeveloperPrerequisiteInstallsAndVerifiesOneExactPackage(
         string packageKey,
-        string packageId)
+        string packageId,
+        string? expectedScope)
     {
         var result = RunPowerShellCommand(
             BuildDeveloperPrerequisiteProof(packageKey, "install", installExitCode: 0));
@@ -2272,18 +2284,33 @@ public sealed class CleanWindowsRunnerScriptTests
             "Install:"));
         var arguments = proof.GetProperty("installArguments").GetString() ?? string.Empty;
         Assert.Contains($"--id|{packageId}|-e|--version", arguments, StringComparison.Ordinal);
-        Assert.Contains("--scope|machine|--source|winget|--silent", arguments, StringComparison.Ordinal);
+        Assert.Contains("--source|winget|--silent", arguments, StringComparison.Ordinal);
+        var scope = proof.GetProperty("scope");
+        if (expectedScope is null)
+        {
+            Assert.DoesNotContain("--scope", arguments, StringComparison.Ordinal);
+            Assert.Equal(JsonValueKind.Null, scope.ValueKind);
+        }
+        else
+        {
+            Assert.Contains(
+                $"--scope|{expectedScope}|--source|winget|--silent",
+                arguments,
+                StringComparison.Ordinal);
+            Assert.Equal(expectedScope, scope.GetString());
+        }
         Assert.DoesNotContain("msix", arguments, StringComparison.OrdinalIgnoreCase);
     }
 
     [Theory]
-    [InlineData("DotNet10", "Microsoft.DotNet.SDK.10")]
-    [InlineData("NodeLts", "OpenJS.NodeJS.LTS")]
-    [InlineData("WindowsSdk26100", "Microsoft.WindowsSDK.10.0.26100")]
-    [InlineData("WebView2", "Microsoft.EdgeWebView2Runtime")]
+    [InlineData("DotNet10", "Microsoft.DotNet.SDK.10", "inherent")]
+    [InlineData("NodeLts", "OpenJS.NodeJS.LTS", "machine")]
+    [InlineData("WindowsSdk26100", "Microsoft.WindowsSDK.10.0.26100", "machine")]
+    [InlineData("WebView2", "Microsoft.EdgeWebView2Runtime", "machine")]
     public void GuestDeveloperPrerequisiteFailureHasPackageSpecificBoundedDiagnostics(
         string packageKey,
-        string packageId)
+        string packageId,
+        string expectedScope)
     {
         var result = RunPowerShellCommand(
             BuildDeveloperPrerequisiteProof(packageKey, "failure", installExitCode: 23));
@@ -2294,6 +2321,7 @@ public sealed class CleanWindowsRunnerScriptTests
         var error = proof.GetProperty("error").GetString() ?? string.Empty;
         Assert.Contains(packageKey, error, StringComparison.Ordinal);
         Assert.Contains(packageId, error, StringComparison.Ordinal);
+        Assert.Contains($"scope={expectedScope}", error, StringComparison.Ordinal);
         Assert.Contains("exit code 23 (0x00000017)", error, StringComparison.Ordinal);
         Assert.Contains("stdout='installer output'", error, StringComparison.Ordinal);
         Assert.Contains("stderr='installer error'", error, StringComparison.Ordinal);
@@ -6221,6 +6249,7 @@ public sealed class CleanWindowsRunnerScriptTests
             " needsRestart = if ($proof) { [bool]$proof.needsRestart } else { $false }\n",
             " rebootInitiated = if ($proof) { [bool]$proof.rebootInitiated } else { $false }\n",
             " installExitCode = if ($proof) { $proof.installExitCode } else { $null }\n",
+            " scope = if ($proof) { $proof.scope } else { $null }\n",
             " calls = $script:calls -join ','\n",
             " installArguments = $script:installArguments\n",
             "} | ConvertTo-Json -Compress))\n");
