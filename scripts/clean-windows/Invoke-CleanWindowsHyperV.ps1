@@ -7320,6 +7320,746 @@ function Ensure-GuestPowerShell7Installed {
             $script:GuestPowerShellVersion) | Out-Null
 }
 
+function Get-GuestDeveloperPrerequisiteScriptBlock {
+    return {
+        param(
+            [Parameter(Mandatory = $true)]
+            [ValidateSet("DotNet10", "NodeLts", "WindowsSdk26100", "WebView2")]
+            [string]$PackageKey,
+            [Parameter(Mandatory = $true)]
+            [bool]$VerifyOnly,
+            [Parameter(Mandatory = $true)]
+            [int]$NativeTimeoutSec
+        )
+
+        function ConvertTo-OpenClawPrerequisiteDiagnostic {
+            param(
+                [AllowNull()]
+                [string]$Text,
+                [int]$MaximumLength = 1024
+            )
+
+            if ([string]::IsNullOrWhiteSpace($Text)) {
+                return "<empty>"
+            }
+            $safe = $Text -replace '[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]', '?'
+            $safe = $safe -replace '(?i)\b(authorization|password|passwd|pwd|secret|token|api[-_]?key)\s*[:=]\s*\S+', '$1=<redacted>'
+            $safe = $safe -replace '(?i)\b(Bearer|Basic)\s+[A-Za-z0-9._~+/\-=]+', '$1 <redacted>'
+            $safe = $safe -replace '(https?://[^?\s]+)\?[^\s]+', '$1?<redacted>'
+            $safe = ($safe -replace '\s+', ' ').Trim()
+            if ($safe.Length -gt $MaximumLength) {
+                return $safe.Substring(0, $MaximumLength) + "...<truncated>"
+            }
+            return $safe
+        }
+
+        function Get-OpenClawPrerequisiteExitHex {
+            param([Parameter(Mandatory = $true)][int]$ExitCode)
+
+            $unsignedExitCode = [BitConverter]::ToUInt32(
+                [BitConverter]::GetBytes($ExitCode),
+                0)
+            return "0x{0:X8}" -f $unsignedExitCode
+        }
+
+        function Invoke-OpenClawPrerequisiteProcess {
+            param(
+                [Parameter(Mandatory = $true)]
+                [ValidateSet("Install", "DotNetListSdks", "NodeVersion", "NpmVersion")]
+                [string]$Operation,
+                [Parameter(Mandatory = $true)]
+                [string]$ExecutablePath,
+                [Parameter(Mandatory = $true)]
+                [string[]]$Arguments
+            )
+
+            $captureRoot = Join-Path $env:TEMP (
+                "openclaw-prerequisite-{0}-{1}" -f
+                    $PackageKey.ToLowerInvariant(),
+                    [Guid]::NewGuid().ToString("N"))
+            $stdoutPath = Join-Path $captureRoot "stdout.txt"
+            $stderrPath = Join-Path $captureRoot "stderr.txt"
+            $cleanupFailure = $null
+            try {
+                New-Item -ItemType Directory -Path $captureRoot -ErrorAction Stop | Out-Null
+                $process = Start-Process `
+                    -FilePath $ExecutablePath `
+                    -ArgumentList $Arguments `
+                    -RedirectStandardOutput $stdoutPath `
+                    -RedirectStandardError $stderrPath `
+                    -PassThru `
+                    -WindowStyle Hidden `
+                    -ErrorAction Stop
+                # Windows PowerShell 5.1 requires opening the handle before exit to retain ExitCode.
+                $null = $process.Handle
+                if (-not $process.WaitForExit($NativeTimeoutSec * 1000)) {
+                    Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+                    throw (
+                        "Developer prerequisite package '{0}' operation '{1}' timed out after {2} seconds." -f
+                            $PackageKey,
+                            $Operation,
+                            $NativeTimeoutSec)
+                }
+                $process.WaitForExit()
+                $stdout = if (Test-Path -LiteralPath $stdoutPath -PathType Leaf) {
+                    [IO.File]::ReadAllText($stdoutPath)
+                } else {
+                    ""
+                }
+                $stderr = if (Test-Path -LiteralPath $stderrPath -PathType Leaf) {
+                    [IO.File]::ReadAllText($stderrPath)
+                } else {
+                    ""
+                }
+                return [pscustomobject][ordered]@{
+                    operation = $Operation
+                    exitCode = [int]$process.ExitCode
+                    stdout = ConvertTo-OpenClawPrerequisiteDiagnostic -Text $stdout
+                    stderr = ConvertTo-OpenClawPrerequisiteDiagnostic -Text $stderr
+                }
+            } finally {
+                if (Test-Path -LiteralPath $captureRoot) {
+                    try {
+                        Remove-Item -LiteralPath $captureRoot -Recurse -Force -ErrorAction Stop
+                    } catch {
+                        $cleanupFailure = $_.Exception.Message
+                    }
+                }
+                if ($cleanupFailure) {
+                    throw (
+                        "Developer prerequisite package '{0}' capture cleanup failed: {1}" -f
+                            $PackageKey,
+                            $cleanupFailure)
+                }
+            }
+        }
+
+        function Get-OpenClawPrerequisiteVerification {
+            param(
+                [Parameter(Mandatory = $true)]
+                [string]$Key
+            )
+
+            switch ($Key) {
+                "DotNet10" {
+                    $dotnet = Get-Command dotnet.exe -CommandType Application -ErrorAction SilentlyContinue
+                    if (-not $dotnet) {
+                        return [pscustomobject]@{ present = $false; evidence = "dotnet.exe unavailable" }
+                    }
+                    $result = Invoke-OpenClawPrerequisiteProcess `
+                        -Operation "DotNetListSdks" `
+                        -ExecutablePath ([string]$dotnet.Source) `
+                        -Arguments ([string[]]@("--list-sdks"))
+                    $versions = @(
+                        [string]$result.stdout -split '\s+' |
+                            Where-Object { $_ -match '^10\.\d+\.\d+$' }
+                    )
+                    return [pscustomobject]@{
+                        present = [int]$result.exitCode -eq 0 -and $versions.Count -gt 0
+                        evidence = if ($versions.Count -gt 0) {
+                            ($versions -join ",")
+                        } else {
+                            "dotnetExit=$($result.exitCode)"
+                        }
+                    }
+                }
+                "NodeLts" {
+                    $node = Get-Command node.exe -CommandType Application -ErrorAction SilentlyContinue
+                    $npm = Get-Command npm.cmd -CommandType Application -ErrorAction SilentlyContinue
+                    if (-not $node -or -not $npm) {
+                        return [pscustomobject]@{ present = $false; evidence = "node.exe or npm.cmd unavailable" }
+                    }
+                    $nodeResult = Invoke-OpenClawPrerequisiteProcess `
+                        -Operation "NodeVersion" `
+                        -ExecutablePath ([string]$node.Source) `
+                        -Arguments ([string[]]@("--version"))
+                    $npmResult = Invoke-OpenClawPrerequisiteProcess `
+                        -Operation "NpmVersion" `
+                        -ExecutablePath ([string]$npm.Source) `
+                        -Arguments ([string[]]@("--version"))
+                    return [pscustomobject]@{
+                        present = (
+                            [int]$nodeResult.exitCode -eq 0 -and
+                            [int]$npmResult.exitCode -eq 0 -and
+                            [string]$nodeResult.stdout -match '^v\d+\.\d+\.\d+$' -and
+                            [string]$npmResult.stdout -match '^\d+\.\d+\.\d+')
+                        evidence = "node=$($nodeResult.stdout);npm=$($npmResult.stdout)"
+                    }
+                }
+                "WindowsSdk26100" {
+                    $includeRoot = "${env:ProgramFiles(x86)}\Windows Kits\10\Include"
+                    $versions = @()
+                    if (Test-Path -LiteralPath $includeRoot -PathType Container) {
+                        $versions = @(
+                            Get-ChildItem -LiteralPath $includeRoot -Directory -ErrorAction Stop |
+                                Where-Object { $_.Name -match '^\d+\.\d+\.\d+\.\d+$' } |
+                                Sort-Object { [Version]$_.Name } -Descending |
+                                Select-Object -ExpandProperty Name
+                        )
+                    }
+                    return [pscustomobject]@{
+                        present = $versions.Count -gt 0
+                        evidence = if ($versions.Count -gt 0) { [string]$versions[0] } else { "SDK include unavailable" }
+                    }
+                }
+                "WebView2" {
+                    $keys = [string[]]@(
+                        "HKLM:\SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}",
+                        "HKCU:\SOFTWARE\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}")
+                    foreach ($key in $keys) {
+                        if (Test-Path -LiteralPath $key) {
+                            $version = (Get-ItemProperty -LiteralPath $key -ErrorAction SilentlyContinue).pv
+                            if ([string]$version -match '^\d+\.\d+\.\d+\.\d+$') {
+                                return [pscustomobject]@{ present = $true; evidence = [string]$version }
+                            }
+                        }
+                    }
+                    return [pscustomobject]@{ present = $false; evidence = "WebView2 registration unavailable" }
+                }
+            }
+        }
+
+        $spec = switch ($PackageKey) {
+            "DotNet10" {
+                [pscustomobject][ordered]@{
+                    displayName = ".NET 10 SDK"
+                    id = "Microsoft.DotNet.SDK.10"
+                    version = "10.0.302"
+                    installerType = "burn"
+                }
+            }
+            "NodeLts" {
+                [pscustomobject][ordered]@{
+                    displayName = "Node.js LTS with npm"
+                    id = "OpenJS.NodeJS.LTS"
+                    version = "24.18.0"
+                    installerType = "wix"
+                }
+            }
+            "WindowsSdk26100" {
+                [pscustomobject][ordered]@{
+                    displayName = "Windows SDK 10.0.26100"
+                    id = "Microsoft.WindowsSDK.10.0.26100"
+                    version = "10.0.26100.7705"
+                    installerType = "burn"
+                }
+            }
+            "WebView2" {
+                [pscustomobject][ordered]@{
+                    displayName = "WebView2 Runtime"
+                    id = "Microsoft.EdgeWebView2Runtime"
+                    version = "150.0.4078.83"
+                    installerType = "exe"
+                }
+            }
+        }
+
+        $initialVerification = Get-OpenClawPrerequisiteVerification -Key $PackageKey
+        if ([bool]$initialVerification.present) {
+            return [pscustomobject][ordered]@{
+                stage = "developer-prerequisite"
+                packageKey = $PackageKey
+                packageId = [string]$spec.id
+                packageVersion = [string]$spec.version
+                installerType = [string]$spec.installerType
+                alreadyInstalled = $true
+                installed = $false
+                verified = $true
+                verification = [string]$initialVerification.evidence
+                needsRestart = $false
+                rebootInitiated = $false
+                installExitCode = $null
+            }
+        }
+        if ($VerifyOnly) {
+            throw (
+                "Developer prerequisite package '{0}' ({1}) is still unavailable after reconnect. Verification: {2}" -f
+                    $PackageKey,
+                    $spec.id,
+                    $initialVerification.evidence)
+        }
+
+        $winget = Get-Command winget.exe -CommandType Application -ErrorAction SilentlyContinue
+        if (-not $winget) {
+            throw "winget.exe is unavailable while installing developer prerequisite '$PackageKey'."
+        }
+        $installArguments = [string[]]@(
+            "install",
+            "--id", [string]$spec.id,
+            "-e",
+            "--version", [string]$spec.version,
+            "--installer-type", [string]$spec.installerType,
+            "--scope", "machine",
+            "--source", "winget",
+            "--silent",
+            "--accept-source-agreements",
+            "--accept-package-agreements",
+            "--disable-interactivity")
+        $installResult = Invoke-OpenClawPrerequisiteProcess `
+            -Operation "Install" `
+            -ExecutablePath ([string]$winget.Source) `
+            -Arguments $installArguments
+        $exitCode = [int]$installResult.exitCode
+        $rebootRequiredToFinish = $exitCode -eq 3010 -or $exitCode -eq -1978334967
+        $rebootInitiated = $exitCode -eq 1641 -or $exitCode -eq -1978334965
+        if ($exitCode -ne 0 -and -not $rebootRequiredToFinish -and -not $rebootInitiated) {
+            $exitHex = Get-OpenClawPrerequisiteExitHex -ExitCode $exitCode
+            throw (
+                (
+                    "winget failed to install developer prerequisite '{0}' ({1} {2}, installer={3}, scope=machine) " +
+                    "with exit code {4} ({5}). stdout='{6}' stderr='{7}'"
+                ) -f
+                    $PackageKey,
+                    $spec.id,
+                    $spec.version,
+                    $spec.installerType,
+                    $exitCode,
+                    $exitHex,
+                    $installResult.stdout,
+                    $installResult.stderr)
+        }
+        if ($rebootRequiredToFinish -or $rebootInitiated) {
+            return [pscustomobject][ordered]@{
+                stage = "developer-prerequisite"
+                packageKey = $PackageKey
+                packageId = [string]$spec.id
+                packageVersion = [string]$spec.version
+                installerType = [string]$spec.installerType
+                alreadyInstalled = $false
+                installed = $true
+                verified = $false
+                verification = "pending owned reboot verification"
+                needsRestart = $true
+                rebootInitiated = $rebootInitiated
+                installExitCode = $exitCode
+            }
+        }
+
+        $env:Path = [Environment]::GetEnvironmentVariable("Path", "Machine") + ";" +
+            [Environment]::GetEnvironmentVariable("Path", "User")
+        $finalVerification = Get-OpenClawPrerequisiteVerification -Key $PackageKey
+        if (-not [bool]$finalVerification.present) {
+            throw (
+                "Developer prerequisite package '{0}' ({1}) exited successfully but verification failed: {2}" -f
+                    $PackageKey,
+                    $spec.id,
+                    $finalVerification.evidence)
+        }
+        return [pscustomobject][ordered]@{
+            stage = "developer-prerequisite"
+            packageKey = $PackageKey
+            packageId = [string]$spec.id
+            packageVersion = [string]$spec.version
+            installerType = [string]$spec.installerType
+            alreadyInstalled = $false
+            installed = $true
+            verified = $true
+            verification = [string]$finalVerification.evidence
+            needsRestart = $false
+            rebootInitiated = $false
+            installExitCode = $exitCode
+        }
+    }
+}
+
+function Get-GuestBootIdentity {
+    param(
+        [Parameter(Mandatory = $true)]
+        [System.Management.Automation.Runspaces.PSSession]$Session,
+        [Parameter(Mandatory = $true)]
+        [string]$OperationName
+    )
+
+    $output = @(
+        Invoke-GuestCommandWithTimeout `
+            -Session $Session `
+            -OperationName $OperationName `
+            -TimeoutSec 60 `
+            -ScriptBlock {
+                return (Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop).
+                    LastBootUpTime.ToUniversalTime().Ticks
+            }
+    )
+    if ($output.Count -ne 1) {
+        throw "$OperationName returned $($output.Count) boot identities; expected one."
+    }
+    return [Int64]$output[0]
+}
+
+function Wait-ForGuestPackageRebootAndReconnect {
+    param(
+        [Parameter(Mandatory = $true)]
+        [System.Management.Automation.Runspaces.PSSession]$Session,
+        [Parameter(Mandatory = $true)]
+        [System.Management.Automation.PSCredential]$GuestCredential,
+        [Parameter(Mandatory = $true)]
+        [string]$ResolvedVhdPath,
+        [Parameter(Mandatory = $true)]
+        [string]$ExpectedOwnerId,
+        [Parameter(Mandatory = $true)]
+        [Int64]$PreviousBootTicks,
+        [Parameter(Mandatory = $true)]
+        [string]$PackageKey
+    )
+
+    $ownedVm = Assert-OwnedVM `
+        -ResolvedVhdPath $ResolvedVhdPath `
+        -ExpectedOwnerId $ExpectedOwnerId
+    $ownedVmId = ([Guid]$ownedVm.Id).ToString("D")
+    Remove-PSSession -Session $Session -ErrorAction SilentlyContinue
+    $deadline = (Get-Date).AddSeconds($GuestRestartTimeoutSec)
+    $lastError = $null
+    do {
+        $candidateSession = $null
+        try {
+            $candidateVm = Assert-OwnedVM `
+                -ResolvedVhdPath $ResolvedVhdPath `
+                -ExpectedOwnerId $ExpectedOwnerId
+            if (
+                ([Guid]$candidateVm.Id).ToString("D") -cne $ownedVmId -or
+                [string]$candidateVm.State -cne "Running"
+            ) {
+                throw "Exact owned VM identity or running state is not ready after package transition."
+            }
+            $candidateSession = New-PSSession `
+                -VMName $VMName `
+                -Credential $GuestCredential `
+                -ErrorAction Stop
+            $currentBootTicks = Get-GuestBootIdentity `
+                -Session $candidateSession `
+                -OperationName "Reading guest boot identity after package '$PackageKey'"
+            if ([Int64]$currentBootTicks -gt $PreviousBootTicks) {
+                return $candidateSession
+            }
+            throw (
+                "PowerShell Direct reconnected after package '$PackageKey', but the guest boot identity did not advance.")
+        } catch {
+            $lastError = $_
+        }
+        if ($null -ne $candidateSession) {
+            Remove-PSSession -Session $candidateSession -ErrorAction SilentlyContinue
+        }
+        Start-Sleep -Seconds 5
+    } while ((Get-Date) -lt $deadline)
+
+    $safeLastError = ConvertTo-SafeGuestDiagnosticText -Value $lastError -MaxChars 512
+    throw (
+        "Developer prerequisite package '$PackageKey' did not complete a fresh owned reboot and reconnect " +
+        "within $GuestRestartTimeoutSec seconds. Last error: $safeLastError")
+}
+
+function Invoke-GuestDeveloperPrerequisiteWorker {
+    param(
+        [Parameter(Mandatory = $true)]
+        [System.Management.Automation.Runspaces.PSSession]$Session,
+        [Parameter(Mandatory = $true)]
+        [ValidateSet("DotNet10", "NodeLts", "WindowsSdk26100", "WebView2")]
+        [string]$PackageKey,
+        [Parameter(Mandatory = $true)]
+        [bool]$VerifyOnly
+    )
+
+    $output = @(
+        Invoke-GuestCommandWithTimeout `
+            -Session $Session `
+            -OperationName (
+                if ($VerifyOnly) {
+                    "Verifying guest developer prerequisite '$PackageKey'"
+                } else {
+                    "Installing guest developer prerequisite '$PackageKey'"
+                }) `
+            -TimeoutSec 2400 `
+            -ScriptBlock (Get-GuestDeveloperPrerequisiteScriptBlock) `
+            -ArgumentList @($PackageKey, $VerifyOnly, 2100)
+    )
+    $result = Get-RequiredGuestStageResult `
+        -Output $output `
+        -ExpectedStage "developer-prerequisite"
+    if (
+        [string]$result.packageKey -cne $PackageKey -or
+        (
+            -not [bool]$result.verified -and
+            -not [bool]$result.needsRestart
+        )
+    ) {
+        throw "Developer prerequisite package '$PackageKey' returned an invalid stage proof."
+    }
+    return $result
+}
+
+function Ensure-GuestDeveloperPrerequisite {
+    param(
+        [Parameter(Mandatory = $true)]
+        [System.Management.Automation.Runspaces.PSSession]$Session,
+        [Parameter(Mandatory = $true)]
+        [System.Management.Automation.PSCredential]$GuestCredential,
+        [Parameter(Mandatory = $true)]
+        [string]$ResolvedVhdPath,
+        [Parameter(Mandatory = $true)]
+        [string]$ExpectedOwnerId,
+        [Parameter(Mandatory = $true)]
+        [ValidateSet("DotNet10", "NodeLts", "WindowsSdk26100", "WebView2")]
+        [string]$PackageKey
+    )
+
+    Write-Step "Ensuring guest developer prerequisite '$PackageKey'"
+    $activeSession = $Session
+    $installAttempted = $false
+    $transition = "none"
+    $previousBootTicks = Get-GuestBootIdentity `
+        -Session $activeSession `
+        -OperationName "Reading guest boot identity before package '$PackageKey'"
+    try {
+        try {
+            $installResult = Invoke-GuestDeveloperPrerequisiteWorker `
+                -Session $activeSession `
+                -PackageKey $PackageKey `
+                -VerifyOnly $false
+            $installAttempted = [bool]$installResult.installed
+        } catch {
+            $installFailure = $_
+            $sessionSurvivedOnSameBoot = $false
+            try {
+                $currentBootTicks = Get-GuestBootIdentity `
+                    -Session $activeSession `
+                    -OperationName "Probing guest session after package '$PackageKey' failure"
+                if ([Int64]$currentBootTicks -eq $previousBootTicks) {
+                    $sessionSurvivedOnSameBoot = $true
+                }
+            } catch {
+                $sessionSurvivedOnSameBoot = $false
+            }
+            if ($sessionSurvivedOnSameBoot) {
+                throw $installFailure
+            }
+
+            try {
+                $installAttempted = $true
+                $transition = "session-loss-reboot"
+                $activeSession = Wait-ForGuestPackageRebootAndReconnect `
+                    -Session $activeSession `
+                    -GuestCredential $GuestCredential `
+                    -ResolvedVhdPath $ResolvedVhdPath `
+                    -ExpectedOwnerId $ExpectedOwnerId `
+                    -PreviousBootTicks $previousBootTicks `
+                    -PackageKey $PackageKey
+            } catch {
+                $safeInstallFailure = ConvertTo-SafeGuestDiagnosticText `
+                    -Value $installFailure `
+                    -MaxChars 1024
+                $safeReconnectFailure = ConvertTo-SafeGuestDiagnosticText `
+                    -Value $_ `
+                    -MaxChars 1024
+                throw (
+                    "Developer prerequisite package '$PackageKey' lost its guest session without a verified " +
+                    "fresh owned reboot. Install failure: $safeInstallFailure Reconnect failure: $safeReconnectFailure")
+            }
+            $installResult = $null
+        }
+
+        if ($null -ne $installResult -and [bool]$installResult.needsRestart) {
+            if ([bool]$installResult.rebootInitiated) {
+                $transition = "installer-initiated-reboot"
+                $activeSession = Wait-ForGuestPackageRebootAndReconnect `
+                    -Session $activeSession `
+                    -GuestCredential $GuestCredential `
+                    -ResolvedVhdPath $ResolvedVhdPath `
+                    -ExpectedOwnerId $ExpectedOwnerId `
+                    -PreviousBootTicks $previousBootTicks `
+                    -PackageKey $PackageKey
+            } else {
+                $transition = "owned-required-reboot"
+                $activeSession = Restart-GuestAndReconnect `
+                    -Session $activeSession `
+                    -GuestCredential $GuestCredential `
+                    -ResolvedVhdPath $ResolvedVhdPath `
+                    -ExpectedOwnerId $ExpectedOwnerId
+            }
+        }
+
+        $proof = if (
+            $null -eq $installResult -or
+            [bool]$installResult.needsRestart
+        ) {
+            Invoke-GuestDeveloperPrerequisiteWorker `
+                -Session $activeSession `
+                -PackageKey $PackageKey `
+                -VerifyOnly $true
+        } else {
+            $installResult
+        }
+        if (-not [bool]$proof.verified) {
+            throw "Developer prerequisite package '$PackageKey' was not verified after its stage."
+        }
+        Write-Host ([pscustomobject][ordered]@{
+            stage = [string]$proof.stage
+            packageKey = [string]$proof.packageKey
+            packageId = [string]$proof.packageId
+            packageVersion = [string]$proof.packageVersion
+            installerType = [string]$proof.installerType
+            alreadyInstalled = [bool]$proof.alreadyInstalled
+            installedThisRun = $installAttempted
+            transition = $transition
+            verification = [string]$proof.verification
+        } | ConvertTo-Json -Compress)
+        return [pscustomobject]@{
+            Session = $activeSession
+            Proof = $proof
+        }
+    } catch {
+        if (
+            $null -ne $activeSession -and
+            $activeSession.InstanceId -ne $Session.InstanceId
+        ) {
+            Remove-PSSession -Session $activeSession -ErrorAction SilentlyContinue
+        }
+        throw
+    }
+}
+
+function Ensure-GuestDeveloperPrerequisites {
+    param(
+        [Parameter(Mandatory = $true)]
+        [System.Management.Automation.Runspaces.PSSession]$Session,
+        [Parameter(Mandatory = $true)]
+        [System.Management.Automation.PSCredential]$GuestCredential,
+        [Parameter(Mandatory = $true)]
+        [string]$ResolvedVhdPath,
+        [Parameter(Mandatory = $true)]
+        [string]$ExpectedOwnerId
+    )
+
+    $activeSession = $Session
+    try {
+        foreach ($packageKey in [string[]]@(
+                "DotNet10",
+                "NodeLts",
+                "WindowsSdk26100",
+                "WebView2")) {
+            $stageResult = Ensure-GuestDeveloperPrerequisite `
+                -Session $activeSession `
+                -GuestCredential $GuestCredential `
+                -ResolvedVhdPath $ResolvedVhdPath `
+                -ExpectedOwnerId $ExpectedOwnerId `
+                -PackageKey $packageKey
+            $activeSession = $stageResult.Session
+        }
+        return $activeSession
+    } catch {
+        if (
+            $null -ne $activeSession -and
+            $activeSession.InstanceId -ne $Session.InstanceId
+        ) {
+            Remove-PSSession -Session $activeSession -ErrorAction SilentlyContinue
+        }
+        throw
+    }
+}
+
+function Get-GuestSetupDevCheckScriptBlock {
+    return {
+        param(
+            [Parameter(Mandatory = $true)]
+            [string]$RemoteRepoRoot,
+            [Parameter(Mandatory = $true)]
+            [int]$NativeTimeoutSec
+        )
+
+        function ConvertTo-OpenClawSetupCheckDiagnostic {
+            param(
+                [AllowNull()]
+                [string]$Text,
+                [int]$MaximumLength = 1024
+            )
+
+            if ([string]::IsNullOrWhiteSpace($Text)) {
+                return "<empty>"
+            }
+            $safe = $Text -replace '[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]', '?'
+            $safe = $safe -replace '(?i)\b(authorization|password|passwd|pwd|secret|token|api[-_]?key)\s*[:=]\s*\S+', '$1=<redacted>'
+            $safe = $safe -replace '(?i)\b(Bearer|Basic)\s+[A-Za-z0-9._~+/\-=]+', '$1 <redacted>'
+            $safe = $safe -replace '(https?://[^?\s]+)\?[^\s]+', '$1?<redacted>'
+            $safe = ($safe -replace '\s+', ' ').Trim()
+            if ($safe.Length -gt $MaximumLength) {
+                return $safe.Substring(0, $MaximumLength) + "...<truncated>"
+            }
+            return $safe
+        }
+
+        $setupDevPath = Join-Path $RemoteRepoRoot "scripts\setup-dev.ps1"
+        if (-not (Test-Path -LiteralPath $setupDevPath -PathType Leaf)) {
+            throw "Guest setup-dev.ps1 is unavailable at the expected repository path."
+        }
+        if ($setupDevPath.IndexOf('"') -ge 0) {
+            throw "Guest setup-dev.ps1 path contains an unsupported quote."
+        }
+        $captureRoot = Join-Path $env:TEMP (
+            "openclaw-setup-check-{0}" -f [Guid]::NewGuid().ToString("N"))
+        $stdoutPath = Join-Path $captureRoot "stdout.txt"
+        $stderrPath = Join-Path $captureRoot "stderr.txt"
+        $cleanupFailure = $null
+        try {
+            New-Item -ItemType Directory -Path $captureRoot -ErrorAction Stop | Out-Null
+            $arguments = [string[]]@(
+                "-NoProfile",
+                "-NonInteractive",
+                "-ExecutionPolicy", "Bypass",
+                "-File", ('"' + $setupDevPath + '"'),
+                "-CheckOnly")
+            $process = Start-Process `
+                -FilePath (Join-Path $env:SystemRoot "System32\WindowsPowerShell\v1.0\powershell.exe") `
+                -ArgumentList $arguments `
+                -WorkingDirectory $RemoteRepoRoot `
+                -RedirectStandardOutput $stdoutPath `
+                -RedirectStandardError $stderrPath `
+                -PassThru `
+                -WindowStyle Hidden `
+                -ErrorAction Stop
+            $null = $process.Handle
+            if (-not $process.WaitForExit($NativeTimeoutSec * 1000)) {
+                Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+                throw "Guest setup-dev.ps1 -CheckOnly timed out after $NativeTimeoutSec seconds."
+            }
+            $process.WaitForExit()
+            $stdout = if (Test-Path -LiteralPath $stdoutPath -PathType Leaf) {
+                [IO.File]::ReadAllText($stdoutPath)
+            } else {
+                ""
+            }
+            $stderr = if (Test-Path -LiteralPath $stderrPath -PathType Leaf) {
+                [IO.File]::ReadAllText($stderrPath)
+            } else {
+                ""
+            }
+            if ([int]$process.ExitCode -ne 0) {
+                $safeStdout = ConvertTo-OpenClawSetupCheckDiagnostic -Text $stdout
+                $safeStderr = ConvertTo-OpenClawSetupCheckDiagnostic -Text $stderr
+                throw (
+                    "Guest setup-dev.ps1 -CheckOnly failed with exit code {0}. stdout='{1}' stderr='{2}'" -f
+                        $process.ExitCode,
+                        $safeStdout,
+                        $safeStderr)
+            }
+            return [pscustomobject][ordered]@{
+                stage = "setup-dev-check"
+                checkOnly = $true
+                exitCode = [int]$process.ExitCode
+            }
+        } finally {
+            if (Test-Path -LiteralPath $captureRoot) {
+                try {
+                    Remove-Item -LiteralPath $captureRoot -Recurse -Force -ErrorAction Stop
+                } catch {
+                    $cleanupFailure = $_.Exception.Message
+                }
+            }
+            if ($cleanupFailure) {
+                throw "Guest setup-dev.ps1 -CheckOnly capture cleanup failed: $cleanupFailure"
+            }
+        }
+    }
+}
+
 function Prepare-GuestPrerequisites {
     param(
         [Parameter(Mandatory = $true)]
@@ -7380,17 +8120,30 @@ function Prepare-GuestPrerequisites {
         } | ConvertTo-Json -Compress)
         Ensure-GuestGitInstalled -Session $activeSession
         Ensure-GuestPowerShell7Installed -Session $activeSession
+        $activeSession = Ensure-GuestDeveloperPrerequisites `
+            -Session $activeSession `
+            -GuestCredential $GuestCredential `
+            -ResolvedVhdPath $ResolvedVhdPath `
+            -ExpectedOwnerId $ExpectedOwnerId
         Copy-RepoToGuest -Session $activeSession
 
         $guestRepoRoot = Get-GuestRepoRoot
-        Invoke-GuestCommandWithTimeout -Session $activeSession -OperationName "Running guest setup-dev" -TimeoutSec $GuestCommandTimeoutSec -ScriptBlock {
-            param($RemoteRepoRoot)
-            Set-Location $RemoteRepoRoot
-            & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $RemoteRepoRoot "scripts\setup-dev.ps1")
-            if ($LASTEXITCODE -ne 0) {
-                throw "setup-dev.ps1 failed with exit code $LASTEXITCODE."
-            }
-        } -ArgumentList @($guestRepoRoot) | Out-Null
+        $setupCheckOutput = @(
+            Invoke-GuestCommandWithTimeout `
+                -Session $activeSession `
+                -OperationName "Running guest setup-dev.ps1 -CheckOnly" `
+                -TimeoutSec $GuestCommandTimeoutSec `
+                -ScriptBlock (Get-GuestSetupDevCheckScriptBlock) `
+                -ArgumentList @(
+                    $guestRepoRoot,
+                    [Math]::Max(30, ($GuestCommandTimeoutSec - 60)))
+        )
+        $setupCheckResult = Get-RequiredGuestStageResult `
+            -Output $setupCheckOutput `
+            -ExpectedStage "setup-dev-check"
+        if (-not [bool]$setupCheckResult.checkOnly -or [int]$setupCheckResult.exitCode -ne 0) {
+            throw "Guest setup-dev.ps1 -CheckOnly returned an invalid stage proof."
+        }
 
         return $activeSession
     } catch {

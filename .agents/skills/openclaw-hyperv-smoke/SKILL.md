@@ -77,9 +77,10 @@ VM ID, and `OwnerId` before mutation.
 The controller owns exactly two checkpoint names:
 
 - `clean-windows`: updated Windows before OpenClaw prerequisites.
-- `openclaw-prerequisites`: WSL2 platform features, Git, PowerShell 7, and
-  `scripts\setup-dev.ps1` prerequisites, before smoke state. The installed
-  smoke provisions its gateway distribution later.
+- `openclaw-prerequisites`: WSL2 platform features, Git, PowerShell 7, staged
+  .NET/Node/Windows SDK/WebView2 packages, and a passing
+  `scripts\setup-dev.ps1 -CheckOnly`, before smoke state. The installed smoke
+  provisions its gateway distribution later.
 
 VM ownership is recorded in Hyper-V notes and beside the VHD under
 `.openclaw-clean-windows\<vm-name>`. Checkpoint markers bind the exact
@@ -209,6 +210,14 @@ restore and finalized checkpoint marker before the next attempt. Retry with
 normal `Prepare`. Do not use `-RecoverPendingCheckpoint`,
 `-CleanupUnattend`, or an ad hoc lifecycle command.
 
+The fifteenth real `Prepare` passed WSL, signed WinGet/catalog, Git,
+PowerShell 7 Wix, the 6 MiB committed source archive, and Git
+staging/provenance. Its old monolithic setup-dev install job then lost the
+Hyper-V socket immediately after Git detection, so it did not identify or
+verify the package transition. Its existing `finally` is expected to restore
+`clean-windows`, but this change does not claim live confirmation. Confirm the
+exact owned finalized checkpoint before normal retry.
+
 From an elevated PowerShell session, run normal `Prepare` without
 `-RecoverPendingCheckpoint`:
 
@@ -307,8 +316,9 @@ observed registration. Every later package install uses explicit
 agreement flags, and disabled interactivity, so `msstore` is never queried.
 The bootstrap does not reset, remove, add, or touch `msstore`.
 All downloads, extraction, and captures use one nonce guest-temp root. Cleanup
-failure is a failed bootstrap. Only then do Git, PowerShell 7, checkout copy,
-and `scripts\setup-dev.ps1` run.
+failure is a failed bootstrap. Only then do Git, PowerShell 7, the four staged
+developer packages, checkout copy, and `scripts\setup-dev.ps1 -CheckOnly`
+run.
 
 PowerShell installation is pinned to community package version `7.6.4.0` and
 uses exact `--installer-type wix --scope machine --source winget` arguments.
@@ -322,6 +332,25 @@ reported engine version `7.6.4`. Installation and version probes use bounded
 native captures with sanitized diagnostics. Failures include decimal and
 eight-digit hexadecimal codes, with an explicit diagnostic for the known
 AppX session error `0x80073D19`.
+
+Before source transfer, the controller installs one exact package per bounded
+native WinGet operation: `.NET 10 SDK` as
+`Microsoft.DotNet.SDK.10` `10.0.302` `burn`, Node LTS as
+`OpenJS.NodeJS.LTS` `24.18.0` `wix`, Windows SDK as
+`Microsoft.WindowsSDK.10.0.26100` `10.0.26100.7705` `burn`, and WebView2 as
+`Microsoft.EdgeWebView2Runtime` `150.0.4078.83` `exe`. Every operation uses
+machine scope, exact source `winget`, silent/noninteractive agreement flags,
+redirected bounded diagnostics, and no MSIX fallback.
+
+Each stage first applies setup-dev's real availability check and skips an
+already-present package. Exit zero requires immediate verification. A
+reboot-required result triggers the exact owned restart. Installer-initiated
+reboot or PowerShell Direct socket loss requires bounded passive reconnect to
+the same owned VM with a newer boot identity. The controller then invokes
+verify-only and never blindly repeats the install. Same-boot failures retain
+package-specific diagnostics. After source staging, only
+`scripts\setup-dev.ps1 -CheckOnly` runs; Prepare never invokes its mutating
+install mode.
 
 Source transfer then requires an empty `git status --porcelain=v1
 --untracked-files=all` and creates one deterministic ZIP from exact committed

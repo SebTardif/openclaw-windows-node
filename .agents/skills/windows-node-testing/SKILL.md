@@ -312,6 +312,22 @@ AppX user session it needs. Post-install proof requires the exact
 Error `0x80073D19` is reported as the known AppX
 deployment-session/user-logged-off regression.
 
+Prepare owns four package stages before clean source transfer:
+`Microsoft.DotNet.SDK.10` `10.0.302` `burn`, `OpenJS.NodeJS.LTS` `24.18.0`
+`wix`, `Microsoft.WindowsSDK.10.0.26100` `10.0.26100.7705` `burn`, and
+`Microsoft.EdgeWebView2Runtime` `150.0.4078.83` `exe`. Each uses one bounded
+native WinGet operation with exact version, installer type, machine scope,
+source `winget`, silent/noninteractive agreement flags, and redirected
+sanitized diagnostics. Existing availability skips install; exit zero
+requires immediate verification.
+
+Reboot-required results use the exact owned restart. Installer-initiated
+reboot or PowerShell Direct loss must reconnect to the same owned VM with a
+newer boot identity and run verify-only. It must not repeat the install.
+After source staging, the controller runs only
+`scripts\setup-dev.ps1 -CheckOnly`, never its mutating package mode. Focused
+tests use extracted workers and mocks; they do not operate the VM or WinGet.
+
 Clean source transfer requires a clean committed host `HEAD`. The controller
 refuses any staged, unstaged, or untracked entry, then creates one bounded
 `git archive` ZIP from exact HEAD instead of recursively copying the worktree.

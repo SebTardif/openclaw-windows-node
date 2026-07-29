@@ -342,7 +342,8 @@ arbitrary arguments.
 
 After the second reconnect, final verification requires enabled features plus
 zero-exit status and version. The pinned WinGet bootstrap then runs before Git,
-PowerShell 7, repository copy, or `scripts\setup-dev.ps1`.
+PowerShell 7, the four staged developer packages, repository copy, or the
+read-only `scripts\setup-dev.ps1 -CheckOnly` gate.
 
 #### Pinned App Installer and signed mutable WinGet catalog bootstrap
 
@@ -477,6 +478,35 @@ MSIX or enable autologon. Native failures include decimal and eight-digit
 hexadecimal exit codes plus bounded sanitized output. `0x80073D19` receives a
 specific AppX deployment-session/user-logged-off diagnostic.
 
+The remaining developer prerequisites are also controller-owned stages before
+source transfer. Each stage uses exactly one bounded native WinGet install
+with redirected, sanitized stdout and stderr, machine scope, source `winget`,
+silent/noninteractive agreement flags, and one exact version and installer
+type:
+
+| Stage | Package | Version | Installer type |
+|---|---|---:|---|
+| .NET 10 | `Microsoft.DotNet.SDK.10` | `10.0.302` | `burn` |
+| Node LTS | `OpenJS.NodeJS.LTS` | `24.18.0` | `wix` |
+| Windows SDK | `Microsoft.WindowsSDK.10.0.26100` | `10.0.26100.7705` | `burn` |
+| WebView2 | `Microsoft.EdgeWebView2Runtime` | `150.0.4078.83` | `exe` |
+
+Before installing, each stage uses the same availability contract as
+`setup-dev.ps1`: a 10.x SDK from `dotnet --list-sdks`, both `node` and `npm`,
+a numeric Windows SDK Include directory, or a valid WebView2 runtime
+registration. Existing prerequisites skip their WinGet operation. A
+successful install must immediately pass the same check.
+
+Exit `3010` and WinGet
+`APPINSTALLER_CLI_ERROR_INSTALL_REBOOT_REQUIRED_TO_FINISH` request an exact
+owned restart. Installer-initiated reboot and PowerShell Direct socket loss
+use bounded passive reconnect instead. The controller records the pre-install
+boot identity, accepts only the same owned VM with a newer boot identity, then
+runs verify-only. A same-boot package failure keeps its package-specific
+bounded diagnostics. Missing software after reconnect fails instead of
+reinstalling. Each proof records package, pinned selection, whether install
+ran, transition type, and observed verification.
+
 #### Clean committed source transfer
 
 `Prepare` and `Smoke` never recursively copy the host checkout. Before source
@@ -514,6 +544,11 @@ excluding only `.git`, and requires identical digests plus an empty final
 bytes and that the source provenance is part of the clean commit. Both guest
 and host archives are removed in `finally`; cleanup failure fails the
 operation.
+
+After source staging, Prepare invokes only `scripts\setup-dev.ps1 -CheckOnly`
+through a bounded redirected native process. The clean controller never runs
+the script's package-installing mode. CheckOnly must pass the repository
+prerequisite and build preflight without changing package or Git trust state.
 
 Downloads, extraction, and native output captures live under one nonce child
 of the guest temporary directory. The root is removed on success or failure.

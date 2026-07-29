@@ -2097,6 +2097,236 @@ public sealed class CleanWindowsRunnerScriptTests
         Assert.Contains("must not fall back to MSIX", error, StringComparison.Ordinal);
     }
 
+    [Fact]
+    public void GuestDeveloperPrerequisitesUseExactPinnedMachineInstallersBeforeSourceTransfer()
+    {
+        var controller = ReadScript("Invoke-CleanWindowsHyperV.ps1");
+        var worker = ExtractPowerShellFunction(
+            controller,
+            "Get-GuestDeveloperPrerequisiteScriptBlock",
+            "Get-GuestBootIdentity");
+        var orchestration = ExtractPowerShellFunction(
+            controller,
+            "Ensure-GuestDeveloperPrerequisites",
+            "Get-GuestSetupDevCheckScriptBlock");
+        var setupCheck = ExtractPowerShellFunction(
+            controller,
+            "Get-GuestSetupDevCheckScriptBlock",
+            "Prepare-GuestPrerequisites");
+        var prepare = ExtractPowerShellFunction(
+            controller,
+            "Prepare-GuestPrerequisites",
+            "Verify-HostVmConfiguration");
+
+        foreach (var spec in new[]
+        {
+            ("Microsoft.DotNet.SDK.10", "10.0.302", "burn"),
+            ("OpenJS.NodeJS.LTS", "24.18.0", "wix"),
+            ("Microsoft.WindowsSDK.10.0.26100", "10.0.26100.7705", "burn"),
+            ("Microsoft.EdgeWebView2Runtime", "150.0.4078.83", "exe"),
+        })
+        {
+            Assert.Contains($"id = \"{spec.Item1}\"", worker, StringComparison.Ordinal);
+            Assert.Contains($"version = \"{spec.Item2}\"", worker, StringComparison.Ordinal);
+            Assert.Contains($"installerType = \"{spec.Item3}\"", worker, StringComparison.Ordinal);
+        }
+        Assert.Contains("\"--scope\", \"machine\"", worker, StringComparison.Ordinal);
+        Assert.Contains("\"--source\", \"winget\"", worker, StringComparison.Ordinal);
+        Assert.Contains("\"--silent\"", worker, StringComparison.Ordinal);
+        Assert.Contains("\"--accept-source-agreements\"", worker, StringComparison.Ordinal);
+        Assert.Contains("\"--accept-package-agreements\"", worker, StringComparison.Ordinal);
+        Assert.Contains("\"--disable-interactivity\"", worker, StringComparison.Ordinal);
+        Assert.DoesNotContain("msix", worker, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("--force", worker, StringComparison.OrdinalIgnoreCase);
+
+        var dotnetIndex = orchestration.IndexOf("\"DotNet10\"", StringComparison.Ordinal);
+        var nodeIndex = orchestration.IndexOf("\"NodeLts\"", StringComparison.Ordinal);
+        var sdkIndex = orchestration.IndexOf("\"WindowsSdk26100\"", StringComparison.Ordinal);
+        var webViewIndex = orchestration.IndexOf("\"WebView2\"", StringComparison.Ordinal);
+        Assert.True(dotnetIndex >= 0);
+        Assert.True(nodeIndex > dotnetIndex);
+        Assert.True(sdkIndex > nodeIndex);
+        Assert.True(webViewIndex > sdkIndex);
+
+        var wslIndex = prepare.IndexOf("Invoke-GuestWslVerificationStage", StringComparison.Ordinal);
+        var wingetIndex = prepare.IndexOf("Ensure-GuestWingetAvailable", StringComparison.Ordinal);
+        var gitIndex = prepare.IndexOf("Ensure-GuestGitInstalled", StringComparison.Ordinal);
+        var powerShellIndex = prepare.IndexOf("Ensure-GuestPowerShell7Installed", StringComparison.Ordinal);
+        var prerequisitesIndex = prepare.IndexOf("Ensure-GuestDeveloperPrerequisites", StringComparison.Ordinal);
+        var sourceIndex = prepare.IndexOf("Copy-RepoToGuest", StringComparison.Ordinal);
+        var checkIndex = prepare.IndexOf("Get-GuestSetupDevCheckScriptBlock", StringComparison.Ordinal);
+        Assert.True(wingetIndex > wslIndex);
+        Assert.True(gitIndex > wingetIndex);
+        Assert.True(powerShellIndex > gitIndex);
+        Assert.True(prerequisitesIndex > powerShellIndex);
+        Assert.True(sourceIndex > prerequisitesIndex);
+        Assert.True(checkIndex > sourceIndex);
+
+        Assert.Contains("\"-CheckOnly\"", setupCheck, StringComparison.Ordinal);
+        Assert.Contains("setup-dev.ps1 -CheckOnly", prepare, StringComparison.Ordinal);
+        Assert.DoesNotContain(
+            "& powershell.exe -NoProfile -ExecutionPolicy Bypass -File",
+            prepare,
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void GuestDeveloperPrerequisiteOrchestrationVerifiesRebootAndNeverBlindlyReinstalls()
+    {
+        var controller = ReadScript("Invoke-CleanWindowsHyperV.ps1");
+        var ensure = ExtractPowerShellFunction(
+            controller,
+            "Ensure-GuestDeveloperPrerequisite",
+            "Ensure-GuestDeveloperPrerequisites");
+        var reconnect = ExtractPowerShellFunction(
+            controller,
+            "Wait-ForGuestPackageRebootAndReconnect",
+            "Invoke-GuestDeveloperPrerequisiteWorker");
+
+        Assert.Contains("Get-GuestBootIdentity", ensure, StringComparison.Ordinal);
+        Assert.Contains("Probing guest session after package", ensure, StringComparison.Ordinal);
+        Assert.Contains("Wait-ForGuestPackageRebootAndReconnect", ensure, StringComparison.Ordinal);
+        Assert.Contains("Restart-GuestAndReconnect", ensure, StringComparison.Ordinal);
+        Assert.Contains("-VerifyOnly $true", ensure, StringComparison.Ordinal);
+        Assert.Equal(1, CountOccurrences(ensure, "-VerifyOnly $false"));
+        Assert.Contains("[Int64]$currentBootTicks -gt $PreviousBootTicks", reconnect, StringComparison.Ordinal);
+        Assert.Contains("Assert-OwnedVM", reconnect, StringComparison.Ordinal);
+        Assert.Contains("exact owned VM", reconnect, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("lost its guest session without a verified", ensure, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("DotNet10")]
+    [InlineData("NodeLts")]
+    [InlineData("WindowsSdk26100")]
+    [InlineData("WebView2")]
+    public void GuestDeveloperPrerequisiteAlreadyPresentSkipsInstall(string packageKey)
+    {
+        var result = RunPowerShellCommand(
+            BuildDeveloperPrerequisiteProof(packageKey, "existing", installExitCode: 0));
+
+        AssertPowerShellProofSucceeded(result);
+        using var document = JsonDocument.Parse(result.Stdout);
+        var proof = document.RootElement;
+        Assert.True(string.IsNullOrEmpty(proof.GetProperty("error").GetString()));
+        Assert.True(proof.GetProperty("verified").GetBoolean());
+        Assert.True(proof.GetProperty("alreadyInstalled").GetBoolean());
+        Assert.DoesNotContain(
+            "Install:",
+            proof.GetProperty("calls").GetString(),
+            StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("DotNet10", "Microsoft.DotNet.SDK.10")]
+    [InlineData("NodeLts", "OpenJS.NodeJS.LTS")]
+    [InlineData("WindowsSdk26100", "Microsoft.WindowsSDK.10.0.26100")]
+    [InlineData("WebView2", "Microsoft.EdgeWebView2Runtime")]
+    public void GuestDeveloperPrerequisiteInstallsAndVerifiesOneExactPackage(
+        string packageKey,
+        string packageId)
+    {
+        var result = RunPowerShellCommand(
+            BuildDeveloperPrerequisiteProof(packageKey, "install", installExitCode: 0));
+
+        AssertPowerShellProofSucceeded(result);
+        using var document = JsonDocument.Parse(result.Stdout);
+        var proof = document.RootElement;
+        Assert.True(string.IsNullOrEmpty(proof.GetProperty("error").GetString()));
+        Assert.True(proof.GetProperty("verified").GetBoolean());
+        Assert.False(proof.GetProperty("alreadyInstalled").GetBoolean());
+        Assert.Equal(1, CountOccurrences(
+            proof.GetProperty("calls").GetString() ?? string.Empty,
+            "Install:"));
+        var arguments = proof.GetProperty("installArguments").GetString() ?? string.Empty;
+        Assert.Contains($"--id|{packageId}|-e|--version", arguments, StringComparison.Ordinal);
+        Assert.Contains("--scope|machine|--source|winget|--silent", arguments, StringComparison.Ordinal);
+        Assert.DoesNotContain("msix", arguments, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Theory]
+    [InlineData("DotNet10", "Microsoft.DotNet.SDK.10")]
+    [InlineData("NodeLts", "OpenJS.NodeJS.LTS")]
+    [InlineData("WindowsSdk26100", "Microsoft.WindowsSDK.10.0.26100")]
+    [InlineData("WebView2", "Microsoft.EdgeWebView2Runtime")]
+    public void GuestDeveloperPrerequisiteFailureHasPackageSpecificBoundedDiagnostics(
+        string packageKey,
+        string packageId)
+    {
+        var result = RunPowerShellCommand(
+            BuildDeveloperPrerequisiteProof(packageKey, "failure", installExitCode: 23));
+
+        AssertPowerShellProofSucceeded(result);
+        using var document = JsonDocument.Parse(result.Stdout);
+        var proof = document.RootElement;
+        var error = proof.GetProperty("error").GetString() ?? string.Empty;
+        Assert.Contains(packageKey, error, StringComparison.Ordinal);
+        Assert.Contains(packageId, error, StringComparison.Ordinal);
+        Assert.Contains("exit code 23 (0x00000017)", error, StringComparison.Ordinal);
+        Assert.Contains("stdout='installer output'", error, StringComparison.Ordinal);
+        Assert.Contains("stderr='installer error'", error, StringComparison.Ordinal);
+        Assert.Equal(1, CountOccurrences(
+            proof.GetProperty("calls").GetString() ?? string.Empty,
+            "Install:"));
+    }
+
+    [Theory]
+    [InlineData(3010, false)]
+    [InlineData(-1978334967, false)]
+    [InlineData(1641, true)]
+    [InlineData(-1978334965, true)]
+    public void GuestDeveloperPrerequisiteRebootResultDefersVerificationWithoutDuplicateInstall(
+        int exitCode,
+        bool rebootInitiated)
+    {
+        var result = RunPowerShellCommand(
+            BuildDeveloperPrerequisiteProof(
+                "WindowsSdk26100",
+                "reboot",
+                installExitCode: exitCode));
+
+        AssertPowerShellProofSucceeded(result);
+        using var document = JsonDocument.Parse(result.Stdout);
+        var proof = document.RootElement;
+        Assert.True(string.IsNullOrEmpty(proof.GetProperty("error").GetString()));
+        Assert.True(proof.GetProperty("needsRestart").GetBoolean());
+        Assert.False(proof.GetProperty("verified").GetBoolean());
+        Assert.Equal(rebootInitiated, proof.GetProperty("rebootInitiated").GetBoolean());
+        Assert.Equal(exitCode, proof.GetProperty("installExitCode").GetInt32());
+        Assert.Equal(1, CountOccurrences(
+            proof.GetProperty("calls").GetString() ?? string.Empty,
+            "Install:"));
+    }
+
+    [Fact]
+    public void GuestSetupDevCheckInvokesCheckOnlyThroughBoundedNativeCapture()
+    {
+        var guestRoot = Path.Combine(Path.GetTempPath(), $"openclaw-setup-check-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(Path.Combine(guestRoot, "scripts"));
+        File.WriteAllText(
+            Path.Combine(guestRoot, "scripts", "setup-dev.ps1"),
+            "throw 'test should use mocked native process'");
+        try
+        {
+            var result = RunPowerShellCommand(BuildSetupDevCheckProof(guestRoot));
+
+            AssertPowerShellProofSucceeded(result);
+            using var document = JsonDocument.Parse(result.Stdout);
+            var proof = document.RootElement;
+            Assert.True(string.IsNullOrEmpty(proof.GetProperty("error").GetString()));
+            Assert.True(proof.GetProperty("checkOnly").GetBoolean());
+            var arguments = proof.GetProperty("arguments").GetString() ?? string.Empty;
+            Assert.Contains("-File", arguments, StringComparison.Ordinal);
+            Assert.Contains("-CheckOnly", arguments, StringComparison.Ordinal);
+            Assert.DoesNotContain("-RunValidation", arguments, StringComparison.Ordinal);
+            Assert.True(proof.GetProperty("waitWasBounded").GetBoolean());
+        }
+        finally
+        {
+            DeleteTestDirectory(guestRoot);
+        }
+    }
+
     [Theory]
     [InlineData("retry", "accepted|3")]
     [InlineData("timeout", "bounded retry")]
@@ -5855,6 +6085,149 @@ public sealed class CleanWindowsRunnerScriptTests
             "  calls = $script:calls -join ','\n",
             "  installArguments = $script:installArguments\n",
             "  error = $errorMessage\n",
+            "} | ConvertTo-Json -Compress))\n");
+    }
+
+    private static string BuildDeveloperPrerequisiteProof(
+        string packageKey,
+        string scenario,
+        int installExitCode)
+    {
+        var controller = ReadScript("Invoke-CleanWindowsHyperV.ps1");
+        var worker = ExtractPowerShellFunction(
+            controller,
+            "Get-GuestDeveloperPrerequisiteScriptBlock",
+            "Get-GuestBootIdentity");
+        return string.Concat(
+            "$ErrorActionPreference = 'Stop'\n",
+            "$script:installed = ",
+            scenario == "existing" ? "$true" : "$false",
+            "\n",
+            "$script:calls = [System.Collections.Generic.List[string]]::new()\n",
+            "$script:installArguments = ''\n",
+            "$script:nextId = 300\n",
+            "function global:Get-Command {\n",
+            " param($Name, $CommandType, $ErrorAction)\n",
+            " if ($Name -eq 'winget.exe') { return [pscustomobject]@{ Source = 'C:\\WindowsApps\\winget.exe' } }\n",
+            " if (-not $script:installed) { return $null }\n",
+            " switch ($Name) {\n",
+            "  'dotnet.exe' { return [pscustomobject]@{ Source = 'C:\\Program Files\\dotnet\\dotnet.exe' } }\n",
+            "  'node.exe' { return [pscustomobject]@{ Source = 'C:\\Program Files\\nodejs\\node.exe' } }\n",
+            "  'npm.cmd' { return [pscustomobject]@{ Source = 'C:\\Program Files\\nodejs\\npm.cmd' } }\n",
+            "  default { return $null }\n",
+            " }\n",
+            "}\n",
+            "function global:Test-Path {\n",
+            " param($LiteralPath, $PathType)\n",
+            " if ([string]$LiteralPath -like '*Windows Kits\\10\\Include') { return $script:installed }\n",
+            " if ([string]$LiteralPath -like 'HKLM:*' -or [string]$LiteralPath -like 'HKCU:*') { return $script:installed }\n",
+            " if ($PSBoundParameters.ContainsKey('PathType')) {\n",
+            "  return Microsoft.PowerShell.Management\\Test-Path -LiteralPath $LiteralPath -PathType $PathType\n",
+            " }\n",
+            " return Microsoft.PowerShell.Management\\Test-Path -LiteralPath $LiteralPath\n",
+            "}\n",
+            "function global:Get-ChildItem {\n",
+            " param($LiteralPath, [switch]$Directory, $ErrorAction)\n",
+            " if ([string]$LiteralPath -like '*Windows Kits\\10\\Include') {\n",
+            "  if ($script:installed) { return [pscustomobject]@{ Name = '10.0.26100.0' } }\n",
+            "  return\n",
+            " }\n",
+            " return Microsoft.PowerShell.Management\\Get-ChildItem @PSBoundParameters\n",
+            "}\n",
+            "function global:Get-ItemProperty {\n",
+            " param($LiteralPath, $ErrorAction)\n",
+            " if ($script:installed) { return [pscustomobject]@{ pv = '150.0.4078.83' } }\n",
+            " return $null\n",
+            "}\n",
+            "function global:Start-Process {\n",
+            " param($FilePath, $ArgumentList, $RedirectStandardOutput, $RedirectStandardError, ",
+            "[switch]$PassThru, $WindowStyle, $ErrorAction)\n",
+            " $argumentsText = @($ArgumentList) -join '|'\n",
+            " $operation = if ($argumentsText -match '(^|\\|)install(\\||$)') { 'Install' } ",
+            "elseif ($FilePath -like '*dotnet.exe') { 'DotNetListSdks' } ",
+            "elseif ($FilePath -like '*node.exe') { 'NodeVersion' } else { 'NpmVersion' }\n",
+            " [void]$script:calls.Add(\"$operation`:$argumentsText\")\n",
+            " $exitCode = 0\n",
+            " $stdout = ''\n",
+            " $stderr = ''\n",
+            " if ($operation -eq 'Install') {\n",
+            "  $script:installArguments = $argumentsText\n",
+            "  $exitCode = ",
+            installExitCode.ToString(System.Globalization.CultureInfo.InvariantCulture),
+            "\n",
+            "  $stdout = 'installer output'\n",
+            "  $stderr = if (",
+            PsQuote(scenario),
+            " -eq 'failure') { 'installer error' } else { '' }\n",
+            "  if (",
+            PsQuote(scenario),
+            " -eq 'install') { $script:installed = $true }\n",
+            " } elseif ($operation -eq 'DotNetListSdks') {\n",
+            "  $stdout = '10.0.302 [C:\\Program Files\\dotnet\\sdk]'\n",
+            " } elseif ($operation -eq 'NodeVersion') {\n",
+            "  $stdout = 'v24.18.0'\n",
+            " } else { $stdout = '11.5.0' }\n",
+            " Microsoft.PowerShell.Management\\Set-Content -LiteralPath $RedirectStandardOutput -Value $stdout -NoNewline\n",
+            " Microsoft.PowerShell.Management\\Set-Content -LiteralPath $RedirectStandardError -Value $stderr -NoNewline\n",
+            " $script:nextId++\n",
+            " $process = [pscustomobject]@{ Id = $script:nextId; ExitCode = $exitCode; Handle = 1 }\n",
+            " $process | Add-Member -MemberType ScriptMethod -Name WaitForExit ",
+            "-Value { param([int]$Milliseconds) ",
+            "if ($PSBoundParameters.ContainsKey('Milliseconds')) { return $true } }\n",
+            " return $process\n",
+            "}\n",
+            worker,
+            "\n$errorMessage = $null\n",
+            "$proof = $null\n",
+            "try { $proof = & (Get-GuestDeveloperPrerequisiteScriptBlock) ",
+            PsQuote(packageKey),
+            " $false 60 } catch { $errorMessage = $_.Exception.Message }\n",
+            "[Console]::Out.Write(([pscustomobject][ordered]@{\n",
+            " error = $errorMessage\n",
+            " verified = if ($proof) { [bool]$proof.verified } else { $false }\n",
+            " alreadyInstalled = if ($proof) { [bool]$proof.alreadyInstalled } else { $false }\n",
+            " needsRestart = if ($proof) { [bool]$proof.needsRestart } else { $false }\n",
+            " rebootInitiated = if ($proof) { [bool]$proof.rebootInitiated } else { $false }\n",
+            " installExitCode = if ($proof) { $proof.installExitCode } else { $null }\n",
+            " calls = $script:calls -join ','\n",
+            " installArguments = $script:installArguments\n",
+            "} | ConvertTo-Json -Compress))\n");
+    }
+
+    private static string BuildSetupDevCheckProof(string guestRoot)
+    {
+        var controller = ReadScript("Invoke-CleanWindowsHyperV.ps1");
+        var worker = ExtractPowerShellFunction(
+            controller,
+            "Get-GuestSetupDevCheckScriptBlock",
+            "Prepare-GuestPrerequisites");
+        return string.Concat(
+            "$ErrorActionPreference = 'Stop'\n",
+            "$script:arguments = ''\n",
+            "$script:waitWasBounded = $false\n",
+            "function global:Start-Process {\n",
+            " param($FilePath, $ArgumentList, $WorkingDirectory, $RedirectStandardOutput, ",
+            "$RedirectStandardError, [switch]$PassThru, $WindowStyle, $ErrorAction)\n",
+            " $script:arguments = @($ArgumentList) -join '|'\n",
+            " Microsoft.PowerShell.Management\\Set-Content -LiteralPath $RedirectStandardOutput -Value 'check output' -NoNewline\n",
+            " Microsoft.PowerShell.Management\\Set-Content -LiteralPath $RedirectStandardError -Value '' -NoNewline\n",
+            " $process = [pscustomobject]@{ Id = 901; ExitCode = 0; Handle = 1 }\n",
+            " $process | Add-Member -MemberType ScriptMethod -Name WaitForExit ",
+            "-Value { param([int]$Milliseconds) ",
+            "if ($PSBoundParameters.ContainsKey('Milliseconds')) { $script:waitWasBounded = $true; return $true } }\n",
+            " return $process\n",
+            "}\n",
+            worker,
+            "\n$errorMessage = $null\n",
+            "$proof = $null\n",
+            "try { $proof = & (Get-GuestSetupDevCheckScriptBlock) ",
+            PsQuote(guestRoot),
+            " 60 } catch { $errorMessage = $_.Exception.Message }\n",
+            "[Console]::Out.Write(([pscustomobject][ordered]@{\n",
+            " error = $errorMessage\n",
+            " checkOnly = if ($proof) { [bool]$proof.checkOnly } else { $false }\n",
+            " arguments = $script:arguments\n",
+            " waitWasBounded = $script:waitWasBounded\n",
             "} | ConvertTo-Json -Compress))\n");
     }
 
