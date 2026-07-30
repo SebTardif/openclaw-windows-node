@@ -602,9 +602,18 @@ cleanup is mandatory.
 
 The controller transfers one validated clean-HEAD source archive with
 PowerShell Direct `Copy-Item -ToSession`, runs the typed `Installed` validation
-lane by default, and retrieves artifacts with `Copy-Item -FromSession`. The VM
-is stopped and restored to `openclaw-prerequisites` in a `finally` path on
-success or failure.
+lane by default, and never recursively copies the remote artifact directory.
+Before checkpoint restore, the guest validates the exact lane root under
+`GuestRoot\artifacts`, rejects reparse points and unsafe relative paths, bounds
+file count and expanded size, and creates a nonce ZIP with size and SHA-256
+proof. The controller copies that one file with `Copy-Item -FromSession`,
+rechecks size/hash and every ZIP entry, extracts under `HostArtifactRoot`, and
+requires lane-specific phase/log artifacts. Guest and host archive copies are
+removed in `finally`. If the validation session broke, retrieval reconnects
+boundedly only to the exact owner-bound Running VM. Primary validation and
+artifact failures are both retained. A failed validation also reports a
+bounded sanitized phase-status snapshot and log tail when available. Only
+after retrieval does the VM stop and restore to `openclaw-prerequisites`.
 
 After `scripts\validate-inno-upgrade-smoke.ps1` is integrated, run the typed
 upgrade lane with an exact official release tag and x64 installer SHA-256:

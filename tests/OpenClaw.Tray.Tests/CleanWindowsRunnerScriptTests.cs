@@ -2755,7 +2755,22 @@ public sealed class CleanWindowsRunnerScriptTests
             "Copy-Item -LiteralPath $sourcePath -Destination $guestRepoRoot",
             script,
             StringComparison.Ordinal);
-        Assert.Contains("Copy-Item -Path $guestArtifacts -Destination $hostArtifacts -FromSession $Session", script);
+        Assert.DoesNotContain(
+            "Copy-Item -Path $guestArtifacts -Destination $hostArtifacts -FromSession $Session -Recurse",
+            script,
+            StringComparison.Ordinal);
+        Assert.Contains("-LiteralPath $guestArchivePath", script, StringComparison.Ordinal);
+        Assert.Contains("-FromSession $Session", script, StringComparison.Ordinal);
+        Assert.Contains("Get-SmokeArtifactPackageScriptBlock", script, StringComparison.Ordinal);
+        Assert.Contains("Expand-VerifiedSmokeArtifactArchive", script, StringComparison.Ordinal);
+        Assert.Contains("Smoke artifact archive SHA256 mismatch.", script, StringComparison.Ordinal);
+        Assert.Contains("Artifact retrieval also failed:", script, StringComparison.Ordinal);
+        Assert.Contains("Removing guest smoke artifact archive", script, StringComparison.Ordinal);
+        Assert.Contains("Remove-Item -LiteralPath $hostArchivePath", script, StringComparison.Ordinal);
+        Assert.Contains("finally {", ExtractPowerShellFunction(
+            script,
+            "Receive-SmokeArtifactArchive",
+            "Get-EffectiveSwitchName"), StringComparison.Ordinal);
         Assert.Contains("Wait-Job -Job $job -Timeout $TimeoutSec", script);
         Assert.Contains("LastBootUpTime.ToUniversalTime().Ticks", script);
         Assert.Contains("if ([Int64]$currentBootTicks -gt [Int64]$previousBootTicks)", script);
@@ -2784,6 +2799,147 @@ public sealed class CleanWindowsRunnerScriptTests
         Assert.Contains("cleanupCompleted", script);
         Assert.Contains("finally {", script);
         Assert.Contains("Restore-OwnedCheckpoint -ResolvedVhdPath $ResolvedVhdPath", script);
+    }
+
+    [Theory]
+    [InlineData("success", null)]
+    [InlineData("hash-mismatch", "SHA256 mismatch")]
+    [InlineData("traversal", "not a safe Windows relative path")]
+    [InlineData("missing-required", "missing 'installed-smoke.log'")]
+    public void HyperVController_SmokeArtifactArchiveValidatesAndExtractsFailClosed(
+        string scenario,
+        string? expectedError)
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"openclaw-smoke-archive-{Guid.NewGuid():N}");
+        var archivePath = Path.Combine(root, "artifacts.zip");
+        var destination = Path.Combine(root, "extracted");
+        Directory.CreateDirectory(root);
+        try
+        {
+            using (var archive = ZipFile.Open(archivePath, ZipArchiveMode.Create))
+            {
+                if (scenario == "traversal")
+                {
+                    var traversal = archive.CreateEntry("../escape.txt");
+                    using var writer = new StreamWriter(traversal.Open());
+                    writer.Write("escape");
+                }
+                else
+                {
+                    WriteZipEntry(
+                        archive,
+                        "phase-status.json",
+                        System.Text.Encoding.UTF8.GetBytes("{\"exitCode\":1}"));
+                    if (scenario != "missing-required")
+                    {
+                        WriteZipEntry(
+                            archive,
+                            "installed-smoke.log",
+                            System.Text.Encoding.UTF8.GetBytes("smoke diagnostics"));
+                    }
+                }
+            }
+            var fileInfo = new FileInfo(archivePath);
+            using var readArchive = ZipFile.OpenRead(archivePath);
+            var fileEntries = readArchive.Entries.Where(
+                entry => !entry.FullName.EndsWith("/", StringComparison.Ordinal)).ToArray();
+            var expandedBytes = fileEntries.Sum(entry => entry.Length);
+            var sha256 = Convert.ToHexString(
+                System.Security.Cryptography.SHA256.HashData(File.ReadAllBytes(archivePath)));
+            if (scenario == "hash-mismatch")
+            {
+                sha256 = new string('0', 64);
+            }
+
+            var result = RunPowerShellCommand(BuildSmokeArtifactArchiveValidationProof(
+                archivePath,
+                destination,
+                fileInfo.Length,
+                sha256,
+                fileEntries.Length,
+                expandedBytes));
+
+            AssertPowerShellProofSucceeded(result);
+            using var document = JsonDocument.Parse(result.Stdout);
+            var proof = document.RootElement;
+            var error = proof.GetProperty("error").GetString();
+            if (expectedError is null)
+            {
+                Assert.True(string.IsNullOrEmpty(error), error);
+                Assert.True(File.Exists(Path.Combine(destination, "phase-status.json")));
+                Assert.True(File.Exists(Path.Combine(destination, "installed-smoke.log")));
+                Assert.Equal(fileEntries.Length, proof.GetProperty("fileCount").GetInt32());
+            }
+            else
+            {
+                Assert.Contains(expectedError, error, StringComparison.OrdinalIgnoreCase);
+            }
+        }
+        finally
+        {
+            DeleteTestDirectory(root);
+        }
+    }
+
+    [Fact]
+    public void HyperVController_SmokeArtifactGuestPackageRoundTripsEmptyDirectoryUnderPowerShell5()
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"openclaw-smoke-package-{Guid.NewGuid():N}");
+        var ownedArtifactsRoot = Path.Combine(root, "artifacts");
+        var artifactRoot = Path.Combine(ownedArtifactsRoot, "installed-smoke");
+        var destination = Path.Combine(root, "extracted");
+        Directory.CreateDirectory(Path.Combine(artifactRoot, "empty-e2e"));
+        File.WriteAllText(Path.Combine(artifactRoot, "phase-status.json"), "{\"exitCode\":1}");
+        File.WriteAllText(Path.Combine(artifactRoot, "installed-smoke.log"), "smoke diagnostics");
+        try
+        {
+            var result = RunPowerShellCommand(BuildSmokeArtifactPackageRoundTripProof(
+                artifactRoot,
+                ownedArtifactsRoot,
+                destination));
+
+            AssertPowerShellProofSucceeded(result);
+            using var document = JsonDocument.Parse(result.Stdout);
+            var proof = document.RootElement;
+            Assert.True(string.IsNullOrEmpty(proof.GetProperty("error").GetString()));
+            Assert.Equal(2, proof.GetProperty("fileCount").GetInt32());
+            Assert.True(proof.GetProperty("archiveRemoved").GetBoolean());
+            Assert.True(File.Exists(Path.Combine(destination, "phase-status.json")));
+            Assert.True(File.Exists(Path.Combine(destination, "installed-smoke.log")));
+        }
+        finally
+        {
+            DeleteTestDirectory(root);
+        }
+    }
+
+    [Fact]
+    public void HyperVController_SmokeArtifactRetrievalRunsBeforeRestoreAndPreservesDualFailure()
+    {
+        var controller = ReadScript("Invoke-CleanWindowsHyperV.ps1");
+        var smoke = ExtractPowerShellFunction(
+            controller,
+            "Invoke-SmokeCommand",
+            "Invoke-RestoreCommand");
+        var preparedOperation = ExtractPowerShellFunction(
+            controller,
+            "Invoke-PreparedGuestOperation",
+            "Get-SmokeArtifactPackageScriptBlock");
+
+        var receiveIndex = smoke.IndexOf("Receive-SmokeArtifactArchive", StringComparison.Ordinal);
+        var dualFailureIndex = smoke.IndexOf("Artifact retrieval also failed:", StringComparison.Ordinal);
+        Assert.True(receiveIndex >= 0);
+        Assert.True(dualFailureIndex > receiveIndex);
+        Assert.Contains("Get-SmokeArtifactRetrievalSession", smoke, StringComparison.Ordinal);
+        Assert.Contains("Phase status:", smoke, StringComparison.Ordinal);
+        Assert.Contains("Log tail:", smoke, StringComparison.Ordinal);
+        Assert.Contains("Get-Content -LiteralPath $logPath -Tail 40", smoke, StringComparison.Ordinal);
+        Assert.DoesNotContain("-FromSession $Session -Recurse", smoke, StringComparison.Ordinal);
+        Assert.Contains("finally {", preparedOperation, StringComparison.Ordinal);
+        Assert.Contains(
+            "Restore-OwnedCheckpoint -ResolvedVhdPath $ResolvedVhdPath",
+            preparedOperation,
+            StringComparison.Ordinal);
     }
 
     [Fact]
@@ -6618,6 +6774,96 @@ public sealed class CleanWindowsRunnerScriptTests
             " commandRequests = $script:commandRequests -join ','\n",
             " processPaths = $script:processPaths -join ','\n",
             " remainingCaptureDirectories = $remaining\n",
+            "} | ConvertTo-Json -Compress))\n");
+    }
+
+    private static string BuildSmokeArtifactArchiveValidationProof(
+        string archivePath,
+        string destination,
+        long archiveSize,
+        string sha256,
+        int fileCount,
+        long expandedBytes)
+    {
+        var controller = ReadScript("Invoke-CleanWindowsHyperV.ps1");
+        var validationFunctions = ExtractPowerShellFunction(
+            controller,
+            "Get-SmokeArtifactSha256",
+            "Resolve-HostArtifactPath");
+        return string.Concat(
+            "$ErrorActionPreference = 'Stop'\n",
+            "$script:SmokeArtifactArchiveMaximumBytes = 536870912\n",
+            "$script:SmokeArtifactExpandedMaximumBytes = 1073741824\n",
+            "$script:SmokeArtifactMaximumFiles = 20000\n",
+            validationFunctions,
+            "\n$errorMessage = $null\n",
+            "$result = $null\n",
+            "$packageProof = [pscustomobject]@{\n",
+            " archiveSize = [Int64]", archiveSize.ToString(System.Globalization.CultureInfo.InvariantCulture), "\n",
+            " sha256 = ", PsQuote(sha256), "\n",
+            " fileCount = ", fileCount.ToString(System.Globalization.CultureInfo.InvariantCulture), "\n",
+            " expandedBytes = [Int64]", expandedBytes.ToString(System.Globalization.CultureInfo.InvariantCulture), "\n",
+            "}\n",
+            "try {\n",
+            " $result = Expand-VerifiedSmokeArtifactArchive ",
+            "-ArchivePath ", PsQuote(archivePath), " ",
+            "-DestinationRoot ", PsQuote(destination), " ",
+            "-PackageProof $packageProof -Lane 'Installed'\n",
+            "} catch { $errorMessage = $_.Exception.Message }\n",
+            "[Console]::Out.Write(([pscustomobject][ordered]@{\n",
+            " error = $errorMessage\n",
+            " fileCount = if ($result) { [int]$result.fileCount } else { 0 }\n",
+            " expandedBytes = if ($result) { [Int64]$result.expandedBytes } else { 0 }\n",
+            "} | ConvertTo-Json -Compress))\n");
+    }
+
+    private static string BuildSmokeArtifactPackageRoundTripProof(
+        string artifactRoot,
+        string ownedArtifactsRoot,
+        string destination)
+    {
+        var controller = ReadScript("Invoke-CleanWindowsHyperV.ps1");
+        var packageFunction = ExtractPowerShellFunction(
+            controller,
+            "Get-SmokeArtifactPackageScriptBlock",
+            "Get-SmokeArtifactSha256");
+        var validationFunctions = ExtractPowerShellFunction(
+            controller,
+            "Get-SmokeArtifactSha256",
+            "Resolve-HostArtifactPath");
+        return string.Concat(
+            "$ErrorActionPreference = 'Stop'\n",
+            "$script:SmokeArtifactArchiveMaximumBytes = 536870912\n",
+            "$script:SmokeArtifactExpandedMaximumBytes = 1073741824\n",
+            "$script:SmokeArtifactMaximumFiles = 20000\n",
+            packageFunction,
+            "\n",
+            validationFunctions,
+            "\n$errorMessage = $null\n",
+            "$result = $null\n",
+            "$archivePath = $null\n",
+            "try {\n",
+            " $packageProof = & (Get-SmokeArtifactPackageScriptBlock) ",
+            "-ArtifactRoot ", PsQuote(artifactRoot), " ",
+            "-OwnedArtifactsRoot ", PsQuote(ownedArtifactsRoot), " ",
+            "-MaximumArchiveBytes $script:SmokeArtifactArchiveMaximumBytes ",
+            "-MaximumExpandedBytes $script:SmokeArtifactExpandedMaximumBytes ",
+            "-MaximumFiles $script:SmokeArtifactMaximumFiles\n",
+            " $archivePath = [string]$packageProof.archivePath\n",
+            " $result = Expand-VerifiedSmokeArtifactArchive ",
+            "-ArchivePath $archivePath ",
+            "-DestinationRoot ", PsQuote(destination), " ",
+            "-PackageProof $packageProof -Lane 'Installed'\n",
+            "} catch { $errorMessage = $_.Exception.Message }\n",
+            "finally {\n",
+            " if ($archivePath -and (Test-Path -LiteralPath $archivePath)) {\n",
+            "  Remove-Item -LiteralPath $archivePath -Force\n",
+            " }\n",
+            "}\n",
+            "[Console]::Out.Write(([pscustomobject][ordered]@{\n",
+            " error = $errorMessage\n",
+            " fileCount = if ($result) { [int]$result.fileCount } else { 0 }\n",
+            " archiveRemoved = -not $archivePath -or -not (Test-Path -LiteralPath $archivePath)\n",
             "} | ConvertTo-Json -Compress))\n");
     }
 

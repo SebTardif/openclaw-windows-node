@@ -377,6 +377,16 @@ through bounded redirected native capture. Never use ambiguous `npm`, because
 PowerShell Direct execution policy can select `npm.ps1`. Require exit zero and
 the expected version shape, including semantic version output from `npm.cmd`.
 
+Clean-runner smoke artifact retrieval must package the exact guest lane
+directory into one bounded nonce ZIP before restoring the prepared checkpoint.
+Guest and host both reject unsafe paths, traversal, reparse/archive link types,
+count/size/hash mismatches, and missing lane-specific phase/log files. Never
+use recursive `Copy-Item -FromSession` on the directory. If the validation
+session broke, reconnect only to the exact owner-bound Running VM and retry
+packaging boundedly without suppressing the primary failure. Always remove
+guest and host archive copies, and report primary plus retrieval failures
+together.
+
 Fresh unattended Hyper-V `Create` requires `-GenerateCredential`, verifies the
 official ISO SHA256, builds a separate answer ISO with Windows IMAPI2, and
 mounts and validates that ISO before any VM or VHD creation. It then waits a

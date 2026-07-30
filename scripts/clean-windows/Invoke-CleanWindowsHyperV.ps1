@@ -138,6 +138,9 @@ $script:SourceArchiveMaximumBytes = 268435456
 $script:SourceArchiveMaximumExpandedBytes = 536870912
 $script:SourceArchiveMaximumTrackedFiles = 20000
 $script:SourceProvenanceFileName = "openclaw-source-provenance.json"
+$script:SmokeArtifactArchiveMaximumBytes = 536870912
+$script:SmokeArtifactExpandedMaximumBytes = 1073741824
+$script:SmokeArtifactMaximumFiles = 20000
 
 Import-Module (Join-Path $PSScriptRoot "CleanWindowsUnattend.psm1") -Force
 
@@ -8497,6 +8500,326 @@ function Invoke-PreparedGuestOperation {
     }
 }
 
+function Get-SmokeArtifactPackageScriptBlock {
+    return {
+        param(
+            [Parameter(Mandatory = $true)]
+            [string]$ArtifactRoot,
+            [Parameter(Mandatory = $true)]
+            [string]$OwnedArtifactsRoot,
+            [Parameter(Mandatory = $true)]
+            [Int64]$MaximumArchiveBytes,
+            [Parameter(Mandatory = $true)]
+            [Int64]$MaximumExpandedBytes,
+            [Parameter(Mandatory = $true)]
+            [int]$MaximumFiles
+        )
+
+        Set-StrictMode -Version 2.0
+        $ErrorActionPreference = "Stop"
+        Add-Type -AssemblyName System.IO.Compression.FileSystem
+
+        function Assert-OpenClawSmokeArtifactRelativePath {
+            param([Parameter(Mandatory = $true)][string]$Path)
+
+            if ([string]::IsNullOrWhiteSpace($Path) -or $Path.IndexOf([char]0) -ge 0) {
+                throw "Smoke artifact path is empty or contains a null character."
+            }
+            $normalized = $Path.Replace("\", "/")
+            if (
+                $normalized.StartsWith("/", [StringComparison]::Ordinal) -or
+                $normalized.StartsWith("//", [StringComparison]::Ordinal) -or
+                $normalized -match '^[A-Za-z]:' -or
+                [IO.Path]::IsPathRooted($normalized)
+            ) {
+                throw "Smoke artifact path '$Path' is absolute."
+            }
+            $trimmed = $normalized.TrimEnd("/")
+            foreach ($segment in @($trimmed.Split("/"))) {
+                if (
+                    [string]::IsNullOrWhiteSpace($segment) -or
+                    $segment -ceq "." -or
+                    $segment -ceq ".." -or
+                    $segment.IndexOf(":") -ge 0 -or
+                    $segment -match '[<>:"|?*\x00-\x1F]' -or
+                    $segment.EndsWith(".", [StringComparison]::Ordinal) -or
+                    $segment.EndsWith(" ", [StringComparison]::Ordinal)
+                ) {
+                    throw "Smoke artifact path '$Path' is not a safe Windows relative path."
+                }
+                $deviceName = ($segment.Split(".")[0]).ToUpperInvariant()
+                if ($deviceName -match '^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])$') {
+                    throw "Smoke artifact path '$Path' contains reserved Windows name '$segment'."
+                }
+            }
+            return $trimmed
+        }
+
+        function Get-OpenClawSmokeArtifactSha256 {
+            param([Parameter(Mandatory = $true)][string]$Path)
+
+            $stream = [IO.File]::OpenRead($Path)
+            $algorithm = [Security.Cryptography.SHA256]::Create()
+            try {
+                return (($algorithm.ComputeHash($stream) |
+                    ForEach-Object { $_.ToString("X2") }) -join "")
+            } finally {
+                $algorithm.Dispose()
+                $stream.Dispose()
+            }
+        }
+
+        $canonicalRoot = [IO.Path]::GetFullPath($ArtifactRoot).TrimEnd("\")
+        $canonicalOwnedArtifactsRoot = [IO.Path]::GetFullPath($OwnedArtifactsRoot).TrimEnd("\")
+        if (-not [string]::Equals(
+            (Split-Path -Parent $canonicalRoot),
+            $canonicalOwnedArtifactsRoot,
+            [StringComparison]::OrdinalIgnoreCase)) {
+            throw "Smoke artifact root does not match the exact owned lane path."
+        }
+        if (@("installed-smoke", "upgrade-smoke") -cnotcontains (Split-Path -Leaf $canonicalRoot)) {
+            throw "Smoke artifact root has an unexpected lane directory name."
+        }
+        if (-not (Test-Path -LiteralPath $canonicalRoot -PathType Container)) {
+            throw "Smoke artifact root does not exist."
+        }
+        $rootItem = Get-Item -LiteralPath $canonicalRoot -Force -ErrorAction Stop
+        if (($rootItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw "Smoke artifact root is a reparse point."
+        }
+
+        $items = @(Get-ChildItem -LiteralPath $canonicalRoot -Recurse -Force -ErrorAction Stop)
+        $reparseItems = @(
+            $items | Where-Object {
+                ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0
+            })
+        if ($reparseItems.Count -ne 0) {
+            throw "Smoke artifacts contain $($reparseItems.Count) reparse points."
+        }
+        $files = @($items | Where-Object { -not $_.PSIsContainer })
+        if ($files.Count -le 0 -or $files.Count -gt $MaximumFiles) {
+            throw "Smoke artifact file count '$($files.Count)' is outside the bounded range."
+        }
+        [Int64]$expandedBytes = 0
+        foreach ($file in $files) {
+            $relativePath = $file.FullName.Substring($canonicalRoot.Length).TrimStart("\")
+            [void](Assert-OpenClawSmokeArtifactRelativePath -Path $relativePath)
+            $expandedBytes += [Int64]$file.Length
+            if ($expandedBytes -gt $MaximumExpandedBytes) {
+                throw "Smoke artifact expanded size exceeds the bounded maximum."
+            }
+        }
+
+        $archiveName = ".openclaw-smoke-artifacts-{0}.zip" -f [Guid]::NewGuid().ToString("N")
+        $archivePath = Join-Path (Split-Path -Parent $canonicalRoot) $archiveName
+        if (Test-Path -LiteralPath $archivePath) {
+            throw "Nonce smoke artifact archive path already exists."
+        }
+        try {
+            [IO.Compression.ZipFile]::CreateFromDirectory(
+                $canonicalRoot,
+                $archivePath,
+                [IO.Compression.CompressionLevel]::Optimal,
+                $false)
+            $archiveItem = Get-Item -LiteralPath $archivePath -Force -ErrorAction Stop
+            if (
+                [Int64]$archiveItem.Length -le 0 -or
+                [Int64]$archiveItem.Length -gt $MaximumArchiveBytes
+            ) {
+                throw "Smoke artifact archive size is outside the bounded range."
+            }
+            return [pscustomobject][ordered]@{
+                stage = "smoke-artifact-package"
+                archivePath = $archivePath
+                archiveName = $archiveName
+                archiveSize = [Int64]$archiveItem.Length
+                sha256 = Get-OpenClawSmokeArtifactSha256 -Path $archivePath
+                fileCount = [int]$files.Count
+                expandedBytes = $expandedBytes
+            }
+        } catch {
+            if (Test-Path -LiteralPath $archivePath) {
+                Remove-Item -LiteralPath $archivePath -Force -ErrorAction SilentlyContinue
+            }
+            throw
+        }
+    }
+}
+
+function Get-SmokeArtifactSha256 {
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    $stream = [IO.File]::OpenRead($Path)
+    $algorithm = [Security.Cryptography.SHA256]::Create()
+    try {
+        return (($algorithm.ComputeHash($stream) |
+            ForEach-Object { $_.ToString("X2") }) -join "")
+    } finally {
+        $algorithm.Dispose()
+        $stream.Dispose()
+    }
+}
+
+function Assert-SmokeArtifactRelativePath {
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    if ([string]::IsNullOrWhiteSpace($Path) -or $Path.IndexOf([char]0) -ge 0) {
+        throw "Smoke artifact archive path is empty or contains a null character."
+    }
+    $normalized = $Path.Replace("\", "/")
+    if (
+        $normalized.StartsWith("/", [StringComparison]::Ordinal) -or
+        $normalized.StartsWith("//", [StringComparison]::Ordinal) -or
+        $normalized -match '^[A-Za-z]:' -or
+        [IO.Path]::IsPathRooted($normalized)
+    ) {
+        throw "Smoke artifact archive path '$Path' is absolute."
+    }
+    $trimmed = $normalized.TrimEnd("/")
+    foreach ($segment in @($trimmed.Split("/"))) {
+        if (
+            [string]::IsNullOrWhiteSpace($segment) -or
+            $segment -ceq "." -or
+            $segment -ceq ".." -or
+            $segment.IndexOf(":") -ge 0 -or
+            $segment -match '[<>:"|?*\x00-\x1F]' -or
+            $segment.EndsWith(".", [StringComparison]::Ordinal) -or
+            $segment.EndsWith(" ", [StringComparison]::Ordinal)
+        ) {
+            throw "Smoke artifact archive path '$Path' is not a safe Windows relative path."
+        }
+        $deviceName = ($segment.Split(".")[0]).ToUpperInvariant()
+        if ($deviceName -match '^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])$') {
+            throw "Smoke artifact archive path '$Path' contains reserved Windows name '$segment'."
+        }
+    }
+    return $trimmed
+}
+
+function Expand-VerifiedSmokeArtifactArchive {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$ArchivePath,
+        [Parameter(Mandatory = $true)]
+        [string]$DestinationRoot,
+        [Parameter(Mandatory = $true)]
+        [object]$PackageProof,
+        [Parameter(Mandatory = $true)]
+        [ValidateSet("Installed", "Upgrade")]
+        [string]$Lane
+    )
+
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    $archiveItem = Get-Item -LiteralPath $ArchivePath -Force -ErrorAction Stop
+    if (
+        ($archiveItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or
+        [Int64]$archiveItem.Length -ne [Int64]$PackageProof.archiveSize -or
+        [Int64]$archiveItem.Length -le 0 -or
+        [Int64]$archiveItem.Length -gt $script:SmokeArtifactArchiveMaximumBytes
+    ) {
+        throw "Smoke artifact archive size or file type does not match guest proof."
+    }
+    $actualSha256 = Get-SmokeArtifactSha256 -Path $ArchivePath
+    if (-not [string]::Equals(
+        $actualSha256,
+        [string]$PackageProof.sha256,
+        [StringComparison]::OrdinalIgnoreCase)) {
+        throw "Smoke artifact archive SHA256 mismatch."
+    }
+
+    $seenPaths = New-Object 'Collections.Generic.HashSet[string]' (
+        [StringComparer]::OrdinalIgnoreCase)
+    $archive = [IO.Compression.ZipFile]::OpenRead($ArchivePath)
+    $files = New-Object 'Collections.Generic.List[object]'
+    [Int64]$expandedBytes = 0
+    try {
+        foreach ($entry in $archive.Entries) {
+            $isDirectory = [string]::IsNullOrEmpty($entry.Name)
+            $safePath = Assert-SmokeArtifactRelativePath -Path $entry.FullName
+            if (-not $seenPaths.Add($safePath)) {
+                throw "Smoke artifact archive contains duplicate path '$safePath'."
+            }
+            $attributeBits = [BitConverter]::ToUInt32(
+                [BitConverter]::GetBytes([int]$entry.ExternalAttributes),
+                0)
+            $unixType = [int](($attributeBits -shr 16) -band 0xF000)
+            if ($isDirectory) {
+                if ($unixType -ne 0 -and $unixType -ne 0x4000) {
+                    throw "Smoke artifact directory '$safePath' has an unexpected entry type."
+                }
+                continue
+            }
+            if ($unixType -ne 0 -and $unixType -ne 0x8000) {
+                throw "Smoke artifact file '$safePath' has an unexpected reparse or archive type."
+            }
+            $files.Add([pscustomobject]@{ Entry = $entry; RelativePath = $safePath })
+            if ($files.Count -gt $script:SmokeArtifactMaximumFiles) {
+                throw "Smoke artifact archive file count exceeds the bounded maximum."
+            }
+            $expandedBytes += [Int64]$entry.Length
+            if ($expandedBytes -gt $script:SmokeArtifactExpandedMaximumBytes) {
+                throw "Smoke artifact archive expanded size exceeds the bounded maximum."
+            }
+        }
+        if (
+            $files.Count -ne [int]$PackageProof.fileCount -or
+            $expandedBytes -ne [Int64]$PackageProof.expandedBytes
+        ) {
+            throw "Smoke artifact archive count or expanded size does not match guest proof."
+        }
+
+        $canonicalDestination = [IO.Path]::GetFullPath($DestinationRoot).TrimEnd("\")
+        New-Item -ItemType Directory -Path $canonicalDestination -Force -ErrorAction Stop | Out-Null
+        foreach ($file in $files) {
+            $destinationPath = [IO.Path]::GetFullPath(
+                (Join-Path $canonicalDestination $file.RelativePath.Replace("/", "\")))
+            if (-not $destinationPath.StartsWith(
+                $canonicalDestination + "\",
+                [StringComparison]::OrdinalIgnoreCase)) {
+                throw "Smoke artifact extraction path escaped the host artifact root."
+            }
+            $destinationParent = Split-Path -Parent $destinationPath
+            New-Item -ItemType Directory -Path $destinationParent -Force -ErrorAction Stop | Out-Null
+            $entryStream = $file.Entry.Open()
+            $outputStream = [IO.File]::Open(
+                $destinationPath,
+                [IO.FileMode]::CreateNew,
+                [IO.FileAccess]::Write,
+                [IO.FileShare]::None)
+            try {
+                $entryStream.CopyTo($outputStream)
+            } finally {
+                $outputStream.Dispose()
+                $entryStream.Dispose()
+            }
+        }
+    } finally {
+        $archive.Dispose()
+    }
+
+    $requiredArtifacts = if ($Lane -eq "Upgrade") {
+        @(
+            "phase-status.json",
+            "upgrade-smoke.log",
+            "upgrade-smoke.done",
+            "inno-install-previous.log",
+            "inno-install-current.log",
+            "installed-runtime-proof\phase-status.json")
+    } else {
+        @("phase-status.json", "installed-smoke.log")
+    }
+    foreach ($requiredArtifact in $requiredArtifacts) {
+        if (-not (Test-Path -LiteralPath (Join-Path $DestinationRoot $requiredArtifact) -PathType Leaf)) {
+            throw "Retrieved $Lane smoke artifacts are missing '$requiredArtifact'."
+        }
+    }
+    return [pscustomobject]@{
+        fileCount = [int]$files.Count
+        expandedBytes = $expandedBytes
+        sha256 = $actualSha256.ToUpperInvariant()
+    }
+}
+
 function Resolve-HostArtifactPath {
     if (-not [string]::IsNullOrWhiteSpace($HostArtifactRoot)) {
         if ([IO.Path]::IsPathRooted($HostArtifactRoot)) {
@@ -8508,6 +8831,177 @@ function Resolve-HostArtifactPath {
 
     $timestamp = Get-Date -Format "yyyyMMdd-HHmmss"
     return (Join-Path $script:RepoRoot ("TestResults\CleanWindowsHyperV\{0}\{1}" -f $VMName, $timestamp))
+}
+
+function Get-SmokeArtifactRetrievalSession {
+    param(
+        [Parameter(Mandatory = $true)]
+        [System.Management.Automation.Runspaces.PSSession]$Session,
+        [Parameter(Mandatory = $true)]
+        [System.Management.Automation.PSCredential]$GuestCredential,
+        [Parameter(Mandatory = $true)]
+        [string]$ResolvedVhdPath,
+        [Parameter(Mandatory = $true)]
+        [string]$ExpectedOwnerId,
+        [Parameter(Mandatory = $true)]
+        [string]$ExpectedVmId
+    )
+
+    try {
+        [void](Get-GuestBootIdentity `
+            -Session $Session `
+            -OperationName "Probing guest session for smoke artifact retrieval")
+        return [pscustomobject]@{ Session = $Session; Reconnected = $false }
+    } catch {
+        Remove-PSSession -Session $Session -ErrorAction SilentlyContinue
+    }
+
+    $deadline = (Get-Date).AddSeconds(120)
+    $lastError = $null
+    do {
+        $candidate = $null
+        try {
+            $vm = Assert-OwnedVM `
+                -ResolvedVhdPath $ResolvedVhdPath `
+                -ExpectedOwnerId $ExpectedOwnerId
+            $candidateVmId = ([Guid]$vm.Id).ToString("D")
+            if ($candidateVmId -cne $ExpectedVmId) {
+                throw "Exact owned VM identity changed before smoke artifact retrieval."
+            }
+            if ([string]$vm.State -cne "Running") {
+                throw "Exact owned VM is not Running before smoke artifact retrieval."
+            }
+            $candidate = Open-GuestSession `
+                -GuestCredential $GuestCredential `
+                -TimeoutSec 30
+            [void](Get-GuestBootIdentity `
+                -Session $candidate `
+                -OperationName "Validating reconnected smoke artifact session")
+            return [pscustomobject]@{ Session = $candidate; Reconnected = $true }
+        } catch {
+            $lastError = $_
+            if ($null -ne $candidate) {
+                Remove-PSSession -Session $candidate -ErrorAction SilentlyContinue
+            }
+        }
+        Start-Sleep -Seconds 5
+    } while ((Get-Date) -lt $deadline)
+
+    $safeLastError = ConvertTo-SafeGuestDiagnosticText -Value $lastError -MaxChars 1024
+    throw "Smoke artifact session recovery timed out after 120 seconds. Last error: $safeLastError"
+}
+
+function Receive-SmokeArtifactArchive {
+    param(
+        [Parameter(Mandatory = $true)]
+        [System.Management.Automation.Runspaces.PSSession]$Session,
+        [Parameter(Mandatory = $true)]
+        [string]$GuestArtifactRoot,
+        [Parameter(Mandatory = $true)]
+        [string]$HostArtifactRoot,
+        [Parameter(Mandatory = $true)]
+        [ValidateSet("Installed", "Upgrade")]
+        [string]$Lane
+    )
+
+    $hostArchivePath = $null
+    $guestArchivePath = $null
+    $primaryError = $null
+    $cleanupError = $null
+    $retrievalProof = $null
+    try {
+        $packageOutput = @(
+            Invoke-GuestCommandWithTimeout `
+                -Session $Session `
+                -OperationName "Packaging $Lane smoke artifacts" `
+                -TimeoutSec 300 `
+                -ScriptBlock (Get-SmokeArtifactPackageScriptBlock) `
+                -ArgumentList @(
+                    $GuestArtifactRoot,
+                    (Split-Path -Parent $GuestArtifactRoot),
+                    $script:SmokeArtifactArchiveMaximumBytes,
+                    $script:SmokeArtifactExpandedMaximumBytes,
+                    $script:SmokeArtifactMaximumFiles)
+        )
+        $packageProof = Get-RequiredGuestStageResult `
+            -Output $packageOutput `
+            -ExpectedStage "smoke-artifact-package"
+        $guestArchivePath = [string]$packageProof.archivePath
+        $expectedGuestArchiveParent = [IO.Path]::GetFullPath(
+            (Split-Path -Parent $GuestArtifactRoot)).TrimEnd("\")
+        $actualGuestArchiveParent = if ([string]::IsNullOrWhiteSpace($guestArchivePath)) {
+            ""
+        } else {
+            [IO.Path]::GetFullPath((Split-Path -Parent $guestArchivePath)).TrimEnd("\")
+        }
+        if (
+            [string]::IsNullOrWhiteSpace($guestArchivePath) -or
+            -not [string]::Equals(
+                $actualGuestArchiveParent,
+                $expectedGuestArchiveParent,
+                [StringComparison]::OrdinalIgnoreCase) -or
+            [IO.Path]::GetFileName($guestArchivePath) -cne [string]$packageProof.archiveName -or
+            [string]$packageProof.archiveName -notmatch '^\.openclaw-smoke-artifacts-[0-9a-f]{32}\.zip$'
+        ) {
+            throw "Guest smoke artifact package returned an invalid archive identity."
+        }
+        $hostArchivePath = Join-Path $HostArtifactRoot ([string]$packageProof.archiveName)
+        Copy-Item `
+            -LiteralPath $guestArchivePath `
+            -Destination $hostArchivePath `
+            -FromSession $Session `
+            -Force `
+            -ErrorAction Stop
+        $retrievalProof = Expand-VerifiedSmokeArtifactArchive `
+            -ArchivePath $hostArchivePath `
+            -DestinationRoot $HostArtifactRoot `
+            -PackageProof $packageProof `
+            -Lane $Lane
+    } catch {
+        $primaryError = $_
+    } finally {
+        if (-not [string]::IsNullOrWhiteSpace($guestArchivePath)) {
+            try {
+                Invoke-GuestCommandWithTimeout `
+                    -Session $Session `
+                    -OperationName "Removing guest smoke artifact archive" `
+                    -TimeoutSec 120 `
+                    -ScriptBlock {
+                        param($ArchivePath)
+                        if (Test-Path -LiteralPath $ArchivePath -PathType Leaf) {
+                            Remove-Item -LiteralPath $ArchivePath -Force -ErrorAction Stop
+                        }
+                    } `
+                    -ArgumentList @($guestArchivePath) | Out-Null
+            } catch {
+                $cleanupError = $_
+            }
+        }
+        if (
+            -not [string]::IsNullOrWhiteSpace($hostArchivePath) -and
+            (Test-Path -LiteralPath $hostArchivePath)
+        ) {
+            try {
+                Remove-Item -LiteralPath $hostArchivePath -Force -ErrorAction Stop
+            } catch {
+                if ($null -eq $cleanupError) {
+                    $cleanupError = $_
+                }
+            }
+        }
+    }
+    if ($null -ne $primaryError -and $null -ne $cleanupError) {
+        $safePrimary = ConvertTo-SafeGuestDiagnosticText -Value $primaryError -MaxChars 2048
+        $safeCleanup = ConvertTo-SafeGuestDiagnosticText -Value $cleanupError -MaxChars 1024
+        throw "Smoke artifact retrieval failed: $safePrimary Archive cleanup also failed: $safeCleanup"
+    }
+    if ($null -ne $primaryError) {
+        throw $primaryError
+    }
+    if ($null -ne $cleanupError) {
+        throw $cleanupError
+    }
+    return $retrievalProof
 }
 
 function Get-EffectiveSwitchName {
@@ -8987,7 +9481,8 @@ function Invoke-SmokeCommand {
     $hostArtifacts = Resolve-HostArtifactPath
     New-Item -ItemType Directory -Force -Path $hostArtifacts | Out-Null
 
-    Assert-OwnedVM -ResolvedVhdPath $resolvedVhdPath -ExpectedOwnerId $OwnerId | Out-Null
+    $ownedVm = Assert-OwnedVM -ResolvedVhdPath $resolvedVhdPath -ExpectedOwnerId $OwnerId
+    $expectedVmId = ([Guid]$ownedVm.Id).ToString("D")
     Assert-OwnedCheckpoint -ResolvedVhdPath $resolvedVhdPath -ExpectedOwnerId $OwnerId -OwnedCheckpointName $script:PreparedCheckpointName | Out-Null
     $operationCredential = Resolve-OperationCredential -ResolvedVhdPath $resolvedVhdPath
 
@@ -9015,7 +9510,7 @@ function Invoke-SmokeCommand {
             }
         } -ArgumentList @($guestRepoRoot, $ValidationLane) | Out-Null
 
-        $smokeFailed = $true
+        $smokeError = $null
         try {
             Invoke-GuestCommandWithTimeout -Session $Session -OperationName "Running $ValidationLane validation lane" -TimeoutSec $GuestCommandTimeoutSec -ScriptBlock {
                 param(
@@ -9059,9 +9554,54 @@ function Invoke-SmokeCommand {
                     throw "$RemoteValidationLane validation script does not exist: $validationScript"
                 }
 
+                function ConvertTo-OpenClawSmokeDiagnostic {
+                    param(
+                        [AllowNull()]
+                        [string]$Text,
+                        [int]$MaximumLength = 4096
+                    )
+
+                    if ([string]::IsNullOrWhiteSpace($Text)) {
+                        return "<unavailable>"
+                    }
+                    $safe = $Text -replace '[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]', '?'
+                    $safe = $safe -replace '(?i)\b(authorization|password|passwd|pwd|secret|token|api[-_]?key)\s*[:=]\s*\S+', '$1=<redacted>'
+                    $safe = $safe -replace '(?i)\b(Bearer|Basic)\s+[A-Za-z0-9._~+/\-=]+', '$1 <redacted>'
+                    $safe = $safe -replace '(https?://[^?\s]+)\?[^\s]+', '$1?<redacted>'
+                    $safe = ($safe -replace '\s+', ' ').Trim()
+                    if ($safe.Length -gt $MaximumLength) {
+                        return $safe.Substring(0, $MaximumLength) + "...<truncated>"
+                    }
+                    return $safe
+                }
+
                 & $validationEngine @validationArguments
-                if ($LASTEXITCODE -ne 0) {
-                    throw "$RemoteValidationLane validation lane failed with exit code $LASTEXITCODE."
+                $validationExitCode = $LASTEXITCODE
+                if ($validationExitCode -ne 0) {
+                    $phaseStatusPath = Join-Path $RemoteArtifactRoot "phase-status.json"
+                    $phaseDiagnostic = if (Test-Path -LiteralPath $phaseStatusPath -PathType Leaf) {
+                        ConvertTo-OpenClawSmokeDiagnostic `
+                            -Text (Get-Content -LiteralPath $phaseStatusPath -Raw -ErrorAction SilentlyContinue) `
+                            -MaximumLength 4096
+                    } else {
+                        "<phase-status.json unavailable>"
+                    }
+                    $logName = if ($RemoteValidationLane -eq "Upgrade") {
+                        "upgrade-smoke.log"
+                    } else {
+                        "installed-smoke.log"
+                    }
+                    $logPath = Join-Path $RemoteArtifactRoot $logName
+                    $logDiagnostic = if (Test-Path -LiteralPath $logPath -PathType Leaf) {
+                        ConvertTo-OpenClawSmokeDiagnostic `
+                            -Text ((Get-Content -LiteralPath $logPath -Tail 40 -ErrorAction SilentlyContinue) -join "`n") `
+                            -MaximumLength 4096
+                    } else {
+                        "<$logName unavailable>"
+                    }
+                    throw (
+                        "$RemoteValidationLane validation lane failed with exit code $validationExitCode. " +
+                        "Phase status: $phaseDiagnostic Log tail: $logDiagnostic")
                 }
 
                 $phaseStatusPath = Join-Path $RemoteArtifactRoot "phase-status.json"
@@ -9116,43 +9656,68 @@ function Invoke-SmokeCommand {
                 $PreviousRelease,
                 $PreviousInstallerSha256.ToLowerInvariant()
             ) | Out-Null
+        } catch {
+            $smokeError = $_
+        }
 
-            $smokeFailed = $false
+        $artifactError = $null
+        $artifactSessionInfo = $null
+        $retrievalProof = $null
+        try {
+            $artifactSessionInfo = Get-SmokeArtifactRetrievalSession `
+                -Session $Session `
+                -GuestCredential $operationCredential `
+                -ResolvedVhdPath $resolvedVhdPath `
+                -ExpectedOwnerId $OwnerId `
+                -ExpectedVmId $expectedVmId
+            $retrievalProof = Receive-SmokeArtifactArchive `
+                -Session $artifactSessionInfo.Session `
+                -GuestArtifactRoot $guestArtifacts `
+                -HostArtifactRoot $hostArtifacts `
+                -Lane $ValidationLane
+        } catch {
+            $artifactError = $_
         } finally {
-            $artifactRetrievalError = $null
-            try {
-                $exists = Invoke-GuestCommandWithTimeout -Session $Session -OperationName "Checking guest artifact path" -TimeoutSec 120 -ScriptBlock {
-                    param($RemoteArtifactRoot)
-                    return (Test-Path -LiteralPath $RemoteArtifactRoot)
-                } -ArgumentList @($guestArtifacts)
+            if (
+                $null -ne $artifactSessionInfo -and
+                [bool]$artifactSessionInfo.Reconnected -and
+                $null -ne $artifactSessionInfo.Session
+            ) {
+                Remove-PSSession `
+                    -Session $artifactSessionInfo.Session `
+                    -ErrorAction SilentlyContinue
+            }
+        }
 
-                if ($exists -contains $true) {
-                    Copy-Item -Path $guestArtifacts -Destination $hostArtifacts -FromSession $Session -Recurse -Force
-                }
-            } catch {
-                Write-InfoLine "Artifact retrieval did not complete: $($_.Exception.Message)"
-                if (-not $smokeFailed) {
-                    $smokeFailed = $true
-                    $artifactRetrievalError = $_
-                }
-            }
-
-            $manifest = [ordered]@{
-                command = "Smoke"
-                validationLane = $ValidationLane
-                previousRelease = if ($ValidationLane -eq "Upgrade") { $PreviousRelease } else { "" }
-                previousInstallerSha256 = if ($ValidationLane -eq "Upgrade") { $PreviousInstallerSha256.ToLowerInvariant() } else { "" }
-                vmName = $VMName
-                ownerId = $OwnerId
-                guestArtifactRoot = $guestArtifacts
-                hostArtifactRoot = $hostArtifacts
-                succeeded = (-not $smokeFailed)
-                timestampUtc = [DateTime]::UtcNow.ToString("o")
-            }
-            $manifest | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $hostArtifacts "host-smoke-manifest.json") -Encoding UTF8
-            if ($null -ne $artifactRetrievalError) {
-                throw $artifactRetrievalError
-            }
+        $manifest = [ordered]@{
+            command = "Smoke"
+            validationLane = $ValidationLane
+            previousRelease = if ($ValidationLane -eq "Upgrade") { $PreviousRelease } else { "" }
+            previousInstallerSha256 = if ($ValidationLane -eq "Upgrade") { $PreviousInstallerSha256.ToLowerInvariant() } else { "" }
+            vmName = $VMName
+            ownerId = $OwnerId
+            guestArtifactRoot = $guestArtifacts
+            hostArtifactRoot = $hostArtifacts
+            archiveSha256 = if ($null -ne $retrievalProof) { [string]$retrievalProof.sha256 } else { "" }
+            artifactFileCount = if ($null -ne $retrievalProof) { [int]$retrievalProof.fileCount } else { 0 }
+            succeeded = ($null -eq $smokeError -and $null -eq $artifactError)
+            timestampUtc = [DateTime]::UtcNow.ToString("o")
+        }
+        $manifest |
+            ConvertTo-Json -Depth 5 |
+            Set-Content -LiteralPath (Join-Path $hostArtifacts "host-smoke-manifest.json") -Encoding UTF8
+        if ($null -ne $smokeError -and $null -ne $artifactError) {
+            $safeSmokeError = ConvertTo-SafeGuestDiagnosticText -Value $smokeError -MaxChars 4096
+            $safeArtifactError = ConvertTo-SafeGuestDiagnosticText -Value $artifactError -MaxChars 2048
+            throw (
+                "$ValidationLane smoke failed: $safeSmokeError " +
+                "Artifact retrieval also failed: $safeArtifactError")
+        }
+        if ($null -ne $smokeError) {
+            throw $smokeError
+        }
+        if ($null -ne $artifactError) {
+            throw $artifactError
         }
     }
 

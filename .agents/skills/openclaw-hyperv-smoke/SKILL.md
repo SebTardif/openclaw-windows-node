@@ -247,6 +247,13 @@ same-boot verify-only attempts without repeating install. Its existing
 `finally` restored `clean-windows`; this implementation does not independently
 operate or inspect the VM.
 
+The nineteenth real run completed `Prepare`, created
+`openclaw-prerequisites`, and passed `Verify`. Installed smoke passed preflight
+but then failed; recursive remote directory retrieval also failed before logs
+could be retained. The prepared checkpoint remains valid. After the artifact
+archive fix, retry only the typed `Installed` smoke lane from
+`openclaw-prerequisites`; do not rerun Prepare or Verify.
+
 From an elevated PowerShell session, run normal `Prepare` without
 `-RecoverPendingCheckpoint`:
 
@@ -505,14 +512,23 @@ another operator or smoke lane owns the VM.
 
 The controller copies exactly one validated clean-HEAD Git archive with
 `Copy-Item -ToSession`, executes with PowerShell Direct
-`Invoke-Command -VMName` or an owned session, and retrieves artifacts with
-`Copy-Item -FromSession`. Commands have bounded timeouts.
+`Invoke-Command -VMName` or an owned session, and retrieves one guest-created
+artifact ZIP file with `Copy-Item -FromSession`. It never recursively copies a
+remote directory. Guest packaging validates the exact owned lane root, safe
+relative paths, no reparse points, bounded count/size, and SHA-256. The host
+revalidates size/hash/ZIP paths before extraction and requires lane-specific
+phase/log files. Both archive copies are removed in `finally`. If the smoke
+session broke, artifact retrieval reconnects boundedly only to the exact
+owner-bound Running VM before checkpoint restore. Commands have bounded
+timeouts.
 
 Every smoke attempt must stop the owned guest and restore
 `openclaw-prerequisites` in a `finally` path on success or failure. Verify the
 host artifact directory and phase gates before making a proof claim. A failed
 artifact copy, missing manifest, failed restore, or running conflicting VM is
-a named blocker.
+a named blocker. Primary smoke and artifact retrieval failures remain visible
+together; available phase status and log tail diagnostics are sanitized and
+bounded.
 
 See `docs/CLEAN_WINDOWS_RUNNERS.md` for the authoritative controller runbook
 and `docs/WINDOWS_NODE_TESTING.md` for installed and release-upgrade phase
