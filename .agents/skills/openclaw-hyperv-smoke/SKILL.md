@@ -517,10 +517,11 @@ artifact ZIP file with `Copy-Item -FromSession`. It never recursively copies a
 remote directory. Guest packaging validates the exact owned lane root, safe
 relative paths, no reparse points, bounded count/size, and SHA-256. The host
 revalidates size/hash/ZIP paths before extraction and requires lane-specific
-phase/log files. Both archive copies are removed in `finally`. If the smoke
-session broke, artifact retrieval reconnects boundedly only to the exact
-owner-bound Running VM before checkpoint restore. Commands have bounded
-timeouts.
+phase/log files. Both archive copies are removed in `finally`. If the smoke or
+packaging session broke, artifact retrieval reconnects boundedly only to the
+exact owner-bound Running VM before checkpoint restore, removes only owned
+nonce archive residue, and retries packaging once. Healthy-session integrity
+failures are not retried. Commands have bounded timeouts.
 
 Every smoke attempt must stop the owned guest and restore
 `openclaw-prerequisites` in a `finally` path on success or failure. Verify the

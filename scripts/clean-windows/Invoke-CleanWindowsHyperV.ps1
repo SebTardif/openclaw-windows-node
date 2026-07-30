@@ -9004,6 +9004,161 @@ function Receive-SmokeArtifactArchive {
     return $retrievalProof
 }
 
+function Remove-GuestSmokeArtifactArchiveResidue {
+    param(
+        [Parameter(Mandatory = $true)]
+        [System.Management.Automation.Runspaces.PSSession]$Session,
+        [Parameter(Mandatory = $true)]
+        [string]$GuestArtifactRoot
+    )
+
+    Invoke-GuestCommandWithTimeout `
+        -Session $Session `
+        -OperationName "Removing stale guest smoke artifact archives" `
+        -TimeoutSec 120 `
+        -ScriptBlock {
+            param($ArtifactRoot)
+
+            Set-StrictMode -Version 2.0
+            $ErrorActionPreference = "Stop"
+            $ownedArtifactsRoot = [IO.Path]::GetFullPath(
+                (Split-Path -Parent $ArtifactRoot)).TrimEnd("\")
+            $rootItem = Get-Item -LiteralPath $ownedArtifactsRoot -Force -ErrorAction Stop
+            if (
+                -not $rootItem.PSIsContainer -or
+                ($rootItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0
+            ) {
+                throw "Owned smoke artifact root is missing, not a directory, or is a reparse point."
+            }
+            foreach ($archive in @(
+                Get-ChildItem `
+                    -LiteralPath $ownedArtifactsRoot `
+                    -Force `
+                    -File `
+                    -ErrorAction Stop |
+                    Where-Object {
+                        $_.Name -cmatch '^\.openclaw-smoke-artifacts-[0-9a-f]{32}\.zip$'
+                    }
+            )) {
+                $archiveParent = [IO.Path]::GetFullPath($archive.DirectoryName).TrimEnd("\")
+                if (
+                    -not [string]::Equals(
+                        $archiveParent,
+                        $ownedArtifactsRoot,
+                        [StringComparison]::OrdinalIgnoreCase) -or
+                    ($archive.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0
+                ) {
+                    throw "Stale smoke artifact archive identity is not safe to remove."
+                }
+                Remove-Item -LiteralPath $archive.FullName -Force -ErrorAction Stop
+            }
+        } `
+        -ArgumentList @($GuestArtifactRoot) | Out-Null
+}
+
+function Receive-SmokeArtifactArchiveWithRecovery {
+    param(
+        [Parameter(Mandatory = $true)]
+        [System.Management.Automation.Runspaces.PSSession]$Session,
+        [Parameter(Mandatory = $true)]
+        [System.Management.Automation.PSCredential]$GuestCredential,
+        [Parameter(Mandatory = $true)]
+        [string]$ResolvedVhdPath,
+        [Parameter(Mandatory = $true)]
+        [string]$ExpectedOwnerId,
+        [Parameter(Mandatory = $true)]
+        [string]$ExpectedVmId,
+        [Parameter(Mandatory = $true)]
+        [string]$GuestArtifactRoot,
+        [Parameter(Mandatory = $true)]
+        [string]$HostArtifactRoot,
+        [Parameter(Mandatory = $true)]
+        [ValidateSet("Installed", "Upgrade")]
+        [string]$Lane
+    )
+
+    $activeSession = $Session
+    $ownsActiveSession = $false
+    $attemptErrors = New-Object 'Collections.Generic.List[object]'
+    try {
+        for ($attempt = 1; $attempt -le 2; $attempt++) {
+            try {
+                $sessionInfo = Get-SmokeArtifactRetrievalSession `
+                    -Session $activeSession `
+                    -GuestCredential $GuestCredential `
+                    -ResolvedVhdPath $ResolvedVhdPath `
+                    -ExpectedOwnerId $ExpectedOwnerId `
+                    -ExpectedVmId $ExpectedVmId
+            } catch {
+                if ($attemptErrors.Count -gt 0) {
+                    $safeFirst = ConvertTo-SafeGuestDiagnosticText `
+                        -Value $attemptErrors[0] `
+                        -MaxChars 2048
+                    $safeRecovery = ConvertTo-SafeGuestDiagnosticText `
+                        -Value $_ `
+                        -MaxChars 2048
+                    throw (
+                        "Smoke artifact retrieval failed before session recovery: $safeFirst " +
+                        "Session recovery also failed: $safeRecovery")
+                }
+                throw
+            }
+            if ([bool]$sessionInfo.Reconnected) {
+                $activeSession = $sessionInfo.Session
+                $ownsActiveSession = $true
+                if ($attempt -gt 1) {
+                    try {
+                        Remove-GuestSmokeArtifactArchiveResidue `
+                            -Session $activeSession `
+                            -GuestArtifactRoot $GuestArtifactRoot
+                    } catch {
+                        $safeFirst = ConvertTo-SafeGuestDiagnosticText `
+                            -Value $attemptErrors[0] `
+                            -MaxChars 2048
+                        $safeCleanup = ConvertTo-SafeGuestDiagnosticText `
+                            -Value $_ `
+                            -MaxChars 2048
+                        throw (
+                            "Smoke artifact retrieval failed before session recovery: $safeFirst " +
+                            "Stale archive cleanup also failed: $safeCleanup")
+                    }
+                }
+            } elseif ($attempt -gt 1) {
+                throw $attemptErrors[0]
+            }
+
+            try {
+                $proof = Receive-SmokeArtifactArchive `
+                    -Session $activeSession `
+                    -GuestArtifactRoot $GuestArtifactRoot `
+                    -HostArtifactRoot $HostArtifactRoot `
+                    -Lane $Lane
+                $proof | Add-Member -NotePropertyName retrievalAttempts -NotePropertyValue $attempt
+                $proof | Add-Member `
+                    -NotePropertyName sessionRecovered `
+                    -NotePropertyValue $ownsActiveSession
+                return $proof
+            } catch {
+                $attemptErrors.Add($_)
+            }
+        }
+
+        $safeFirst = ConvertTo-SafeGuestDiagnosticText `
+            -Value $attemptErrors[0] `
+            -MaxChars 2048
+        $safeRetry = ConvertTo-SafeGuestDiagnosticText `
+            -Value $attemptErrors[1] `
+            -MaxChars 2048
+        throw (
+            "Smoke artifact retrieval failed before session recovery: $safeFirst " +
+            "Retry after exact-VM reconnect also failed: $safeRetry")
+    } finally {
+        if ($ownsActiveSession -and $null -ne $activeSession) {
+            Remove-PSSession -Session $activeSession -ErrorAction SilentlyContinue
+        }
+    }
+}
+
 function Get-EffectiveSwitchName {
     if (-not [string]::IsNullOrWhiteSpace($SwitchName)) {
         return $SwitchName
@@ -9661,32 +9816,19 @@ function Invoke-SmokeCommand {
         }
 
         $artifactError = $null
-        $artifactSessionInfo = $null
         $retrievalProof = $null
         try {
-            $artifactSessionInfo = Get-SmokeArtifactRetrievalSession `
+            $retrievalProof = Receive-SmokeArtifactArchiveWithRecovery `
                 -Session $Session `
                 -GuestCredential $operationCredential `
                 -ResolvedVhdPath $resolvedVhdPath `
                 -ExpectedOwnerId $OwnerId `
-                -ExpectedVmId $expectedVmId
-            $retrievalProof = Receive-SmokeArtifactArchive `
-                -Session $artifactSessionInfo.Session `
+                -ExpectedVmId $expectedVmId `
                 -GuestArtifactRoot $guestArtifacts `
                 -HostArtifactRoot $hostArtifacts `
                 -Lane $ValidationLane
         } catch {
             $artifactError = $_
-        } finally {
-            if (
-                $null -ne $artifactSessionInfo -and
-                [bool]$artifactSessionInfo.Reconnected -and
-                $null -ne $artifactSessionInfo.Session
-            ) {
-                Remove-PSSession `
-                    -Session $artifactSessionInfo.Session `
-                    -ErrorAction SilentlyContinue
-            }
         }
 
         $manifest = [ordered]@{
@@ -9700,6 +9842,8 @@ function Invoke-SmokeCommand {
             hostArtifactRoot = $hostArtifacts
             archiveSha256 = if ($null -ne $retrievalProof) { [string]$retrievalProof.sha256 } else { "" }
             artifactFileCount = if ($null -ne $retrievalProof) { [int]$retrievalProof.fileCount } else { 0 }
+            artifactRetrievalAttempts = if ($null -ne $retrievalProof) { [int]$retrievalProof.retrievalAttempts } else { 0 }
+            artifactSessionRecovered = if ($null -ne $retrievalProof) { [bool]$retrievalProof.sessionRecovered } else { $false }
             succeeded = ($null -eq $smokeError -and $null -eq $artifactError)
             timestampUtc = [DateTime]::UtcNow.ToString("o")
         }

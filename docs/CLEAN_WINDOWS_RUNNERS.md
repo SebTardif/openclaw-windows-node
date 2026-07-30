@@ -609,9 +609,11 @@ file count and expanded size, and creates a nonce ZIP with size and SHA-256
 proof. The controller copies that one file with `Copy-Item -FromSession`,
 rechecks size/hash and every ZIP entry, extracts under `HostArtifactRoot`, and
 requires lane-specific phase/log artifacts. Guest and host archive copies are
-removed in `finally`. If the validation session broke, retrieval reconnects
-boundedly only to the exact owner-bound Running VM. Primary validation and
-artifact failures are both retained. A failed validation also reports a
+removed in `finally`. If the validation or packaging session broke, retrieval
+reconnects boundedly only to the exact owner-bound Running VM, removes only
+owned nonce archive residue, and retries packaging once. Healthy-session
+integrity failures are not retried. Primary validation and artifact failures
+are both retained. A failed validation also reports a
 bounded sanitized phase-status snapshot and log tail when available. Only
 after retrieval does the VM stop and restore to `openclaw-prerequisites`.
 

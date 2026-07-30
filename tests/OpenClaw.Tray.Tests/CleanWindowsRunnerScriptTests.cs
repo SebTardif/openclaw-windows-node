@@ -2930,7 +2930,21 @@ public sealed class CleanWindowsRunnerScriptTests
         var dualFailureIndex = smoke.IndexOf("Artifact retrieval also failed:", StringComparison.Ordinal);
         Assert.True(receiveIndex >= 0);
         Assert.True(dualFailureIndex > receiveIndex);
-        Assert.Contains("Get-SmokeArtifactRetrievalSession", smoke, StringComparison.Ordinal);
+        Assert.Contains("Receive-SmokeArtifactArchiveWithRecovery", smoke, StringComparison.Ordinal);
+        Assert.Contains(
+            "for ($attempt = 1; $attempt -le 2; $attempt++)",
+            controller,
+            StringComparison.Ordinal);
+        Assert.Contains("Get-SmokeArtifactRetrievalSession", controller, StringComparison.Ordinal);
+        Assert.Contains("Remove-GuestSmokeArtifactArchiveResidue", controller, StringComparison.Ordinal);
+        Assert.Contains(
+            "Retry after exact-VM reconnect also failed",
+            controller,
+            StringComparison.Ordinal);
+        Assert.Contains("Session recovery also failed", controller, StringComparison.Ordinal);
+        Assert.Contains("Stale archive cleanup also failed", controller, StringComparison.Ordinal);
+        Assert.Contains("artifactRetrievalAttempts", smoke, StringComparison.Ordinal);
+        Assert.Contains("artifactSessionRecovered", smoke, StringComparison.Ordinal);
         Assert.Contains("Phase status:", smoke, StringComparison.Ordinal);
         Assert.Contains("Log tail:", smoke, StringComparison.Ordinal);
         Assert.Contains("Get-Content -LiteralPath $logPath -Tail 40", smoke, StringComparison.Ordinal);
