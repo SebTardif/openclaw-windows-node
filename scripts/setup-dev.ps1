@@ -111,6 +111,129 @@ function Get-WebView2RuntimeVersion {
     return $null
 }
 
+function Test-ReparsePointPath($literalPath) {
+    try {
+        $item = Get-Item -LiteralPath $literalPath -Force -ErrorAction Stop
+        return [bool]($item.Attributes -band [IO.FileAttributes]::ReparsePoint)
+    } catch {
+        return $true
+    }
+}
+
+function Get-VisualStudioVcRedistProof {
+    $componentId = "Microsoft.VisualStudio.Component.VC.Redist.14.Latest"
+    $vswherePath = Join-Path ${env:ProgramFiles(x86)} "Microsoft Visual Studio\Installer\vswhere.exe"
+    if (-not (Test-Path -LiteralPath $vswherePath -PathType Leaf)) {
+        return $null
+    }
+    if (Test-ReparsePointPath $vswherePath) {
+        return $null
+    }
+
+    $installRoots = @(
+        & $vswherePath `
+            -latest `
+            -products "*" `
+            -requires $componentId `
+            -property installationPath 2>$null |
+            ForEach-Object { ([string]$_).Trim() } |
+            Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+    )
+    if ($LASTEXITCODE -ne 0 -or $installRoots.Count -ne 1) {
+        return $null
+    }
+
+    try {
+        $installRoot = [IO.Path]::GetFullPath([string]$installRoots[0]).TrimEnd("\")
+    } catch {
+        return $null
+    }
+    if (
+        -not (Test-Path -LiteralPath $installRoot -PathType Container) -or
+        (Test-ReparsePointPath $installRoot)
+    ) {
+        return $null
+    }
+
+    $installRootPrefix = $installRoot + "\"
+    $redistRoot = $installRoot
+    foreach ($segment in [string[]]@("VC", "Redist", "MSVC")) {
+        $candidateRoot = [IO.Path]::GetFullPath(
+            (Join-Path $redistRoot $segment)).TrimEnd("\")
+        if (
+            -not $candidateRoot.StartsWith(
+                $installRootPrefix,
+                [StringComparison]::OrdinalIgnoreCase) -or
+            -not (Test-Path -LiteralPath $candidateRoot -PathType Container) -or
+            (Test-ReparsePointPath $candidateRoot)
+        ) {
+            return $null
+        }
+        $redistRoot = $candidateRoot
+    }
+
+    $versionDirectories = @(
+        Get-ChildItem -LiteralPath $redistRoot -Directory -ErrorAction Stop |
+            Where-Object {
+                $_.Name -match '^\d+\.\d+\.\d+(?:\.\d+)?$' -and
+                -not ($_.Attributes -band [IO.FileAttributes]::ReparsePoint)
+            } |
+            Sort-Object { [Version]$_.Name } -Descending
+    )
+    foreach ($versionDirectory in $versionDirectories) {
+        $versionPath = [IO.Path]::GetFullPath([string]$versionDirectory.FullName).TrimEnd("\")
+        if (-not $versionPath.StartsWith(
+            $installRootPrefix,
+            [StringComparison]::OrdinalIgnoreCase)) {
+            continue
+        }
+        $x64Root = [IO.Path]::GetFullPath((Join-Path $versionPath "x64")).TrimEnd("\")
+        if (
+            -not $x64Root.StartsWith(
+                $installRootPrefix,
+                [StringComparison]::OrdinalIgnoreCase) -or
+            -not (Test-Path -LiteralPath $x64Root -PathType Container) -or
+            (Test-ReparsePointPath $x64Root)
+        ) {
+            continue
+        }
+        $crtDirectories = @(
+            Get-ChildItem -LiteralPath $x64Root -Directory -ErrorAction Stop |
+                Where-Object {
+                    $_.Name -like 'Microsoft.VC*.CRT' -and
+                    -not ($_.Attributes -band [IO.FileAttributes]::ReparsePoint)
+                }
+        )
+        foreach ($crtDirectory in $crtDirectories) {
+            $crtPath = [IO.Path]::GetFullPath([string]$crtDirectory.FullName).TrimEnd("\")
+            if (-not $crtPath.StartsWith(
+                $installRootPrefix,
+                [StringComparison]::OrdinalIgnoreCase)) {
+                continue
+            }
+            $runtimeFiles = @(
+                Get-ChildItem -LiteralPath $crtPath -File -ErrorAction Stop |
+                    Where-Object {
+                        $_.Length -gt 0 -and
+                        -not ($_.Attributes -band [IO.FileAttributes]::ReparsePoint)
+                    }
+            )
+            if (
+                @($runtimeFiles | Where-Object { $_.Name -like 'vcruntime140*.dll' }).Count -gt 0 -and
+                @($runtimeFiles | Where-Object { $_.Name -like 'msvcp140*.dll' }).Count -gt 0
+            ) {
+                return [pscustomobject][ordered]@{
+                    component = $componentId
+                    installRoot = $installRoot
+                    redistVersion = [string]$versionDirectory.Name
+                }
+            }
+        }
+    }
+
+    return $null
+}
+
 function Install-WingetPackage($id, $displayName) {
     if ($CheckOnly) {
         Write-WarningMessage "$displayName is missing."
@@ -135,6 +258,46 @@ function Install-WingetPackage($id, $displayName) {
     & winget @arguments
     if ($LASTEXITCODE -ne 0) {
         throw "winget failed to install $displayName ($id)."
+    }
+
+    Update-ProcessPath
+}
+
+function Install-VisualStudioBuildToolsVcRedist {
+    $packageId = "Microsoft.VisualStudio.2022.BuildTools"
+    $packageVersion = "17.14.37"
+    $componentId = "Microsoft.VisualStudio.Component.VC.Redist.14.Latest"
+    if ($CheckOnly) {
+        Write-WarningMessage "Visual Studio Build Tools VC Redist component is missing."
+        Write-Info (
+            "Install with: winget install --id $packageId -e --version $packageVersion " +
+            "--installer-type exe --scope machine --custom `"--add $componentId --norestart`" " +
+            "--source winget")
+        return
+    }
+
+    if (-not (Test-CommandAvailable "winget")) {
+        throw "winget is not available. Install App Installer from the Microsoft Store, then rerun this script."
+    }
+
+    Write-Header "Installing Visual Studio Build Tools VC Redist component"
+    $arguments = @(
+        "install",
+        "--id", $packageId,
+        "-e",
+        "--version", $packageVersion,
+        "--installer-type", "exe",
+        "--scope", "machine",
+        "--custom", "--add $componentId --norestart",
+        "--source", "winget",
+        "--silent",
+        "--accept-source-agreements",
+        "--accept-package-agreements",
+        "--disable-interactivity"
+    )
+    & winget @arguments
+    if ($LASTEXITCODE -ne 0) {
+        throw "winget failed to install the Visual Studio Build Tools VC Redist component ($packageId)."
     }
 
     Update-ProcessPath
@@ -224,6 +387,15 @@ if ($webView2Version) {
     Install-WingetPackage "Microsoft.EdgeWebView2Runtime" "WebView2 Runtime"
 }
 
+$visualStudioVcRedist = Get-VisualStudioVcRedistProof
+if ($visualStudioVcRedist) {
+    Write-Success (
+        "Visual Studio VC Redist component detected " +
+        "($($visualStudioVcRedist.redistVersion)).")
+} else {
+    Install-VisualStudioBuildToolsVcRedist
+}
+
 Update-ProcessPath
 Ensure-RepositoryTrust
 
@@ -233,6 +405,7 @@ if (-not (Test-DotNet10Sdk)) { $missing += ".NET 10 SDK" }
 if (-not (Test-NodeAndNpm)) { $missing += "Node.js LTS with npm" }
 if (-not (Get-WindowsSdkVersion)) { $missing += "Windows SDK 10.0.26100" }
 if (-not (Get-WebView2RuntimeVersion)) { $missing += "WebView2 Runtime" }
+if (-not (Get-VisualStudioVcRedistProof)) { $missing += "Visual Studio Build Tools VC Redist component" }
 
 if ($missing.Count -gt 0) {
     Write-ErrorMessage "Setup is incomplete:"

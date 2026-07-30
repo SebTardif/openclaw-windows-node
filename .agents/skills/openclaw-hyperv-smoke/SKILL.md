@@ -78,7 +78,8 @@ The controller owns exactly two checkpoint names:
 
 - `clean-windows`: updated Windows before OpenClaw prerequisites.
 - `openclaw-prerequisites`: WSL2 platform features, Git, PowerShell 7, staged
-  .NET/Node/Windows SDK/WebView2 packages, and a passing
+  .NET/Node/Windows SDK/WebView2/Visual Studio Build Tools VC Redist packages,
+  and a passing
   `scripts\setup-dev.ps1 -CheckOnly`, before smoke state. The installed smoke
   provisions its gateway distribution later.
 
@@ -273,6 +274,14 @@ prints and records that actual path, and never overwrites or deletes an older
 run. The current build failure remains unknown. Retry only Installed Smoke
 with the same base and inspect the newly reported child directory.
 
+The next isolated artifact run identified the remaining clean-image
+prerequisite: publish requires the Visual Studio Build Tools component
+`Microsoft.VisualStudio.Component.VC.Redist.14.Latest`. The old
+`openclaw-prerequisites` checkpoint does not contain it and is no longer valid
+for current-head proof. Rerun normal `Prepare` from `clean-windows` to install
+and verify the component, recreate the prepared checkpoint, then run `Verify`
+and Installed `Smoke`.
+
 From an elevated PowerShell session, run normal `Prepare` without
 `-RecoverPendingCheckpoint`:
 
@@ -371,7 +380,7 @@ observed registration. Every later package install uses explicit
 agreement flags, and disabled interactivity, so `msstore` is never queried.
 The bootstrap does not reset, remove, add, or touch `msstore`.
 All downloads, extraction, and captures use one nonce guest-temp root. Cleanup
-failure is a failed bootstrap. Only then do Git, PowerShell 7, the four staged
+failure is a failed bootstrap. Only then do Git, PowerShell 7, the five staged
 developer packages, checkout copy, and `scripts\setup-dev.ps1 -CheckOnly`
 run.
 
@@ -393,12 +402,28 @@ native WinGet operation: `.NET 10 SDK` as
 `Microsoft.DotNet.SDK.10` `10.0.302` `burn`, Node LTS as
 `OpenJS.NodeJS.LTS` `24.18.0` `wix`, Windows SDK as
 `Microsoft.WindowsSDK.10.0.26100` `10.0.26100.7705` `burn`, and WebView2 as
-`Microsoft.EdgeWebView2Runtime` `150.0.4078.83` `exe`. The .NET Burn manifest
+`Microsoft.EdgeWebView2Runtime` `150.0.4078.83` `exe`, then Visual Studio
+Build Tools as `Microsoft.VisualStudio.2022.BuildTools` `17.14.37` `exe`.
+The Build Tools selection uses machine scope and only
+`--custom "--add Microsoft.VisualStudio.Component.VC.Redist.14.Latest --norestart"`;
+it does not add workloads, the IDE, recommended, or optional components. The
+.NET Burn manifest
 has no `Scope`, so that typed selection omits `--scope` and records null scope
 evidence while its SDK verification proves installation. The other three
 typed selections retain exact machine scope. Every operation uses source
 `winget`, silent/noninteractive agreement flags, redirected bounded
 diagnostics, and no MSIX fallback.
+
+Build Tools verification requires the exact standard
+`Program Files (x86)\Microsoft Visual Studio\Installer\vswhere.exe` path. It
+executes that application with
+`-latest -products * -requires Microsoft.VisualStudio.Component.VC.Redist.14.Latest -property installationPath`,
+requires exit zero and exactly one canonical existing install root, then
+requires nonempty x64 `vcruntime140*.dll` and `msvcp140*.dll` beneath a
+non-reparse `VC\Redist\MSVC\<version>\x64\Microsoft.VC*.CRT` directory safely
+contained by that root. Evidence reports only the component, install root, and
+VC Redist version. Verify repeats the same verify-only worker, so it rejects a
+stale prepared checkpoint.
 
 Each stage first applies setup-dev's real availability check and skips an
 already-present package. Exit zero requires immediate verification. A

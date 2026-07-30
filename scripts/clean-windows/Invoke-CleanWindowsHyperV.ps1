@@ -7451,7 +7451,7 @@ function Get-GuestDeveloperPrerequisiteScriptBlock {
     return {
         param(
             [Parameter(Mandatory = $true)]
-            [ValidateSet("DotNet10", "NodeLts", "WindowsSdk26100", "WebView2")]
+            [ValidateSet("DotNet10", "NodeLts", "WindowsSdk26100", "WebView2", "VisualStudioBuildTools")]
             [string]$PackageKey,
             [Parameter(Mandatory = $true)]
             [bool]$VerifyOnly,
@@ -7489,10 +7489,24 @@ function Get-GuestDeveloperPrerequisiteScriptBlock {
             return "0x{0:X8}" -f $unsignedExitCode
         }
 
+        function Test-OpenClawPrerequisiteReparsePoint {
+            param(
+                [Parameter(Mandatory = $true)]
+                [string]$LiteralPath
+            )
+
+            try {
+                $item = Get-Item -LiteralPath $LiteralPath -Force -ErrorAction Stop
+                return [bool]($item.Attributes -band [IO.FileAttributes]::ReparsePoint)
+            } catch {
+                return $true
+            }
+        }
+
         function Invoke-OpenClawPrerequisiteProcess {
             param(
                 [Parameter(Mandatory = $true)]
-                [ValidateSet("Install", "DotNetListSdks", "NodeVersion", "NpmVersion")]
+                [ValidateSet("Install", "DotNetListSdks", "NodeVersion", "NpmVersion", "VsWhere")]
                 [string]$Operation,
                 [Parameter(Mandatory = $true)]
                 [string]$ExecutablePath,
@@ -7538,10 +7552,18 @@ function Get-GuestDeveloperPrerequisiteScriptBlock {
                 } else {
                     ""
                 }
+                $stdoutLines = @(
+                    foreach ($line in ($stdout -split '\r?\n')) {
+                        if (-not [string]::IsNullOrWhiteSpace($line)) {
+                            ConvertTo-OpenClawPrerequisiteDiagnostic -Text $line
+                        }
+                    }
+                )
                 return [pscustomobject][ordered]@{
                     operation = $Operation
                     exitCode = [int]$process.ExitCode
                     stdout = ConvertTo-OpenClawPrerequisiteDiagnostic -Text $stdout
+                    stdoutLines = [string[]]$stdoutLines
                     stderr = ConvertTo-OpenClawPrerequisiteDiagnostic -Text $stderr
                 }
             } finally {
@@ -7654,6 +7676,150 @@ function Get-GuestDeveloperPrerequisiteScriptBlock {
                     }
                     return [pscustomobject]@{ present = $false; evidence = "WebView2 registration unavailable" }
                 }
+                "VisualStudioBuildTools" {
+                    $componentId = "Microsoft.VisualStudio.Component.VC.Redist.14.Latest"
+                    $vswherePath = Join-Path ${env:ProgramFiles(x86)} "Microsoft Visual Studio\Installer\vswhere.exe"
+                    if (-not (Test-Path -LiteralPath $vswherePath -PathType Leaf)) {
+                        return [pscustomobject]@{
+                            present = $false
+                            evidence = "standard vswhere.exe path unavailable"
+                        }
+                    }
+                    if (Test-OpenClawPrerequisiteReparsePoint -LiteralPath $vswherePath) {
+                        return [pscustomobject]@{
+                            present = $false
+                            evidence = "standard vswhere.exe path is a reparse point"
+                        }
+                    }
+                    $vswhereResult = Invoke-OpenClawPrerequisiteProcess `
+                        -Operation "VsWhere" `
+                        -ExecutablePath $vswherePath `
+                        -Arguments ([string[]]@(
+                            "-latest",
+                            "-products", "*",
+                            "-requires", $componentId,
+                            "-property", "installationPath"))
+                    if ([int]$vswhereResult.exitCode -ne 0) {
+                        return [pscustomobject]@{
+                            present = $false
+                            evidence = (
+                                "vswhereExit={0};stdout='{1}';stderr='{2}'" -f
+                                    $vswhereResult.exitCode,
+                                    $vswhereResult.stdout,
+                                    $vswhereResult.stderr)
+                        }
+                    }
+                    $installRoots = @($vswhereResult.stdoutLines)
+                    if ($installRoots.Count -ne 1) {
+                        return [pscustomobject]@{
+                            present = $false
+                            evidence = "vswhere returned $($installRoots.Count) component install roots"
+                        }
+                    }
+
+                    try {
+                        $installRoot = [IO.Path]::GetFullPath([string]$installRoots[0]).TrimEnd("\")
+                    } catch {
+                        return [pscustomobject]@{
+                            present = $false
+                            evidence = "vswhere returned an invalid component install root"
+                        }
+                    }
+                    if (
+                        -not (Test-Path -LiteralPath $installRoot -PathType Container) -or
+                        (Test-OpenClawPrerequisiteReparsePoint -LiteralPath $installRoot)
+                    ) {
+                        return [pscustomobject]@{
+                            present = $false
+                            evidence = "vswhere component install root is unavailable or a reparse point"
+                        }
+                    }
+                    $installRootPrefix = $installRoot + "\"
+                    $redistRoot = $installRoot
+                    foreach ($segment in [string[]]@("VC", "Redist", "MSVC")) {
+                        $candidateRoot = [IO.Path]::GetFullPath(
+                            (Join-Path $redistRoot $segment)).TrimEnd("\")
+                        if (
+                            -not $candidateRoot.StartsWith(
+                                $installRootPrefix,
+                                [StringComparison]::OrdinalIgnoreCase) -or
+                            -not (Test-Path -LiteralPath $candidateRoot -PathType Container) -or
+                            (Test-OpenClawPrerequisiteReparsePoint -LiteralPath $candidateRoot)
+                        ) {
+                            return [pscustomobject]@{
+                                present = $false
+                                evidence = "VC Redist path is unavailable or contains a reparse point"
+                            }
+                        }
+                        $redistRoot = $candidateRoot
+                    }
+
+                    $versionDirectories = @(
+                        Get-ChildItem -LiteralPath $redistRoot -Directory -ErrorAction Stop |
+                            Where-Object {
+                                $_.Name -match '^\d+\.\d+\.\d+(?:\.\d+)?$' -and
+                                -not ($_.Attributes -band [IO.FileAttributes]::ReparsePoint)
+                            } |
+                            Sort-Object { [Version]$_.Name } -Descending
+                    )
+                    foreach ($versionDirectory in $versionDirectories) {
+                        $versionPath = [IO.Path]::GetFullPath([string]$versionDirectory.FullName).TrimEnd("\")
+                        if (-not $versionPath.StartsWith(
+                            $installRootPrefix,
+                            [StringComparison]::OrdinalIgnoreCase)) {
+                            continue
+                        }
+                        $x64Root = [IO.Path]::GetFullPath(
+                            (Join-Path $versionPath "x64")).TrimEnd("\")
+                        if (
+                            -not $x64Root.StartsWith(
+                                $installRootPrefix,
+                                [StringComparison]::OrdinalIgnoreCase) -or
+                            -not (Test-Path -LiteralPath $x64Root -PathType Container) -or
+                            (Test-OpenClawPrerequisiteReparsePoint -LiteralPath $x64Root)
+                        ) {
+                            continue
+                        }
+                        $crtDirectories = @(
+                            Get-ChildItem -LiteralPath $x64Root -Directory -ErrorAction Stop |
+                                Where-Object {
+                                    $_.Name -like 'Microsoft.VC*.CRT' -and
+                                    -not ($_.Attributes -band [IO.FileAttributes]::ReparsePoint)
+                                }
+                        )
+                        foreach ($crtDirectory in $crtDirectories) {
+                            $crtPath = [IO.Path]::GetFullPath([string]$crtDirectory.FullName).TrimEnd("\")
+                            if (-not $crtPath.StartsWith(
+                                $installRootPrefix,
+                                [StringComparison]::OrdinalIgnoreCase)) {
+                                continue
+                            }
+                            $runtimeFiles = @(
+                                Get-ChildItem -LiteralPath $crtPath -File -ErrorAction Stop |
+                                    Where-Object {
+                                        $_.Length -gt 0 -and
+                                        -not ($_.Attributes -band [IO.FileAttributes]::ReparsePoint)
+                                    }
+                            )
+                            $vcruntime = @($runtimeFiles | Where-Object { $_.Name -like 'vcruntime140*.dll' })
+                            $msvcp = @($runtimeFiles | Where-Object { $_.Name -like 'msvcp140*.dll' })
+                            if ($vcruntime.Count -gt 0 -and $msvcp.Count -gt 0) {
+                                return [pscustomobject]@{
+                                    present = $true
+                                    evidence = (
+                                        "component={0};installRoot={1};redistVersion={2}" -f
+                                            $componentId,
+                                            $installRoot,
+                                            $versionDirectory.Name)
+                                }
+                            }
+                        }
+                    }
+                    return [pscustomobject]@{
+                        present = $false
+                        evidence = "required nonempty x64 VC runtime DLLs are unavailable under the component install root"
+                    }
+                }
             }
         }
 
@@ -7665,6 +7831,7 @@ function Get-GuestDeveloperPrerequisiteScriptBlock {
                     version = "10.0.302"
                     installerType = "burn"
                     scope = $null
+                    customArguments = $null
                 }
             }
             "NodeLts" {
@@ -7674,6 +7841,7 @@ function Get-GuestDeveloperPrerequisiteScriptBlock {
                     version = "24.18.0"
                     installerType = "wix"
                     scope = "machine"
+                    customArguments = $null
                 }
             }
             "WindowsSdk26100" {
@@ -7683,6 +7851,7 @@ function Get-GuestDeveloperPrerequisiteScriptBlock {
                     version = "10.0.26100.7705"
                     installerType = "burn"
                     scope = "machine"
+                    customArguments = $null
                 }
             }
             "WebView2" {
@@ -7692,10 +7861,26 @@ function Get-GuestDeveloperPrerequisiteScriptBlock {
                     version = "150.0.4078.83"
                     installerType = "exe"
                     scope = "machine"
+                    customArguments = $null
+                }
+            }
+            "VisualStudioBuildTools" {
+                [pscustomobject][ordered]@{
+                    displayName = "Visual Studio 2022 Build Tools VC Redist component"
+                    id = "Microsoft.VisualStudio.2022.BuildTools"
+                    version = "17.14.37"
+                    installerType = "exe"
+                    scope = "machine"
+                    customArguments = "--add Microsoft.VisualStudio.Component.VC.Redist.14.Latest --norestart"
                 }
             }
         }
         $scope = if ($null -eq $spec.scope) { $null } else { [string]$spec.scope }
+        $customArguments = if ($null -eq $spec.customArguments) {
+            $null
+        } else {
+            [string]$spec.customArguments
+        }
 
         $initialVerification = Get-OpenClawPrerequisiteVerification -Key $PackageKey
         if ([bool]$initialVerification.present) {
@@ -7706,6 +7891,7 @@ function Get-GuestDeveloperPrerequisiteScriptBlock {
                 packageVersion = [string]$spec.version
                 installerType = [string]$spec.installerType
                 scope = $scope
+                customArguments = $customArguments
                 alreadyInstalled = $true
                 installed = $false
                 verified = $true
@@ -7735,6 +7921,11 @@ function Get-GuestDeveloperPrerequisiteScriptBlock {
             "--installer-type", [string]$spec.installerType)
         if ($null -ne $scope) {
             $installArguments += @("--scope", $scope)
+        }
+        if ($null -ne $customArguments) {
+            # Start-Process joins ArgumentList arrays under Windows PowerShell 5.1.
+            # Preserve the fixed multi-word custom value as one native argv token.
+            $installArguments += @("--custom", ('"{0}"' -f $customArguments))
         }
         $installArguments += @(
             "--source", "winget",
@@ -7776,6 +7967,7 @@ function Get-GuestDeveloperPrerequisiteScriptBlock {
                 packageVersion = [string]$spec.version
                 installerType = [string]$spec.installerType
                 scope = $scope
+                customArguments = $customArguments
                 alreadyInstalled = $false
                 installed = $true
                 verified = $false
@@ -7803,6 +7995,7 @@ function Get-GuestDeveloperPrerequisiteScriptBlock {
             packageVersion = [string]$spec.version
             installerType = [string]$spec.installerType
             scope = $scope
+            customArguments = $customArguments
             alreadyInstalled = $false
             installed = $true
             verified = $true
@@ -7970,7 +8163,7 @@ function Invoke-GuestDeveloperPrerequisiteWorker {
         [Parameter(Mandatory = $true)]
         [System.Management.Automation.Runspaces.PSSession]$Session,
         [Parameter(Mandatory = $true)]
-        [ValidateSet("DotNet10", "NodeLts", "WindowsSdk26100", "WebView2")]
+        [ValidateSet("DotNet10", "NodeLts", "WindowsSdk26100", "WebView2", "VisualStudioBuildTools")]
         [string]$PackageKey,
         [Parameter(Mandatory = $true)]
         [bool]$VerifyOnly
@@ -8015,7 +8208,7 @@ function Ensure-GuestDeveloperPrerequisite {
         [Parameter(Mandatory = $true)]
         [string]$ExpectedOwnerId,
         [Parameter(Mandatory = $true)]
-        [ValidateSet("DotNet10", "NodeLts", "WindowsSdk26100", "WebView2")]
+        [ValidateSet("DotNet10", "NodeLts", "WindowsSdk26100", "WebView2", "VisualStudioBuildTools")]
         [string]$PackageKey
     )
 
@@ -8111,6 +8304,7 @@ function Ensure-GuestDeveloperPrerequisite {
             packageId = [string]$proof.packageId
             packageVersion = [string]$proof.packageVersion
             installerType = [string]$proof.installerType
+            customArguments = $proof.customArguments
             alreadyInstalled = [bool]$proof.alreadyInstalled
             installedThisRun = $installAttempted
             transition = $transition
@@ -8149,7 +8343,8 @@ function Ensure-GuestDeveloperPrerequisites {
                 "DotNet10",
                 "NodeLts",
                 "WindowsSdk26100",
-                "WebView2")) {
+                "WebView2",
+                "VisualStudioBuildTools")) {
             $stageResult = Ensure-GuestDeveloperPrerequisite `
                 -Session $activeSession `
                 -GuestCredential $GuestCredential `
@@ -9803,6 +9998,10 @@ function Invoke-VerifyCommand {
         param($Session)
         Install-GuestWslNativeHelper -Session $Session
         $wslProof = Invoke-GuestWslVerificationStage -Session $Session
+        $buildToolsProof = Invoke-GuestDeveloperPrerequisiteWorker `
+            -Session $Session `
+            -PackageKey "VisualStudioBuildTools" `
+            -VerifyOnly $true
         $verifyResult = Invoke-GuestCommandWithTimeout `
             -Session $Session `
             -OperationName "Verifying guest readiness" `
@@ -9822,6 +10021,14 @@ function Invoke-VerifyCommand {
             nodeVersion = [string]$toolSummary.nodeVersion
             npmVersion = [string]$toolSummary.npmVersion
             windowsSdkPresent = [bool]$toolSummary.windowsSdkPresent
+            visualStudioBuildTools = [pscustomobject][ordered]@{
+                packageId = [string]$buildToolsProof.packageId
+                packageVersion = [string]$buildToolsProof.packageVersion
+                installerType = [string]$buildToolsProof.installerType
+                scope = [string]$buildToolsProof.scope
+                component = "Microsoft.VisualStudio.Component.VC.Redist.14.Latest"
+                verification = [string]$buildToolsProof.verification
+            }
             wslPackageProof = [pscustomobject][ordered]@{
                 scope = [string]$wslProof.scope
                 normalizedState = [string]$wslProof.normalizedState

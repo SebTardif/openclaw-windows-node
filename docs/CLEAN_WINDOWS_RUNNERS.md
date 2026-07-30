@@ -342,7 +342,7 @@ arbitrary arguments.
 
 After the second reconnect, final verification requires enabled features plus
 zero-exit status and version. The pinned WinGet bootstrap then runs before Git,
-PowerShell 7, the four staged developer packages, repository copy, or the
+PowerShell 7, the five staged developer packages, repository copy, or the
 read-only `scripts\setup-dev.ps1 -CheckOnly` gate.
 
 #### Pinned App Installer and signed mutable WinGet catalog bootstrap
@@ -490,15 +490,27 @@ and installer type:
 | Node LTS | `OpenJS.NodeJS.LTS` | `24.18.0` | `wix` | `machine` |
 | Windows SDK | `Microsoft.WindowsSDK.10.0.26100` | `10.0.26100.7705` | `burn` | `machine` |
 | WebView2 | `Microsoft.EdgeWebView2Runtime` | `150.0.4078.83` | `exe` | `machine` |
+| Visual Studio Build Tools VC Redist | `Microsoft.VisualStudio.2022.BuildTools` | `17.14.37` | `exe` | `machine` |
 
 Before installing, each stage uses the same availability contract as
 `setup-dev.ps1`: a 10.x SDK from `dotnet --list-sdks`, both `node` and `npm`,
-a numeric Windows SDK Include directory, or a valid WebView2 runtime
-registration. Existing prerequisites skip their WinGet operation. A
+a numeric Windows SDK Include directory, a valid WebView2 runtime registration,
+or the exact standard `vswhere.exe` proving
+`Microsoft.VisualStudio.Component.VC.Redist.14.Latest` and nonempty x64
+`vcruntime140*.dll` plus `msvcp140*.dll` files under its one canonical install
+root. Existing prerequisites skip their WinGet operation. A
 successful install must immediately pass the same check.
 The .NET proof records a null scope filter rather than claiming a manifest
 filter that was not applied; its post-install SDK-path/version check still
 proves the machine installation.
+
+The Build Tools stage supplies exactly
+`--custom "--add Microsoft.VisualStudio.Component.VC.Redist.14.Latest --norestart"`
+in addition to WinGet's manifest-provided quiet/wait arguments. It does not add
+a workload, IDE, `includeRecommended`, or `includeOptional`. Its evidence names
+only the required component, canonical install root, and observed VC Redist
+version. Verify repeats this controller-owned check, so a prepared checkpoint
+without the component is rejected.
 
 Exit `3010` and WinGet
 `APPINSTALLER_CLI_ERROR_INSTALL_REBOOT_REQUIRED_TO_FINISH` request an exact

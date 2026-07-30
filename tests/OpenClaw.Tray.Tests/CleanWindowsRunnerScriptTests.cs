@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.IO.Compression;
+using System.Text;
 using System.Text.Json;
 
 namespace OpenClaw.Tray.Tests;
@@ -1984,6 +1985,7 @@ public sealed class CleanWindowsRunnerScriptTests
             "OpenJS.NodeJS.LTS",
             "Microsoft.WindowsSDK.10.0.26100",
             "Microsoft.EdgeWebView2Runtime",
+            "Microsoft.VisualStudio.2022.BuildTools",
         })
         {
             Assert.Contains(packageId, controller + setupDev, StringComparison.Ordinal);
@@ -2124,6 +2126,7 @@ public sealed class CleanWindowsRunnerScriptTests
             ("OpenJS.NodeJS.LTS", "24.18.0", "wix", "machine"),
             ("Microsoft.WindowsSDK.10.0.26100", "10.0.26100.7705", "burn", "machine"),
             ("Microsoft.EdgeWebView2Runtime", "150.0.4078.83", "exe", "machine"),
+            ("Microsoft.VisualStudio.2022.BuildTools", "17.14.37", "exe", "machine"),
         })
         {
             Assert.Contains($"id = \"{spec.Id}\"", worker, StringComparison.Ordinal);
@@ -2134,9 +2137,20 @@ public sealed class CleanWindowsRunnerScriptTests
                 worker,
                 StringComparison.Ordinal);
         }
-        Assert.Equal(3, CountOccurrences(worker, "scope = \"machine\""));
+        Assert.Equal(4, CountOccurrences(worker, "scope = \"machine\""));
         Assert.Contains("if ($null -ne $scope)", worker, StringComparison.Ordinal);
         Assert.Contains("$installArguments += @(\"--scope\", $scope)", worker, StringComparison.Ordinal);
+        Assert.Contains(
+            "customArguments = \"--add Microsoft.VisualStudio.Component.VC.Redist.14.Latest --norestart\"",
+            worker,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "$installArguments += @(\"--custom\", ('\"{0}\"' -f $customArguments))",
+            worker,
+            StringComparison.Ordinal);
+        Assert.DoesNotContain("includeRecommended", worker, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("includeOptional", worker, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("Microsoft.VisualStudio.Workload", worker, StringComparison.OrdinalIgnoreCase);
         Assert.Contains(
             "Join-Path $env:ProgramFiles \"dotnet\\dotnet.exe\"",
             worker,
@@ -2154,10 +2168,12 @@ public sealed class CleanWindowsRunnerScriptTests
         var nodeIndex = orchestration.IndexOf("\"NodeLts\"", StringComparison.Ordinal);
         var sdkIndex = orchestration.IndexOf("\"WindowsSdk26100\"", StringComparison.Ordinal);
         var webViewIndex = orchestration.IndexOf("\"WebView2\"", StringComparison.Ordinal);
+        var buildToolsIndex = orchestration.IndexOf("\"VisualStudioBuildTools\"", StringComparison.Ordinal);
         Assert.True(dotnetIndex >= 0);
         Assert.True(nodeIndex > dotnetIndex);
         Assert.True(sdkIndex > nodeIndex);
         Assert.True(webViewIndex > sdkIndex);
+        Assert.True(buildToolsIndex > webViewIndex);
 
         var wslIndex = prepare.IndexOf("Invoke-GuestWslVerificationStage", StringComparison.Ordinal);
         var wingetIndex = prepare.IndexOf("Ensure-GuestWingetAvailable", StringComparison.Ordinal);
@@ -2179,6 +2195,30 @@ public sealed class CleanWindowsRunnerScriptTests
             "& powershell.exe -NoProfile -ExecutionPolicy Bypass -File",
             prepare,
             StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void SetupDevUsesOnlyTheMinimalVisualStudioVcRedistComponent()
+    {
+        var setupDev = File.ReadAllText(Path.Combine(Root, "scripts", "setup-dev.ps1"));
+        var install = ExtractPowerShellFunction(
+            setupDev,
+            "Install-VisualStudioBuildToolsVcRedist",
+            "ConvertTo-GitSafeDirectoryPath");
+
+        Assert.Contains("\"Microsoft.VisualStudio.2022.BuildTools\"", install, StringComparison.Ordinal);
+        Assert.Contains("\"17.14.37\"", install, StringComparison.Ordinal);
+        Assert.Contains("\"--installer-type\", \"exe\"", install, StringComparison.Ordinal);
+        Assert.Contains("\"--scope\", \"machine\"", install, StringComparison.Ordinal);
+        Assert.Contains(
+            "\"--custom\", \"--add $componentId --norestart\"",
+            install,
+            StringComparison.Ordinal);
+        Assert.Contains("\"--source\", \"winget\"", install, StringComparison.Ordinal);
+        Assert.Contains("\"--silent\"", install, StringComparison.Ordinal);
+        Assert.DoesNotContain("workload", install, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("includeRecommended", install, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("includeOptional", install, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]
@@ -2312,6 +2352,7 @@ public sealed class CleanWindowsRunnerScriptTests
     [InlineData("NodeLts")]
     [InlineData("WindowsSdk26100")]
     [InlineData("WebView2")]
+    [InlineData("VisualStudioBuildTools")]
     public void GuestDeveloperPrerequisiteAlreadyPresentSkipsInstall(string packageKey)
     {
         var result = RunPowerShellCommand(
@@ -2334,6 +2375,7 @@ public sealed class CleanWindowsRunnerScriptTests
     [InlineData("NodeLts", "OpenJS.NodeJS.LTS", "machine")]
     [InlineData("WindowsSdk26100", "Microsoft.WindowsSDK.10.0.26100", "machine")]
     [InlineData("WebView2", "Microsoft.EdgeWebView2Runtime", "machine")]
+    [InlineData("VisualStudioBuildTools", "Microsoft.VisualStudio.2022.BuildTools", "machine")]
     public void GuestDeveloperPrerequisiteInstallsAndVerifiesOneExactPackage(
         string packageKey,
         string packageId,
@@ -2362,13 +2404,98 @@ public sealed class CleanWindowsRunnerScriptTests
         }
         else
         {
-            Assert.Contains(
-                $"--scope|{expectedScope}|--source|winget|--silent",
-                arguments,
-                StringComparison.Ordinal);
+            if (packageKey == "VisualStudioBuildTools")
+            {
+                Assert.Contains(
+                    $"--scope|{expectedScope}|--custom|",
+                    arguments,
+                    StringComparison.Ordinal);
+            }
+            else
+            {
+                Assert.Contains(
+                    $"--scope|{expectedScope}|--source|winget|--silent",
+                    arguments,
+                    StringComparison.Ordinal);
+            }
             Assert.Equal(expectedScope, scope.GetString());
         }
+        if (packageKey == "VisualStudioBuildTools")
+        {
+            Assert.Contains(
+                "--scope|machine|--custom|\"--add Microsoft.VisualStudio.Component.VC.Redist.14.Latest --norestart\"|--source|winget|--silent",
+                arguments,
+                StringComparison.Ordinal);
+            Assert.DoesNotContain("workload", arguments, StringComparison.OrdinalIgnoreCase);
+            Assert.DoesNotContain("includeRecommended", arguments, StringComparison.OrdinalIgnoreCase);
+            Assert.DoesNotContain("includeOptional", arguments, StringComparison.OrdinalIgnoreCase);
+        }
+        else
+        {
+            Assert.DoesNotContain("--custom", arguments, StringComparison.Ordinal);
+        }
         Assert.DoesNotContain("msix", arguments, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void WindowsPowerShellStartProcessPreservesBuildToolsCustomValueAsOneArgument()
+    {
+        var tempRoot = Path.Combine(
+            Path.GetTempPath(),
+            $"openclaw-buildtools-argv-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(tempRoot);
+        var argvScript = Path.Combine(tempRoot, "argv.ps1");
+        var stdoutPath = Path.Combine(tempRoot, "stdout.json");
+        var stderrPath = Path.Combine(tempRoot, "stderr.txt");
+        File.WriteAllText(
+            argvScript,
+            "[Console]::Out.Write((@($args) | ConvertTo-Json -Compress))");
+        try
+        {
+            var command = string.Concat(
+                "$ErrorActionPreference = 'Stop'\n",
+                "$arguments = [string[]]@(\n",
+                " '-NoProfile', '-File', ('\"{0}\"' -f ", PsQuote(argvScript), "),\n",
+                " '--custom', ('\"{0}\"' -f '--add Microsoft.VisualStudio.Component.VC.Redist.14.Latest --norestart'),\n",
+                " '--source', 'winget')\n",
+                "$process = Start-Process -FilePath ",
+                PsQuote(Path.Combine(
+                    Environment.GetFolderPath(Environment.SpecialFolder.System),
+                    "WindowsPowerShell",
+                    "v1.0",
+                    "powershell.exe")),
+                " -ArgumentList $arguments -RedirectStandardOutput ",
+                PsQuote(stdoutPath),
+                " -RedirectStandardError ",
+                PsQuote(stderrPath),
+                " -PassThru -WindowStyle Hidden\n",
+                "$null = $process.Handle\n",
+                "if (-not $process.WaitForExit(10000)) { Stop-Process -Id $process.Id -Force; throw 'argv proof timed out' }\n",
+                "$process.WaitForExit()\n",
+                "if ($process.ExitCode -ne 0) { throw [IO.File]::ReadAllText(",
+                PsQuote(stderrPath),
+                ") }\n",
+                "[Console]::Out.Write([IO.File]::ReadAllText(",
+                PsQuote(stdoutPath),
+                "))\n");
+            var result = RunPowerShellCommand(command);
+
+            AssertPowerShellProofSucceeded(result);
+            using var document = JsonDocument.Parse(result.Stdout);
+            Assert.Equal(
+                new[]
+                {
+                    "--custom",
+                    "--add Microsoft.VisualStudio.Component.VC.Redist.14.Latest --norestart",
+                    "--source",
+                    "winget",
+                },
+                document.RootElement.EnumerateArray().Select(value => value.GetString()).ToArray());
+        }
+        finally
+        {
+            DeleteTestDirectory(tempRoot);
+        }
     }
 
     [Theory]
@@ -2376,6 +2503,7 @@ public sealed class CleanWindowsRunnerScriptTests
     [InlineData("NodeLts", "OpenJS.NodeJS.LTS", "machine")]
     [InlineData("WindowsSdk26100", "Microsoft.WindowsSDK.10.0.26100", "machine")]
     [InlineData("WebView2", "Microsoft.EdgeWebView2Runtime", "machine")]
+    [InlineData("VisualStudioBuildTools", "Microsoft.VisualStudio.2022.BuildTools", "machine")]
     public void GuestDeveloperPrerequisiteFailureHasPackageSpecificBoundedDiagnostics(
         string packageKey,
         string packageId,
@@ -2410,7 +2538,7 @@ public sealed class CleanWindowsRunnerScriptTests
     {
         var result = RunPowerShellCommand(
             BuildDeveloperPrerequisiteProof(
-                "WindowsSdk26100",
+                "VisualStudioBuildTools",
                 "reboot",
                 installExitCode: exitCode));
 
@@ -2425,6 +2553,37 @@ public sealed class CleanWindowsRunnerScriptTests
         Assert.Equal(1, CountOccurrences(
             proof.GetProperty("calls").GetString() ?? string.Empty,
             "Install:"));
+    }
+
+    [Theory]
+    [InlineData("vswhere-missing", "standard vswhere.exe path unavailable")]
+    [InlineData("vswhere-error", "vswhereExit=9")]
+    [InlineData("component-missing", "vswhere returned 0 component install roots")]
+    [InlineData("vswhere-multiple", "vswhere returned 2 component install roots")]
+    [InlineData("crt-missing", "required nonempty x64 VC runtime DLLs")]
+    [InlineData("reparse-x64", "required nonempty x64 VC runtime DLLs")]
+    public void GuestVisualStudioBuildToolsVerificationFailsClosed(
+        string scenario,
+        string expectedError)
+    {
+        var result = RunPowerShellCommand(
+            BuildDeveloperPrerequisiteProof(
+                "VisualStudioBuildTools",
+                scenario,
+                installExitCode: 0,
+                verifyOnly: true));
+
+        AssertPowerShellProofSucceeded(result);
+        using var document = JsonDocument.Parse(result.Stdout);
+        var proof = document.RootElement;
+        Assert.Contains(
+            expectedError,
+            proof.GetProperty("error").GetString(),
+            StringComparison.Ordinal);
+        Assert.DoesNotContain(
+            "Install:",
+            proof.GetProperty("calls").GetString(),
+            StringComparison.Ordinal);
     }
 
     [Fact]
@@ -2488,6 +2647,16 @@ public sealed class CleanWindowsRunnerScriptTests
         Assert.DoesNotContain("2>&1", getter, StringComparison.Ordinal);
         Assert.Contains(
             "-ScriptBlock (Get-GuestVerificationSummaryScriptBlock)",
+            verify,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "-PackageKey \"VisualStudioBuildTools\"",
+            verify,
+            StringComparison.Ordinal);
+        Assert.Contains("-VerifyOnly $true", verify, StringComparison.Ordinal);
+        Assert.Contains("visualStudioBuildTools", verify, StringComparison.Ordinal);
+        Assert.Contains(
+            "Microsoft.VisualStudio.Component.VC.Redist.14.Latest",
             verify,
             StringComparison.Ordinal);
     }
@@ -6610,7 +6779,8 @@ public sealed class CleanWindowsRunnerScriptTests
     private static string BuildDeveloperPrerequisiteProof(
         string packageKey,
         string scenario,
-        int installExitCode)
+        int installExitCode,
+        bool verifyOnly = false)
     {
         var controller = ReadScript("Invoke-CleanWindowsHyperV.ps1");
         var worker = ExtractPowerShellFunction(
@@ -6620,11 +6790,16 @@ public sealed class CleanWindowsRunnerScriptTests
         return string.Concat(
             "$ErrorActionPreference = 'Stop'\n",
             "$script:installed = ",
-            scenario == "existing" ? "$true" : "$false",
+            scenario is "existing" or "vswhere-missing" or "vswhere-error" or
+                "component-missing" or "vswhere-multiple" or "crt-missing" or "reparse-x64"
+                ? "$true"
+                : "$false",
             "\n",
             "$script:calls = [System.Collections.Generic.List[string]]::new()\n",
             "$script:installArguments = ''\n",
             "$script:nextId = 300\n",
+            "$script:vsInstallRoot = 'C:\\Program Files (x86)\\Microsoft Visual Studio\\2022\\BuildTools'\n",
+            "$script:vsRedistVersion = '14.44.35211'\n",
             "function global:Get-Command {\n",
             " param($Name, $CommandType, $ErrorAction)\n",
             " if ($Name -eq 'winget.exe') { return [pscustomobject]@{ Source = 'C:\\WindowsApps\\winget.exe' } }\n",
@@ -6640,16 +6815,47 @@ public sealed class CleanWindowsRunnerScriptTests
             " param($LiteralPath, $PathType)\n",
             " if ([string]$LiteralPath -like '*Windows Kits\\10\\Include') { return $script:installed }\n",
             " if ([string]$LiteralPath -like 'HKLM:*' -or [string]$LiteralPath -like 'HKCU:*') { return $script:installed }\n",
+            " if ([string]$LiteralPath -like '*Microsoft Visual Studio\\Installer\\vswhere.exe') {\n",
+            "  return $script:installed -and ", PsQuote(scenario), " -ne 'vswhere-missing'\n",
+            " }\n",
+            " if ([string]$LiteralPath -like \"$($script:vsInstallRoot)*\") { return $script:installed }\n",
             " if ($PSBoundParameters.ContainsKey('PathType')) {\n",
             "  return Microsoft.PowerShell.Management\\Test-Path -LiteralPath $LiteralPath -PathType $PathType\n",
             " }\n",
             " return Microsoft.PowerShell.Management\\Test-Path -LiteralPath $LiteralPath\n",
             "}\n",
+            "function global:Get-Item {\n",
+            " param($LiteralPath, [switch]$Force, $ErrorAction)\n",
+            " $attributes = if (", PsQuote(scenario), " -eq 'reparse-x64' -and ",
+            "[string]$LiteralPath -like '*\\x64') { [IO.FileAttributes]::ReparsePoint } ",
+            "elseif ([string]$LiteralPath -like '*.exe') { [IO.FileAttributes]::Normal } ",
+            "else { [IO.FileAttributes]::Directory }\n",
+            " return [pscustomobject]@{ Attributes = $attributes }\n",
+            "}\n",
             "function global:Get-ChildItem {\n",
-            " param($LiteralPath, [switch]$Directory, $ErrorAction)\n",
+            " param($LiteralPath, [switch]$Directory, [switch]$File, $ErrorAction)\n",
             " if ([string]$LiteralPath -like '*Windows Kits\\10\\Include') {\n",
             "  if ($script:installed) { return [pscustomobject]@{ Name = '10.0.26100.0' } }\n",
             "  return\n",
+            " }\n",
+            " if ([string]$LiteralPath -eq \"$($script:vsInstallRoot)\\VC\\Redist\\MSVC\") {\n",
+            "  return [pscustomobject]@{ Name = $script:vsRedistVersion; ",
+            "FullName = \"$($script:vsInstallRoot)\\VC\\Redist\\MSVC\\$($script:vsRedistVersion)\"; ",
+            "Attributes = [IO.FileAttributes]::Directory }\n",
+            " }\n",
+            " if ([string]$LiteralPath -eq \"$($script:vsInstallRoot)\\VC\\Redist\\MSVC\\$($script:vsRedistVersion)\\x64\") {\n",
+            "  return [pscustomobject]@{ Name = 'Microsoft.VC143.CRT'; ",
+            "FullName = \"$LiteralPath\\Microsoft.VC143.CRT\"; ",
+            "Attributes = [IO.FileAttributes]::Directory }\n",
+            " }\n",
+            " if ([string]$LiteralPath -like '*\\Microsoft.VC143.CRT' -and $File) {\n",
+            "  $files = @([pscustomobject]@{ Name = 'vcruntime140.dll'; Length = 1024; ",
+            "Attributes = [IO.FileAttributes]::Normal })\n",
+            "  if (", PsQuote(scenario), " -ne 'crt-missing') {\n",
+            "   $files += [pscustomobject]@{ Name = 'msvcp140.dll'; Length = 2048; ",
+            "Attributes = [IO.FileAttributes]::Normal }\n",
+            "  }\n",
+            "  return $files\n",
             " }\n",
             " return Microsoft.PowerShell.Management\\Get-ChildItem @PSBoundParameters\n",
             "}\n",
@@ -6664,7 +6870,8 @@ public sealed class CleanWindowsRunnerScriptTests
             " $argumentsText = @($ArgumentList) -join '|'\n",
             " $operation = if ($argumentsText -match '(^|\\|)install(\\||$)') { 'Install' } ",
             "elseif ($FilePath -like '*dotnet.exe') { 'DotNetListSdks' } ",
-            "elseif ($FilePath -like '*node.exe') { 'NodeVersion' } else { 'NpmVersion' }\n",
+            "elseif ($FilePath -like '*node.exe') { 'NodeVersion' } ",
+            "elseif ($FilePath -like '*vswhere.exe') { 'VsWhere' } else { 'NpmVersion' }\n",
             " [void]$script:calls.Add(\"$operation`:$argumentsText\")\n",
             " $exitCode = 0\n",
             " $stdout = ''\n",
@@ -6685,6 +6892,12 @@ public sealed class CleanWindowsRunnerScriptTests
             "  $stdout = '10.0.302 [C:\\Program Files\\dotnet\\sdk]'\n",
             " } elseif ($operation -eq 'NodeVersion') {\n",
             "  $stdout = 'v24.18.0'\n",
+            " } elseif ($operation -eq 'VsWhere') {\n",
+            "  if (", PsQuote(scenario), " -eq 'vswhere-error') { $exitCode = 9; $stderr = 'vswhere failure' }\n",
+            "  elseif (", PsQuote(scenario), " -eq 'component-missing') { $stdout = '' }\n",
+            "  elseif (", PsQuote(scenario), " -eq 'vswhere-multiple') {\n",
+            "   $stdout = \"$($script:vsInstallRoot)`r`nC:\\Unexpected\\SecondRoot\"\n",
+            "  } else { $stdout = $script:vsInstallRoot }\n",
             " } else { $stdout = '11.5.0' }\n",
             " Microsoft.PowerShell.Management\\Set-Content -LiteralPath $RedirectStandardOutput -Value $stdout -NoNewline\n",
             " Microsoft.PowerShell.Management\\Set-Content -LiteralPath $RedirectStandardError -Value $stderr -NoNewline\n",
@@ -6700,7 +6913,8 @@ public sealed class CleanWindowsRunnerScriptTests
             "$proof = $null\n",
             "try { $proof = & (Get-GuestDeveloperPrerequisiteScriptBlock) ",
             PsQuote(packageKey),
-            " $false 60 } catch { $errorMessage = $_.Exception.Message }\n",
+            verifyOnly ? " $true 60" : " $false 60",
+            " } catch { $errorMessage = $_.Exception.Message }\n",
             "[Console]::Out.Write(([pscustomobject][ordered]@{\n",
             " error = $errorMessage\n",
             " verified = if ($proof) { [bool]$proof.verified } else { $false }\n",
@@ -6709,6 +6923,7 @@ public sealed class CleanWindowsRunnerScriptTests
             " rebootInitiated = if ($proof) { [bool]$proof.rebootInitiated } else { $false }\n",
             " installExitCode = if ($proof) { $proof.installExitCode } else { $null }\n",
             " scope = if ($proof) { $proof.scope } else { $null }\n",
+            " customArguments = if ($proof) { $proof.customArguments } else { $null }\n",
             " calls = $script:calls -join ','\n",
             " installArguments = $script:installArguments\n",
             "} | ConvertTo-Json -Compress))\n");
@@ -6839,7 +7054,7 @@ public sealed class CleanWindowsRunnerScriptTests
             "try {\n",
             " $result = Wait-ForGuestPackageTransitionAndVerify ",
             "-Session $session -GuestCredential $credential -ResolvedVhdPath 'D:\\owned\\os.vhdx' ",
-            "-ExpectedOwnerId 'owner' -PreviousBootTicks 100 -PackageKey 'WindowsSdk26100' ",
+            "-ExpectedOwnerId 'owner' -PreviousBootTicks 100 -PackageKey 'VisualStudioBuildTools' ",
             "-OriginalInstallFailure ([InvalidOperationException]::new('original install socket failure')) ",
             "-TimeoutSec 3 -PollIntervalSec 1\n",
             "} catch { $errorMessage = $_.Exception.Message }\n",
@@ -7683,6 +7898,7 @@ public sealed class CleanWindowsRunnerScriptTests
 
     private static ProcessResult RunPowerShellCommand(string command)
     {
+        string? scriptPath = null;
         var startInfo = new ProcessStartInfo
         {
             FileName = "powershell.exe",
@@ -7691,21 +7907,49 @@ public sealed class CleanWindowsRunnerScriptTests
             RedirectStandardError = true,
             CreateNoWindow = true,
         };
-        foreach (var argument in new[] { "-NoProfile", "-Command", command })
+        var arguments = new List<string> { "-NoProfile" };
+        if (command.Length > 20_000)
+        {
+            scriptPath = Path.Combine(
+                Path.GetTempPath(),
+                $"openclaw-powershell-proof-{Guid.NewGuid():N}.ps1");
+            File.WriteAllText(
+                scriptPath,
+                command,
+                new UTF8Encoding(encoderShouldEmitUTF8Identifier: true));
+            arguments.Add("-File");
+            arguments.Add(scriptPath);
+        }
+        else
+        {
+            arguments.Add("-Command");
+            arguments.Add(command);
+        }
+        foreach (var argument in arguments)
         {
             startInfo.ArgumentList.Add(argument);
         }
 
-        using var process = Process.Start(startInfo)
-            ?? throw new InvalidOperationException("Failed to start PowerShell.");
-        var stdout = process.StandardOutput.ReadToEnd();
-        var stderr = process.StandardError.ReadToEnd();
-        if (!process.WaitForExit(30_000))
+        try
         {
-            process.Kill(entireProcessTree: true);
-            throw new TimeoutException("PowerShell command exceeded 30 seconds.");
+            using var process = Process.Start(startInfo)
+                ?? throw new InvalidOperationException("Failed to start PowerShell.");
+            var stdout = process.StandardOutput.ReadToEnd();
+            var stderr = process.StandardError.ReadToEnd();
+            if (!process.WaitForExit(30_000))
+            {
+                process.Kill(entireProcessTree: true);
+                throw new TimeoutException("PowerShell command exceeded 30 seconds.");
+            }
+            return new ProcessResult(process.ExitCode, stdout, stderr);
         }
-        return new ProcessResult(process.ExitCode, stdout, stderr);
+        finally
+        {
+            if (scriptPath is not null)
+            {
+                File.Delete(scriptPath);
+            }
+        }
     }
 
     private static ProcessResult RunOwnedJsonWriterProof(string shell, string ownedRoot)

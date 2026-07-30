@@ -312,15 +312,23 @@ AppX user session it needs. Post-install proof requires the exact
 Error `0x80073D19` is reported as the known AppX
 deployment-session/user-logged-off regression.
 
-Prepare owns four package stages before clean source transfer:
+Prepare owns five package stages before clean source transfer:
 `Microsoft.DotNet.SDK.10` `10.0.302` `burn`, `OpenJS.NodeJS.LTS` `24.18.0`
 `wix`, `Microsoft.WindowsSDK.10.0.26100` `10.0.26100.7705` `burn`, and
-`Microsoft.EdgeWebView2Runtime` `150.0.4078.83` `exe`. Each uses one bounded
+`Microsoft.EdgeWebView2Runtime` `150.0.4078.83` `exe`, followed by
+`Microsoft.VisualStudio.2022.BuildTools` `17.14.37` `exe`. Each uses one bounded
 native WinGet operation with exact version, installer type, source `winget`,
 silent/noninteractive agreement flags, and redirected sanitized diagnostics.
 The .NET Burn manifest has no `Scope`, so its typed selection omits
 `--scope` and records null scope evidence; its SDK verification still proves
-installation. Node, Windows SDK, and WebView2 retain exact machine scope.
+installation. Node, Windows SDK, WebView2, and Build Tools retain exact machine scope.
+Build Tools adds only
+`--custom "--add Microsoft.VisualStudio.Component.VC.Redist.14.Latest --norestart"`,
+never a workload, IDE, recommended, or optional component. Its verify-only
+proof requires the standard `vswhere.exe`, exactly one canonical component
+install root, and nonempty x64 `vcruntime140*.dll` plus `msvcp140*.dll` files
+safely below that root. Verify repeats this check and rejects a stale prepared
+checkpoint.
 Existing availability skips install; exit zero requires immediate
 verification.
 
