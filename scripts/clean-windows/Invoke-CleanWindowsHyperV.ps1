@@ -8944,7 +8944,7 @@ function Expand-VerifiedSmokeArtifactArchive {
     }
 }
 
-function Resolve-HostArtifactPath {
+function Resolve-HostArtifactBasePath {
     if (-not [string]::IsNullOrWhiteSpace($HostArtifactRoot)) {
         if ([IO.Path]::IsPathRooted($HostArtifactRoot)) {
             return (Resolve-FullPath -Path $HostArtifactRoot)
@@ -8953,8 +8953,92 @@ function Resolve-HostArtifactPath {
         return (Resolve-FullPath -Path (Join-Path $script:RepoRoot $HostArtifactRoot))
     }
 
-    $timestamp = Get-Date -Format "yyyyMMdd-HHmmss"
-    return (Join-Path $script:RepoRoot ("TestResults\CleanWindowsHyperV\{0}\{1}" -f $VMName, $timestamp))
+    return (Join-Path $script:RepoRoot ("TestResults\CleanWindowsHyperV\{0}" -f $VMName))
+}
+
+function New-SmokeArtifactRunDirectory {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$BasePath,
+        [string[]]$CandidateNames
+    )
+
+    $canonicalBase = [IO.Path]::GetFullPath($BasePath).TrimEnd("\")
+    if (
+        [string]::Equals(
+            $canonicalBase,
+            [IO.Path]::GetPathRoot($canonicalBase).TrimEnd("\"),
+            [StringComparison]::OrdinalIgnoreCase)
+    ) {
+        throw "Smoke artifact base cannot be a drive root."
+    }
+    if (-not (Test-Path -LiteralPath $canonicalBase)) {
+        New-Item -ItemType Directory -Path $canonicalBase -ErrorAction Stop | Out-Null
+    }
+    $baseItem = Get-Item -LiteralPath $canonicalBase -Force -ErrorAction Stop
+    if (
+        -not $baseItem.PSIsContainer -or
+        ($baseItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0
+    ) {
+        throw "Smoke artifact base is not a directory or is a reparse point."
+    }
+
+    $names = New-Object 'Collections.Generic.List[string]'
+    if ($null -ne $CandidateNames -and $CandidateNames.Count -gt 0) {
+        foreach ($candidateName in $CandidateNames) {
+            [void]$names.Add([string]$candidateName)
+        }
+    } else {
+        for ($attempt = 0; $attempt -lt 16; $attempt++) {
+            $timestamp = [DateTime]::UtcNow.ToString("yyyyMMdd-HHmmss-fff")
+            $nonce = [Guid]::NewGuid().ToString("N").Substring(0, 8)
+            [void]$names.Add("$timestamp-$nonce")
+        }
+    }
+
+    foreach ($name in $names) {
+        if ($name -cnotmatch '^\d{8}-\d{6}-\d{3}-[0-9a-f]{8}$') {
+            throw "Smoke artifact run directory name is not a safe generated segment."
+        }
+        $candidate = [IO.Path]::GetFullPath((Join-Path $canonicalBase $name))
+        if (-not $candidate.StartsWith(
+            $canonicalBase + "\",
+            [StringComparison]::OrdinalIgnoreCase)) {
+            throw "Smoke artifact run directory escaped its canonical base."
+        }
+        if (Test-Path -LiteralPath $candidate) {
+            $existing = Get-Item -LiteralPath $candidate -Force -ErrorAction Stop
+            if (($existing.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+                throw "Smoke artifact run directory collision is a reparse point."
+            }
+            continue
+        }
+        try {
+            New-Item -ItemType Directory -Path $candidate -ErrorAction Stop | Out-Null
+        } catch {
+            if (Test-Path -LiteralPath $candidate) {
+                $racedItem = Get-Item -LiteralPath $candidate -Force -ErrorAction Stop
+                if (($racedItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+                    throw "Smoke artifact run directory collision is a reparse point."
+                }
+                continue
+            }
+            throw
+        }
+        $created = Get-Item -LiteralPath $candidate -Force -ErrorAction Stop
+        if (
+            -not $created.PSIsContainer -or
+            ($created.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or
+            -not [string]::Equals(
+                [IO.Path]::GetFullPath($created.FullName).TrimEnd("\"),
+                $candidate.TrimEnd("\"),
+                [StringComparison]::OrdinalIgnoreCase)
+        ) {
+            throw "Created smoke artifact run directory failed identity verification."
+        }
+        return $candidate
+    }
+    throw "Unable to allocate a unique smoke artifact run directory after $($names.Count) bounded attempts."
 }
 
 function Get-SmokeArtifactRetrievalSession {
@@ -9757,17 +9841,20 @@ function Invoke-VerifyCommand {
 
 function Invoke-SmokeCommand {
     $resolvedVhdPath = Resolve-FullPath -Path $VhdPath
-    $hostArtifacts = Resolve-HostArtifactPath
-    New-Item -ItemType Directory -Force -Path $hostArtifacts | Out-Null
+    $hostArtifactBase = Resolve-HostArtifactBasePath
+    $hostArtifacts = New-SmokeArtifactRunDirectory -BasePath $hostArtifactBase
+    $hostManifestPath = Join-Path $hostArtifacts "host-smoke-manifest.json"
+    Write-InfoLine "Smoke artifact run directory: $hostArtifacts"
 
-    $ownedVm = Assert-OwnedVM -ResolvedVhdPath $resolvedVhdPath -ExpectedOwnerId $OwnerId
-    $expectedVmId = ([Guid]$ownedVm.Id).ToString("D")
-    Assert-OwnedCheckpoint -ResolvedVhdPath $resolvedVhdPath -ExpectedOwnerId $OwnerId -OwnedCheckpointName $script:PreparedCheckpointName | Out-Null
-    $operationCredential = Resolve-OperationCredential -ResolvedVhdPath $resolvedVhdPath
+    try {
+        $ownedVm = Assert-OwnedVM -ResolvedVhdPath $resolvedVhdPath -ExpectedOwnerId $OwnerId
+        $expectedVmId = ([Guid]$ownedVm.Id).ToString("D")
+        Assert-OwnedCheckpoint -ResolvedVhdPath $resolvedVhdPath -ExpectedOwnerId $OwnerId -OwnedCheckpointName $script:PreparedCheckpointName | Out-Null
+        $operationCredential = Resolve-OperationCredential -ResolvedVhdPath $resolvedVhdPath
 
-    $guestArtifactName = if ($ValidationLane -eq "Upgrade") { "upgrade-smoke" } else { "installed-smoke" }
-    $guestArtifacts = Join-Path $GuestRoot "artifacts\$guestArtifactName"
-    Invoke-PreparedGuestOperation `
+        $guestArtifactName = if ($ValidationLane -eq "Upgrade") { "upgrade-smoke" } else { "installed-smoke" }
+        $guestArtifacts = Join-Path $GuestRoot "artifacts\$guestArtifactName"
+        Invoke-PreparedGuestOperation `
         -ResolvedVhdPath $resolvedVhdPath `
         -ExpectedOwnerId $OwnerId `
         -GuestCredential $operationCredential `
@@ -9963,6 +10050,8 @@ function Invoke-SmokeCommand {
             vmName = $VMName
             ownerId = $OwnerId
             guestArtifactRoot = $guestArtifacts
+            hostArtifactBase = $hostArtifactBase
+            hostArtifactRunPath = $hostArtifacts
             hostArtifactRoot = $hostArtifacts
             archiveSha256 = if ($null -ne $retrievalProof) { [string]$retrievalProof.sha256 } else { "" }
             artifactFileCount = if ($null -ne $retrievalProof) { [int]$retrievalProof.fileCount } else { 0 }
@@ -9973,7 +10062,7 @@ function Invoke-SmokeCommand {
         }
         $manifest |
             ConvertTo-Json -Depth 5 |
-            Set-Content -LiteralPath (Join-Path $hostArtifacts "host-smoke-manifest.json") -Encoding UTF8
+            Set-Content -LiteralPath $hostManifestPath -Encoding UTF8
         if ($null -ne $smokeError -and $null -ne $artifactError) {
             $safeSmokeError = ConvertTo-SafeGuestDiagnosticText -Value $smokeError -MaxChars 4096
             $safeArtifactError = ConvertTo-SafeGuestDiagnosticText -Value $artifactError -MaxChars 2048
@@ -9987,9 +10076,36 @@ function Invoke-SmokeCommand {
         if ($null -ne $artifactError) {
             throw $artifactError
         }
+        }
+    } catch {
+        if (-not (Test-Path -LiteralPath $hostManifestPath -PathType Leaf)) {
+            [ordered]@{
+                command = "Smoke"
+                validationLane = $ValidationLane
+                vmName = $VMName
+                ownerId = $OwnerId
+                hostArtifactBase = $hostArtifactBase
+                hostArtifactRunPath = $hostArtifacts
+                hostArtifactRoot = $hostArtifacts
+                succeeded = $false
+                timestampUtc = [DateTime]::UtcNow.ToString("o")
+                failure = ConvertTo-SafeGuestDiagnosticText -Value $_ -MaxChars 4096
+            } |
+                ConvertTo-Json -Depth 5 |
+                Set-Content -LiteralPath $hostManifestPath -Encoding UTF8
+        }
+        throw
     }
 
     Write-InfoLine "Smoke artifacts: $hostArtifacts"
+    return [pscustomobject][ordered]@{
+        command = "Smoke"
+        validationLane = $ValidationLane
+        hostArtifactBase = $hostArtifactBase
+        hostArtifactRunPath = $hostArtifacts
+        manifestPath = $hostManifestPath
+        succeeded = $true
+    }
 }
 
 function Invoke-RestoreCommand {

@@ -399,6 +399,13 @@ not retry healthy-session integrity failures or suppress the primary failure.
 Always remove guest and host archive copies, and report primary plus retrieval
 failures together.
 
+Treat clean-runner `-HostArtifactRoot` as a base directory. Every Smoke
+invocation must atomically allocate one contained, non-reparse,
+timestamp-plus-nonce child that did not preexist. Route the ZIP, extraction,
+and host manifest only into that child; print/return/record the actual run
+path, including a fallback manifest for failures before retrieval. Retry name
+collisions without overwriting or deleting any prior run evidence.
+
 Fresh unattended Hyper-V `Create` requires `-GenerateCredential`, verifies the
 official ISO SHA256, builds a separate answer ISO with Windows IMAPI2, and
 mounts and validates that ISO before any VM or VHD creation. It then waits a

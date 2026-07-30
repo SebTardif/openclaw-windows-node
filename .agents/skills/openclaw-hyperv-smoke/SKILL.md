@@ -265,6 +265,14 @@ Version discovery now uses exact bounded `dotnet.exe` stdout/stderr capture
 and parses only stdout JSON. Retry only Installed Smoke after this fix; do not
 rerun Prepare or Verify.
 
+The twenty-first Installed retry still failed its build, but artifact
+retrieval then collided with files from the prior run because the configured
+host artifact path was reused directly. `-HostArtifactRoot` is now only a
+base. Every Smoke invocation allocates a unique timestamp-plus-nonce child,
+prints and records that actual path, and never overwrites or deletes an older
+run. The current build failure remains unknown. Retry only Installed Smoke
+with the same base and inspect the newly reported child directory.
+
 From an elevated PowerShell session, run normal `Prepare` without
 `-RecoverPendingCheckpoint`:
 
@@ -540,7 +548,13 @@ artifact ZIP file with `Copy-Item -FromSession`. It never recursively copies a
 remote directory. Guest packaging validates the exact owned lane root, safe
 relative paths, no reparse points, bounded count/size, and SHA-256. The host
 revalidates size/hash/ZIP paths before extraction and requires lane-specific
-phase/log files. Both archive copies are removed in `finally`. If the smoke or
+phase/log files. `-HostArtifactRoot` is a base: each invocation atomically
+creates a contained, non-reparse, previously absent
+`yyyyMMdd-HHmmss-fff-<8hex>` child for extraction and manifest output.
+Collisions retry without changing old runs; the actual path is printed,
+returned on success, and recorded even for pre-retrieval failures. Both
+archive copies are removed in `finally`, but prior run directories are never
+overwritten or deleted. If the smoke or
 packaging session broke, artifact retrieval reconnects boundedly only to the
 exact owner-bound Running VM before checkpoint restore, removes only owned
 nonce archive residue, and retries packaging once. Healthy-session integrity

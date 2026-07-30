@@ -2914,6 +2914,68 @@ public sealed class CleanWindowsRunnerScriptTests
     }
 
     [Fact]
+    public void HyperVController_SmokeArtifactRunsUseDistinctContainedDirectoriesWithoutOverwriting()
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"openclaw-smoke-runs-{Guid.NewGuid():N}");
+        var basePath = Path.Combine(root, "base");
+        var outside = Path.Combine(root, "outside");
+        Directory.CreateDirectory(basePath);
+        Directory.CreateDirectory(outside);
+        const string collisionName = "20260730-010203-004-aaaaaaaa";
+        const string firstName = "20260730-010203-004-bbbbbbbb";
+        const string secondName = "20260730-010203-004-cccccccc";
+        const string reparseName = "20260730-010203-004-dddddddd";
+        var collisionPath = Path.Combine(basePath, collisionName);
+        var reparsePath = Path.Combine(basePath, reparseName);
+        Directory.CreateDirectory(collisionPath);
+        File.WriteAllText(Path.Combine(collisionPath, "old-evidence.txt"), "preserve");
+        CreateJunction(reparsePath, outside);
+        try
+        {
+            var result = RunPowerShellCommand(BuildSmokeArtifactRunDirectoryProof(
+                basePath,
+                collisionName,
+                firstName,
+                secondName,
+                reparseName));
+
+            AssertPowerShellProofSucceeded(result);
+            using var document = JsonDocument.Parse(result.Stdout);
+            var proof = document.RootElement;
+            Assert.Equal(Path.Combine(basePath, firstName), proof.GetProperty("first").GetString());
+            Assert.Equal(Path.Combine(basePath, secondName), proof.GetProperty("second").GetString());
+            Assert.NotEqual(
+                proof.GetProperty("first").GetString(),
+                proof.GetProperty("second").GetString());
+            Assert.Equal("preserve", proof.GetProperty("oldEvidence").GetString());
+            Assert.Contains(
+                "bounded attempts",
+                proof.GetProperty("preexistingError").GetString(),
+                StringComparison.OrdinalIgnoreCase);
+            Assert.Contains(
+                "reparse point",
+                proof.GetProperty("reparseError").GetString(),
+                StringComparison.OrdinalIgnoreCase);
+            Assert.Contains(
+                "safe generated segment",
+                proof.GetProperty("containmentError").GetString(),
+                StringComparison.OrdinalIgnoreCase);
+            Assert.False((File.GetAttributes(proof.GetProperty("first").GetString()!)
+                & FileAttributes.ReparsePoint) != 0);
+            Assert.False((File.GetAttributes(proof.GetProperty("second").GetString()!)
+                & FileAttributes.ReparsePoint) != 0);
+        }
+        finally
+        {
+            if (Directory.Exists(reparsePath))
+            {
+                Directory.Delete(reparsePath);
+            }
+            DeleteTestDirectory(root);
+        }
+    }
+
+    [Fact]
     public void HyperVController_SmokeArtifactRetrievalRunsBeforeRestoreAndPreservesDualFailure()
     {
         var controller = ReadScript("Invoke-CleanWindowsHyperV.ps1");
@@ -2945,6 +3007,10 @@ public sealed class CleanWindowsRunnerScriptTests
         Assert.Contains("Stale archive cleanup also failed", controller, StringComparison.Ordinal);
         Assert.Contains("artifactRetrievalAttempts", smoke, StringComparison.Ordinal);
         Assert.Contains("artifactSessionRecovered", smoke, StringComparison.Ordinal);
+        Assert.Contains("hostArtifactRunPath", smoke, StringComparison.Ordinal);
+        Assert.Contains("hostArtifactBase", smoke, StringComparison.Ordinal);
+        Assert.Contains("Smoke artifact run directory:", smoke, StringComparison.Ordinal);
+        Assert.Contains("return [pscustomobject][ordered]@{", smoke, StringComparison.Ordinal);
         Assert.Contains("Phase status:", smoke, StringComparison.Ordinal);
         Assert.Contains("Log tail:", smoke, StringComparison.Ordinal);
         Assert.Contains("Get-Content -LiteralPath $logPath -Tail 40", smoke, StringComparison.Ordinal);
@@ -6878,7 +6944,7 @@ public sealed class CleanWindowsRunnerScriptTests
         var validationFunctions = ExtractPowerShellFunction(
             controller,
             "Get-SmokeArtifactSha256",
-            "Resolve-HostArtifactPath");
+            "Resolve-HostArtifactBasePath");
         return string.Concat(
             "$ErrorActionPreference = 'Stop'\n",
             "$script:SmokeArtifactArchiveMaximumBytes = 536870912\n",
@@ -6919,7 +6985,7 @@ public sealed class CleanWindowsRunnerScriptTests
         var validationFunctions = ExtractPowerShellFunction(
             controller,
             "Get-SmokeArtifactSha256",
-            "Resolve-HostArtifactPath");
+            "Resolve-HostArtifactBasePath");
         return string.Concat(
             "$ErrorActionPreference = 'Stop'\n",
             "$script:SmokeArtifactArchiveMaximumBytes = 536870912\n",
@@ -6953,6 +7019,47 @@ public sealed class CleanWindowsRunnerScriptTests
             " error = $errorMessage\n",
             " fileCount = if ($result) { [int]$result.fileCount } else { 0 }\n",
             " archiveRemoved = -not $archivePath -or -not (Test-Path -LiteralPath $archivePath)\n",
+            "} | ConvertTo-Json -Compress))\n");
+    }
+
+    private static string BuildSmokeArtifactRunDirectoryProof(
+        string basePath,
+        string collisionName,
+        string firstName,
+        string secondName,
+        string reparseName)
+    {
+        var controller = ReadScript("Invoke-CleanWindowsHyperV.ps1");
+        var allocator = ExtractPowerShellFunction(
+            controller,
+            "New-SmokeArtifactRunDirectory",
+            "Get-SmokeArtifactRetrievalSession");
+        return string.Concat(
+            "$ErrorActionPreference = 'Stop'\n",
+            allocator,
+            "\n$base = ", PsQuote(basePath), "\n",
+            "$first = New-SmokeArtifactRunDirectory -BasePath $base -CandidateNames @(",
+            PsQuote(collisionName), ",", PsQuote(firstName), ")\n",
+            "[IO.File]::WriteAllText((Join-Path $first 'first.txt'), 'first')\n",
+            "$second = New-SmokeArtifactRunDirectory -BasePath $base -CandidateNames @(",
+            PsQuote(secondName), ")\n",
+            "$preexistingError = $null\n",
+            "try { [void](New-SmokeArtifactRunDirectory -BasePath $base -CandidateNames @(",
+            PsQuote(collisionName), ")) } catch { $preexistingError = $_.Exception.Message }\n",
+            "$reparseError = $null\n",
+            "try { [void](New-SmokeArtifactRunDirectory -BasePath $base -CandidateNames @(",
+            PsQuote(reparseName), ")) } catch { $reparseError = $_.Exception.Message }\n",
+            "$containmentError = $null\n",
+            "try { [void](New-SmokeArtifactRunDirectory -BasePath $base -CandidateNames @('../escape')) } ",
+            "catch { $containmentError = $_.Exception.Message }\n",
+            "[Console]::Out.Write(([pscustomobject][ordered]@{\n",
+            " first = $first\n",
+            " second = $second\n",
+            " oldEvidence = [IO.File]::ReadAllText((Join-Path $base ",
+            PsQuote(collisionName + "\\old-evidence.txt"), "))\n",
+            " preexistingError = $preexistingError\n",
+            " reparseError = $reparseError\n",
+            " containmentError = $containmentError\n",
             "} | ConvertTo-Json -Compress))\n");
     }
 

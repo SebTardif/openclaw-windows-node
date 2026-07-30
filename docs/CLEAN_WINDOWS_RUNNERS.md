@@ -622,9 +622,16 @@ Before checkpoint restore, the guest validates the exact lane root under
 `GuestRoot\artifacts`, rejects reparse points and unsafe relative paths, bounds
 file count and expanded size, and creates a nonce ZIP with size and SHA-256
 proof. The controller copies that one file with `Copy-Item -FromSession`,
-rechecks size/hash and every ZIP entry, extracts under `HostArtifactRoot`, and
-requires lane-specific phase/log artifacts. Guest and host archive copies are
-removed in `finally`. If the validation or packaging session broke, retrieval
+rechecks size/hash and every ZIP entry, and requires lane-specific phase/log
+artifacts. `-HostArtifactRoot` is a base directory, never the extraction
+directory. Every invocation atomically allocates a contained, non-reparse,
+previously absent `yyyyMMdd-HHmmss-fff-<8hex>` child and routes extraction and
+`host-smoke-manifest.json` there with `CreateNew` semantics. Collisions retry
+without changing old evidence; the actual run path is printed, returned on
+success, and recorded in the manifest. Even a pre-retrieval failure writes its
+manifest into that unique child. Guest and host archive copies are removed in
+`finally`; prior run directories are never overwritten or deleted. If the
+validation or packaging session broke, retrieval
 reconnects boundedly only to the exact owner-bound Running VM, removes only
 owned nonce archive residue, and retries packaging once. Healthy-session
 integrity failures are not retried. Primary validation and artifact failures
