@@ -73,7 +73,12 @@ match before build artifacts are published. If a release tag is
 
 `scripts\Get-OpenClawVersion.ps1` uses the repository-local
 `.config\dotnet-tools.json` manifest and `GitVersion.Tool` to print the same
-GitVersion value local scripts need outside MSBuild.
+GitVersion value local scripts need outside MSBuild. It resolves the exact
+`dotnet.exe` Application, uses bounded redirected native-process capture for
+tool restore and GitVersion, accepts exit-zero warning stderr, and parses only
+stdout as one JSON object. Nonzero exits and timeouts report sanitized bounded
+diagnostics; capture files and scoped dotnet environment overrides are always
+cleaned up/restored.
 
 For example:
 

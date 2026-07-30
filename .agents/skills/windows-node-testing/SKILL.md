@@ -347,13 +347,24 @@ segments, no duplicate case-insensitive names, only expected entry types, and
 safe relative symbolic-link payloads. The guest verifies before reset,
 extracts with built-in tooling, rejects reparse points and generated
 directories, and records the original HEAD plus archive evidence in
-`openclaw-source-provenance.json`. Exactly one source archive is transferred
-and both copies are removed in `finally`. Guest Git staging sets local
+`openclaw-source-provenance.json`. Before Git init, a bounded breadth-first
+walk that never follows reparse points sets only the root/extracted-entry
+owner to the current guest administrator SID and verifies every owner.
+Permissions/inheritance remain intact; wrong owners fail closed and wildcard
+`safe.directory` is not used. Exactly one source archive is transferred and
+both copies are removed in `finally`. Guest Git staging sets local
 `core.autocrlf=false` and `core.safecrlf=true` before `git add`, redirects
 bounded stdout/stderr for every fixed native Git operation, accepts sanitized
 warning stderr only with exit zero, and fails nonzero exits. Matching pre/post
 source-tree SHA-256 digests, unchanged LF bytes, and empty final porcelain
 status are required.
+
+Clean Installed/Upgrade builds must run `scripts\Get-OpenClawVersion.ps1`
+through its exact `dotnet.exe` Application path and bounded redirected native
+helper. Restore and GitVersion stderr must not become PowerShell ErrorRecords;
+exit-zero stderr is diagnostic, while nonzero/timeout diagnostics are
+sanitized and bounded. Parse only GitVersion stdout as one JSON object with
+the requested property, and require capture/environment cleanup.
 
 After a failed `Prepare`, the driver must first confirm that the rollback
 restored the exact owned `clean-windows` checkpoint and finalized marker. The

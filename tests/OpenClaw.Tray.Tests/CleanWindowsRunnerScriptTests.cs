@@ -2998,6 +2998,21 @@ public sealed class CleanWindowsRunnerScriptTests
         Assert.Contains("Expand-Archive", script, StringComparison.Ordinal);
         Assert.Contains("openclaw.clean-windows.source-provenance/v1", script, StringComparison.Ordinal);
         Assert.Contains("Guest staging from $SourceHead", staging, StringComparison.Ordinal);
+        var ownership = ExtractPowerShellRange(
+            staging,
+            "        function Set-OpenClawGuestSourceOwner {",
+            "        function Invoke-OpenClawGuestGitProcess {");
+        Assert.Contains("$acl.SetOwner($currentSid)", ownership, StringComparison.Ordinal);
+        Assert.Contains("[IO.Directory]::SetAccessControl", ownership, StringComparison.Ordinal);
+        Assert.Contains("[IO.File]::SetAccessControl", ownership, StringComparison.Ordinal);
+        Assert.Contains("GetOwner(", ownership, StringComparison.Ordinal);
+        Assert.Contains("wrong owner", ownership, StringComparison.Ordinal);
+        Assert.Contains("pendingDirectories", ownership, StringComparison.Ordinal);
+        Assert.Contains("refuses reparse point", ownership, StringComparison.Ordinal);
+        Assert.DoesNotContain("Get-ChildItem -LiteralPath $directory -Recurse", ownership, StringComparison.Ordinal);
+        Assert.True(
+            staging.IndexOf("$ownershipProof = Set-OpenClawGuestSourceOwner", StringComparison.Ordinal) <
+            staging.IndexOf("$gitCommands = @(", StringComparison.Ordinal));
         Assert.Contains("@(\"config\", \"--local\", \"core.autocrlf\", \"false\")", staging, StringComparison.Ordinal);
         Assert.Contains("@(\"config\", \"--local\", \"core.safecrlf\", \"true\")", staging, StringComparison.Ordinal);
         var stagingWorkflow = ExtractPowerShellRange(
@@ -3220,6 +3235,20 @@ public sealed class CleanWindowsRunnerScriptTests
                 Assert.Equal("false", proof.GetProperty("autoCrlf").GetString());
                 Assert.Equal("true", proof.GetProperty("safeCrlf").GetString());
                 Assert.Equal(string.Empty, proof.GetProperty("status").GetString());
+                Assert.Matches(
+                    "^S-1-",
+                    proof.GetProperty("ownerSid").GetString() ?? string.Empty);
+                Assert.Equal(
+                    proof.GetProperty("ownerSid").GetString(),
+                    proof.GetProperty("actualRootOwnerSid").GetString());
+                Assert.Equal(
+                    proof.GetProperty("ownerSid").GetString(),
+                    proof.GetProperty("actualFileOwnerSid").GetString());
+                if (proof.GetProperty("elevated").GetBoolean())
+                {
+                    Assert.True(proof.GetProperty("normalizedFromWrongOwner").GetBoolean());
+                }
+                Assert.True(proof.GetProperty("ownedEntryCount").GetInt32() >= 4);
                 Assert.Equal(lfContent, File.ReadAllText(Path.Combine(destination, "src", "lf.txt")));
                 Assert.DoesNotContain(
                     (byte)'\r',
@@ -3229,6 +3258,52 @@ public sealed class CleanWindowsRunnerScriptTests
             {
                 File.Delete(archivePath);
                 DeleteTestDirectory(destination);
+            }
+        }
+
+        [Fact]
+        public void GuestSourceOwnershipRejectsReparsePointWithoutTraversal()
+        {
+            var archivePath = Path.Combine(Path.GetTempPath(), $"openclaw-reparse-{Guid.NewGuid():N}.zip");
+            var destination = Path.Combine(Path.GetTempPath(), $"openclaw-reparse-dest-{Guid.NewGuid():N}");
+            var outside = Path.Combine(Path.GetTempPath(), $"openclaw-reparse-outside-{Guid.NewGuid():N}");
+            CreateSourceArchive(archivePath, ("src/file.txt", "content", 0));
+            Directory.CreateDirectory(outside);
+            File.WriteAllText(Path.Combine(outside, "must-not-read.txt"), "outside");
+            var junction = Path.Combine(destination, "escape");
+            try
+            {
+                var hash = Convert.ToHexString(
+                    System.Security.Cryptography.SHA256.HashData(File.ReadAllBytes(archivePath)));
+                var install = RunPowerShellCommand(BuildSourceArchiveInstallProof(
+                    archivePath,
+                    destination,
+                    hash,
+                    expectedFileCount: 1,
+                    install: true));
+                AssertPowerShellProofSucceeded(install);
+
+                CreateJunction(junction, outside);
+                var result = RunPowerShellCommand(
+                    BuildGuestSourceStagingFailureProof(destination));
+
+                AssertPowerShellProofSucceeded(result);
+                using var document = JsonDocument.Parse(result.Stdout);
+                Assert.Contains(
+                    "refuses reparse point",
+                    document.RootElement.GetProperty("error").GetString(),
+                    StringComparison.OrdinalIgnoreCase);
+                Assert.False(document.RootElement.GetProperty("gitInitialized").GetBoolean());
+            }
+            finally
+            {
+                if (Directory.Exists(junction))
+                {
+                    Directory.Delete(junction);
+                }
+                File.Delete(archivePath);
+                DeleteTestDirectory(destination);
+                DeleteTestDirectory(outside);
             }
         }
 
@@ -7065,7 +7140,21 @@ public sealed class CleanWindowsRunnerScriptTests
         return string.Concat(
             "$ErrorActionPreference = 'Stop'\n",
             staging,
-            "\n$proof = & (Get-GuestSourceStagingScriptBlock) ",
+            "\n$currentSid = [Security.Principal.WindowsIdentity]::GetCurrent().User\n",
+            "$principal = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())\n",
+            "$elevated = $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)\n",
+            "$normalizedFromWrongOwner = $false\n",
+            "if ($elevated) {\n",
+            " $wrongSid = New-Object Security.Principal.SecurityIdentifier('S-1-5-32-544')\n",
+            " foreach ($path in @(", PsQuote(destination), ", (Join-Path ", PsQuote(destination), " 'src\\lf.txt'))) {\n",
+            "  $item = Get-Item -LiteralPath $path -Force\n",
+            "  $acl = if ($item.PSIsContainer) { [IO.Directory]::GetAccessControl($path) } else { [IO.File]::GetAccessControl($path) }\n",
+            "  $acl.SetOwner($wrongSid)\n",
+            "  if ($item.PSIsContainer) { [IO.Directory]::SetAccessControl($path, $acl) } else { [IO.File]::SetAccessControl($path, $acl) }\n",
+            " }\n",
+            " $normalizedFromWrongOwner = $true\n",
+            "}\n",
+            "$proof = & (Get-GuestSourceStagingScriptBlock) ",
             PsQuote(destination),
             " '1111111111111111111111111111111111111111' ",
             "'openclaw-source-provenance.json' 60\n",
@@ -7078,6 +7167,12 @@ public sealed class CleanWindowsRunnerScriptTests
             "$status = (& git -C ",
             PsQuote(destination),
             " status --porcelain) -join \"`n\"\n",
+            "$rootOwner = [IO.Directory]::GetAccessControl(",
+            PsQuote(destination),
+            ", [Security.AccessControl.AccessControlSections]::Owner).GetOwner([Security.Principal.SecurityIdentifier]).Value\n",
+            "$fileOwner = [IO.File]::GetAccessControl((Join-Path ",
+            PsQuote(destination),
+            " 'src\\lf.txt'), [Security.AccessControl.AccessControlSections]::Owner).GetOwner([Security.Principal.SecurityIdentifier]).Value\n",
             "[Console]::Out.Write(([pscustomobject][ordered]@{\n",
             " clean = [bool]$proof.clean\n",
             " beforeSha256 = [string]$proof.beforeSha256\n",
@@ -7085,6 +7180,36 @@ public sealed class CleanWindowsRunnerScriptTests
             " autoCrlf = [string]$autoCrlf\n",
             " safeCrlf = [string]$safeCrlf\n",
             " status = [string]$status\n",
+            " ownerSid = [string]$proof.ownerSid\n",
+            " actualRootOwnerSid = [string]$rootOwner\n",
+            " actualFileOwnerSid = [string]$fileOwner\n",
+            " elevated = [bool]$elevated\n",
+            " normalizedFromWrongOwner = [bool]$normalizedFromWrongOwner\n",
+            " ownedEntryCount = [int]$proof.ownedEntryCount\n",
+            "} | ConvertTo-Json -Compress))\n");
+    }
+
+    private static string BuildGuestSourceStagingFailureProof(string destination)
+    {
+        var controller = ReadScript("Invoke-CleanWindowsHyperV.ps1");
+        var staging = ExtractPowerShellFunction(
+            controller,
+            "Get-GuestSourceStagingScriptBlock",
+            "New-CleanWindowsSourceArchive");
+        return string.Concat(
+            "$ErrorActionPreference = 'Stop'\n",
+            staging,
+            "\n$errorMessage = $null\n",
+            "try { [void](& (Get-GuestSourceStagingScriptBlock) ",
+            PsQuote(destination),
+            " '1111111111111111111111111111111111111111' ",
+            "'openclaw-source-provenance.json' 60) } ",
+            "catch { $errorMessage = $_.Exception.Message }\n",
+            "[Console]::Out.Write(([pscustomobject][ordered]@{\n",
+            " error = $errorMessage\n",
+            " gitInitialized = Test-Path -LiteralPath (Join-Path ",
+            PsQuote(destination),
+            " '.git')\n",
             "} | ConvertTo-Json -Compress))\n");
     }
 
@@ -7166,15 +7291,11 @@ public sealed class CleanWindowsRunnerScriptTests
         return string.Concat(
             "$ErrorActionPreference = 'Stop'\n",
             staging,
-            "\n& git -C ",
-            PsQuote(destination),
-            " init --quiet\n",
-            "if ($LASTEXITCODE -ne 0) { throw 'Test Git initialization failed.' }\n",
-            "$hookPath = Join-Path ",
-            PsQuote(destination),
-            " '.git\\hooks\\pre-commit'\n",
-            "[IO.File]::WriteAllText($hookPath, \"#!/bin/sh`nexit 23`n\", ",
-            "(New-Object Text.UTF8Encoding($false)))\n",
+            "\n$env:GIT_CONFIG_COUNT = '2'\n",
+            "$env:GIT_CONFIG_KEY_0 = 'commit.gpgsign'\n",
+            "$env:GIT_CONFIG_VALUE_0 = 'true'\n",
+            "$env:GIT_CONFIG_KEY_1 = 'gpg.program'\n",
+            "$env:GIT_CONFIG_VALUE_1 = 'C:\\openclaw-missing-gpg.exe'\n",
             "$errorMessage = $null\n",
             "try { [void](& (Get-GuestSourceStagingScriptBlock) ",
             PsQuote(destination),
@@ -7211,6 +7332,26 @@ public sealed class CleanWindowsRunnerScriptTests
             index += substring.Length;
         }
         return count;
+    }
+
+    private static void CreateJunction(string link, string target)
+    {
+        using var mklink = Process.Start(
+            new ProcessStartInfo
+            {
+                FileName = "cmd.exe",
+                Arguments = $"/c mklink /J \"{link}\" \"{target}\"",
+                UseShellExecute = false,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                CreateNoWindow = true,
+            }) ?? throw new InvalidOperationException("Failed to start mklink.");
+        var stdout = mklink.StandardOutput.ReadToEnd();
+        var stderr = mklink.StandardError.ReadToEnd();
+        Assert.True(mklink.WaitForExit(30_000), "Junction creation timed out.");
+        Assert.True(
+            mklink.ExitCode == 0,
+            $"Junction creation failed.{Environment.NewLine}{stdout}{Environment.NewLine}{stderr}");
     }
 
     private static void DeleteTestDirectory(string path)

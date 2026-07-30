@@ -254,6 +254,17 @@ could be retained. The prepared checkpoint remains valid. After the artifact
 archive fix, retry only the typed `Installed` smoke lane from
 `openclaw-prerequisites`; do not rerun Prepare or Verify.
 
+The twentieth real run again passed `Prepare` and `Verify`; artifact archive
+retrieval succeeded and retained the failed Installed build proof. The
+prepared checkpoint is valid. The failure showed the extracted repository
+owned by `BUILTIN\Administrators` instead of `OpenClawAdmin`, and direct
+`dotnet tool restore | Out-Host` promoted benign native stderr to a terminating
+error. Source staging now normalizes and verifies every exact extracted entry
+owner SID before Git init, without reparse traversal or wildcard Git trust.
+Version discovery now uses exact bounded `dotnet.exe` stdout/stderr capture
+and parses only stdout JSON. Retry only Installed Smoke after this fix; do not
+rerun Prepare or Verify.
+
 From an elevated PowerShell session, run normal `Prepare` without
 `-RecoverPendingCheckpoint`:
 
@@ -405,7 +416,12 @@ tree or ZIP types, unsafe symbolic-link targets, and archive count/hash/size
 mismatches. The guest verifies before resetting its repo root, extracts with
 built-in tooling, rejects all resulting reparse points and generated
 directories, writes `openclaw-source-provenance.json`, and initializes the
-disposable Git commit. Guest staging first sets repository-local
+disposable Git commit. Before Git initialization, a bounded breadth-first
+walk sets only the owner of the exact root and every extracted entry to the
+current guest administrator SID through Windows ACL APIs, preserving access
+rules/inheritance and verifying every owner afterward. Reparse points and
+wrong owners fail closed; no wildcard `safe.directory` is used. Guest staging
+then sets repository-local
 `core.autocrlf=false` and `core.safecrlf=true`, then runs only fixed Git
 operations through bounded redirected native processes. Exit-zero stderr is
 returned as sanitized bounded warning evidence; nonzero exits fail closed.
@@ -413,6 +429,13 @@ Pre/post source-tree SHA-256 digests must match, LF working-tree bytes remain
 unchanged, and final porcelain status must be empty. Exactly one archive
 crosses PowerShell Direct. Guest and host copies are removed in `finally`,
 and cleanup failure is fatal.
+
+Installed and upgrade version discovery resolves only `dotnet.exe` as a
+Windows Application and runs fixed tool restore/GitVersion arguments through
+bounded redirected `Start-Process` capture. Exit-zero stderr is diagnostic,
+nonzero/timeout errors are sanitized and bounded, GitVersion parses stdout
+only as one JSON object, and capture plus temporary dotnet environment state
+are cleaned up/restored.
 
 `Prepare` does not install Ubuntu or another distribution. Installed smoke
 provisions its app-owned distribution later. Checkpoint observation, guest

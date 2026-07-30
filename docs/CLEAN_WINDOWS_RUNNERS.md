@@ -540,8 +540,14 @@ its size and SHA-256 and repeats the complete ZIP entry validation before
 resetting the guest repository root. After built-in `Expand-Archive`, it
 requires the exact tracked-file count and no generated directories or reparse
 points. It writes `openclaw-source-provenance.json` with the original host
-HEAD and archive evidence, then initializes and commits the disposable guest
-Git repository. Before staging, the guest sets repository-local
+HEAD and archive evidence. Before Git initialization, a bounded breadth-first
+walk that never recurses through reparse points changes only the owner of the
+exact repository root and every extracted file/directory, including
+provenance, to the current guest administrator SID. It preserves access rules
+and inheritance, then rereads every owner SID and fails on any mismatch. Git
+trust therefore comes from correct Windows ownership, not a wildcard
+`safe.directory`. The guest then initializes and commits the disposable Git
+repository. Before staging, it sets repository-local
 `core.autocrlf=false` and `core.safecrlf=true`. Every fixed Git operation runs
 through a bounded native-process helper with redirected stdout and stderr, so
 exit-zero warnings remain bounded diagnostics instead of failing a PowerShell
@@ -552,6 +558,15 @@ excluding only `.git`, and requires identical digests plus an empty final
 bytes and that the source provenance is part of the clean commit. Both guest
 and host archives are removed in `finally`; cleanup failure fails the
 operation.
+
+Installed builds call `scripts\Get-OpenClawVersion.ps1`, which resolves the
+exact `dotnet.exe` Application and runs fixed `tool restore` and
+`tool run dotnet-gitversion -- /output json` arguments through bounded
+`Start-Process` capture. Stdout and stderr remain separate; exit-zero warning
+stderr is diagnostic only, while timeout/nonzero failures include sanitized
+bounded output. Only stdout may be parsed, and it must be one JSON object with
+the requested version property. Capture files are removed and temporary
+dotnet environment overrides are restored on success or failure.
 
 After source staging, Prepare invokes only `scripts\setup-dev.ps1 -CheckOnly`
 through a bounded redirected native process. The clean controller never runs

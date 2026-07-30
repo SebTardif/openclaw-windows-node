@@ -4147,6 +4147,122 @@ function Get-GuestSourceStagingScriptBlock {
             }
         }
 
+        function Set-OpenClawGuestSourceOwner {
+            param(
+                [Parameter(Mandatory = $true)]
+                [string]$Root,
+                [Parameter(Mandatory = $true)]
+                [int]$ExpectedTrackedFileCount
+            )
+
+            if ($ExpectedTrackedFileCount -lt 1 -or $ExpectedTrackedFileCount -gt 20000) {
+                throw "Guest source ownership received an invalid tracked-file count."
+            }
+            $canonicalRoot = [IO.Path]::GetFullPath($Root).TrimEnd("\")
+            $rootPrefix = $canonicalRoot + "\"
+            $maximumEntries = ($ExpectedTrackedFileCount * 4) + 2
+            $currentSid = [Security.Principal.WindowsIdentity]::GetCurrent().User
+            if ($null -eq $currentSid) {
+                throw "Guest source ownership could not resolve the current Windows user SID."
+            }
+            $stopwatch = [Diagnostics.Stopwatch]::StartNew()
+            $entries = New-Object 'Collections.Generic.List[object]'
+            $pendingDirectories = New-Object 'Collections.Generic.Queue[string]'
+            $rootItem = Get-Item -LiteralPath $canonicalRoot -Force -ErrorAction Stop
+            if (
+                -not $rootItem.PSIsContainer -or
+                ($rootItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0
+            ) {
+                throw "Guest source repository root is missing, not a directory, or is a reparse point."
+            }
+            [void]$entries.Add($rootItem)
+            $pendingDirectories.Enqueue($canonicalRoot)
+            while ($pendingDirectories.Count -gt 0) {
+                if ($stopwatch.Elapsed.TotalSeconds -gt $NativeTimeoutSec) {
+                    throw "Guest source ownership enumeration timed out after $NativeTimeoutSec seconds."
+                }
+                $directory = $pendingDirectories.Dequeue()
+                foreach ($child in @(
+                    Get-ChildItem -LiteralPath $directory -Force -ErrorAction Stop
+                )) {
+                    $fullPath = [IO.Path]::GetFullPath([string]$child.FullName)
+                    if (-not $fullPath.StartsWith(
+                        $rootPrefix,
+                        [StringComparison]::OrdinalIgnoreCase)) {
+                        throw "Guest source ownership encountered an entry outside the repository root."
+                    }
+                    if (($child.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+                        throw "Guest source ownership refuses reparse point '$fullPath'."
+                    }
+                    [void]$entries.Add($child)
+                    if ($entries.Count -gt $maximumEntries) {
+                        throw "Guest source ownership entry count exceeds the bounded maximum."
+                    }
+                    if ($child.PSIsContainer) {
+                        $pendingDirectories.Enqueue($fullPath)
+                    }
+                }
+            }
+
+            $fileCount = @($entries | Where-Object { -not $_.PSIsContainer }).Count
+            if ($fileCount -ne ($ExpectedTrackedFileCount + 1)) {
+                throw (
+                    "Guest source ownership found $fileCount files; expected tracked files plus provenance.")
+            }
+            foreach ($entry in $entries) {
+                if ($stopwatch.Elapsed.TotalSeconds -gt $NativeTimeoutSec) {
+                    throw "Guest source ownership normalization timed out after $NativeTimeoutSec seconds."
+                }
+                $currentItem = Get-Item -LiteralPath $entry.FullName -Force -ErrorAction Stop
+                if (($currentItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+                    throw "Guest source ownership refuses reparse point '$($currentItem.FullName)'."
+                }
+                $aclSections = (
+                    [Security.AccessControl.AccessControlSections]::Access -bor
+                    [Security.AccessControl.AccessControlSections]::Owner -bor
+                    [Security.AccessControl.AccessControlSections]::Group)
+                $acl = if ($currentItem.PSIsContainer) {
+                    [IO.Directory]::GetAccessControl($currentItem.FullName, $aclSections)
+                } else {
+                    [IO.File]::GetAccessControl($currentItem.FullName, $aclSections)
+                }
+                $acl.SetOwner($currentSid)
+                if ($currentItem.PSIsContainer) {
+                    [IO.Directory]::SetAccessControl($currentItem.FullName, $acl)
+                } else {
+                    [IO.File]::SetAccessControl($currentItem.FullName, $acl)
+                }
+            }
+            foreach ($entry in $entries) {
+                if ($stopwatch.Elapsed.TotalSeconds -gt $NativeTimeoutSec) {
+                    throw "Guest source ownership verification timed out after $NativeTimeoutSec seconds."
+                }
+                $currentItem = Get-Item -LiteralPath $entry.FullName -Force -ErrorAction Stop
+                if (($currentItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+                    throw "Guest source ownership refuses reparse point '$($currentItem.FullName)'."
+                }
+                $ownerAcl = if ($currentItem.PSIsContainer) {
+                    [IO.Directory]::GetAccessControl(
+                        $currentItem.FullName,
+                        [Security.AccessControl.AccessControlSections]::Owner)
+                } else {
+                    [IO.File]::GetAccessControl(
+                        $currentItem.FullName,
+                        [Security.AccessControl.AccessControlSections]::Owner)
+                }
+                $owner = $ownerAcl.GetOwner([Security.Principal.SecurityIdentifier])
+                if (-not $owner.Equals($currentSid)) {
+                    throw "Guest source ownership verification found an entry with the wrong owner."
+                }
+            }
+            $stopwatch.Stop()
+            return [pscustomobject][ordered]@{
+                ownerSid = $currentSid.Value
+                entryCount = $entries.Count
+                fileCount = $fileCount
+            }
+        }
+
         function Invoke-OpenClawGuestGitProcess {
             param(
                 [Parameter(Mandatory = $true)]
@@ -4268,6 +4384,10 @@ function Get-GuestSourceStagingScriptBlock {
         ) {
             throw "Guest source provenance does not match the exact host HEAD."
         }
+        $provenanceTrackedFileCount = [int]$provenance.trackedFileCount
+        $ownershipProof = Set-OpenClawGuestSourceOwner `
+            -Root $canonicalRoot `
+            -ExpectedTrackedFileCount $provenanceTrackedFileCount
 
         $gitCommands = @(
             Get-Command git.exe -CommandType Application -ErrorAction SilentlyContinue
@@ -4327,6 +4447,8 @@ function Get-GuestSourceStagingScriptBlock {
                 afterSha256 = $afterSha256
                 warningCount = $warnings.Count
                 warnings = @($warnings)
+                ownerSid = [string]$ownershipProof.ownerSid
+                ownedEntryCount = [int]$ownershipProof.entryCount
                 clean = $true
             }
         } finally {
@@ -4537,6 +4659,8 @@ function Copy-RepoToGuest {
             $stagingOutput.Count -ne 1 -or
             -not [bool]$stagingOutput[0].clean -or
             [string]$stagingOutput[0].sourceHead -cne [string]$sourceArchive.SourceHead -or
+            [string]::IsNullOrWhiteSpace([string]$stagingOutput[0].ownerSid) -or
+            [int]$stagingOutput[0].ownedEntryCount -le [int]$sourceArchive.TrackedFileCount -or
             [string]$stagingOutput[0].beforeSha256 -cne [string]$stagingOutput[0].afterSha256
         ) {
             throw "Guest Git staging proof did not preserve exact extracted source bytes."
