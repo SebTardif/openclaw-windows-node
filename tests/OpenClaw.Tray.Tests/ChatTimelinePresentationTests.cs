@@ -3,7 +3,7 @@ namespace OpenClaw.Tray.Tests;
 public sealed class ChatTimelinePresentationTests
 {
     [Fact]
-    public void ReactorTimeline_UsesNonSelectableItemsViewContainersAndAnnotatedScrollBar()
+    public void ReactorTimeline_UsesNonSelectableItemsViewContainersAndNativeScrollView()
     {
         var timeline = File.ReadAllText(Path.Combine(
             TestRepositoryPaths.GetRepositoryRoot(),
@@ -25,39 +25,45 @@ public sealed class ChatTimelinePresentationTests
         Assert.Contains("ItemContainerSelectedPointerOverBackground", timeline);
         Assert.Contains("ItemContainerSelectedPressedBackground", timeline);
         Assert.Contains("ItemContainerSelectionVisualPointerOverBackground", timeline);
-        Assert.Contains("AnnotatedScrollBar()", timeline);
-        Assert.Contains(".BindVerticalScrollController(", timeline);
-        Assert.Contains("annotatedScrollBarRef,", timeline);
+        Assert.Contains(".PositionInitialTail(", timeline);
         Assert.Contains("rows.Count - 1", timeline);
         Assert.Contains("initialTailRequestKey", timeline);
+        Assert.DoesNotContain("AnnotatedScrollBar()", timeline);
+        Assert.DoesNotContain(".BindVerticalScrollController(", timeline);
         Assert.DoesNotContain("ItemsRepeater(", timeline);
         Assert.DoesNotContain("ScrollView(", timeline);
     }
 
     [Fact]
-    public void ReactorTimeline_UsesReactiveAnnotatedScrollBarControllerBinding()
+    public void ReactorTimeline_ProductionChatDoesNotAttachExternalVerticalScrollController()
     {
-        var binding = File.ReadAllText(Path.Combine(
+        var chatDirectory = Path.Combine(
             TestRepositoryPaths.GetRepositoryRoot(),
             "src",
             "OpenClaw.Tray.WinUI",
-            "Chat",
-            "ReactorItemsViewScrollController.cs"));
+            "Chat");
+        var binding = File.ReadAllText(Path.Combine(
+            chatDirectory,
+            "ReactorItemsViewInitialTail.cs"));
 
-        Assert.Contains("context.BindFor(itemsView, element).Reference", binding);
-        Assert.Contains("VerticalScrollController = scrollBar?.ScrollController", binding);
-        Assert.DoesNotContain(".Current", binding);
+        Assert.Contains("ItemsViewInitialTailElement", binding);
+        foreach (var sourcePath in Directory.EnumerateFiles(chatDirectory, "*.cs"))
+        {
+            var source = File.ReadAllText(sourcePath);
+            Assert.DoesNotContain("AnnotatedScrollBar", source);
+            Assert.DoesNotContain("VerticalScrollController", source);
+        }
     }
 
     [Fact]
-    public void ReactorTimeline_QueuesInitialTailAfterLoadedLayoutAndCleansUp()
+    public void ReactorTimeline_QueuesInitialTailWithoutReactiveExtentScrolling()
     {
         var binding = File.ReadAllText(Path.Combine(
             TestRepositoryPaths.GetRepositoryRoot(),
             "src",
             "OpenClaw.Tray.WinUI",
             "Chat",
-            "ReactorItemsViewScrollController.cs"));
+            "ReactorItemsViewInitialTail.cs"));
 
         Assert.Contains("itemsView.Loaded += OnLoaded", binding);
         Assert.Contains("itemsView.LayoutUpdated += OnLayoutUpdated", binding);
@@ -65,12 +71,17 @@ public sealed class ChatTimelinePresentationTests
         Assert.Contains("itemsView.StartBringItemIntoView(", binding);
         Assert.Contains("VerticalAlignmentRatio = 1.0", binding);
         Assert.Contains("_valid = tailIndex >= 0", binding);
+        Assert.Contains("scrollView.ScrollTo(", binding);
+        Assert.Contains("WinUIScrollingAnimationMode.Disabled", binding);
+        Assert.Contains("WinUIScrollingSnapPointsMode.Ignore", binding);
+        Assert.Contains("scrollView.ScrollableHeight - scrollView.VerticalOffset", binding);
         Assert.Contains("itemsView.Unloaded += OnUnloaded", binding);
         Assert.Contains("itemsView.Loaded -= OnLoaded", binding);
         Assert.Contains("itemsView.LayoutUpdated -= OnLayoutUpdated", binding);
         Assert.DoesNotContain("ChangeView", binding);
         Assert.DoesNotContain("UpdateLayout", binding);
-        Assert.Contains("scrollView.VerticalAnchorRatio = _following ? 1.0 : double.NaN", binding);
+        Assert.DoesNotContain("VerticalAnchorRatio", binding);
+        Assert.DoesNotContain("ExtentChanged", binding);
     }
 
     [Fact]

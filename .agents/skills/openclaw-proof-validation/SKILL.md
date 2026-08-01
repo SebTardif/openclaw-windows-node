@@ -39,11 +39,13 @@ dotnet test .\tests\OpenClaw.WinNode.Cli.Tests\OpenClaw.WinNode.Cli.Tests.csproj
 
 | Surface | Proof to collect |
 |---|---|
-| UI / WinUI | Launch `.\run-app-local.ps1 -Isolated`, exercise the changed path with computer-use or developer-provided screenshots/output, and include visible evidence or blocker. If the developer captures manually, provide exact steps and confirm screenshot/artifact links resolve after updating the PR body. |
+| UI / WinUI | Build the current branch, then launch `.\run-app-local.ps1 -UseWinApp -NoBuild -Isolated -AllowNonMain`. Exercise the changed path with computer-use or developer-provided screenshots/output, and include visible evidence or a blocker. If the developer captures manually, provide exact steps and confirm screenshot/artifact links resolve after updating the PR body. |
 | Local MCP | Enable **Local MCP Server**, run `winnode --list-tools`, then invoke the changed command with `winnode --command <name> --params '<json-object>'`. |
 | Raw MCP HTTP | For protocol/server-shape changes, paste JSON-RPC `tools/list` and `tools/call` responses from `http://127.0.0.1:8765/`. |
 | Gateway path | When relevant and available, prove `openclaw nodes invoke --command <name> --params '<json-object>'`; otherwise state the gateway blocker. |
 | Rubber-duck | Ask a rubber-duck reviewer to inspect the final implementation/proof plan; verify any finding before changing code. |
+
+For real-data proof that the developer explicitly requests, omit `-Isolated` so the app uses the existing paired `%APPDATA%\OpenClawTray` profile. Stop the currently running release-identity app first so the candidate process owns the single-instance mutex. Use the helper rather than assembling `winapp run` arguments manually.
 
 For isolated tray runs, copy the data directory printed by `run-app-local.ps1 -Isolated` and set it before MCP proof commands:
 

@@ -199,6 +199,20 @@ public sealed class InstallerIssAssertionTests
     }
 
     [Fact]
+    public void LocalLaunchGuidance_WinAppActivationUsesSupportedCliContract()
+    {
+        var root = TestRepositoryPaths.GetRepositoryRoot();
+        var runScript = File.ReadAllText(Path.Combine(root, "run-app-local.ps1"));
+        var buildScript = File.ReadAllText(Path.Combine(root, "build.ps1"));
+
+        Assert.Contains(
+            """$winappArgs = @("run", $outputDir, "--manifest", $manifestPath)""",
+            runScript);
+        Assert.DoesNotContain("\"--executable\"", runScript);
+        Assert.DoesNotContain("--executable", buildScript);
+    }
+
+    [Fact]
     public void MsixManifest_IsGeneratedUnderObjWithoutMutatingTrackedSource()
     {
         var root = TestRepositoryPaths.GetRepositoryRoot();

@@ -83,6 +83,8 @@ public sealed class AccessibilityAppFixture : IDisposable
 
         EnsureTargetIsAlive();
         await WaitForPageMarkerAsync(pageTag, pageMarkerAutomationId);
+        await Task.Delay(NavigationSettleTime);
+        EnsureTargetIsAlive();
     }
 
     public string? CaptureHubScreenshotIfRequested()

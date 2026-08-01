@@ -464,7 +464,7 @@ if ($failCount -eq 0) {
             Write-Host "  Isolated: .\run-app-local.ps1 -NoBuild -Isolated$runIdentitySwitch" -ForegroundColor White
             Write-Host "  Dev:      .\run-app-local.ps1 -Dev" -ForegroundColor White
             Write-Host "  WinApp:   .\run-app-local.ps1 -NoBuild -UseWinApp$runIdentitySwitch" -ForegroundColor White
-            Write-Host "            Direct launch is default. -UseWinApp runs: winapp run `"$winUIOutputDirectory`" --manifest `"$winUIManifestPath`" --executable `"OpenClaw.Tray.WinUI.exe`" --debug-output" -ForegroundColor DarkGray
+            Write-Host "            Direct launch is default. -UseWinApp runs: winapp run `"$winUIOutputDirectory`" --manifest `"$winUIManifestPath`" --debug-output" -ForegroundColor DarkGray
         } else {
             Write-Warning "Unable to determine WinUI target framework from $winUIProjectPath"
         }

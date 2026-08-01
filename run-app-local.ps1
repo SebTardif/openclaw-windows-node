@@ -231,7 +231,7 @@ try {
     }
 
     if ($UseWinApp) {
-        $winappArgs = @("run", $outputDir, "--manifest", $manifestPath, "--executable", "OpenClaw.Tray.WinUI.exe")
+        $winappArgs = @("run", $outputDir, "--manifest", $manifestPath)
         if (-not $NoDebugOutput) {
             $winappArgs += "--debug-output"
         }

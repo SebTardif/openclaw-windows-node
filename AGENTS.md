@@ -30,6 +30,7 @@ Notes:
   - `$env:OPENCLAW_REPO_ROOT='D:\github\openclaw-windows-node.<worktree-name>'`
 - Tray tests must isolate `SettingsManager` from real user settings. Do not use `new SettingsManager()` in tests unless the test intentionally reads `%APPDATA%\OpenClawTray\settings.json`; pass a temp settings directory or set `OPENCLAW_TRAY_DATA_DIR` before the test process starts.
 - Prefer isolated worktrees for PR validation. Use `git-wt` for worktree workflows; `wt.exe` may resolve to WorkTrunk instead of Windows Terminal, so use the full Windows Terminal path when explicitly launching Terminal.
+- For branch UI proof, launch with `.\run-app-local.ps1 -UseWinApp -AllowNonMain`. Add `-NoBuild` only after the current branch has been built. Add `-Isolated` for a disposable profile; omit it only when the developer explicitly requests proof against their existing paired `%APPDATA%\OpenClawTray` data. Do not hand-build a `winapp run` command or add `--executable`; the helper owns the supported WinAppCLI invocation.
 - Do not claim completion without reporting validation results.
 
 ## Targeted Validation Paths

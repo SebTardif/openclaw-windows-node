@@ -14,7 +14,6 @@ using OpenClaw.Chat;
 using OpenClawTray.Helpers;
 using Windows.UI;
 using static Microsoft.UI.Reactor.Factories;
-using WinUIAnnotatedScrollBar = Microsoft.UI.Xaml.Controls.AnnotatedScrollBar;
 
 namespace OpenClawTray.Chat;
 
@@ -51,7 +50,6 @@ public sealed class ReactorChatTimeline : Component<ReactorChatTimelineProps>
         var (hoveredEntryId, setHoveredEntryId) = UseState<string?>(null, threadSafe: true);
         var speechOperation = UseRef(0);
         var mounted = UseRef(true);
-        var annotatedScrollBarRef = this.UseElementRef<WinUIAnnotatedScrollBar>();
 
         UseEffect((Func<Action>)(() =>
         {
@@ -152,23 +150,11 @@ public sealed class ReactorChatTimeline : Component<ReactorChatTimelineProps>
             SelectionMode = ItemsViewSelectionMode.None,
             IsItemInvokedEnabled = false,
         };
-        return Grid(
-            [GridSize.Star(), GridSize.Auto],
-            [GridSize.Star()],
-            itemsView
-                .BindVerticalScrollController(
-                    annotatedScrollBarRef,
-                    rows.Count - 1,
-                    initialTailRequestKey)
-                .Grid(column: 0)
-                .AutomationName("Chat messages")
-                .HAlign(HorizontalAlignment.Stretch)
-                .VAlign(VerticalAlignment.Stretch),
-            AnnotatedScrollBar()
-                .Ref(annotatedScrollBarRef)
-                .Width(32)
-                .Grid(column: 1)
-                .AutomationName("Chat message navigation"))
+        return itemsView
+            .PositionInitialTail(
+                rows.Count - 1,
+                initialTailRequestKey)
+            .AutomationName("Chat messages")
             .HAlign(HorizontalAlignment.Stretch)
             .VAlign(VerticalAlignment.Stretch);
     }
