@@ -322,13 +322,13 @@ silent/noninteractive agreement flags, and redirected sanitized diagnostics.
 The .NET Burn manifest has no `Scope`, so its typed selection omits
 `--scope` and records null scope evidence; its SDK verification still proves
 installation. Node, Windows SDK, WebView2, and Build Tools retain exact machine scope.
-Build Tools adds only
-`--custom "--add Microsoft.VisualStudio.Component.VC.Redist.14.Latest --norestart"`,
-never a workload, IDE, recommended, or optional component. Its verify-only
-proof requires the standard `vswhere.exe`, exactly one canonical component
-install root, and nonempty x64 `vcruntime140*.dll` plus `msvcp140*.dll` files
-safely below that root. Verify repeats this check and rejects a stale prepared
-checkpoint.
+Build Tools adds only the two individual components needed by publish:
+`--custom "--add Microsoft.VisualStudio.Component.VC.Redist.14.Latest --add Microsoft.VisualStudio.Component.VC.Tools.x86.x64 --norestart"`.
+It never adds a workload, IDE, recommended, or optional component set. Its
+verify-only proof requires the standard `vswhere.exe`, exactly one canonical
+install root containing both components, and nonempty x64 `vcruntime140*.dll`
+plus `msvcp140*.dll` files safely below that root. Verify repeats this check and
+rejects a stale prepared checkpoint.
 Existing availability skips install; exit zero requires immediate
 verification.
 

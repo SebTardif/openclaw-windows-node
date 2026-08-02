@@ -2141,7 +2141,11 @@ public sealed class CleanWindowsRunnerScriptTests
         Assert.Contains("if ($null -ne $scope)", worker, StringComparison.Ordinal);
         Assert.Contains("$installArguments += @(\"--scope\", $scope)", worker, StringComparison.Ordinal);
         Assert.Contains(
-            "customArguments = \"--add Microsoft.VisualStudio.Component.VC.Redist.14.Latest --norestart\"",
+            "\"--add Microsoft.VisualStudio.Component.VC.Redist.14.Latest \"",
+            worker,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "\"--add Microsoft.VisualStudio.Component.VC.Tools.x86.x64 --norestart\"",
             worker,
             StringComparison.Ordinal);
         Assert.Contains(
@@ -2195,10 +2199,16 @@ public sealed class CleanWindowsRunnerScriptTests
             "& powershell.exe -NoProfile -ExecutionPolicy Bypass -File",
             prepare,
             StringComparison.Ordinal);
+
+        var targets = File.ReadAllText(Path.Combine(Root, "src", "Directory.Build.targets"));
+        Assert.Contains(
+            "-requires Microsoft.VisualStudio.Component.VC.Redist.14.Latest Microsoft.VisualStudio.Component.VC.Tools.x86.x64",
+            targets,
+            StringComparison.Ordinal);
     }
 
     [Fact]
-    public void SetupDevUsesOnlyTheMinimalVisualStudioVcRedistComponent()
+    public void SetupDevUsesOnlyTheMinimalVisualStudioVcRuntimeComponents()
     {
         var setupDev = File.ReadAllText(Path.Combine(Root, "scripts", "setup-dev.ps1"));
         var install = ExtractPowerShellFunction(
@@ -2211,8 +2221,24 @@ public sealed class CleanWindowsRunnerScriptTests
         Assert.Contains("\"--installer-type\", \"exe\"", install, StringComparison.Ordinal);
         Assert.Contains("\"--scope\", \"machine\"", install, StringComparison.Ordinal);
         Assert.Contains(
-            "\"--custom\", \"--add $componentId --norestart\"",
+            "\"--custom\", $customArguments",
             install,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "\"--add $redistComponentId --add $toolsComponentId --norestart\"",
+            install,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "-requires $redistComponentId $toolsComponentId",
+            setupDev,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "\"Microsoft.VisualStudio.Component.VC.Redist.14.Latest\"",
+            setupDev,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "\"Microsoft.VisualStudio.Component.VC.Tools.x86.x64\"",
+            setupDev,
             StringComparison.Ordinal);
         Assert.Contains("\"--source\", \"winget\"", install, StringComparison.Ordinal);
         Assert.Contains("\"--silent\"", install, StringComparison.Ordinal);
@@ -2423,8 +2449,20 @@ public sealed class CleanWindowsRunnerScriptTests
         if (packageKey == "VisualStudioBuildTools")
         {
             Assert.Contains(
-                "--scope|machine|--custom|\"--add Microsoft.VisualStudio.Component.VC.Redist.14.Latest --norestart\"|--source|winget|--silent",
+                "--scope|machine|--custom|\"--add Microsoft.VisualStudio.Component.VC.Redist.14.Latest --add Microsoft.VisualStudio.Component.VC.Tools.x86.x64 --norestart\"|--source|winget|--silent",
                 arguments,
+                StringComparison.Ordinal);
+            var calls = proof.GetProperty("calls").GetString() ?? string.Empty;
+            Assert.Contains(
+                "VsWhere:-latest|-products|*|-requires|Microsoft.VisualStudio.Component.VC.Redist.14.Latest|Microsoft.VisualStudio.Component.VC.Tools.x86.x64|-property|installationPath",
+                calls,
+                StringComparison.Ordinal);
+            Assert.Equal(
+                "--add Microsoft.VisualStudio.Component.VC.Redist.14.Latest --add Microsoft.VisualStudio.Component.VC.Tools.x86.x64 --norestart",
+                proof.GetProperty("customArguments").GetString());
+            Assert.Contains(
+                "components=Microsoft.VisualStudio.Component.VC.Redist.14.Latest,Microsoft.VisualStudio.Component.VC.Tools.x86.x64;",
+                proof.GetProperty("verification").GetString(),
                 StringComparison.Ordinal);
             Assert.DoesNotContain("workload", arguments, StringComparison.OrdinalIgnoreCase);
             Assert.DoesNotContain("includeRecommended", arguments, StringComparison.OrdinalIgnoreCase);
@@ -2456,7 +2494,7 @@ public sealed class CleanWindowsRunnerScriptTests
                 "$ErrorActionPreference = 'Stop'\n",
                 "$arguments = [string[]]@(\n",
                 " '-NoProfile', '-File', ('\"{0}\"' -f ", PsQuote(argvScript), "),\n",
-                " '--custom', ('\"{0}\"' -f '--add Microsoft.VisualStudio.Component.VC.Redist.14.Latest --norestart'),\n",
+                " '--custom', ('\"{0}\"' -f '--add Microsoft.VisualStudio.Component.VC.Redist.14.Latest --add Microsoft.VisualStudio.Component.VC.Tools.x86.x64 --norestart'),\n",
                 " '--source', 'winget')\n",
                 "$process = Start-Process -FilePath ",
                 PsQuote(Path.Combine(
@@ -2486,7 +2524,7 @@ public sealed class CleanWindowsRunnerScriptTests
                 new[]
                 {
                     "--custom",
-                    "--add Microsoft.VisualStudio.Component.VC.Redist.14.Latest --norestart",
+                    "--add Microsoft.VisualStudio.Component.VC.Redist.14.Latest --add Microsoft.VisualStudio.Component.VC.Tools.x86.x64 --norestart",
                     "--source",
                     "winget",
                 },
@@ -2559,6 +2597,7 @@ public sealed class CleanWindowsRunnerScriptTests
     [InlineData("vswhere-missing", "standard vswhere.exe path unavailable")]
     [InlineData("vswhere-error", "vswhereExit=9")]
     [InlineData("component-missing", "vswhere returned 0 component install roots")]
+    [InlineData("tools-component-missing", "vswhere returned 0 component install roots")]
     [InlineData("vswhere-multiple", "vswhere returned 2 component install roots")]
     [InlineData("crt-missing", "required nonempty x64 VC runtime DLLs")]
     [InlineData("reparse-x64", "required nonempty x64 VC runtime DLLs")]
@@ -2657,6 +2696,10 @@ public sealed class CleanWindowsRunnerScriptTests
         Assert.Contains("visualStudioBuildTools", verify, StringComparison.Ordinal);
         Assert.Contains(
             "Microsoft.VisualStudio.Component.VC.Redist.14.Latest",
+            verify,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "Microsoft.VisualStudio.Component.VC.Tools.x86.x64",
             verify,
             StringComparison.Ordinal);
     }
@@ -6791,7 +6834,8 @@ public sealed class CleanWindowsRunnerScriptTests
             "$ErrorActionPreference = 'Stop'\n",
             "$script:installed = ",
             scenario is "existing" or "vswhere-missing" or "vswhere-error" or
-                "component-missing" or "vswhere-multiple" or "crt-missing" or "reparse-x64"
+                "component-missing" or "tools-component-missing" or "vswhere-multiple" or
+                "crt-missing" or "reparse-x64"
                 ? "$true"
                 : "$false",
             "\n",
@@ -6894,7 +6938,7 @@ public sealed class CleanWindowsRunnerScriptTests
             "  $stdout = 'v24.18.0'\n",
             " } elseif ($operation -eq 'VsWhere') {\n",
             "  if (", PsQuote(scenario), " -eq 'vswhere-error') { $exitCode = 9; $stderr = 'vswhere failure' }\n",
-            "  elseif (", PsQuote(scenario), " -eq 'component-missing') { $stdout = '' }\n",
+            "  elseif (", PsQuote(scenario), " -in @('component-missing', 'tools-component-missing')) { $stdout = '' }\n",
             "  elseif (", PsQuote(scenario), " -eq 'vswhere-multiple') {\n",
             "   $stdout = \"$($script:vsInstallRoot)`r`nC:\\Unexpected\\SecondRoot\"\n",
             "  } else { $stdout = $script:vsInstallRoot }\n",
@@ -6924,6 +6968,7 @@ public sealed class CleanWindowsRunnerScriptTests
             " installExitCode = if ($proof) { $proof.installExitCode } else { $null }\n",
             " scope = if ($proof) { $proof.scope } else { $null }\n",
             " customArguments = if ($proof) { $proof.customArguments } else { $null }\n",
+            " verification = if ($proof) { $proof.verification } else { $null }\n",
             " calls = $script:calls -join ','\n",
             " installArguments = $script:installArguments\n",
             "} | ConvertTo-Json -Compress))\n");

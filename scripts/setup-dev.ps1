@@ -121,7 +121,8 @@ function Test-ReparsePointPath($literalPath) {
 }
 
 function Get-VisualStudioVcRedistProof {
-    $componentId = "Microsoft.VisualStudio.Component.VC.Redist.14.Latest"
+    $redistComponentId = "Microsoft.VisualStudio.Component.VC.Redist.14.Latest"
+    $toolsComponentId = "Microsoft.VisualStudio.Component.VC.Tools.x86.x64"
     $vswherePath = Join-Path ${env:ProgramFiles(x86)} "Microsoft Visual Studio\Installer\vswhere.exe"
     if (-not (Test-Path -LiteralPath $vswherePath -PathType Leaf)) {
         return $null
@@ -134,7 +135,7 @@ function Get-VisualStudioVcRedistProof {
         & $vswherePath `
             -latest `
             -products "*" `
-            -requires $componentId `
+            -requires $redistComponentId $toolsComponentId `
             -property installationPath 2>$null |
             ForEach-Object { ([string]$_).Trim() } |
             Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
@@ -223,7 +224,7 @@ function Get-VisualStudioVcRedistProof {
                 @($runtimeFiles | Where-Object { $_.Name -like 'msvcp140*.dll' }).Count -gt 0
             ) {
                 return [pscustomobject][ordered]@{
-                    component = $componentId
+                    components = [string[]]@($redistComponentId, $toolsComponentId)
                     installRoot = $installRoot
                     redistVersion = [string]$versionDirectory.Name
                 }
@@ -266,12 +267,14 @@ function Install-WingetPackage($id, $displayName) {
 function Install-VisualStudioBuildToolsVcRedist {
     $packageId = "Microsoft.VisualStudio.2022.BuildTools"
     $packageVersion = "17.14.37"
-    $componentId = "Microsoft.VisualStudio.Component.VC.Redist.14.Latest"
+    $redistComponentId = "Microsoft.VisualStudio.Component.VC.Redist.14.Latest"
+    $toolsComponentId = "Microsoft.VisualStudio.Component.VC.Tools.x86.x64"
+    $customArguments = "--add $redistComponentId --add $toolsComponentId --norestart"
     if ($CheckOnly) {
-        Write-WarningMessage "Visual Studio Build Tools VC Redist component is missing."
+        Write-WarningMessage "Visual Studio Build Tools VC runtime components are missing."
         Write-Info (
             "Install with: winget install --id $packageId -e --version $packageVersion " +
-            "--installer-type exe --scope machine --custom `"--add $componentId --norestart`" " +
+            "--installer-type exe --scope machine --custom `"$customArguments`" " +
             "--source winget")
         return
     }
@@ -280,7 +283,7 @@ function Install-VisualStudioBuildToolsVcRedist {
         throw "winget is not available. Install App Installer from the Microsoft Store, then rerun this script."
     }
 
-    Write-Header "Installing Visual Studio Build Tools VC Redist component"
+    Write-Header "Installing Visual Studio Build Tools VC runtime components"
     $arguments = @(
         "install",
         "--id", $packageId,
@@ -288,7 +291,7 @@ function Install-VisualStudioBuildToolsVcRedist {
         "--version", $packageVersion,
         "--installer-type", "exe",
         "--scope", "machine",
-        "--custom", "--add $componentId --norestart",
+        "--custom", $customArguments,
         "--source", "winget",
         "--silent",
         "--accept-source-agreements",
@@ -297,7 +300,7 @@ function Install-VisualStudioBuildToolsVcRedist {
     )
     & winget @arguments
     if ($LASTEXITCODE -ne 0) {
-        throw "winget failed to install the Visual Studio Build Tools VC Redist component ($packageId)."
+        throw "winget failed to install the Visual Studio Build Tools VC runtime components ($packageId)."
     }
 
     Update-ProcessPath
@@ -390,7 +393,7 @@ if ($webView2Version) {
 $visualStudioVcRedist = Get-VisualStudioVcRedistProof
 if ($visualStudioVcRedist) {
     Write-Success (
-        "Visual Studio VC Redist component detected " +
+        "Visual Studio VC runtime components detected " +
         "($($visualStudioVcRedist.redistVersion)).")
 } else {
     Install-VisualStudioBuildToolsVcRedist
@@ -405,7 +408,7 @@ if (-not (Test-DotNet10Sdk)) { $missing += ".NET 10 SDK" }
 if (-not (Test-NodeAndNpm)) { $missing += "Node.js LTS with npm" }
 if (-not (Get-WindowsSdkVersion)) { $missing += "Windows SDK 10.0.26100" }
 if (-not (Get-WebView2RuntimeVersion)) { $missing += "WebView2 Runtime" }
-if (-not (Get-VisualStudioVcRedistProof)) { $missing += "Visual Studio Build Tools VC Redist component" }
+if (-not (Get-VisualStudioVcRedistProof)) { $missing += "Visual Studio Build Tools VC runtime components" }
 
 if ($missing.Count -gt 0) {
     Write-ErrorMessage "Setup is incomplete:"

@@ -33,16 +33,16 @@
     </PropertyGroup>
 
     <Error Condition="!Exists('$(_OpenClawVsWherePath)')"
-           Text="vswhere.exe not found at '$(_OpenClawVsWherePath)'. Publishing requires a Visual Studio install with the C++ Redistributable (Microsoft.VisualStudio.Component.VC.Redist.14.Latest) component." />
+          Text="vswhere.exe not found at '$(_OpenClawVsWherePath)'. Publishing requires a Visual Studio install with the C++ Redistributable and x64/x86 build tools components." />
 
-    <Exec Command="&quot;$(_OpenClawVsWherePath)&quot; -latest -products * -requires Microsoft.VisualStudio.Component.VC.Redist.14.Latest -property installationPath"
+    <Exec Command="&quot;$(_OpenClawVsWherePath)&quot; -latest -products * -requires Microsoft.VisualStudio.Component.VC.Redist.14.Latest Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath"
           ConsoleToMSBuild="true"
           IgnoreExitCode="true">
       <Output TaskParameter="ConsoleOutput" PropertyName="_OpenClawVsInstallRoot" />
     </Exec>
 
     <Error Condition="'$(_OpenClawVsInstallRoot)' == '' or !Exists('$(_OpenClawVsInstallRoot)')"
-           Text="vswhere did not find a Visual Studio install with the C++ Redistributable (Microsoft.VisualStudio.Component.VC.Redist.14.Latest) component (got '$(_OpenClawVsInstallRoot)'). Install that component via the Visual Studio Installer (Individual Components tab)." />
+           Text="vswhere did not find a Visual Studio install with both Microsoft.VisualStudio.Component.VC.Redist.14.Latest and Microsoft.VisualStudio.Component.VC.Tools.x86.x64 (got '$(_OpenClawVsInstallRoot)'). Install those components via the Visual Studio Installer (Individual Components tab)." />
 
     <!--
       Glob the loose CRT DLLs. The Microsoft.VC*.CRT folder name carries the VS
@@ -67,7 +67,7 @@
     </ItemGroup>
 
     <Error Condition="'@(OpenClawVCRuntimeFiles)' == ''"
-           Text="No $(OpenClawVCRuntimeArch) VC++ Runtime DLLs were found under '$(_OpenClawVsInstallRoot)\VC\Redist\MSVC\*\$(OpenClawVCRuntimeArch)\Microsoft.VC*.CRT\'. Install the C++ Redistributable Update Visual Studio component." />
+           Text="No $(OpenClawVCRuntimeArch) VC++ Runtime DLLs were found under '$(_OpenClawVsInstallRoot)\VC\Redist\MSVC\*\$(OpenClawVCRuntimeArch)\Microsoft.VC*.CRT\'. Install the C++ Redistributable Update and MSVC x64/x86 build tools Visual Studio components." />
   </Target>
 
   <!-- Legacy alias so existing CI log searches and docs still find the target. -->

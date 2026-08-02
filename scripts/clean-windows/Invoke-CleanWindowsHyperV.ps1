@@ -7677,7 +7677,8 @@ function Get-GuestDeveloperPrerequisiteScriptBlock {
                     return [pscustomobject]@{ present = $false; evidence = "WebView2 registration unavailable" }
                 }
                 "VisualStudioBuildTools" {
-                    $componentId = "Microsoft.VisualStudio.Component.VC.Redist.14.Latest"
+                    $redistComponentId = "Microsoft.VisualStudio.Component.VC.Redist.14.Latest"
+                    $toolsComponentId = "Microsoft.VisualStudio.Component.VC.Tools.x86.x64"
                     $vswherePath = Join-Path ${env:ProgramFiles(x86)} "Microsoft Visual Studio\Installer\vswhere.exe"
                     if (-not (Test-Path -LiteralPath $vswherePath -PathType Leaf)) {
                         return [pscustomobject]@{
@@ -7697,7 +7698,7 @@ function Get-GuestDeveloperPrerequisiteScriptBlock {
                         -Arguments ([string[]]@(
                             "-latest",
                             "-products", "*",
-                            "-requires", $componentId,
+                            "-requires", $redistComponentId, $toolsComponentId,
                             "-property", "installationPath"))
                     if ([int]$vswhereResult.exitCode -ne 0) {
                         return [pscustomobject]@{
@@ -7807,8 +7808,9 @@ function Get-GuestDeveloperPrerequisiteScriptBlock {
                                 return [pscustomobject]@{
                                     present = $true
                                     evidence = (
-                                        "component={0};installRoot={1};redistVersion={2}" -f
-                                            $componentId,
+                                        "components={0},{1};installRoot={2};redistVersion={3}" -f
+                                            $redistComponentId,
+                                            $toolsComponentId,
                                             $installRoot,
                                             $versionDirectory.Name)
                                 }
@@ -7866,12 +7868,14 @@ function Get-GuestDeveloperPrerequisiteScriptBlock {
             }
             "VisualStudioBuildTools" {
                 [pscustomobject][ordered]@{
-                    displayName = "Visual Studio 2022 Build Tools VC Redist component"
+                    displayName = "Visual Studio 2022 Build Tools VC runtime components"
                     id = "Microsoft.VisualStudio.2022.BuildTools"
                     version = "17.14.37"
                     installerType = "exe"
                     scope = "machine"
-                    customArguments = "--add Microsoft.VisualStudio.Component.VC.Redist.14.Latest --norestart"
+                    customArguments = (
+                        "--add Microsoft.VisualStudio.Component.VC.Redist.14.Latest " +
+                        "--add Microsoft.VisualStudio.Component.VC.Tools.x86.x64 --norestart")
                 }
             }
         }
@@ -10026,7 +10030,9 @@ function Invoke-VerifyCommand {
                 packageVersion = [string]$buildToolsProof.packageVersion
                 installerType = [string]$buildToolsProof.installerType
                 scope = [string]$buildToolsProof.scope
-                component = "Microsoft.VisualStudio.Component.VC.Redist.14.Latest"
+                components = [string[]]@(
+                    "Microsoft.VisualStudio.Component.VC.Redist.14.Latest",
+                    "Microsoft.VisualStudio.Component.VC.Tools.x86.x64")
                 verification = [string]$buildToolsProof.verification
             }
             wslPackageProof = [pscustomobject][ordered]@{
