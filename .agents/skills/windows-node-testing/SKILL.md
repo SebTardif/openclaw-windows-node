@@ -401,11 +401,15 @@ directory into one bounded nonce ZIP before restoring the prepared checkpoint.
 Guest and host both reject unsafe paths, traversal, reparse/archive link types,
 count/size/hash mismatches, and missing lane-specific phase/log files. Never
 use recursive `Copy-Item -FromSession` on the directory. If the validation
-or packaging session broke, reconnect only to the exact owner-bound Running VM
-and retry packaging once after removing only owned nonce archive residue. Do
-not retry healthy-session integrity failures or suppress the primary failure.
-Always remove guest and host archive copies, and report primary plus retrieval
-failures together.
+session ends with the exact PowerShell Direct transport-loss signature, reconnect
+only to the unchanged owner-bound Running VM and wait boundedly for the existing
+lane completion marker. Never rerun validation. Package only after completion
+evidence closes artifact writers, and preserve recovered phase/log diagnostics.
+If the packaging session broke, reconnect under the same identity guard and
+retry packaging once after removing only owned nonce archive residue. Do not
+retry healthy-session integrity failures or suppress the primary failure.
+Always remove guest and host archive copies, record validation and artifact
+recovery separately, and report primary plus retrieval failures together.
 
 Treat clean-runner `-HostArtifactRoot` as a base directory. Every Smoke
 invocation must atomically allocate one contained, non-reparse,

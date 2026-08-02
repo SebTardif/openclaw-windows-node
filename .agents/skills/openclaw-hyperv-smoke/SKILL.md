@@ -283,6 +283,14 @@ checkpoint therefore requires both that component and the individual
 `Prepare` from `clean-windows` to install and verify both, recreate the prepared
 checkpoint, then run `Verify` and Installed `Smoke`.
 
+The next real retry passed `Prepare` and `Verify`, including both Build Tools
+components and loose CRT files. Installed Smoke then lost its PowerShell Direct
+target after preflight while the nested validation process continued. Immediate
+artifact packaging collided with the still-open roundtrip log. The controller
+now reconnects to the exact owned Running VM, waits boundedly for the existing
+lane completion marker without rerunning validation, and packages only after
+the validation writers close.
+
 From an elevated PowerShell session, run normal `Prepare` without
 `-RecoverPendingCheckpoint`:
 
@@ -583,11 +591,17 @@ creates a contained, non-reparse, previously absent
 Collisions retry without changing old runs; the actual path is printed,
 returned on success, and recorded even for pre-retrieval failures. Both
 archive copies are removed in `finally`, but prior run directories are never
-overwritten or deleted. If the smoke or
-packaging session broke, artifact retrieval reconnects boundedly only to the
-exact owner-bound Running VM before checkpoint restore, removes only owned
-nonce archive residue, and retries packaging once. Healthy-session integrity
-failures are not retried. Commands have bounded timeouts.
+overwritten or deleted. On the exact PowerShell Direct transport-loss
+signature, the controller reconnects only to the unchanged owner-bound Running
+VM and waits boundedly for the already-running lane to write its completion
+marker and phase status. It never reruns validation. Recovered success proceeds
+to packaging; recovered failure preserves bounded phase/log diagnostics.
+Packaging starts only after those completion files prove artifact writers have
+closed. If the packaging session broke, artifact retrieval reconnects under
+the same guard, removes only owned nonce archive residue, and retries packaging
+once. Healthy-session integrity failures are not retried. The host manifest
+records validation and artifact recovery separately. Commands have bounded
+timeouts.
 
 Every smoke attempt must stop the owned guest and restore
 `openclaw-prerequisites` in a `finally` path on success or failure. Verify the

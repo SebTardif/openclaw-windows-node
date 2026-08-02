@@ -9240,6 +9240,112 @@ function New-SmokeArtifactRunDirectory {
     throw "Unable to allocate a unique smoke artifact run directory after $($names.Count) bounded attempts."
 }
 
+function Get-SmokeValidationCompletionProbeScriptBlock {
+    return {
+        param(
+            [Parameter(Mandatory = $true)]
+            [string]$ArtifactRoot,
+            [Parameter(Mandatory = $true)]
+            [string]$OwnedArtifactsRoot,
+            [Parameter(Mandatory = $true)]
+            [ValidateSet("Installed", "Upgrade")]
+            [string]$Lane,
+            [Parameter(Mandatory = $true)]
+            [int]$TimeoutSec,
+            [Parameter(Mandatory = $true)]
+            [int]$PollIntervalMilliseconds
+        )
+
+        Set-StrictMode -Version 2.0
+        $ErrorActionPreference = "Stop"
+
+        function ConvertTo-OpenClawSmokeCompletionDiagnostic {
+            param(
+                [AllowNull()]
+                [string]$Text,
+                [int]$MaximumLength = 4096
+            )
+
+            if ([string]::IsNullOrWhiteSpace($Text)) {
+                return "<unavailable>"
+            }
+            $safe = $Text -replace '[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]', '?'
+            $safe = $safe -replace '(?i)\b(authorization|password|passwd|pwd|secret|token|api[-_]?key)\s*[:=]\s*\S+', '$1=<redacted>'
+            $safe = $safe -replace '(?i)\b(Bearer|Basic)\s+[A-Za-z0-9._~+/\-=]+', '$1 <redacted>'
+            $safe = $safe -replace '(https?://[^?\s]+)\?[^\s]+', '$1?<redacted>'
+            $safe = ($safe -replace '\s+', ' ').Trim()
+            if ($safe.Length -gt $MaximumLength) {
+                return $safe.Substring(0, $MaximumLength) + "...<truncated>"
+            }
+            return $safe
+        }
+
+        if ($TimeoutSec -lt 1 -or $PollIntervalMilliseconds -lt 50) {
+            throw "Smoke validation completion bounds are invalid."
+        }
+        $canonicalRoot = [IO.Path]::GetFullPath($ArtifactRoot).TrimEnd("\")
+        $canonicalOwnedRoot = [IO.Path]::GetFullPath($OwnedArtifactsRoot).TrimEnd("\")
+        $expectedLaneRoot = if ($Lane -eq "Upgrade") { "upgrade-smoke" } else { "installed-smoke" }
+        if (
+            -not [string]::Equals(
+                (Split-Path -Parent $canonicalRoot),
+                $canonicalOwnedRoot,
+                [StringComparison]::OrdinalIgnoreCase) -or
+            (Split-Path -Leaf $canonicalRoot) -cne $expectedLaneRoot
+        ) {
+            throw "Smoke validation completion root does not match the exact owned lane path."
+        }
+
+        $doneName = if ($Lane -eq "Upgrade") { "upgrade-smoke.done" } else { "installed-smoke.done" }
+        $logName = if ($Lane -eq "Upgrade") { "upgrade-smoke.log" } else { "installed-smoke.log" }
+        $deadline = (Get-Date).AddSeconds($TimeoutSec)
+        do {
+            if (Test-Path -LiteralPath $canonicalRoot -PathType Container) {
+                $rootItem = Get-Item -LiteralPath $canonicalRoot -Force -ErrorAction Stop
+                if (($rootItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+                    throw "Smoke validation completion root is a reparse point."
+                }
+                $donePath = Join-Path $canonicalRoot $doneName
+                $phaseStatusPath = Join-Path $canonicalRoot "phase-status.json"
+                if (
+                    (Test-Path -LiteralPath $donePath -PathType Leaf) -and
+                    (Test-Path -LiteralPath $phaseStatusPath -PathType Leaf)
+                ) {
+                    foreach ($requiredPath in [string[]]@($donePath, $phaseStatusPath)) {
+                        $item = Get-Item -LiteralPath $requiredPath -Force -ErrorAction Stop
+                        if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+                            throw "Smoke validation completion evidence contains a reparse point."
+                        }
+                    }
+                    $doneValue = (Get-Content -LiteralPath $donePath -Raw -ErrorAction Stop).Trim()
+                    if ($doneValue -notmatch '^[01]$') {
+                        throw "Smoke validation completion marker has invalid content."
+                    }
+                    $phaseDiagnostic = ConvertTo-OpenClawSmokeCompletionDiagnostic `
+                        -Text (Get-Content -LiteralPath $phaseStatusPath -Raw -ErrorAction Stop)
+                    $logPath = Join-Path $canonicalRoot $logName
+                    $logDiagnostic = if (Test-Path -LiteralPath $logPath -PathType Leaf) {
+                        ConvertTo-OpenClawSmokeCompletionDiagnostic `
+                            -Text ((Get-Content -LiteralPath $logPath -Tail 40 -ErrorAction SilentlyContinue) -join "`n")
+                    } else {
+                        "<$logName unavailable>"
+                    }
+                    return [pscustomobject][ordered]@{
+                        stage = "smoke-validation-completion"
+                        lane = $Lane
+                        exitCode = [int]$doneValue
+                        phaseDiagnostic = $phaseDiagnostic
+                        logDiagnostic = $logDiagnostic
+                    }
+                }
+            }
+            Start-Sleep -Milliseconds $PollIntervalMilliseconds
+        } while ((Get-Date) -lt $deadline)
+
+        throw "$Lane smoke validation did not produce closed completion evidence within $TimeoutSec seconds."
+    }
+}
+
 function Get-SmokeArtifactRetrievalSession {
     param(
         [Parameter(Mandatory = $true)]
@@ -9296,6 +9402,111 @@ function Get-SmokeArtifactRetrievalSession {
 
     $safeLastError = ConvertTo-SafeGuestDiagnosticText -Value $lastError -MaxChars 1024
     throw "Smoke artifact session recovery timed out after 120 seconds. Last error: $safeLastError"
+}
+
+function Test-SmokeValidationTransportLoss {
+    param([Parameter(Mandatory = $true)][object]$ErrorRecord)
+
+    $text = [string]$ErrorRecord
+    return (
+        $text.IndexOf(
+            "System.Management.Automation.Remoting.PSRemotingTransportException",
+            [StringComparison]::Ordinal) -ge 0 -and
+        $text.IndexOf(
+            "The Hyper-V socket target process has ended.",
+            [StringComparison]::Ordinal) -ge 0)
+}
+
+function Wait-SmokeValidationCompletionWithRecovery {
+    param(
+        [Parameter(Mandatory = $true)]
+        [System.Management.Automation.Runspaces.PSSession]$Session,
+        [Parameter(Mandatory = $true)]
+        [System.Management.Automation.PSCredential]$GuestCredential,
+        [Parameter(Mandatory = $true)]
+        [string]$ResolvedVhdPath,
+        [Parameter(Mandatory = $true)]
+        [string]$ExpectedOwnerId,
+        [Parameter(Mandatory = $true)]
+        [string]$ExpectedVmId,
+        [Parameter(Mandatory = $true)]
+        [string]$GuestArtifactRoot,
+        [Parameter(Mandatory = $true)]
+        [ValidateSet("Installed", "Upgrade")]
+        [string]$Lane,
+        [Parameter(Mandatory = $true)]
+        [int]$TimeoutSec
+    )
+
+    $activeSession = $Session
+    $ownsActiveSession = $false
+    $sessionRecovered = $false
+    $attemptErrors = New-Object 'Collections.Generic.List[object]'
+    $deadline = (Get-Date).AddSeconds($TimeoutSec)
+    try {
+        for ($attempt = 1; $attempt -le 2; $attempt++) {
+            $remainingSeconds = [int][Math]::Ceiling(($deadline - (Get-Date)).TotalSeconds)
+            if ($remainingSeconds -lt 1) {
+                break
+            }
+            try {
+                $sessionInfo = Get-SmokeArtifactRetrievalSession `
+                    -Session $activeSession `
+                    -GuestCredential $GuestCredential `
+                    -ResolvedVhdPath $ResolvedVhdPath `
+                    -ExpectedOwnerId $ExpectedOwnerId `
+                    -ExpectedVmId $ExpectedVmId
+                $activeSession = $sessionInfo.Session
+                if ([bool]$sessionInfo.Reconnected) {
+                    $ownsActiveSession = $true
+                    $sessionRecovered = $true
+                }
+                $remainingSeconds = [int][Math]::Ceiling(($deadline - (Get-Date)).TotalSeconds)
+                if ($remainingSeconds -lt 1) {
+                    throw "$Lane smoke validation completion recovery exceeded its $TimeoutSec second deadline."
+                }
+                $probeOutput = @(
+                    Invoke-GuestCommandWithTimeout `
+                        -Session $activeSession `
+                        -OperationName "Waiting for $Lane smoke validation completion after transport loss" `
+                        -TimeoutSec ($remainingSeconds + 30) `
+                        -ScriptBlock (Get-SmokeValidationCompletionProbeScriptBlock) `
+                        -ArgumentList @(
+                            $GuestArtifactRoot,
+                            (Split-Path -Parent $GuestArtifactRoot),
+                            $Lane,
+                            $remainingSeconds,
+                            1000)
+                )
+                $proof = Get-RequiredGuestStageResult `
+                    -Output $probeOutput `
+                    -ExpectedStage "smoke-validation-completion"
+                $proof | Add-Member -NotePropertyName recoveryAttempts -NotePropertyValue $attempt
+                $proof | Add-Member -NotePropertyName sessionRecovered -NotePropertyValue $sessionRecovered
+                return $proof
+            } catch {
+                $attemptErrors.Add($_)
+                Remove-PSSession -Session $activeSession -ErrorAction SilentlyContinue
+                $activeSession = $Session
+            }
+        }
+
+        if ($attemptErrors.Count -eq 1) {
+            throw $attemptErrors[0]
+        }
+        if ($attemptErrors.Count -gt 1) {
+            $safeFirst = ConvertTo-SafeGuestDiagnosticText -Value $attemptErrors[0] -MaxChars 2048
+            $safeRetry = ConvertTo-SafeGuestDiagnosticText -Value $attemptErrors[1] -MaxChars 2048
+            throw (
+                "Smoke validation completion recovery failed: $safeFirst " +
+                "Retry after exact-VM reconnect also failed: $safeRetry")
+        }
+        throw "$Lane smoke validation completion recovery exceeded its $TimeoutSec second deadline."
+    } finally {
+        if ($ownsActiveSession -and $null -ne $activeSession) {
+            Remove-PSSession -Session $activeSession -ErrorAction SilentlyContinue
+        }
+    }
 }
 
 function Receive-SmokeArtifactArchive {
@@ -10090,6 +10301,7 @@ function Invoke-SmokeCommand {
         } -ArgumentList @($guestRepoRoot, $ValidationLane) | Out-Null
 
         $smokeError = $null
+        $validationRecoveryProof = $null
         try {
             Invoke-GuestCommandWithTimeout -Session $Session -OperationName "Running $ValidationLane validation lane" -TimeoutSec $GuestCommandTimeoutSec -ScriptBlock {
                 param(
@@ -10237,6 +10449,38 @@ function Invoke-SmokeCommand {
             ) | Out-Null
         } catch {
             $smokeError = $_
+            if (Test-SmokeValidationTransportLoss -ErrorRecord $smokeError) {
+                try {
+                    $validationRecoveryProof = Wait-SmokeValidationCompletionWithRecovery `
+                        -Session $Session `
+                        -GuestCredential $operationCredential `
+                        -ResolvedVhdPath $resolvedVhdPath `
+                        -ExpectedOwnerId $OwnerId `
+                        -ExpectedVmId $expectedVmId `
+                        -GuestArtifactRoot $guestArtifacts `
+                        -Lane $ValidationLane `
+                        -TimeoutSec $GuestCommandTimeoutSec
+                    if ([int]$validationRecoveryProof.exitCode -eq 0) {
+                        $smokeError = $null
+                    } else {
+                        $smokeError = (
+                            "$ValidationLane smoke validation completed with exit code " +
+                            "$($validationRecoveryProof.exitCode) after PowerShell Direct recovery. " +
+                            "Phase status: $($validationRecoveryProof.phaseDiagnostic) " +
+                            "Log tail: $($validationRecoveryProof.logDiagnostic)")
+                    }
+                } catch {
+                    $safeTransportError = ConvertTo-SafeGuestDiagnosticText `
+                        -Value $smokeError `
+                        -MaxChars 2048
+                    $safeRecoveryError = ConvertTo-SafeGuestDiagnosticText `
+                        -Value $_ `
+                        -MaxChars 2048
+                    $smokeError = (
+                        "$ValidationLane smoke validation lost PowerShell Direct: $safeTransportError " +
+                        "Completion recovery also failed: $safeRecoveryError")
+                }
+            }
         }
 
         $artifactError = $null
@@ -10270,6 +10514,9 @@ function Invoke-SmokeCommand {
             artifactFileCount = if ($null -ne $retrievalProof) { [int]$retrievalProof.fileCount } else { 0 }
             artifactRetrievalAttempts = if ($null -ne $retrievalProof) { [int]$retrievalProof.retrievalAttempts } else { 0 }
             artifactSessionRecovered = if ($null -ne $retrievalProof) { [bool]$retrievalProof.sessionRecovered } else { $false }
+            validationRecoveryAttempts = if ($null -ne $validationRecoveryProof) { [int]$validationRecoveryProof.recoveryAttempts } else { 0 }
+            validationSessionRecovered = if ($null -ne $validationRecoveryProof) { [bool]$validationRecoveryProof.sessionRecovered } else { $false }
+            validationRecoveredExitCode = if ($null -ne $validationRecoveryProof) { [int]$validationRecoveryProof.exitCode } else { $null }
             succeeded = ($null -eq $smokeError -and $null -eq $artifactError)
             timestampUtc = [DateTime]::UtcNow.ToString("o")
         }

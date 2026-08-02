@@ -2916,6 +2916,29 @@ public sealed class CleanWindowsRunnerScriptTests
     }
 
     [Fact]
+    public void HyperVController_SmokeTransportLossClassifierPinsGuestJobDiagnosticContract()
+    {
+        var result = RunPowerShellCommand(BuildSmokeTransportLossClassifierProof());
+
+        AssertPowerShellProofSucceeded(result);
+        using var document = JsonDocument.Parse(result.Stdout);
+        var proof = document.RootElement;
+        var diagnostic = proof.GetProperty("diagnostic").GetString()!;
+        Assert.Contains(
+            "System.Management.Automation.Remoting.PSRemotingTransportException",
+            diagnostic,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "The Hyper-V socket target process has ended.",
+            diagnostic,
+            StringComparison.Ordinal);
+        Assert.True(proof.GetProperty("wrappedDiagnostic").GetBoolean());
+        Assert.False(proof.GetProperty("rawTransportRecord").GetBoolean());
+        Assert.False(proof.GetProperty("wrongType").GetBoolean());
+        Assert.False(proof.GetProperty("wrongMessage").GetBoolean());
+    }
+
+    [Fact]
     public void HyperVController_GuestCommandTimeoutSemanticsRemainBoundedAndRemoveJob()
     {
         var controller = ReadScript("Invoke-CleanWindowsHyperV.ps1");
@@ -3125,6 +3148,51 @@ public sealed class CleanWindowsRunnerScriptTests
         }
     }
 
+    [Theory]
+    [InlineData("delayed-success", 0, null)]
+    [InlineData("completed-failure", 1, null)]
+    [InlineData("timeout", null, "did not produce closed completion evidence")]
+    public void HyperVController_SmokeValidationCompletionWaitsForClosedEvidence(
+        string scenario,
+        int? expectedExitCode,
+        string? expectedError)
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"openclaw-smoke-completion-{Guid.NewGuid():N}");
+        var ownedArtifactsRoot = Path.Combine(root, "artifacts");
+        var artifactRoot = Path.Combine(ownedArtifactsRoot, "installed-smoke");
+        Directory.CreateDirectory(artifactRoot);
+        try
+        {
+            var result = RunPowerShellCommand(BuildSmokeValidationCompletionProof(
+                artifactRoot,
+                ownedArtifactsRoot,
+                scenario));
+
+            AssertPowerShellProofSucceeded(result);
+            using var document = JsonDocument.Parse(result.Stdout);
+            var proof = document.RootElement;
+            var error = proof.GetProperty("error").GetString();
+            if (expectedError is null)
+            {
+                Assert.True(string.IsNullOrEmpty(error), error);
+                Assert.Equal(expectedExitCode, proof.GetProperty("exitCode").GetInt32());
+                Assert.Contains(
+                    "\"preflight\":\"passed\"",
+                    proof.GetProperty("phaseDiagnostic").GetString(),
+                    StringComparison.Ordinal);
+            }
+            else
+            {
+                Assert.Contains(expectedError, error, StringComparison.Ordinal);
+                Assert.True(proof.GetProperty("elapsedMilliseconds").GetInt64() < 5000);
+            }
+        }
+        finally
+        {
+            DeleteTestDirectory(root);
+        }
+    }
+
     [Fact]
     public void HyperVController_SmokeArtifactRunsUseDistinctContainedDirectoriesWithoutOverwriting()
     {
@@ -3200,10 +3268,20 @@ public sealed class CleanWindowsRunnerScriptTests
             "Invoke-PreparedGuestOperation",
             "Get-SmokeArtifactPackageScriptBlock");
 
+        var recoveryIndex = smoke.IndexOf(
+            "Wait-SmokeValidationCompletionWithRecovery",
+            StringComparison.Ordinal);
         var receiveIndex = smoke.IndexOf("Receive-SmokeArtifactArchive", StringComparison.Ordinal);
         var dualFailureIndex = smoke.IndexOf("Artifact retrieval also failed:", StringComparison.Ordinal);
+        Assert.True(recoveryIndex >= 0);
         Assert.True(receiveIndex >= 0);
+        Assert.True(receiveIndex > recoveryIndex);
         Assert.True(dualFailureIndex > receiveIndex);
+        Assert.Contains("Test-SmokeValidationTransportLoss", smoke, StringComparison.Ordinal);
+        Assert.Contains("validationRecoveryAttempts", smoke, StringComparison.Ordinal);
+        Assert.Contains("validationSessionRecovered", smoke, StringComparison.Ordinal);
+        Assert.Contains("validationRecoveredExitCode", smoke, StringComparison.Ordinal);
+        Assert.Equal(1, CountOccurrences(smoke, "& $validationEngine @validationArguments"));
         Assert.Contains("Receive-SmokeArtifactArchiveWithRecovery", smoke, StringComparison.Ordinal);
         Assert.Contains(
             "for ($attempt = 1; $attempt -le 2; $attempt++)",
@@ -3217,6 +3295,21 @@ public sealed class CleanWindowsRunnerScriptTests
             StringComparison.Ordinal);
         Assert.Contains("Session recovery also failed", controller, StringComparison.Ordinal);
         Assert.Contains("Stale archive cleanup also failed", controller, StringComparison.Ordinal);
+        Assert.Contains(
+            "The Hyper-V socket target process has ended.",
+            controller,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "Get-SmokeValidationCompletionProbeScriptBlock",
+            controller,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "Get-SmokeArtifactRetrievalSession",
+            ExtractPowerShellFunction(
+                controller,
+                "Wait-SmokeValidationCompletionWithRecovery",
+                "Receive-SmokeArtifactArchive"),
+            StringComparison.Ordinal);
         Assert.Contains("artifactRetrievalAttempts", smoke, StringComparison.Ordinal);
         Assert.Contains("artifactSessionRecovered", smoke, StringComparison.Ordinal);
         Assert.Contains("hostArtifactRunPath", smoke, StringComparison.Ordinal);
@@ -6742,6 +6835,65 @@ public sealed class CleanWindowsRunnerScriptTests
             "} | ConvertTo-Json -Compress))\n");
     }
 
+    private static string BuildSmokeTransportLossClassifierProof()
+    {
+        var controller = ReadScript("Invoke-CleanWindowsHyperV.ps1");
+        var helpersStart = controller.IndexOf(
+            "function ConvertTo-SafeGuestDiagnosticText",
+            StringComparison.Ordinal);
+        var helpersEnd = controller.IndexOf(
+            "function Invoke-GuestCommandWithTimeout",
+            helpersStart,
+            StringComparison.Ordinal);
+        Assert.True(helpersStart >= 0);
+        Assert.True(helpersEnd > helpersStart);
+        var helpers = controller[helpersStart..helpersEnd];
+        var classifier = ExtractPowerShellFunction(
+            controller,
+            "Test-SmokeValidationTransportLoss",
+            "Wait-SmokeValidationCompletionWithRecovery");
+        return string.Concat(
+            "$ErrorActionPreference = 'Stop'\n",
+            "function global:Receive-Job {\n",
+            " [CmdletBinding()]\n",
+            " param([object]$Job, [switch]$Keep)\n",
+            " return @()\n",
+            "}\n",
+            helpers,
+            "\n",
+            classifier,
+            "\n",
+            "$message = 'The Hyper-V socket target process has ended.'\n",
+            "$transport = [System.Management.Automation.Remoting.PSRemotingTransportException]::new($message)\n",
+            "$job = [pscustomobject]@{\n",
+            " JobStateInfo = [pscustomobject]@{ Reason = $transport }\n",
+            " ChildJobs = @()\n",
+            "}\n",
+            "$diagnostic = Get-FailedGuestJobDiagnostic -Job $job\n",
+            "$wrapped = [Management.Automation.ErrorRecord]::new(\n",
+            " [System.Management.Automation.RuntimeException]::new(\"Running Installed validation lane ended in state 'Failed'. Guest job diagnostics: $diagnostic\"),\n",
+            " 'WrappedTransport', [Management.Automation.ErrorCategory]::OperationStopped, $null)\n",
+            "$raw = [Management.Automation.ErrorRecord]::new(\n",
+            " $transport, 'RawTransport', [Management.Automation.ErrorCategory]::ConnectionError, $null)\n",
+            "$wrongTypeDiagnostic = $diagnostic.Replace(\n",
+            " 'System.Management.Automation.Remoting.PSRemotingTransportException',\n",
+            " 'System.InvalidOperationException')\n",
+            "$wrongType = [Management.Automation.ErrorRecord]::new(\n",
+            " [System.Management.Automation.RuntimeException]::new($wrongTypeDiagnostic), 'WrongType',\n",
+            " [Management.Automation.ErrorCategory]::OperationStopped, $null)\n",
+            "$wrongMessageDiagnostic = $diagnostic.Replace($message, 'A different transport failure occurred.')\n",
+            "$wrongMessage = [Management.Automation.ErrorRecord]::new(\n",
+            " [System.Management.Automation.RuntimeException]::new($wrongMessageDiagnostic), 'WrongMessage',\n",
+            " [Management.Automation.ErrorCategory]::OperationStopped, $null)\n",
+            "[Console]::Out.Write(([pscustomobject][ordered]@{\n",
+            " diagnostic = $diagnostic\n",
+            " wrappedDiagnostic = Test-SmokeValidationTransportLoss -ErrorRecord $wrapped\n",
+            " rawTransportRecord = Test-SmokeValidationTransportLoss -ErrorRecord $raw\n",
+            " wrongType = Test-SmokeValidationTransportLoss -ErrorRecord $wrongType\n",
+            " wrongMessage = Test-SmokeValidationTransportLoss -ErrorRecord $wrongMessage\n",
+            "} | ConvertTo-Json -Compress))\n");
+    }
+
     private static string BuildPowerShell7InstallProof(
         string scenario,
         string reportedVersion,
@@ -7229,6 +7381,69 @@ public sealed class CleanWindowsRunnerScriptTests
             " error = $errorMessage\n",
             " fileCount = if ($result) { [int]$result.fileCount } else { 0 }\n",
             " expandedBytes = if ($result) { [Int64]$result.expandedBytes } else { 0 }\n",
+            "} | ConvertTo-Json -Compress))\n");
+    }
+
+    private static string BuildSmokeValidationCompletionProof(
+        string artifactRoot,
+        string ownedArtifactsRoot,
+        string scenario)
+    {
+        var controller = ReadScript("Invoke-CleanWindowsHyperV.ps1");
+        var completionGetter = ExtractPowerShellFunction(
+            controller,
+            "Get-SmokeValidationCompletionProbeScriptBlock",
+            "Get-SmokeArtifactRetrievalSession");
+        var setup = scenario switch
+        {
+            "delayed-success" => string.Concat(
+                "$job = Start-Job -ScriptBlock {\n",
+                " param($Root)\n",
+                " Start-Sleep -Milliseconds 750\n",
+                " Set-Content -LiteralPath (Join-Path $Root 'phase-status.json') ",
+                "-Value '{\"phases\":{\"preflight\":\"passed\"}}' -Encoding UTF8\n",
+                " Set-Content -LiteralPath (Join-Path $Root 'installed-smoke.log') ",
+                "-Value 'delayed smoke complete' -Encoding UTF8\n",
+                " Set-Content -LiteralPath (Join-Path $Root 'installed-smoke.done') ",
+                "-Value '0' -Encoding ASCII\n",
+                "} -ArgumentList ", PsQuote(artifactRoot), "\n"),
+            "completed-failure" => string.Concat(
+                "Set-Content -LiteralPath (Join-Path ", PsQuote(artifactRoot),
+                " 'phase-status.json') -Value '{\"phases\":{\"preflight\":\"passed\"}}' -Encoding UTF8\n",
+                "Set-Content -LiteralPath (Join-Path ", PsQuote(artifactRoot),
+                " 'installed-smoke.log') -Value 'smoke failed' -Encoding UTF8\n",
+                "Set-Content -LiteralPath (Join-Path ", PsQuote(artifactRoot),
+                " 'installed-smoke.done') -Value '1' -Encoding ASCII\n"),
+            "timeout" => string.Empty,
+            _ => throw new ArgumentOutOfRangeException(nameof(scenario)),
+        };
+        var timeout = scenario == "timeout" ? 1 : 15;
+        return string.Concat(
+            "$ErrorActionPreference = 'Stop'\n",
+            "$job = $null\n",
+            completionGetter,
+            "\n",
+            setup,
+            "$result = $null\n",
+            "$errorMessage = $null\n",
+            "$started = [Diagnostics.Stopwatch]::StartNew()\n",
+            "try {\n",
+            " $result = & (Get-SmokeValidationCompletionProbeScriptBlock) ",
+            PsQuote(artifactRoot), " ", PsQuote(ownedArtifactsRoot),
+            " 'Installed' ", timeout.ToString(System.Globalization.CultureInfo.InvariantCulture), " 100\n",
+            "} catch { $errorMessage = $_.Exception.Message } finally {\n",
+            " $started.Stop()\n",
+            " if ($null -ne $job) {\n",
+            "  Wait-Job -Job $job -Timeout 20 | Out-Null\n",
+            "  Remove-Job -Job $job -Force -ErrorAction SilentlyContinue\n",
+            " }\n",
+            "}\n",
+            "[Console]::Out.Write(([pscustomobject][ordered]@{\n",
+            " error = $errorMessage\n",
+            " exitCode = if ($result) { [int]$result.exitCode } else { $null }\n",
+            " phaseDiagnostic = if ($result) { [string]$result.phaseDiagnostic } else { $null }\n",
+            " logDiagnostic = if ($result) { [string]$result.logDiagnostic } else { $null }\n",
+            " elapsedMilliseconds = [Int64]$started.ElapsedMilliseconds\n",
             "} | ConvertTo-Json -Compress))\n");
     }
 
