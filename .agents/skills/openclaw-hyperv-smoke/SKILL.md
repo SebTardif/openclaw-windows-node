@@ -498,7 +498,8 @@ are cleaned up/restored.
 Installed and Upgrade smoke process execution is separate from version
 discovery. Inno install/uninstall uses the shared COM-independent
 `System.Diagnostics.Process` helper with typed arguments, redirected captures,
-and bounded timeout tree termination. Installed E2E `dotnet.exe` build/test
+raw `/DIR=` and `/LOG=` values without embedded quotes, and bounded timeout
+tree termination. Installed E2E `dotnet.exe` build/test
 uses the same helper. The nested clean WSL CLI install keeps the official HTTPS
 path and pinned version, requests structured progress, bounds initial curl
 connect/stall/retry behavior, and allows 15 minutes per attempt. Timeout and

@@ -154,7 +154,7 @@ function Invoke-Cleanup {
                 "/VERYSILENT",
                 "/SUPPRESSMSGBOXES",
                 "/NORESTART",
-                "/LOG=`"$uninstallLog`""
+                "/LOG=$uninstallLog"
             ) `
             -TimeoutSeconds 300 `
             -CaptureRoot $ArtifactRoot `
@@ -248,8 +248,8 @@ try {
                     "/VERYSILENT",
                     "/SUPPRESSMSGBOXES",
                     "/NORESTART",
-                    "/DIR=`"$installRoot`"",
-                    "/LOG=`"$installLog`""
+                    "/DIR=$installRoot",
+                    "/LOG=$installLog"
                 ) `
                 -TimeoutSeconds 600 `
                 -CaptureRoot $ArtifactRoot `

@@ -282,7 +282,9 @@ Installer, uninstaller, E2E build, and E2E test processes use one
 arguments, separate stdout/stderr capture, and fixed deadlines. A timeout stops
 only the captured process and its observed descendants. The lane does not depend
 on `Start-Process` or merge benign native stderr into PowerShell's error stream.
-The capture files remain in the run artifact directory.
+The helper owns Windows command-line quoting, so `/DIR=` and `/LOG=` values are
+passed as raw typed tokens without embedded quote characters. The capture files
+remain in the run artifact directory.
 
 This proves the installed tray runtime payload, including its operator, local MCP,
 Windows node, and native chat paths. The fixture's headless WSL gateway setup is

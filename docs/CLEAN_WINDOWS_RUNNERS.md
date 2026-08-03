@@ -641,7 +641,9 @@ preserves typed argument boundaries, captures stdout and stderr separately,
 enforces operation-specific deadlines, and terminates only the captured PID
 tree on timeout. It does not use `Start-Process`, so a recycled PowerShell
 Direct target cannot turn cleanup into a COM interface failure. Captures are
-retained as smoke artifacts.
+retained as smoke artifacts. Callers pass raw `/DIR=` and `/LOG=` values; only
+the helper adds Windows command-line quotes, so Inno never receives literal
+embedded quote characters.
 
 The nested clean WSL setup keeps the official HTTPS CLI installer and configured
 pinned OpenClaw version. Its initial curl propagates pipe failures, bounds

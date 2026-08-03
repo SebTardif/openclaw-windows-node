@@ -73,6 +73,8 @@ public sealed class WindowsInstalledSmokeScriptTests
         Assert.Contains("Stop-Process -Id ([int]$process.ProcessId)", script);
         Assert.DoesNotContain("Stop-Process -Name", script);
         Assert.DoesNotContain("Start-Process", script);
+        Assert.DoesNotContain("/DIR=`\"", script);
+        Assert.DoesNotContain("/LOG=`\"", script);
         Assert.Contains("Invoke-SmokeNativeProcess", script);
         Assert.Equal(2, script.Split("--disable-build-servers").Length - 1);
         Assert.Contains("/p:UseSharedCompilation=false", script);

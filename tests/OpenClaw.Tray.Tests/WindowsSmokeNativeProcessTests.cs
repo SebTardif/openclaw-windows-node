@@ -34,6 +34,30 @@ public sealed class WindowsSmokeNativeProcessTests
     }
 
     [Fact]
+    public void Helper_PreservesInnoStyleSpacedPathArgumentsWithoutEmbeddedQuotes()
+    {
+        using var fixture = new NativeFixture(
+            """
+            param([string]$InstallArgument, [string]$LogArgument)
+            [Console]::Out.Write($InstallArgument + "|" + $LogArgument)
+            exit 0
+            """);
+        var installArgument = "/DIR=C:\\Smoke Root\\app";
+        var logArgument = "/LOG=C:\\Artifact Root\\inno install.log";
+
+        var result = fixture.Invoke(
+            timeoutSeconds: 10,
+            $"""
+            '-NoProfile', '-NonInteractive', '-File', $fixturePath, '{Escape(installArgument)}', '{Escape(logArgument)}'
+            """);
+
+        Assert.False(result.TimedOut);
+        Assert.Equal(0, result.ExitCode);
+        Assert.Equal($"{installArgument}|{logArgument}", File.ReadAllText(result.StdoutPath));
+        Assert.Equal("", File.ReadAllText(result.StderrPath));
+    }
+
+    [Fact]
     public void Helper_PreservesNonzeroExitAndSeparateDiagnostics()
     {
         using var fixture = new NativeFixture(

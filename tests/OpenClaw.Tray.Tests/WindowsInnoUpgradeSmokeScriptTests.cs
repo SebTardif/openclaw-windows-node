@@ -91,6 +91,8 @@ public sealed class WindowsInnoUpgradeSmokeScriptTests
         Assert.Contains("Refusing to recursively delete smoke-owned reparse point", script);
         Assert.Contains("Invoke-SmokeNativeProcess", script);
         Assert.DoesNotContain("Start-Process", script);
+        Assert.DoesNotContain("/DIR=`\"", script);
+        Assert.DoesNotContain("/LOG=`\"", script);
         Assert.DoesNotContain("-ErrorAction SilentlyContinue | Out-Null", script);
     }
 

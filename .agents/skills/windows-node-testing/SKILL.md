@@ -378,7 +378,8 @@ Installed and Upgrade smoke Inno install/uninstall operations must use the
 shared `System.Diagnostics.Process` smoke helper, not `Start-Process`. Installed
 smoke also uses it for the E2E `dotnet.exe` build/test operations. Require exact
 typed arguments, separate stdout/stderr artifacts, operation-specific
-deadlines, and exact captured PID-tree termination on timeout. This keeps
+deadlines, raw unquoted `/DIR=` and `/LOG=` token values, and exact captured
+PID-tree termination on timeout. The helper alone owns Windows quoting. This keeps
 cleanup valid after PowerShell Direct recycles its target process and prevents
 benign native stderr from becoming a terminating PowerShell error.
 

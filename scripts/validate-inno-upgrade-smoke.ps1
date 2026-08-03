@@ -501,8 +501,8 @@ function Invoke-InnoInstall {
             "/NORESTART",
             "/NOCANCEL",
             "/CLOSEAPPLICATIONS",
-            "/DIR=`"$installRoot`"",
-            "/LOG=`"$(Join-Path $ArtifactRoot $LogName)`""
+            "/DIR=$installRoot",
+            "/LOG=$(Join-Path $ArtifactRoot $LogName)"
         ) `
         -TimeoutSeconds 600 `
         -CaptureRoot $ArtifactRoot `
@@ -724,7 +724,7 @@ function Invoke-Cleanup {
                     "/VERYSILENT",
                     "/SUPPRESSMSGBOXES",
                     "/NORESTART",
-                    "/LOG=`"$(Join-Path $ArtifactRoot "inno-uninstall.log")`""
+                    "/LOG=$(Join-Path $ArtifactRoot "inno-uninstall.log")"
                 ) `
                 -TimeoutSeconds 300 `
                 -CaptureRoot $ArtifactRoot `
