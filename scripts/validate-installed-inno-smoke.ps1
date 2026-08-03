@@ -21,6 +21,7 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
+. (Join-Path $PSScriptRoot "_smoke-native-process.ps1")
 
 if (-not (Test-Path -LiteralPath $RepoRoot -PathType Container)) {
     throw "Repository root does not exist: $RepoRoot"
@@ -146,15 +147,21 @@ function Invoke-Cleanup {
 
     if (Test-Path -LiteralPath $uninstaller) {
         $uninstallLog = Join-Path $ArtifactRoot "inno-uninstall.log"
-        $process = Start-Process -FilePath $uninstaller -ArgumentList @(
-            "/VERYSILENT",
-            "/SUPPRESSMSGBOXES",
-            "/NORESTART",
-            "/LOG=`"$uninstallLog`""
-        ) -Wait -PassThru
-        if ($process.ExitCode -ne 0) {
-            throw "DEV Inno uninstaller failed with exit code $($process.ExitCode)."
-        }
+        $uninstallResult = Invoke-SmokeNativeProcess `
+            -Operation "DEV Inno uninstaller" `
+            -FilePath $uninstaller `
+            -ArgumentList @(
+                "/VERYSILENT",
+                "/SUPPRESSMSGBOXES",
+                "/NORESTART",
+                "/LOG=`"$uninstallLog`""
+            ) `
+            -TimeoutSeconds 300 `
+            -CaptureRoot $ArtifactRoot `
+            -CaptureName "inno-uninstall" `
+            -WorkingDirectory $installRoot
+        Write-SmokeNativeProcessOutput -Result $uninstallResult
+        Assert-SmokeNativeProcessSucceeded -Result $uninstallResult
     }
 
     $registeredDevDistro = @(& wsl.exe --list --quiet 2>$null) |
@@ -234,16 +241,22 @@ try {
             New-Item -ItemType Directory -Force -Path (Split-Path -Parent $installRoot) | Out-Null
             $script:ownsDevInstall = $true
             $installLog = Join-Path $ArtifactRoot "inno-install.log"
-            $process = Start-Process -FilePath $installerPath -ArgumentList @(
-                "/VERYSILENT",
-                "/SUPPRESSMSGBOXES",
-                "/NORESTART",
-                "/DIR=`"$installRoot`"",
-                "/LOG=`"$installLog`""
-            ) -Wait -PassThru
-            if ($process.ExitCode -ne 0) {
-                throw "DEV Inno installer failed with exit code $($process.ExitCode)."
-            }
+            $installResult = Invoke-SmokeNativeProcess `
+                -Operation "DEV Inno installer" `
+                -FilePath $installerPath `
+                -ArgumentList @(
+                    "/VERYSILENT",
+                    "/SUPPRESSMSGBOXES",
+                    "/NORESTART",
+                    "/DIR=`"$installRoot`"",
+                    "/LOG=`"$installLog`""
+                ) `
+                -TimeoutSeconds 600 `
+                -CaptureRoot $ArtifactRoot `
+                -CaptureName "inno-install-process" `
+                -WorkingDirectory $RepoRoot
+            Write-SmokeNativeProcessOutput -Result $installResult
+            Assert-SmokeNativeProcessSucceeded -Result $installResult
             if (-not (Test-Path -LiteralPath $installedTray)) {
                 throw "Installed tray payload is missing: $installedTray."
             }
@@ -273,19 +286,47 @@ try {
         $env:OPENCLAW_E2E_TRAY_EXE = $installedTray
         $env:OPENCLAW_E2E_ARTIFACT_ROOT = Join-Path $ArtifactRoot "e2e"
 
-        & dotnet build (Join-Path $RepoRoot "tests\OpenClaw.E2ETests\OpenClaw.E2ETests.csproj") -c Debug -r win-x64
-        Assert-NativeSuccess "E2E test build"
+        $e2eProject = Join-Path $RepoRoot "tests\OpenClaw.E2ETests\OpenClaw.E2ETests.csproj"
+        $buildResult = Invoke-SmokeNativeProcess `
+            -Operation "E2E test build" `
+            -FilePath "dotnet.exe" `
+            -ArgumentList @(
+                "build",
+                $e2eProject,
+                "-c", "Debug",
+                "-r", "win-x64",
+                "--disable-build-servers",
+                "/p:UseSharedCompilation=false"
+            ) `
+            -TimeoutSeconds 900 `
+            -CaptureRoot $ArtifactRoot `
+            -CaptureName "roundtrip-build" `
+            -WorkingDirectory $RepoRoot
+        Write-SmokeNativeProcessOutput -Result $buildResult
+        Assert-SmokeNativeProcessSucceeded -Result $buildResult
 
         $trxPath = Join-Path $ArtifactRoot "installed-published-gateway.trx"
-        & dotnet test (Join-Path $RepoRoot "tests\OpenClaw.E2ETests\OpenClaw.E2ETests.csproj") `
-            --no-build `
-            -c Debug `
-            -r win-x64 `
-            --filter "FullyQualifiedName~OpenClaw.E2ETests.Setup.PublishedGatewayNativeChatTests" `
-            --results-directory $ArtifactRoot `
-            --logger "trx;LogFileName=$(Split-Path -Leaf $trxPath)" `
-            --logger "console;verbosity=detailed"
-        Assert-NativeSuccess "Installed published-gateway roundtrip"
+        $roundtripResult = Invoke-SmokeNativeProcess `
+            -Operation "Installed published-gateway roundtrip" `
+            -FilePath "dotnet.exe" `
+            -ArgumentList @(
+                "test",
+                $e2eProject,
+                "--no-build",
+                "--disable-build-servers",
+                "-c", "Debug",
+                "-r", "win-x64",
+                "--filter", "FullyQualifiedName~OpenClaw.E2ETests.Setup.PublishedGatewayNativeChatTests",
+                "--results-directory", $ArtifactRoot,
+                "--logger", "trx;LogFileName=$(Split-Path -Leaf $trxPath)",
+                "--logger", "console;verbosity=detailed"
+            ) `
+            -TimeoutSeconds 3600 `
+            -CaptureRoot $ArtifactRoot `
+            -CaptureName "roundtrip-test" `
+            -WorkingDirectory $RepoRoot
+        Write-SmokeNativeProcessOutput -Result $roundtripResult
+        Assert-SmokeNativeProcessSucceeded -Result $roundtripResult
 
         [xml]$trx = Get-Content -LiteralPath $trxPath -Raw
         $proofName = "RealPublishedGateway_DeviceInfo_AndNativeChat_Roundtrip"

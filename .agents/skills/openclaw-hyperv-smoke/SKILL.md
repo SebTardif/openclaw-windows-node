@@ -291,6 +291,19 @@ now reconnects to the exact owned Running VM, waits boundedly for the existing
 lane completion marker without rerunning validation, and packages only after
 the validation writers close.
 
+The completion-aware retry recovered that same validation process and preserved
+complete artifacts. It then exposed two later defects: clean nested WSL CLI
+installation exceeded the old five-minute budget on both attempts, and cleanup
+used `Start-Process` after the PowerShell Direct target recycled. The CLI step
+now retains the official HTTPS installer and pinned version, adds bounded
+initial curl transport controls plus structured JSON progress, uses 15 minutes
+per clean-install attempt, and reports sanitized stdout/stderr tails. Installed
+and Upgrade smoke now use a COM-independent bounded
+`System.Diagnostics.Process` helper for Inno operations; Installed smoke uses it
+for E2E `dotnet.exe` build/test as well. The helper captures separate artifacts
+and terminates only its exact observed PID tree on timeout. The prepared
+checkpoint remains valid, so retry only Installed Smoke.
+
 From an elevated PowerShell session, run normal `Prepare` without
 `-RecoverPendingCheckpoint`:
 
@@ -481,6 +494,15 @@ bounded redirected `Start-Process` capture. Exit-zero stderr is diagnostic,
 nonzero/timeout errors are sanitized and bounded, GitVersion parses stdout
 only as one JSON object, and capture plus temporary dotnet environment state
 are cleaned up/restored.
+
+Installed and Upgrade smoke process execution is separate from version
+discovery. Inno install/uninstall uses the shared COM-independent
+`System.Diagnostics.Process` helper with typed arguments, redirected captures,
+and bounded timeout tree termination. Installed E2E `dotnet.exe` build/test
+uses the same helper. The nested clean WSL CLI install keeps the official HTTPS
+path and pinned version, requests structured progress, bounds initial curl
+connect/stall/retry behavior, and allows 15 minutes per attempt. Timeout and
+nonzero failures preserve sanitized bounded stdout and stderr tails.
 
 `Prepare` does not install Ubuntu or another distribution. Installed smoke
 provisions its app-owned distribution later. Checkpoint observation, guest

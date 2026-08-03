@@ -277,10 +277,23 @@ published-gateway proof with `OPENCLAW_E2E_TRAY_EXE` pinned to the installed
 executable. It then silently uninstalls and verifies there is no DEV registration,
 installed tray, DEV data directory, or `OpenClawGateway-Dev` distro left behind.
 
+Installer, uninstaller, E2E build, and E2E test processes use one
+`System.Diagnostics.Process` helper with `UseShellExecute=false`, exact typed
+arguments, separate stdout/stderr capture, and fixed deadlines. A timeout stops
+only the captured process and its observed descendants. The lane does not depend
+on `Start-Process` or merge benign native stderr into PowerShell's error stream.
+The capture files remain in the run artifact directory.
+
 This proves the installed tray runtime payload, including its operator, local MCP,
 Windows node, and native chat paths. The fixture's headless WSL gateway setup is
 still orchestrated in-process by the source-built E2E test harness. The smoke does
-not exercise the installed UI setup entrypoint itself.
+not exercise the installed UI setup entrypoint itself. A fresh nested WSL distro
+uses the official HTTPS CLI installer with the configured pinned package version.
+The initial curl has bounded connect/stall/retry behavior and pipe failure
+propagation. The installer emits structured JSON progress and receives a
+15-minute budget per attempt because clean Node/npm bootstrap can exceed five
+minutes. Timeout and nonzero failures retain sanitized, bounded stdout and stderr
+tails.
 
 The smoke refuses to start if existing DEV install/data/distro state is present. It
 does not inspect, overwrite, uninstall, or clean release identity state. Every phase
@@ -309,6 +322,10 @@ Do not remove or bypass a local guard to make a contributor workstation pass.
 All installer operations are noninteractive, and guard diagnostics identify the
 conflicting state category and path without reading or printing registry values,
 settings, gateway credentials, or device keys.
+
+The upgrade lane uses the same bounded native process helper for both Inno
+installations and final uninstall. This keeps cleanup independent of COM-backed
+`Start-Process` behavior after a PowerShell Direct target process is recycled.
 
 The script rejects existing release and DEV installs, data directories, protocol and
 startup registry entries, shortcuts, tray processes, startup tasks, and app-owned WSL

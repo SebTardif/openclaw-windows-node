@@ -35,6 +35,7 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
+. (Join-Path $PSScriptRoot "_smoke-native-process.ps1")
 
 $officialApiRoot = "https://api.github.com/repos/openclaw/openclaw-windows-node"
 $officialDownloadRoot = "https://github.com/openclaw/openclaw-windows-node/releases/download/"
@@ -490,18 +491,25 @@ function Invoke-InnoInstall {
     )
 
     New-Item -ItemType Directory -Force -Path $installBase | Out-Null
-    $process = Start-Process -FilePath $Installer -ArgumentList @(
-        "/VERYSILENT",
-        "/SUPPRESSMSGBOXES",
-        "/NORESTART",
-        "/NOCANCEL",
-        "/CLOSEAPPLICATIONS",
-        "/DIR=`"$installRoot`"",
-        "/LOG=`"$(Join-Path $ArtifactRoot $LogName)`""
-    ) -Wait -PassThru
-    if ($process.ExitCode -ne 0) {
-        throw "Inno installer '$Installer' failed with exit code $($process.ExitCode)."
-    }
+    $captureName = "inno-{0}" -f ([IO.Path]::GetFileNameWithoutExtension($LogName).ToLowerInvariant() -replace '[^a-z0-9.-]', '-')
+    $installResult = Invoke-SmokeNativeProcess `
+        -Operation "Inno installer '$Installer'" `
+        -FilePath $Installer `
+        -ArgumentList @(
+            "/VERYSILENT",
+            "/SUPPRESSMSGBOXES",
+            "/NORESTART",
+            "/NOCANCEL",
+            "/CLOSEAPPLICATIONS",
+            "/DIR=`"$installRoot`"",
+            "/LOG=`"$(Join-Path $ArtifactRoot $LogName)`""
+        ) `
+        -TimeoutSeconds 600 `
+        -CaptureRoot $ArtifactRoot `
+        -CaptureName $captureName `
+        -WorkingDirectory $RepoRoot
+    Write-SmokeNativeProcessOutput -Result $installResult
+    Assert-SmokeNativeProcessSucceeded -Result $installResult
     if (-not (Test-Path -LiteralPath $installedTray -PathType Leaf)) {
         throw "Installed tray payload is missing after Inno install: $installedTray"
     }
@@ -709,15 +717,21 @@ function Invoke-Cleanup {
             Remove-OwnedDirectory -Path $installBase
             $script:ownsInstall = $false
         } else {
-            $process = Start-Process -FilePath $uninstaller -ArgumentList @(
-                "/VERYSILENT",
-                "/SUPPRESSMSGBOXES",
-                "/NORESTART",
-                "/LOG=`"$(Join-Path $ArtifactRoot "inno-uninstall.log")`""
-            ) -Wait -PassThru
-            if ($process.ExitCode -ne 0) {
-                throw "Inno uninstaller failed with exit code $($process.ExitCode)."
-            }
+            $uninstallResult = Invoke-SmokeNativeProcess `
+                -Operation "Release Inno uninstaller" `
+                -FilePath $uninstaller `
+                -ArgumentList @(
+                    "/VERYSILENT",
+                    "/SUPPRESSMSGBOXES",
+                    "/NORESTART",
+                    "/LOG=`"$(Join-Path $ArtifactRoot "inno-uninstall.log")`""
+                ) `
+                -TimeoutSeconds 300 `
+                -CaptureRoot $ArtifactRoot `
+                -CaptureName "inno-uninstall" `
+                -WorkingDirectory $installRoot
+            Write-SmokeNativeProcessOutput -Result $uninstallResult
+            Assert-SmokeNativeProcessSucceeded -Result $uninstallResult
             $script:ownsInstall = $false
         }
     }

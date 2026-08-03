@@ -917,7 +917,9 @@ public class SetupStepsTests : IDisposable
     {
         var command = InstallCliStep.BuildInstallCommand("https://openclaw.ai/install-cli.sh", null);
 
-        Assert.Equal("curl -fsSL --proto '=https' --tlsv1.2 'https://openclaw.ai/install-cli.sh' | bash", command);
+        Assert.Equal(
+            "set -o pipefail; curl -fsSL --proto '=https' --tlsv1.2 --connect-timeout 20 --speed-limit 1 --speed-time 30 --retry 3 --retry-delay 1 --retry-connrefused 'https://openclaw.ai/install-cli.sh' | bash -s -- --json",
+            command);
     }
 
     [Fact]
@@ -925,7 +927,9 @@ public class SetupStepsTests : IDisposable
     {
         var command = InstallCliStep.BuildInstallCommand("https://openclaw.ai/install-cli.sh", "2026.5.22");
 
-        Assert.Equal("curl -fsSL --proto '=https' --tlsv1.2 'https://openclaw.ai/install-cli.sh' | bash -s -- --version '2026.5.22'", command);
+        Assert.Equal(
+            "set -o pipefail; curl -fsSL --proto '=https' --tlsv1.2 --connect-timeout 20 --speed-limit 1 --speed-time 30 --retry 3 --retry-delay 1 --retry-connrefused 'https://openclaw.ai/install-cli.sh' | bash -s -- --json --version '2026.5.22'",
+            command);
     }
 
     [Fact]
@@ -933,7 +937,58 @@ public class SetupStepsTests : IDisposable
     {
         var command = InstallCliStep.BuildInstallCommand("https://openclaw.ai/install-cli's.sh", "2026.5.22'a");
 
-        Assert.Equal("curl -fsSL --proto '=https' --tlsv1.2 'https://openclaw.ai/install-cli'\\''s.sh' | bash -s -- --version '2026.5.22'\\''a'", command);
+        Assert.Equal(
+            "set -o pipefail; curl -fsSL --proto '=https' --tlsv1.2 --connect-timeout 20 --speed-limit 1 --speed-time 30 --retry 3 --retry-delay 1 --retry-connrefused 'https://openclaw.ai/install-cli'\\''s.sh' | bash -s -- --json --version '2026.5.22'\\''a'",
+            command);
+    }
+
+    [Fact]
+    public async Task InstallCli_UsesCleanDistroBudgetAndReportsSanitizedTimeoutOutput()
+    {
+        var commands = new FakeCommandRunner(
+            _ => Fail(),
+            (_, command, _) => command.Contains("install-cli.sh", StringComparison.Ordinal)
+                ? new CommandResult(
+                    ExitCode: -1,
+                    Stdout: "EARLY-MARKER " +
+                            string.Join(' ', Enumerable.Repeat("installer-progress", 400)) +
+                            "\ninstalling node FINAL-MARKER",
+                    Stderr: "token=super-secret\nnetwork stalled",
+                    Elapsed: InstallCliStep.InstallTimeout,
+                    TimedOut: true)
+                : Fail("Unexpected WSL command"));
+        var ctx = CreateContext(
+            new SetupConfig
+            {
+                Gateway = new GatewayConfig
+                {
+                    InstallUrl = "https://openclaw.ai/install-cli.sh",
+                    Version = "2026.6.11"
+                }
+            },
+            commands);
+        ctx.DistroName = "test-distro";
+
+        var result = await new InstallCliStep().ExecuteAsync(ctx, CancellationToken.None);
+
+        Assert.Equal(StepOutcome.Failed, result.Outcome);
+        var message = Assert.IsType<string>(result.Message);
+        Assert.Contains("timed out after 15 minutes", message);
+        Assert.Contains("installing node", message);
+        Assert.Contains("network stalled", message);
+        Assert.Contains("[REDACTED]", message);
+        Assert.Contains("[truncated ", message);
+        Assert.Contains("FINAL-MARKER", message);
+        Assert.DoesNotContain("EARLY-MARKER", message);
+        Assert.DoesNotContain("super-secret", message);
+        Assert.True(message.Length < 4300);
+        var call = Assert.Single(commands.WslCalls);
+        Assert.Equal(InstallCliStep.InstallTimeout, call.Timeout);
+        Assert.Contains("set -o pipefail", call.Command);
+        Assert.Contains("--connect-timeout 20", call.Command);
+        Assert.Contains("--speed-limit 1 --speed-time 30", call.Command);
+        Assert.Contains("--retry 3 --retry-delay 1 --retry-connrefused", call.Command);
+        Assert.Contains("--json --version '2026.6.11'", call.Command);
     }
 
     [Fact]

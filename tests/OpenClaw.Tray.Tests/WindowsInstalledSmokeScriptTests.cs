@@ -67,10 +67,22 @@ public sealed class WindowsInstalledSmokeScriptTests
     public void Helper_CleansOnlyExactInstalledProcessAndFailsOnResidue()
     {
         var script = ReadHelper();
+        var nativeHelper = ReadNativeHelper();
 
         Assert.Contains("[string]::Equals([IO.Path]::GetFullPath($_.ExecutablePath), $expectedPath", script);
         Assert.Contains("Stop-Process -Id ([int]$process.ProcessId)", script);
         Assert.DoesNotContain("Stop-Process -Name", script);
+        Assert.DoesNotContain("Start-Process", script);
+        Assert.Contains("Invoke-SmokeNativeProcess", script);
+        Assert.Equal(2, script.Split("--disable-build-servers").Length - 1);
+        Assert.Contains("/p:UseSharedCompilation=false", script);
+        Assert.Contains("$processStartInfo.UseShellExecute = $false", nativeHelper);
+        Assert.Contains("$processStartInfo.RedirectStandardOutput = $true", nativeHelper);
+        Assert.Contains("$processStartInfo.RedirectStandardError = $true", nativeHelper);
+        Assert.Contains("Stop-SmokeNativeProcessTree -RootProcessId $process.Id", nativeHelper);
+        Assert.Contains("[Threading.Tasks.Task]::WaitAll(", nativeHelper);
+        Assert.Contains("Stop-Process -Id $RootProcessId", nativeHelper);
+        Assert.DoesNotContain("Stop-Process -Name", nativeHelper);
         Assert.Contains("DEV WSL distro still exists after cleanup", script);
         Assert.Contains("DEV uninstall registration still exists after cleanup", script);
         Assert.Contains("Installed DEV tray still exists after cleanup", script);
@@ -116,4 +128,7 @@ public sealed class WindowsInstalledSmokeScriptTests
 
     private static string ReadHelper() =>
         File.ReadAllText(Path.Combine(Root, "scripts", "validate-installed-inno-smoke.ps1"));
+
+    private static string ReadNativeHelper() =>
+        File.ReadAllText(Path.Combine(Root, "scripts", "_smoke-native-process.ps1"));
 }

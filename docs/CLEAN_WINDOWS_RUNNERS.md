@@ -635,6 +635,22 @@ cleanup is mandatory.
 The controller transfers one validated clean-HEAD source archive with
 PowerShell Direct `Copy-Item -ToSession`, runs the typed `Installed` validation
 lane by default, and never recursively copies the remote artifact directory.
+Inside the lane, Inno install/uninstall and the E2E `dotnet.exe` build/test
+commands use one COM-independent `System.Diagnostics.Process` helper. It
+preserves typed argument boundaries, captures stdout and stderr separately,
+enforces operation-specific deadlines, and terminates only the captured PID
+tree on timeout. It does not use `Start-Process`, so a recycled PowerShell
+Direct target cannot turn cleanup into a COM interface failure. Captures are
+retained as smoke artifacts.
+
+The nested clean WSL setup keeps the official HTTPS CLI installer and configured
+pinned OpenClaw version. Its initial curl propagates pipe failures, bounds
+connect and stalled-transfer behavior, retries transient connection failures,
+and asks the installer for structured JSON progress. Each install attempt has
+a 15-minute budget instead of the insufficient five-minute clean-bootstrap
+budget. Timeout and nonzero results report sanitized, bounded stdout and stderr
+tails without putting credentials in diagnostics.
+
 Before checkpoint restore, the guest validates the exact lane root under
 `GuestRoot\artifacts`, rejects reparse points and unsafe relative paths, bounds
 file count and expanded size, and creates a nonce ZIP with size and SHA-256

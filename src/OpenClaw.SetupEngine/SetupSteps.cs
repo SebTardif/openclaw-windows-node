@@ -1227,6 +1227,9 @@ public sealed class ValidateWslLockdownStep : SetupStep
 
 public sealed class InstallCliStep : SetupStep
 {
+    internal static readonly TimeSpan InstallTimeout = TimeSpan.FromMinutes(15);
+    private const int MaximumFailureDiagnosticCharacters = 4096;
+
     public override string Id => "install-cli";
     public override string DisplayName => "Install OpenClaw CLI";
     public override RetryPolicy Retry => new(MaxAttempts: 2, InitialDelay: TimeSpan.FromSeconds(5));
@@ -1256,10 +1259,10 @@ public sealed class InstallCliStep : SetupStep
             return StepResult.Fail(ex.Message);
         }
 
-        var result = await ctx.Commands.RunInWslAsync(distro, installScript, TimeSpan.FromMinutes(5), ct: ct);
+        var result = await ctx.Commands.RunInWslAsync(distro, installScript, InstallTimeout, ct: ct);
 
         if (result.ExitCode != 0)
-            return StepResult.Fail($"CLI install failed (exit {result.ExitCode}): {result.Stderr}");
+            return StepResult.Fail(BuildInstallFailureMessage(result));
 
         var verifyCommands = new (string Command, string? ExecutablePath)[]
         {
@@ -1292,15 +1295,45 @@ public sealed class InstallCliStep : SetupStep
     internal static string BuildInstallCommand(string installUrl, string? requestedVersion)
     {
         var escapedUrl = WslShellQuoting.EscapePosixSingleQuoteInner(installUrl);
+        const string curl =
+            "set -o pipefail; curl -fsSL --proto '=https' --tlsv1.2 " +
+            "--connect-timeout 20 --speed-limit 1 --speed-time 30 " +
+            "--retry 3 --retry-delay 1 --retry-connrefused";
         if (string.IsNullOrWhiteSpace(requestedVersion))
-            return $"curl -fsSL --proto '=https' --tlsv1.2 '{escapedUrl}' | bash";
+            return $"{curl} '{escapedUrl}' | bash -s -- --json";
 
         var trimmedVersion = requestedVersion.Trim();
         if (trimmedVersion.Contains('\n') || trimmedVersion.Contains('\r'))
             throw new ArgumentException("Gateway version cannot contain newlines.");
 
         var escapedVersion = WslShellQuoting.EscapePosixSingleQuoteInner(trimmedVersion);
-        return $"curl -fsSL --proto '=https' --tlsv1.2 '{escapedUrl}' | bash -s -- --version '{escapedVersion}'";
+        return $"{curl} '{escapedUrl}' | bash -s -- --json --version '{escapedVersion}'";
+    }
+
+    internal static string BuildInstallFailureMessage(CommandResult result)
+    {
+        var prefix = result.TimedOut
+            ? $"CLI install timed out after {InstallTimeout.TotalMinutes:F0} minutes"
+            : $"CLI install failed (exit {result.ExitCode})";
+        var stdout = GetBoundedFailureDiagnostic(result.Stdout);
+        var stderr = GetBoundedFailureDiagnostic(result.Stderr);
+        return $"{prefix}. stdout tail: {stdout}; stderr tail: {stderr}";
+    }
+
+    private static string GetBoundedFailureDiagnostic(string value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+            return "<empty>";
+
+        var sanitized = SetupLogger.Sanitize(value)
+            .Replace("\r\n", " ", StringComparison.Ordinal)
+            .Replace('\r', ' ')
+            .Replace('\n', ' ')
+            .Trim();
+        return sanitized.Length <= MaximumFailureDiagnosticCharacters
+            ? sanitized
+            : $"[truncated {sanitized.Length - MaximumFailureDiagnosticCharacters} chars] " +
+              sanitized[^MaximumFailureDiagnosticCharacters..];
     }
 
     private static async Task<StepResult> EnsureCliOnDefaultPathAsync(

@@ -89,6 +89,8 @@ public sealed class WindowsInnoUpgradeSmokeScriptTests
         Assert.Contains("Assert-PostCleanup", script);
         Assert.Contains("has a registration but no uninstaller", script);
         Assert.Contains("Refusing to recursively delete smoke-owned reparse point", script);
+        Assert.Contains("Invoke-SmokeNativeProcess", script);
+        Assert.DoesNotContain("Start-Process", script);
         Assert.DoesNotContain("-ErrorAction SilentlyContinue | Out-Null", script);
     }
 

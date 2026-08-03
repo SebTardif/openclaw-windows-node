@@ -374,6 +374,20 @@ exit-zero stderr is diagnostic, while nonzero/timeout diagnostics are
 sanitized and bounded. Parse only GitVersion stdout as one JSON object with
 the requested property, and require capture/environment cleanup.
 
+Installed and Upgrade smoke Inno install/uninstall operations must use the
+shared `System.Diagnostics.Process` smoke helper, not `Start-Process`. Installed
+smoke also uses it for the E2E `dotnet.exe` build/test operations. Require exact
+typed arguments, separate stdout/stderr artifacts, operation-specific
+deadlines, and exact captured PID-tree termination on timeout. This keeps
+cleanup valid after PowerShell Direct recycles its target process and prevents
+benign native stderr from becoming a terminating PowerShell error.
+
+For a clean nested WSL CLI install, retain the official HTTPS installer and
+configured pinned OpenClaw version. Require pipe failure propagation, bounded
+initial curl connect/stall/retry behavior, structured JSON progress, and the
+15-minute per-attempt clean-bootstrap budget. Timeout and nonzero diagnostics
+must include sanitized bounded stdout and stderr tails.
+
 After a failed `Prepare`, the driver must first confirm that the rollback
 restored the exact owned `clean-windows` checkpoint and finalized marker. The
 next attempt is normal `Prepare`, without `-RecoverPendingCheckpoint` or
