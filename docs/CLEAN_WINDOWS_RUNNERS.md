@@ -653,6 +653,13 @@ a 15-minute budget instead of the insufficient five-minute clean-bootstrap
 budget. Timeout and nonzero results report sanitized, bounded stdout and stderr
 tails without putting credentials in diagnostics.
 
+After CLI installation, gateway configuration launches the Node CLI once per
+emitted `openclaw config set`. Its aggregate deadline is fixed startup
+headroom plus 45 seconds per command (7.5 minutes for the default nine-command
+loopback configuration), reflecting cold clean-distro startup rather than the
+obsolete 15-second estimate. Failure evidence records the command count and
+sanitized bounded stdout/stderr tails.
+
 Before checkpoint restore, the guest validates the exact lane root under
 `GuestRoot\artifacts`, rejects reparse points and unsafe relative paths, bounds
 file count and expanded size, and creates a nonce ZIP with size and SHA-256

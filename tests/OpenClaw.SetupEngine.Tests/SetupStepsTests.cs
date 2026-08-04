@@ -1908,7 +1908,12 @@ public class SetupStepsTests : IDisposable
     {
         var commands = new FakeCommandRunner(
             _ => Ok(),
-            (_, _, timeout) => new CommandResult(-1, "", "", timeout, TimedOut: true));
+            (_, _, timeout) => new CommandResult(
+                -1,
+                "EARLY " + string.Join(' ', Enumerable.Repeat("config-progress", 400)) + " FINAL",
+                "token=super-secret\nconfig stalled",
+                timeout,
+                TimedOut: true));
         var ctx = CreateContext(commands: commands);
 
         var result = await new ConfigureGatewayStep().ExecuteAsync(ctx, CancellationToken.None);
@@ -1916,7 +1921,27 @@ public class SetupStepsTests : IDisposable
         Assert.Equal(StepOutcome.Failed, result.Outcome);
         var message = Assert.IsType<string>(result.Message);
         Assert.Contains("Gateway configuration timed out after", message);
+        Assert.Contains("9 openclaw config commands", message);
+        Assert.Contains("[truncated ", message);
+        Assert.Contains("FINAL", message);
+        Assert.DoesNotContain("EARLY", message);
+        Assert.Contains("config stalled", message);
+        Assert.Contains("[REDACTED]", message);
+        Assert.DoesNotContain("super-secret", message);
         Assert.DoesNotContain("exit -1", message);
+    }
+
+    [Fact]
+    public void ComputeConfigurationTimeout_GivesDefaultColdConfigSevenAndHalfMinutes()
+    {
+        var commands = ConfigureGatewayStep.BuildConfigCommands(
+            new GatewayConfig(),
+            18789,
+            "'[]'");
+
+        Assert.Equal(
+            TimeSpan.FromMinutes(7.5),
+            ConfigureGatewayStep.ComputeConfigurationTimeout(commands));
     }
 
     [Fact]

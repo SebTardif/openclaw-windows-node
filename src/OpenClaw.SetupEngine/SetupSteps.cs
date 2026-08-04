@@ -1320,7 +1320,7 @@ public sealed class InstallCliStep : SetupStep
         return $"{prefix}. stdout tail: {stdout}; stderr tail: {stderr}";
     }
 
-    private static string GetBoundedFailureDiagnostic(string value)
+    internal static string GetBoundedFailureDiagnostic(string value)
     {
         if (string.IsNullOrWhiteSpace(value))
             return "<empty>";
@@ -1395,13 +1395,13 @@ public sealed class ConfigureGatewayStep : SetupStep
     internal const string DevicePairPublicUrlKey = "plugins.entries.device-pair.config.publicUrl";
     internal const string DevicePairEnabledKey = "plugins.entries.device-pair.enabled";
     // Each `openclaw config set` emitted below spawns the Node CLI fresh inside WSL; on a
-    // newly created distro with a cold cache that is ~4-5s apiece. Budget the step by how
-    // many config commands we actually emit -- BuildConfigCommands grows with the
+    // newly created distro with a cold package cache can exceed 20s apiece. Budget the step
+    // by how many config commands we actually emit -- BuildConfigCommands grows with the
     // device-pair keys and every Gateway.ExtraConfig entry -- with a floor so the minimal
     // path keeps generous headroom. A fixed cap silently regresses as the list grows.
     internal static readonly TimeSpan ConfigBaseBudget = TimeSpan.FromSeconds(45);
-    internal static readonly TimeSpan PerConfigCommandBudget = TimeSpan.FromSeconds(15);
-    internal static readonly TimeSpan MinConfigurationTimeout = TimeSpan.FromSeconds(180);
+    internal static readonly TimeSpan PerConfigCommandBudget = TimeSpan.FromSeconds(45);
+    internal static readonly TimeSpan MinConfigurationTimeout = TimeSpan.FromMinutes(5);
 
     public override string Id => "configure-gateway";
     public override string DisplayName => "Configure gateway";
@@ -1456,16 +1456,24 @@ public sealed class ConfigureGatewayStep : SetupStep
             echo "GATEWAY_CONFIGURED"
             """;
 
-        var timeout = ComputeConfigurationTimeout(configCommands);
+        var configCommandCount = CountConfigSetCommands(configCommands);
+        var timeout = ComputeConfigurationTimeout(configCommandCount);
         var result = await ctx.Commands.RunInWslAsync(distro, script, timeout, env, ct);
 
         if (result.ExitCode != 0 || !result.Stdout.Contains("GATEWAY_CONFIGURED"))
         {
+            var stdout = InstallCliStep.GetBoundedFailureDiagnostic(result.Stdout);
+            var stderr = InstallCliStep.GetBoundedFailureDiagnostic(result.Stderr);
             if (result.TimedOut)
                 return StepResult.Fail(
-                    $"Gateway configuration timed out after {timeout.TotalSeconds:0}s while running openclaw config inside WSL.");
+                    $"Gateway configuration timed out after {timeout.TotalSeconds:0}s " +
+                    $"while running {configCommandCount} openclaw config commands inside WSL. " +
+                    $"stdout tail: {stdout}; stderr tail: {stderr}");
 
-            return StepResult.Fail($"Gateway configuration failed (exit {result.ExitCode}): {result.Stderr}");
+            return StepResult.Fail(
+                $"Gateway configuration failed (exit {result.ExitCode}) while running " +
+                $"{configCommandCount} openclaw config commands. " +
+                $"stdout tail: {stdout}; stderr tail: {stderr}");
         }
 
         ctx.Logger.StateChange("shared_gateway_token", null, "[SET]");
@@ -1542,7 +1550,12 @@ public sealed class ConfigureGatewayStep : SetupStep
     // BuildConfigCommands grows.
     internal static TimeSpan ComputeConfigurationTimeout(string configCommands)
     {
-        var budget = ConfigBaseBudget + PerConfigCommandBudget * CountConfigSetCommands(configCommands);
+        return ComputeConfigurationTimeout(CountConfigSetCommands(configCommands));
+    }
+
+    private static TimeSpan ComputeConfigurationTimeout(int configCommandCount)
+    {
+        var budget = ConfigBaseBudget + PerConfigCommandBudget * configCommandCount;
         return budget > MinConfigurationTimeout ? budget : MinConfigurationTimeout;
     }
 

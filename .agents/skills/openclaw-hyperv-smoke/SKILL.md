@@ -503,7 +503,11 @@ tree termination. Installed E2E `dotnet.exe` build/test
 uses the same helper. The nested clean WSL CLI install keeps the official HTTPS
 path and pinned version, requests structured progress, bounds initial curl
 connect/stall/retry behavior, and allows 15 minutes per attempt. Timeout and
-nonzero failures preserve sanitized bounded stdout and stderr tails.
+nonzero failures preserve sanitized bounded stdout and stderr tails. Gateway
+configuration then budgets 45 seconds per emitted cold
+`openclaw config set` command plus startup headroom (7.5 minutes for the
+default nine commands) and records command-count plus sanitized tail evidence
+on failure.
 
 `Prepare` does not install Ubuntu or another distribution. Installed smoke
 provisions its app-owned distribution later. Checkpoint observation, guest

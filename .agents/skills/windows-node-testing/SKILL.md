@@ -389,6 +389,12 @@ initial curl connect/stall/retry behavior, structured JSON progress, and the
 15-minute per-attempt clean-bootstrap budget. Timeout and nonzero diagnostics
 must include sanitized bounded stdout and stderr tails.
 
+The following gateway configuration step launches one cold Node CLI process
+per emitted `openclaw config set`. Budget fixed startup headroom plus 45 seconds
+per command, which is 7.5 minutes for the default nine-command loopback
+configuration. Failure evidence must report the command count and sanitized
+bounded stdout/stderr tails.
+
 After a failed `Prepare`, the driver must first confirm that the rollback
 restored the exact owned `clean-windows` checkpoint and finalized marker. The
 next attempt is normal `Prepare`, without `-RecoverPendingCheckpoint` or

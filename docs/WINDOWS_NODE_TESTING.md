@@ -295,7 +295,11 @@ The initial curl has bounded connect/stall/retry behavior and pipe failure
 propagation. The installer emits structured JSON progress and receives a
 15-minute budget per attempt because clean Node/npm bootstrap can exceed five
 minutes. Timeout and nonzero failures retain sanitized, bounded stdout and stderr
-tails.
+tails. The subsequent gateway configuration budget scales at 45 seconds per
+emitted `openclaw config set` command plus fixed startup headroom (7.5 minutes
+for the default nine-command loopback configuration). Timeout and nonzero
+failures identify the command count and retain the same sanitized bounded
+diagnostic tails.
 
 The smoke refuses to start if existing DEV install/data/distro state is present. It
 does not inspect, overwrite, uninstall, or clean release identity state. Every phase
