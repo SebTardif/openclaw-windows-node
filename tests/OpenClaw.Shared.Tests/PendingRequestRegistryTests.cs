@@ -6,6 +6,38 @@ namespace OpenClaw.Shared.Tests;
 public sealed class PendingRequestRegistryTests
 {
     [Fact]
+    public void DiagnosticObserver_ReportsAcceptedRegistrationAndResponseClassification()
+    {
+        using var registry = CreateOpenRegistry();
+        var diagnostics = new List<PendingRequestDiagnostic>();
+        registry.DiagnosticObserver = diagnostics.Add;
+
+        var registration = registry.RegisterMethod("proof-id", "sessions.list");
+        var take = registry.TakeForResponse("proof-id");
+
+        Assert.True(registration.Accepted);
+        Assert.Equal(PendingResponseDisposition.Active, take.Disposition);
+        Assert.Collection(
+            diagnostics,
+            diagnostic =>
+            {
+                Assert.Equal(PendingRequestDiagnosticStage.Registered, diagnostic.Stage);
+                Assert.Equal("proof-id", diagnostic.RequestId);
+                Assert.Equal("sessions.list", diagnostic.Method);
+                Assert.Equal(PendingRequestKind.Method, diagnostic.Kind);
+                Assert.Null(diagnostic.Disposition);
+            },
+            diagnostic =>
+            {
+                Assert.Equal(PendingRequestDiagnosticStage.ResponseClassified, diagnostic.Stage);
+                Assert.Equal("proof-id", diagnostic.RequestId);
+                Assert.Equal("sessions.list", diagnostic.Method);
+                Assert.Equal(PendingRequestKind.Method, diagnostic.Kind);
+                Assert.Equal(PendingResponseDisposition.Active, diagnostic.Disposition);
+            });
+    }
+
+    [Fact]
     public void MethodRegisterTakeAndRemove_AreAtomicAndTombstoned()
     {
         using var registry = CreateOpenRegistry();

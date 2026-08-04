@@ -21,6 +21,19 @@ internal enum PendingResponseDisposition
     Ownerless,
 }
 
+internal enum PendingRequestDiagnosticStage
+{
+    Registered,
+    ResponseClassified,
+}
+
+internal readonly record struct PendingRequestDiagnostic(
+    PendingRequestDiagnosticStage Stage,
+    string RequestId,
+    string? Method,
+    PendingRequestKind? Kind,
+    PendingResponseDisposition? Disposition);
+
 internal sealed class PendingRequest
 {
     private PendingRequest(string method, PendingRequestKind kind)
@@ -84,6 +97,8 @@ internal sealed class PendingRequestRegistry : IDisposable
     private long _nextRegistrationVersion;
     private bool _acceptingRegistrations;
     private bool _disposed;
+
+    internal Action<PendingRequestDiagnostic>? DiagnosticObserver { get; set; }
 
     public PendingRequestRegistry(int completedIdCapacity = DefaultCompletedIdCapacity)
     {
@@ -211,20 +226,39 @@ internal sealed class PendingRequestRegistry : IDisposable
     internal PendingResponseTake TakeForResponse(string? requestId)
     {
         if (string.IsNullOrWhiteSpace(requestId))
+        {
+            DiagnosticObserver?.Invoke(new(
+                PendingRequestDiagnosticStage.ResponseClassified,
+                requestId ?? string.Empty,
+                null,
+                null,
+                PendingResponseDisposition.Ownerless));
             return new(PendingResponseDisposition.Ownerless, null);
+        }
 
+        PendingResponseTake take;
         lock (_lock)
         {
             if (_active.Remove(requestId, out var request))
             {
                 AddCompletedIdLocked(requestId);
-                return new(PendingResponseDisposition.Active, request);
+                take = new(PendingResponseDisposition.Active, request);
             }
-
-            return _completed.ContainsKey(requestId)
-                ? new(PendingResponseDisposition.Tombstoned, null)
-                : new(PendingResponseDisposition.Ownerless, null);
+            else
+            {
+                take = _completed.ContainsKey(requestId)
+                    ? new(PendingResponseDisposition.Tombstoned, null)
+                    : new(PendingResponseDisposition.Ownerless, null);
+            }
         }
+
+        DiagnosticObserver?.Invoke(new(
+            PendingRequestDiagnosticStage.ResponseClassified,
+            requestId,
+            take.Request?.Method,
+            take.Request?.Kind,
+            take.Disposition));
+        return take;
     }
 
     internal bool Remove(string requestId)
@@ -349,10 +383,21 @@ internal sealed class PendingRequestRegistry : IDisposable
                 CreateConnectionLossCancellation(request.Kind, disposed));
         }
 
-        return new PendingRequestRegistration(
+        var registration = new PendingRequestRegistration(
             requestId,
             request.RegistrationVersion,
             accepted);
+        if (accepted)
+        {
+            DiagnosticObserver?.Invoke(new(
+                PendingRequestDiagnosticStage.Registered,
+                requestId,
+                request.Method,
+                request.Kind,
+                null));
+        }
+
+        return registration;
     }
 
     private List<PendingRequest> DrainActiveLocked()
