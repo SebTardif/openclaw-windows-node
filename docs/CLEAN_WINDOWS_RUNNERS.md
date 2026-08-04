@@ -672,7 +672,11 @@ QR/bootstrap minting, exact device and node approval, bounded approval drains,
 and the final gateway status query. A request ID stays in the
 `OPENCLAW_APPROVAL_REQUEST_ID` environment variable rather than command text,
 and one method invocation never replays an approval after a timeout. Timeout and
-nonzero failures retain bounded, sanitized stdout/stderr tails.
+nonzero failures retain bounded, sanitized stdout/stderr tails. The
+`devices approve --latest --json` preview can intentionally return nonzero with
+a safe selected scope-upgrade request; setup approves that exact
+environment-bound request once, but still fails closed when no safe selection
+can be parsed.
 
 Before checkpoint restore, the guest validates the exact lane root under
 `GuestRoot\artifacts`, rejects reparse points and unsafe relative paths, bounds

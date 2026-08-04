@@ -2228,19 +2228,19 @@ public sealed class PairOperatorStep : SetupStep
 
             ctx.Logger.Info($"Approve preview: exit={preview.ExitCode}");
 
-            if (preview.ExitCode != 0)
-            {
-                if (ApprovalRequestHelper.IsPluginNotFoundError(preview.Stdout.Trim()))
-                    return StepResult.Terminal(ApprovalRequestHelper.PluginNotFoundMessage);
-
-                return StepResult.Fail(WslOpenClawCliTimeouts.DescribeFailure(
-                    "Device approval preview",
-                    preview));
-            }
-
             var parsed = ApprovalRequestHelper.TryReadSelectedRequestId(preview.Stdout.Trim());
             if (!parsed.Success)
             {
+                if (preview.ExitCode != 0)
+                {
+                    if (ApprovalRequestHelper.IsPluginNotFoundError(preview.Stdout.Trim()))
+                        return StepResult.Terminal(ApprovalRequestHelper.PluginNotFoundMessage);
+
+                    return StepResult.Fail(WslOpenClawCliTimeouts.DescribeFailure(
+                        "Device approval preview",
+                        preview));
+                }
+
                 ctx.Logger.Warn($"Could not select pairing request: {parsed.Error}");
                 return StepResult.Fail("Could not find a safe pending pairing request to approve");
             }
@@ -3511,16 +3511,6 @@ public sealed class VerifyEndToEndStep : SetupStep
                 break;
             }
 
-            if (preview.ExitCode != 0)
-            {
-                if (ApprovalRequestHelper.IsPluginNotFoundError(preview.Stdout.Trim()))
-                    return StepResult.Terminal(ApprovalRequestHelper.PluginNotFoundMessage);
-
-                return StepResult.Fail(WslOpenClawCliTimeouts.DescribeFailure(
-                    "Device approval drain preview",
-                    preview));
-            }
-
             var parsed = ApprovalRequestHelper.TryReadSelectedRequestId(preview.Stdout.Trim());
             if (parsed.Success)
             {
@@ -3542,6 +3532,16 @@ public sealed class VerifyEndToEndStep : SetupStep
                     return StepResult.Fail("Device approval drain reached its iteration limit; pending approvals may remain");
 
                 continue;
+            }
+
+            if (preview.ExitCode != 0)
+            {
+                if (ApprovalRequestHelper.IsPluginNotFoundError(preview.Stdout.Trim()))
+                    return StepResult.Terminal(ApprovalRequestHelper.PluginNotFoundMessage);
+
+                return StepResult.Fail(WslOpenClawCliTimeouts.DescribeFailure(
+                    "Device approval drain preview",
+                    preview));
             }
 
             if (preview.ExitCode == 0)

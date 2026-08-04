@@ -313,7 +313,9 @@ Clean-distro QR/bootstrap, device and node approval, bounded approval-drain,
 and final gateway status commands each have a two-minute budget. The Setup
 Engine keeps approval request IDs environment-bound, does not replay an
 approval within one operation, and reports bounded sanitized stdout/stderr
-tails for timeouts and nonzero exits.
+tails for timeouts and nonzero exits. A nonzero
+`devices approve --latest --json` preview is actionable only when its JSON
+contains one safe selected request; that exact request is approved once.
 
 The smoke refuses to start if existing DEV install/data/distro state is present. It
 does not inspect, overwrite, uninstall, or clean release identity state. Every phase

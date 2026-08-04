@@ -404,7 +404,9 @@ name alone or accept a missing, inactive, mismatched, or foreign listener.
 Clean-distro QR/bootstrap, device and node approval, bounded approval-drain,
 and final gateway status commands each use a two-minute budget. Keep approval
 request IDs environment-bound, do not replay one approval within an operation,
-and preserve bounded sanitized timeout/nonzero diagnostics.
+and preserve bounded sanitized timeout/nonzero diagnostics. Accept a nonzero
+`devices approve --latest --json` preview only when its JSON contains a safe
+selected request, then approve that exact environment-bound request once.
 
 After a failed `Prepare`, the driver must first confirm that the rollback
 restored the exact owned `clean-windows` checkpoint and finalized marker. The

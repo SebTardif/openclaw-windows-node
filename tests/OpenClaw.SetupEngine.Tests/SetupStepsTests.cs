@@ -2403,6 +2403,35 @@ public class SetupStepsTests : IDisposable
     }
 
     [Fact]
+    public async Task AutoApprovePairing_NonzeroPreviewWithSafeSelectionApprovesExactlyOnce()
+    {
+        const string selected = """{"selected":{"requestId":"scope-upgrade-1"},"approvalState":{"kind":"scope-upgrade"}}""";
+        var invocation = 0;
+        var commands = new FakeCommandRunner(
+            _ => Ok(),
+            (_, _, _) => invocation++ == 0
+                ? FailWithStdout(selected)
+                : Ok("""{"approved":true}"""));
+        var ctx = CreateContext(commands: commands);
+        ctx.SharedGatewayToken = "shared-token";
+
+        var result = await PairOperatorStep.AutoApprovePairing(
+            ctx,
+            requestId: null,
+            CancellationToken.None);
+
+        Assert.True(result.IsSuccess, result.Message);
+        Assert.Equal(2, commands.WslCalls.Count);
+        Assert.Contains("devices approve --latest --json", commands.WslCalls[0].Command);
+        Assert.DoesNotContain("scope-upgrade-1", commands.WslCalls[1].Command, StringComparison.Ordinal);
+        var approvalEnvironment = commands.WslEnvironments[1];
+        Assert.NotNull(approvalEnvironment);
+        Assert.Equal(
+            "scope-upgrade-1",
+            approvalEnvironment["OPENCLAW_APPROVAL_REQUEST_ID"]);
+    }
+
+    [Fact]
     public async Task AutoApproveNodePairing_UsesColdCliTimeoutForExactRequest()
     {
         var commands = new FakeCommandRunner(
@@ -2471,6 +2500,39 @@ public class SetupStepsTests : IDisposable
         Assert.Contains("timed out after 120 seconds", result.Message, StringComparison.Ordinal);
         Assert.Contains("[REDACTED]", result.Message, StringComparison.Ordinal);
         Assert.DoesNotContain(rawToken, result.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task DrainPendingDeviceApprovals_NonzeroPreviewWithSafeSelectionApprovesExactlyOnce()
+    {
+        const string selected = """{"selected":{"requestId":"scope-upgrade-1"},"approvalState":{"kind":"scope-upgrade"}}""";
+        var invocation = 0;
+        var commands = new FakeCommandRunner(
+            _ => Ok(),
+            (_, _, _) => invocation++ switch
+            {
+                0 => FailWithStdout(selected),
+                1 => Ok("""{"approved":true}"""),
+                2 => Fail("No pending device approvals"),
+                _ => Fail("Unexpected WSL invocation")
+            });
+        var ctx = CreateContext(commands: commands);
+        ctx.SharedGatewayToken = "shared-token";
+
+        var result = await VerifyEndToEndStep.DrainPendingDeviceApprovalsAsync(
+            ctx,
+            CancellationToken.None);
+
+        Assert.True(result.IsSuccess, result.Message);
+        Assert.Equal(3, commands.WslCalls.Count);
+        Assert.DoesNotContain("scope-upgrade-1", commands.WslCalls[1].Command, StringComparison.Ordinal);
+        var approvalEnvironment = commands.WslEnvironments[1];
+        Assert.NotNull(approvalEnvironment);
+        Assert.Equal(
+            "scope-upgrade-1",
+            approvalEnvironment["OPENCLAW_APPROVAL_REQUEST_ID"]);
+        Assert.All(commands.WslCalls, call =>
+            Assert.Equal(WslOpenClawCliTimeouts.ColdCommand, call.Timeout));
     }
 
     [Fact]
