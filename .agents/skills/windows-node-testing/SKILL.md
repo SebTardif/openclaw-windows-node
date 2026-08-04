@@ -401,6 +401,11 @@ exact nonzero `MainPID` matches a PID reported on the configured socket. Continu
 through HTTP health without a duplicate start. Never trust the process display
 name alone or accept a missing, inactive, mismatched, or foreign listener.
 
+Clean-distro QR/bootstrap, device and node approval, bounded approval-drain,
+and final gateway status commands each use a two-minute budget. Keep approval
+request IDs environment-bound, do not replay one approval within an operation,
+and preserve bounded sanitized timeout/nonzero diagnostics.
+
 After a failed `Prepare`, the driver must first confirm that the rollback
 restored the exact owned `clean-windows` checkpoint and finalized marker. The
 next attempt is normal `Prepare`, without `-RecoverPendingCheckpoint` or

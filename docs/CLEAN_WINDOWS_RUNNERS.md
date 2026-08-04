@@ -667,6 +667,13 @@ its exact nonzero `MainPID` to match a PID from the configured listening socket,
 then proceeds through the normal HTTP health gate without another start. Any
 inactive, mismatched, or foreign listener remains a fail-closed port conflict.
 
+Subsequent clean-distro CLI operations use one two-minute per-command budget for
+QR/bootstrap minting, exact device and node approval, bounded approval drains,
+and the final gateway status query. A request ID stays in the
+`OPENCLAW_APPROVAL_REQUEST_ID` environment variable rather than command text,
+and one method invocation never replays an approval after a timeout. Timeout and
+nonzero failures retain bounded, sanitized stdout/stderr tails.
+
 Before checkpoint restore, the guest validates the exact lane root under
 `GuestRoot\artifacts`, rejects reparse points and unsafe relative paths, bounds
 file count and expanded size, and creates a nonce ZIP with size and SHA-256

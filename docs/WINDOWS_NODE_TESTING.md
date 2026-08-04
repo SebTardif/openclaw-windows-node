@@ -309,6 +309,12 @@ It then continues to the existing HTTP health gate without launching a second
 start command. A missing, inactive, mismatched, or foreign listener remains a
 gateway-start failure or fail-closed port conflict, as applicable.
 
+Clean-distro QR/bootstrap, device and node approval, bounded approval-drain,
+and final gateway status commands each have a two-minute budget. The Setup
+Engine keeps approval request IDs environment-bound, does not replay an
+approval within one operation, and reports bounded sanitized stdout/stderr
+tails for timeouts and nonzero exits.
+
 The smoke refuses to start if existing DEV install/data/distro state is present. It
 does not inspect, overwrite, uninstall, or clean release identity state. Every phase
 must report `passed`; a missing or skipped install, installed-payload check, roundtrip,

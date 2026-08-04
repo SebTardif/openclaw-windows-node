@@ -1867,6 +1867,24 @@ internal static class SetupPairingCredentialPolicy
         ctx.SharedGatewayToken ?? ctx.BootstrapToken;
 }
 
+internal static class WslOpenClawCliTimeouts
+{
+    // A pristine npm-installed CLI can spend more than 30 seconds loading command
+    // modules even after the gateway is warm. These commands are bounded, but must
+    // not be replayed merely because the old interactive-machine budget expired.
+    internal static readonly TimeSpan ColdCommand = TimeSpan.FromMinutes(2);
+
+    internal static string DescribeFailure(string operation, CommandResult result)
+    {
+        var outcome = result.TimedOut
+            ? $"timed out after {ColdCommand.TotalSeconds:F0} seconds"
+            : $"failed with exit code {result.ExitCode}";
+        return $"{operation} {outcome}. stdout tail: " +
+               $"{InstallCliStep.GetBoundedFailureDiagnostic(result.Stdout)}; stderr tail: " +
+               $"{InstallCliStep.GetBoundedFailureDiagnostic(result.Stderr)}";
+    }
+}
+
 public sealed class MintBootstrapTokenStep : SetupStep
 {
     public override string Id => "mint-token";
@@ -1887,7 +1905,11 @@ public sealed class MintBootstrapTokenStep : SetupStep
         };
 
         var mint = await ctx.Commands.RunInWslAsync(
-            distro, $"{ctx.WslPathPrefix} && openclaw qr --json", TimeSpan.FromSeconds(30), env, ct);
+            distro,
+            $"{ctx.WslPathPrefix} && openclaw qr --json",
+            WslOpenClawCliTimeouts.ColdCommand,
+            env,
+            ct);
 
         if (mint.ExitCode == 0 && !string.IsNullOrWhiteSpace(mint.Stdout))
         {
@@ -1907,7 +1929,14 @@ public sealed class MintBootstrapTokenStep : SetupStep
             }
         }
 
-        ctx.Logger.Warn("QR/bootstrap token mint failed or did not return a bootstrapToken/setupCode");
+        if (mint.ExitCode != 0)
+        {
+            var diagnostic = WslOpenClawCliTimeouts.DescribeFailure("QR/bootstrap token mint", mint);
+            ctx.Logger.Warn(diagnostic);
+            return StepResult.Fail(diagnostic);
+        }
+
+        ctx.Logger.Warn("QR/bootstrap token mint did not return a bootstrapToken/setupCode");
         return StepResult.Fail("Could not mint bootstrap token; refusing to use the shared gateway token as bootstrap.");
     }
 
@@ -2193,9 +2222,21 @@ public sealed class PairOperatorStep : SetupStep
             var preview = await ctx.Commands.RunInWslAsync(
                 distro,
                 $"""{ctx.WslPathPrefix} && openclaw devices approve --latest --json""",
-                TimeSpan.FromSeconds(30), env, ct);
+                WslOpenClawCliTimeouts.ColdCommand,
+                env,
+                ct);
 
             ctx.Logger.Info($"Approve preview: exit={preview.ExitCode}");
+
+            if (preview.ExitCode != 0)
+            {
+                if (ApprovalRequestHelper.IsPluginNotFoundError(preview.Stdout.Trim()))
+                    return StepResult.Terminal(ApprovalRequestHelper.PluginNotFoundMessage);
+
+                return StepResult.Fail(WslOpenClawCliTimeouts.DescribeFailure(
+                    "Device approval preview",
+                    preview));
+            }
 
             var parsed = ApprovalRequestHelper.TryReadSelectedRequestId(preview.Stdout.Trim());
             if (!parsed.Success)
@@ -2219,7 +2260,9 @@ public sealed class PairOperatorStep : SetupStep
         var approve = await ctx.Commands.RunInWslAsync(
             distro,
             $"""{ctx.WslPathPrefix} && {ApprovalRequestHelper.ApprovalCommand(ApprovalRequestKind.Device)}""",
-            TimeSpan.FromSeconds(30), approvalEnv, ct);
+            WslOpenClawCliTimeouts.ColdCommand,
+            approvalEnv,
+            ct);
 
         ctx.Logger.Info($"Approve result: exit={approve.ExitCode}");
 
@@ -2228,7 +2271,9 @@ public sealed class PairOperatorStep : SetupStep
             var approveOutput = approve.Stdout.Trim();
             if (ApprovalRequestHelper.IsPluginNotFoundError(approveOutput))
                 return StepResult.Terminal(ApprovalRequestHelper.PluginNotFoundMessage);
-            return StepResult.Fail($"Device approval failed (exit {approve.ExitCode}): {approveOutput}");
+            return StepResult.Fail(WslOpenClawCliTimeouts.DescribeFailure(
+                "Device approval",
+                approve));
         }
 
         return StepResult.Ok($"Approved request {requestId}");
@@ -2650,7 +2695,9 @@ public sealed class PairNodeStep : SetupStep
             var pending = await ctx.Commands.RunInWslAsync(
                 distro,
                 $"""{ctx.WslPathPrefix} && openclaw nodes list --json""",
-                TimeSpan.FromSeconds(30), env, ct);
+                WslOpenClawCliTimeouts.ColdCommand,
+                env,
+                ct);
 
             ctx.Logger.Info($"Node pending list: exit={pending.ExitCode}");
 
@@ -2659,7 +2706,9 @@ public sealed class PairNodeStep : SetupStep
                 var pendingOutput = pending.Stdout.Trim();
                 if (ApprovalRequestHelper.IsPluginNotFoundError(pendingOutput))
                     return StepResult.Terminal(ApprovalRequestHelper.PluginNotFoundMessage);
-                return StepResult.Fail($"Could not list pending node pairing requests (exit {pending.ExitCode}): {pendingOutput}");
+                return StepResult.Fail(WslOpenClawCliTimeouts.DescribeFailure(
+                    "Could not list pending node pairing requests",
+                    pending));
             }
 
             var parsed = ApprovalRequestHelper.TryReadSinglePendingRequestId(pending.Stdout.Trim());
@@ -2681,7 +2730,9 @@ public sealed class PairNodeStep : SetupStep
         var approve = await ctx.Commands.RunInWslAsync(
             distro,
             $"""{ctx.WslPathPrefix} && {ApprovalRequestHelper.ApprovalCommand(approvalKind)}""",
-            TimeSpan.FromSeconds(30), approvalEnv, ct);
+            WslOpenClawCliTimeouts.ColdCommand,
+            approvalEnv,
+            ct);
 
         ctx.Logger.Info($"Node approve result: exit={approve.ExitCode}");
 
@@ -2689,7 +2740,9 @@ public sealed class PairNodeStep : SetupStep
             ? StepResult.Ok($"Node approved: {requestId}")
             : ApprovalRequestHelper.IsPluginNotFoundError(approve.Stdout.Trim())
                 ? StepResult.Terminal(ApprovalRequestHelper.PluginNotFoundMessage)
-                : StepResult.Fail($"Node approval failed (exit {approve.ExitCode}): {approve.Stdout.Trim()}");
+                : StepResult.Fail(WslOpenClawCliTimeouts.DescribeFailure(
+                    "Node approval",
+                    approve));
     }
 
     private static void RegisterCapabilitiesFromConfig(WindowsNodeClient client, SetupContext ctx)
@@ -3363,10 +3416,14 @@ public sealed class VerifyEndToEndStep : SetupStep
         // Verify gateway is still healthy
         var distro = ctx.DistroName!;
         var status = await ctx.Commands.RunInWslAsync(
-            distro, $"{ctx.WslPathPrefix} && openclaw gateway status --json", TimeSpan.FromSeconds(15), ct: ct);
+            distro,
+            $"{ctx.WslPathPrefix} && openclaw gateway status --json",
+            WslOpenClawCliTimeouts.ColdCommand,
+            ct: ct);
 
-        if (status.ExitCode != 0 || !status.Stdout.Contains("running", StringComparison.OrdinalIgnoreCase))
-            return StepResult.Fail("Gateway is not running");
+        var statusValidation = ValidateGatewayStatus(status);
+        if (!statusValidation.IsSuccess)
+            return statusValidation;
 
         // Verify registry state
         var registry = new GatewayRegistry(ctx.DataDir, logger: new SetupOpenClawLogger(ctx.Logger));
@@ -3410,6 +3467,24 @@ public sealed class VerifyEndToEndStep : SetupStep
         return StepResult.Ok("Gateway running; operator finalized; settings written for tray.");
     }
 
+    internal static StepResult ValidateGatewayStatus(CommandResult status)
+    {
+        if (status.ExitCode != 0)
+            return StepResult.Fail(WslOpenClawCliTimeouts.DescribeFailure(
+                "Gateway status query",
+                status));
+
+        if (!status.Stdout.Contains("running", StringComparison.OrdinalIgnoreCase))
+        {
+            return StepResult.Fail(
+                "Gateway status did not report running. stdout tail: " +
+                $"{InstallCliStep.GetBoundedFailureDiagnostic(status.Stdout)}; stderr tail: " +
+                $"{InstallCliStep.GetBoundedFailureDiagnostic(status.Stderr)}");
+        }
+
+        return StepResult.Ok("Gateway is running");
+    }
+
     internal static async Task<StepResult> DrainPendingDeviceApprovalsAsync(SetupContext ctx, CancellationToken ct)
     {
         var distro = ctx.DistroName!;
@@ -3426,12 +3501,24 @@ public sealed class VerifyEndToEndStep : SetupStep
             var preview = await ctx.Commands.RunInWslAsync(
                 distro,
                 $"""{pathPrefix} && openclaw devices approve --latest --json""",
-                TimeSpan.FromSeconds(15), env, ct);
+                WslOpenClawCliTimeouts.ColdCommand,
+                env,
+                ct);
 
             if (preview.Stdout.Contains("No pending", StringComparison.OrdinalIgnoreCase) ||
                 preview.Stderr.Contains("No pending", StringComparison.OrdinalIgnoreCase))
             {
                 break;
+            }
+
+            if (preview.ExitCode != 0)
+            {
+                if (ApprovalRequestHelper.IsPluginNotFoundError(preview.Stdout.Trim()))
+                    return StepResult.Terminal(ApprovalRequestHelper.PluginNotFoundMessage);
+
+                return StepResult.Fail(WslOpenClawCliTimeouts.DescribeFailure(
+                    "Device approval drain preview",
+                    preview));
             }
 
             var parsed = ApprovalRequestHelper.TryReadSelectedRequestId(preview.Stdout.Trim());
@@ -3442,10 +3529,14 @@ public sealed class VerifyEndToEndStep : SetupStep
                 var approve = await ctx.Commands.RunInWslAsync(
                     distro,
                     $"""{pathPrefix} && {ApprovalRequestHelper.ApprovalCommand(ApprovalRequestKind.Device)}""",
-                    TimeSpan.FromSeconds(15), approvalEnv, ct);
+                    WslOpenClawCliTimeouts.ColdCommand,
+                    approvalEnv,
+                    ct);
 
                 if (approve.ExitCode != 0)
-                    return StepResult.Fail($"Device approval drain failed for {parsed.RequestId} (exit {approve.ExitCode}): {approve.Stdout.Trim()} {approve.Stderr.Trim()}".Trim());
+                    return StepResult.Fail(WslOpenClawCliTimeouts.DescribeFailure(
+                        $"Device approval drain for {parsed.RequestId}",
+                        approve));
 
                 if (i == maxDrainIterations - 1)
                     return StepResult.Fail("Device approval drain reached its iteration limit; pending approvals may remain");
@@ -3492,13 +3583,17 @@ public sealed class VerifyEndToEndStep : SetupStep
             var nodeList = await ctx.Commands.RunInWslAsync(
                 distro,
                 $"""{pathPrefix} && openclaw nodes list --json""",
-                TimeSpan.FromSeconds(15), env, ct);
+                WslOpenClawCliTimeouts.ColdCommand,
+                env,
+                ct);
 
             var parsed = ApprovalRequestHelper.TryReadPendingRequestIds(nodeList.Stdout.Trim());
             if (!parsed.Success)
             {
                 if (nodeList.ExitCode != 0)
-                    return StepResult.Fail($"Could not list pending node approvals (exit {nodeList.ExitCode}): {nodeList.Stdout.Trim()} {nodeList.Stderr.Trim()}".Trim());
+                    return StepResult.Fail(WslOpenClawCliTimeouts.DescribeFailure(
+                        "Pending node approval query",
+                        nodeList));
 
                 return StepResult.Fail($"Could not parse pending node approvals: {parsed.Error}");
             }
@@ -3513,10 +3608,14 @@ public sealed class VerifyEndToEndStep : SetupStep
                 var approve = await ctx.Commands.RunInWslAsync(
                     distro,
                     $"""{pathPrefix} && {ApprovalRequestHelper.ApprovalCommand(ApprovalRequestKind.Node)}""",
-                    TimeSpan.FromSeconds(15), approvalEnv, ct);
+                    WslOpenClawCliTimeouts.ColdCommand,
+                    approvalEnv,
+                    ct);
 
                 if (approve.ExitCode != 0)
-                    return StepResult.Fail($"Node approval drain failed for {requestId} (exit {approve.ExitCode}): {approve.Stdout.Trim()} {approve.Stderr.Trim()}".Trim());
+                    return StepResult.Fail(WslOpenClawCliTimeouts.DescribeFailure(
+                        $"Node approval drain for {requestId}",
+                        approve));
             }
 
             if (i == maxDrainIterations - 1)

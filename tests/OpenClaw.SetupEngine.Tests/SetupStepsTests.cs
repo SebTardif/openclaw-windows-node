@@ -2010,6 +2010,22 @@ public class SetupStepsTests : IDisposable
     }
 
     [Fact]
+    public async Task MintBootstrapToken_UsesColdCliTimeout()
+    {
+        var commands = new FakeCommandRunner(
+            _ => Ok(),
+            (_, _, _) => Ok("""{"setupCode":"setup-code"}"""));
+        var ctx = CreateContext(commands: commands);
+        ctx.SharedGatewayToken = "shared-token";
+
+        var result = await new MintBootstrapTokenStep().ExecuteAsync(ctx, CancellationToken.None);
+
+        Assert.True(result.IsSuccess, result.Message);
+        Assert.Equal(TimeSpan.FromMinutes(2), WslOpenClawCliTimeouts.ColdCommand);
+        Assert.Equal(WslOpenClawCliTimeouts.ColdCommand, Assert.Single(commands.WslCalls).Timeout);
+    }
+
+    [Fact]
     public async Task InstallCli_RejectsFtpUrl()
     {
         var ctx = CreateContext(new SetupConfig
@@ -2359,6 +2375,102 @@ public class SetupStepsTests : IDisposable
 
         Assert.Equal(StepOutcome.FailedTerminal, result.Outcome);
         Assert.Equal(ApprovalRequestHelper.PluginNotFoundMessage, result.Message);
+    }
+
+    [Fact]
+    public async Task AutoApprovePairing_UsesColdCliTimeoutForExactRequest()
+    {
+        var commands = new FakeCommandRunner(
+            _ => Ok(),
+            (_, _, _) => Ok("""{"approved":true}"""));
+        var ctx = CreateContext(commands: commands);
+        ctx.SharedGatewayToken = "shared-token";
+
+        var result = await PairOperatorStep.AutoApprovePairing(
+            ctx,
+            "device-req-1",
+            CancellationToken.None);
+
+        Assert.True(result.IsSuccess, result.Message);
+        var call = Assert.Single(commands.WslCalls);
+        Assert.Equal(WslOpenClawCliTimeouts.ColdCommand, call.Timeout);
+        Assert.DoesNotContain("device-req-1", call.Command, StringComparison.Ordinal);
+        var environment = Assert.Single(commands.WslEnvironments);
+        Assert.NotNull(environment);
+        Assert.Equal(
+            "device-req-1",
+            environment["OPENCLAW_APPROVAL_REQUEST_ID"]);
+    }
+
+    [Fact]
+    public async Task AutoApproveNodePairing_UsesColdCliTimeoutForExactRequest()
+    {
+        var commands = new FakeCommandRunner(
+            _ => Ok(),
+            (_, _, _) => Ok("""{"approved":true}"""));
+        var ctx = CreateContext(commands: commands);
+        ctx.SharedGatewayToken = "shared-token";
+
+        var result = await PairNodeStep.AutoApproveNodePairing(
+            ctx,
+            "node-req-1",
+            CancellationToken.None);
+
+        Assert.True(result.IsSuccess, result.Message);
+        var call = Assert.Single(commands.WslCalls);
+        Assert.Equal(WslOpenClawCliTimeouts.ColdCommand, call.Timeout);
+        Assert.DoesNotContain("node-req-1", call.Command, StringComparison.Ordinal);
+        var environment = Assert.Single(commands.WslEnvironments);
+        Assert.NotNull(environment);
+        Assert.Equal(
+            "node-req-1",
+            environment["OPENCLAW_APPROVAL_REQUEST_ID"]);
+    }
+
+    [Fact]
+    public async Task AutoApprovePairing_TimeoutHasBoundedSanitizedDiagnostic()
+    {
+        const string rawToken = "1234567890abcdef1234567890abcdef";
+        var commands = new FakeCommandRunner(
+            _ => Ok(),
+            (_, _, timeout) => new CommandResult(
+                -1,
+                "",
+                $"token={rawToken}",
+                timeout,
+                TimedOut: true));
+        var ctx = CreateContext(commands: commands);
+        ctx.SharedGatewayToken = "shared-token";
+
+        var result = await PairOperatorStep.AutoApprovePairing(
+            ctx,
+            "device-req-1",
+            CancellationToken.None);
+
+        Assert.False(result.IsSuccess);
+        Assert.Contains("timed out after 120 seconds", result.Message, StringComparison.Ordinal);
+        Assert.Contains("[REDACTED]", result.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain(rawToken, result.Message, StringComparison.Ordinal);
+        Assert.Single(commands.WslCalls);
+    }
+
+    [Fact]
+    public void ValidateGatewayStatus_TimeoutHasBoundedSanitizedDiagnostic()
+    {
+        const string rawToken = "1234567890abcdef1234567890abcdef";
+        var status = new CommandResult(
+            -1,
+            "",
+            $"token={rawToken}",
+            WslOpenClawCliTimeouts.ColdCommand,
+            TimedOut: true);
+
+        var result = VerifyEndToEndStep.ValidateGatewayStatus(status);
+
+        Assert.False(result.IsSuccess);
+        Assert.Contains("timed out after 120 seconds", result.Message, StringComparison.Ordinal);
+        Assert.Contains("[REDACTED]", result.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain(rawToken, result.Message, StringComparison.Ordinal);
     }
 
     [Fact]

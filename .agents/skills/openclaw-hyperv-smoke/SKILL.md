@@ -517,6 +517,12 @@ continues to the normal HTTP health gate without a duplicate start. Process
 names alone are not ownership proof; mismatched or foreign listeners fail
 closed.
 
+Budget clean-distro QR/bootstrap, exact device and node approval, bounded
+approval drains, and final gateway status commands for two minutes each. Keep
+approval request IDs in `OPENCLAW_APPROVAL_REQUEST_ID`, never replay an
+approval within one operation after timeout, and retain only bounded sanitized
+stdout/stderr diagnostics.
+
 `Prepare` does not install Ubuntu or another distribution. Installed smoke
 provisions its app-owned distribution later. Checkpoint observation, guest
 commands, restarts, and reconnects are bounded. Failed jobs report bounded,
