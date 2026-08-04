@@ -65,7 +65,7 @@ These are the canonical homes. Do not reintroduce private copies elsewhere.
 | Capability registration/gating | `NodeCapabilityRegistrationPolicy` (planned) | planned |
 | Local MCP exposure policy | `McpCapabilityPolicy` (planned) | planned |
 | Gateway connect envelope | `ConnectEnvelopeBuilder` (planned) | planned |
-| Gateway request tracking | `PendingRequestRegistry` (planned) | planned |
+| Gateway request tracking | `PendingRequestRegistry` | authoritative |
 
 ## When you touch file X, extract toward Y
 
@@ -78,7 +78,7 @@ These are the canonical homes. Do not reintroduce private copies elsewhere.
 | `src/OpenClaw.Tray.WinUI/Pages/ConnectionPage.xaml.cs` | `ConnectionPagePlan` (pure), `ConnectionPageViewModel`, gateway row models |
 | `src/OpenClaw.Tray.WinUI/Pages/SettingsPage.xaml.cs` | settings read/persist → `SettingsPageViewModel` + `ISettingsStore`; keep gateway-uninstall, uptime timer, saved-indicator, and app-info in the view |
 | `src/OpenClaw.Tray.WinUI/Services/NodeService.cs` | `McpServerHost`, `CanvasWindowManager`, `MediaCapabilityHost`, `RecordingConsentService`, `NodeCapabilityRegistry` |
-| `src/OpenClaw.Shared/OpenClawGatewayClient.cs` | `PendingRequestRegistry`, `ConnectEnvelopeBuilder`, `GatewayMessageRouter`, per-domain API facades |
+| `src/OpenClaw.Shared/OpenClawGatewayClient.cs` | `ConnectEnvelopeBuilder`, `GatewayMessageRouter`, per-domain API facades; request bookkeeping stays in `PendingRequestRegistry` |
 | `src/OpenClaw.Shared/Models.cs` | per-domain model files + `*Mapper` classes |
 | `src/OpenClaw.Shared/Capabilities/SystemCapability.cs` | `ExecApprovalService` |
 | `src/OpenClaw.Connection/GatewayConnectionManager.cs` | `NodeConnectionCoordinator`, `BootstrapTokenLifecycle`, `DevicePairApprovalCoordinator` |
@@ -126,7 +126,8 @@ leading and trailing pipe. Columns, in order:
 | app-tray-controller | planned | src/OpenClaw.Tray.WinUI/App.xaml.cs | tray icon/menu/action routing | ITrayController | composition/delegation only | tray actions route unchanged | none | review-only | extracted in Phase 3 |
 | app-activation-router | planned | src/OpenClaw.Tray.WinUI/App.xaml.cs | deep-link/toast/single-instance activation | IActivationRouter | composition/delegation only | activation routes land on the same UI/actions; current-user pipe security preserved | none | review-only | extracted in Phase 3 |
 | chat-send-queue | planned | src/OpenClaw.Tray.WinUI/Chat/OpenClawChatDataProvider.cs | send queue/admission/abort state | ChatSendQueue | - | queued send/abort/generation semantics preserved | none | review-only | extracted in Phase 4 |
-| gateway-pending-requests | planned | src/OpenClaw.Shared/OpenClawGatewayClient.cs | request-id -> method/completion tracking | PendingRequestRegistry | - | request ids never leak after disconnect; thread-safe | none | review-only | extracted in Phase 4 |
+| gateway-pending-requests | authoritative | src/OpenClaw.Shared/OpenClawGatewayClient.cs | request-id -> method/completion tracking | PendingRequestRegistry | response payload interpretation remains in OpenClawGatewayClient | one atomic owner per request id; duplicate and late responses are suppressed; disconnect closes registration and cancels active owners | PendingRequestRegistryTests.ConcurrentRegisterAndTake_LeavesNoActiveRequestsAndBoundsTombstones | behavioral | - |
+| gateway-client-pending-requests-closed | closed | src/OpenClaw.Shared/OpenClawGatewayClient.cs | independent method, wizard, chat-send, approval, or session-snapshot pending stores and locks | PendingRequestRegistry | request creation, typed response interpretation, and legacy untracked hello-ok routing only | OpenClawGatewayClient has one PendingRequestRegistry and no private pending-request dictionaries or locks | PendingRequestRegistryArchitectureTests.OpenClawGatewayClient_DelegatesPendingBookkeepingToRegistry | source-shape | when gateway response interpretation moves to GatewayMessageRouter |
 | connect-envelope | planned | src/OpenClaw.Shared/OpenClawGatewayClient.cs + WindowsNodeClient.cs | connect message + auth precedence + signature version | ConnectEnvelopeBuilder | - | credential precedence never downgrades a device token; v3->v2 fallback preserved | none | review-only | extracted in Phase 4 |
 | ui-dispatcher | authoritative | src/OpenClaw.Tray.WinUI/App.xaml.cs | UI-thread marshaling abstraction for presentation code | IUiDispatcher | App and existing WinUI code may call DispatcherQueue directly until the view-model migration | presentation view models depend on IUiDispatcher not a concrete DispatcherQueue | UiDispatcherContractTests.PageViewModel_ReceivesRegisteredDispatcher | behavioral | - |
 | navigation-scope | authoritative | src/OpenClaw.Tray.WinUI/Windows/HubWindow.xaml.cs | page view-model activation/deactivation and disposal lifetime | NavigationScopeManager | HubWindow keeps frame navigation back-stack and rail selection | transient page view models are activated on navigation and deactivated then disposed on navigate-away | NavigationScopeManagerTests.NavigatingAway_DeactivatesAndDisposesPreviousViewModel | behavioral | - |
