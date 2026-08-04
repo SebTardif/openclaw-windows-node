@@ -220,8 +220,8 @@ public partial class SetupAndConnectTests
             .ToLowerInvariant()[..12];
 
     private static string ResolveProofHead() =>
-        Environment.GetEnvironmentVariable("GITHUB_SHA")
-        ?? Environment.GetEnvironmentVariable("OPENCLAW_PROOF_HEAD")
+        Environment.GetEnvironmentVariable("OPENCLAW_PROOF_HEAD")
+        ?? Environment.GetEnvironmentVariable("GITHUB_SHA")
         ?? "local-worktree";
 
 }
