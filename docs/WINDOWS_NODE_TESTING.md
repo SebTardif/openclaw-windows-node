@@ -301,6 +301,14 @@ for the default nine-command loopback configuration). Timeout and nonzero
 failures identify the command count and retain the same sanitized bounded
 diagnostic tails.
 
+`openclaw gateway start` may exceed its controller command timeout after
+systemd has already started the gateway. The setup engine accepts the resulting
+listener only when `openclaw-gateway.service` is `active/running` and its exact
+nonzero `MainPID` matches a PID reported for the configured listening port.
+It then continues to the existing HTTP health gate without launching a second
+start command. A missing, inactive, mismatched, or foreign listener remains a
+gateway-start failure or fail-closed port conflict, as applicable.
+
 The smoke refuses to start if existing DEV install/data/distro state is present. It
 does not inspect, overwrite, uninstall, or clean release identity state. Every phase
 must report `passed`; a missing or skipped install, installed-payload check, roundtrip,

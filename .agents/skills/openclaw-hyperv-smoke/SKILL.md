@@ -509,6 +509,14 @@ configuration then budgets 45 seconds per emitted cold
 default nine commands) and records command-count plus sanitized tail evidence
 on failure.
 
+`openclaw gateway start` can outlive its bounded controller command after
+systemd has already created the socket. Recovery requires the installed
+`openclaw-gateway.service` to be `active/running` and its exact nonzero
+`MainPID` to match a PID reported for the configured listening port. It then
+continues to the normal HTTP health gate without a duplicate start. Process
+names alone are not ownership proof; mismatched or foreign listeners fail
+closed.
+
 `Prepare` does not install Ubuntu or another distribution. Installed smoke
 provisions its app-owned distribution later. Checkpoint observation, guest
 commands, restarts, and reconnects are bounded. Failed jobs report bounded,

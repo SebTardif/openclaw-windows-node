@@ -395,6 +395,12 @@ per command, which is 7.5 minutes for the default nine-command loopback
 configuration. Failure evidence must report the command count and sanitized
 bounded stdout/stderr tails.
 
+If `openclaw gateway start` times out after systemd creates the listener, accept
+the listener only when `openclaw-gateway.service` is `active/running` and its
+exact nonzero `MainPID` matches a PID reported on the configured socket. Continue
+through HTTP health without a duplicate start. Never trust the process display
+name alone or accept a missing, inactive, mismatched, or foreign listener.
+
 After a failed `Prepare`, the driver must first confirm that the rollback
 restored the exact owned `clean-windows` checkpoint and finalized marker. The
 next attempt is normal `Prepare`, without `-RecoverPendingCheckpoint` or

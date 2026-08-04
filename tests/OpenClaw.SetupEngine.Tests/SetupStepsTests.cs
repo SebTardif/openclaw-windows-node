@@ -2140,6 +2140,185 @@ public class SetupStepsTests : IDisposable
     }
 
     [Fact]
+    public async Task StartGateway_AcceptsOwnedListenerAfterStartCommandTimeout()
+    {
+        var startCalls = 0;
+        var commands = new FakeCommandRunner(
+            _ => Ok(),
+            (_, command, timeout) =>
+            {
+                if (command.Contains("ss -tlnp", StringComparison.Ordinal))
+                {
+                    return startCalls == 0
+                        ? Ok()
+                        : Ok("LISTEN 0 511 127.0.0.1:18789 0.0.0.0:* users:((\"MainThread\",pid=1110,fd=27))");
+                }
+                if (command.Contains("openclaw gateway start", StringComparison.Ordinal))
+                {
+                    startCalls++;
+                    return new CommandResult(-1, "", "", timeout, TimedOut: true);
+                }
+                if (command.Contains("systemctl --user show openclaw-gateway.service", StringComparison.Ordinal))
+                    return Ok("ActiveState=active\nSubState=running\nMainPID=1110\n");
+                if (command.Contains("curl -s -o /dev/null", StringComparison.Ordinal))
+                    return Ok("401");
+                return Fail($"Unexpected WSL command: {command}");
+            });
+        var ctx = CreateContext(commands: commands);
+
+        var result = await new StartGatewayStep().ExecuteAsync(ctx, CancellationToken.None);
+
+        Assert.True(result.IsSuccess, result.Message);
+        Assert.Equal(1, startCalls);
+        Assert.Single(
+            commands.WslCalls,
+            call => call.Command.Contains("openclaw gateway start", StringComparison.Ordinal));
+        Assert.Contains(
+            commands.WslCalls,
+            call => call.Command.Contains("systemctl --user show openclaw-gateway.service", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task StartGateway_AcceptsOwnedListenerAfterStartLimitResetTimeout()
+    {
+        var startCalls = 0;
+        var commands = new FakeCommandRunner(
+            _ => Ok(),
+            (_, command, timeout) =>
+            {
+                if (command.Contains("ss -tlnp", StringComparison.Ordinal))
+                {
+                    return startCalls < 2
+                        ? Ok()
+                        : Ok("LISTEN 0 511 127.0.0.1:18789 0.0.0.0:* users:((\"MainThread\",pid=1110,fd=27))");
+                }
+                if (command.Contains("openclaw gateway start", StringComparison.Ordinal))
+                {
+                    startCalls++;
+                    return startCalls == 1
+                        ? Fail("start-limit hit")
+                        : new CommandResult(-1, "", "", timeout, TimedOut: true);
+                }
+                if (command.Contains("systemctl --user reset-failed", StringComparison.Ordinal))
+                    return Ok();
+                if (command.Contains("systemctl --user show openclaw-gateway.service", StringComparison.Ordinal))
+                    return Ok("ActiveState=active\nSubState=running\nMainPID=1110\n");
+                if (command.Contains("curl -s -o /dev/null", StringComparison.Ordinal))
+                    return Ok("403");
+                return Fail($"Unexpected WSL command: {command}");
+            });
+        var ctx = CreateContext(commands: commands);
+
+        var result = await new StartGatewayStep().ExecuteAsync(ctx, CancellationToken.None);
+
+        Assert.True(result.IsSuccess, result.Message);
+        Assert.Equal(2, startCalls);
+        Assert.Contains(
+            commands.WslCalls,
+            call => call.Command.Contains("systemctl --user reset-failed", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task StartGateway_DoesNotRestartAlreadyOwnedListener()
+    {
+        var commands = new FakeCommandRunner(
+            _ => Ok(),
+            (_, command, _) =>
+            {
+                if (command.Contains("ss -tlnp", StringComparison.Ordinal))
+                    return Ok("LISTEN 0 511 127.0.0.1:18789 0.0.0.0:* users:((\"MainThread\",pid=1110,fd=27))");
+                if (command.Contains("systemctl --user show openclaw-gateway.service", StringComparison.Ordinal))
+                    return Ok("ActiveState=active\nSubState=running\nMainPID=1110\n");
+                if (command.Contains("curl -s -o /dev/null", StringComparison.Ordinal))
+                    return Ok("200");
+                return Fail($"Unexpected WSL command: {command}");
+            });
+        var ctx = CreateContext(commands: commands);
+
+        var result = await new StartGatewayStep().ExecuteAsync(ctx, CancellationToken.None);
+
+        Assert.True(result.IsSuccess, result.Message);
+        Assert.DoesNotContain(
+            commands.WslCalls,
+            call => call.Command.Contains("openclaw gateway start", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task StartGateway_RejectsListenerWhosePidDoesNotMatchInstalledService()
+    {
+        var commands = new FakeCommandRunner(
+            _ => Ok(),
+            (_, command, _) =>
+            {
+                if (command.Contains("ss -tlnp", StringComparison.Ordinal))
+                    return Ok("LISTEN 0 511 127.0.0.1:18789 0.0.0.0:* users:((\"foreign\",pid=2220,fd=9))");
+                if (command.Contains("systemctl --user show openclaw-gateway.service", StringComparison.Ordinal))
+                    return Ok("ActiveState=active\nSubState=running\nMainPID=1110\n");
+                return Fail($"Unexpected WSL command: {command}");
+            });
+        var ctx = CreateContext(commands: commands);
+
+        var result = await new StartGatewayStep().ExecuteAsync(ctx, CancellationToken.None);
+
+        Assert.False(result.IsSuccess);
+        Assert.Contains("already in use by another process", result.Message);
+        Assert.DoesNotContain(
+            commands.WslCalls,
+            call => call.Command.Contains("openclaw gateway start", StringComparison.Ordinal));
+        Assert.DoesNotContain(
+            commands.WslCalls,
+            call => call.Command.Contains("curl -s -o /dev/null", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task StartGateway_RejectsHealthyForeignListenerAfterSuccessfulStartCommand()
+    {
+        var listenerChecks = 0;
+        var commands = new FakeCommandRunner(
+            _ => Ok(),
+            (_, command, _) =>
+            {
+                if (command.Contains("ss -tlnp", StringComparison.Ordinal))
+                {
+                    listenerChecks++;
+                    return listenerChecks == 1
+                        ? Ok()
+                        : Ok("LISTEN 0 511 127.0.0.1:18789 0.0.0.0:* users:((\"foreign\",pid=2220,fd=9))");
+                }
+                if (command.Contains("openclaw gateway start", StringComparison.Ordinal))
+                    return Ok();
+                if (command.Contains("curl -s -o /dev/null", StringComparison.Ordinal))
+                    return Ok("200");
+                if (command.Contains("systemctl --user show openclaw-gateway.service", StringComparison.Ordinal))
+                    return Ok("ActiveState=active\nSubState=running\nMainPID=1110\n");
+                return Fail($"Unexpected WSL command: {command}");
+            });
+        var ctx = CreateContext(commands: commands);
+
+        var result = await new StartGatewayStep().ExecuteAsync(ctx, CancellationToken.None);
+
+        Assert.False(result.IsSuccess);
+        Assert.Contains("not owned by the installed gateway service", result.Message);
+    }
+
+    [Theory]
+    [InlineData("ActiveState=active\nSubState=running\nMainPID=1110\n", true)]
+    [InlineData("ActiveState=active\nSubState=running\nMainPID=2220\n", false)]
+    [InlineData("ActiveState=failed\nSubState=failed\nMainPID=1110\n", false)]
+    public void StartGateway_RequiresActiveServiceMainPidToOwnListener(
+        string serviceState,
+        bool expected)
+    {
+        const string listener =
+            "LISTEN 0 511 127.0.0.1:18789 0.0.0.0:* users:((\"MainThread\",pid=1110,fd=27))";
+
+        var actual = StartGatewayStep.IsOwnedGatewayListener(listener, serviceState, out var diagnostic);
+
+        Assert.Equal(expected, actual);
+        Assert.NotEmpty(diagnostic);
+    }
+
+    [Fact]
     public void TryGetExistingKeepalive_ReturnsFalseForCorruptMarker()
     {
         var markerPath = Path.Combine(_tempDir, "keepalive.json");

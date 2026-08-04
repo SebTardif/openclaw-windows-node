@@ -660,6 +660,13 @@ loopback configuration), reflecting cold clean-distro startup rather than the
 obsolete 15-second estimate. Failure evidence records the command count and
 sanitized bounded stdout/stderr tails.
 
+The following `openclaw gateway start` command can time out after systemd has
+already created a listener. Recovery does not trust the process display name:
+the setup engine requires `openclaw-gateway.service` to be `active/running` and
+its exact nonzero `MainPID` to match a PID from the configured listening socket,
+then proceeds through the normal HTTP health gate without another start. Any
+inactive, mismatched, or foreign listener remains a fail-closed port conflict.
+
 Before checkpoint restore, the guest validates the exact lane root under
 `GuestRoot\artifacts`, rejects reparse points and unsafe relative paths, bounds
 file count and expanded size, and creates a nonce ZIP with size and SHA-256

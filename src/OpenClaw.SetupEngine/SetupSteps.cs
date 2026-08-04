@@ -1604,6 +1604,10 @@ public sealed class InstallGatewayServiceStep : SetupStep
 
 public sealed class StartGatewayStep : SetupStep
 {
+    private const string GatewayServiceStateCommand =
+        "systemctl --user show openclaw-gateway.service " +
+        "--property=ActiveState --property=SubState --property=MainPID --no-pager";
+
     public override string Id => "start-gateway";
     public override string DisplayName => "Start gateway";
     public override RetryPolicy Retry => new(MaxAttempts: 3, InitialDelay: TimeSpan.FromSeconds(3));
@@ -1613,46 +1617,72 @@ public sealed class StartGatewayStep : SetupStep
         var distro = ctx.DistroName!;
         var pathCmd = ctx.WslPathPrefix;
 
-        // Check for port conflicts before starting
-        var portCheck = await ctx.Commands.RunInWslAsync(
-            distro, $"ss -tlnp 2>/dev/null | grep ':{ctx.Config.GatewayPort}\\b' || true",
-            TimeSpan.FromSeconds(10), ct: ct);
-
-        if (!string.IsNullOrWhiteSpace(portCheck.Stdout) && portCheck.Stdout.Contains($":{ctx.Config.GatewayPort}"))
+        var listener = await InspectGatewayListenerAsync(ctx, ct);
+        var gatewayAlreadyOwned = false;
+        if (listener.HasListener)
         {
-            if (!portCheck.Stdout.Contains("openclaw", StringComparison.OrdinalIgnoreCase))
+            if (!listener.IsOwned)
             {
-                ctx.Logger.Warn($"Port {ctx.Config.GatewayPort} is in use by another process:\n{portCheck.Stdout.Trim()}");
+                ctx.Logger.Warn(
+                    $"Port {ctx.Config.GatewayPort} is not owned by the installed gateway service: " +
+                    $"{listener.Diagnostic}");
                 return StepResult.Fail(
                     $"Port {ctx.Config.GatewayPort} is already in use by another process. Either stop the conflicting process or change GatewayPort in the setup config.");
             }
 
-            ctx.Logger.Info($"Port {ctx.Config.GatewayPort} appears to be in use by openclaw — proceeding");
+            gatewayAlreadyOwned = true;
+            ctx.Logger.Info(
+                $"Installed gateway service MainPID owns port {ctx.Config.GatewayPort}; " +
+                "continuing with health verification");
         }
 
-        // Start the service
-        var start = await ctx.Commands.RunInWslAsync(
-            distro, $"{pathCmd} && openclaw gateway start", TimeSpan.FromSeconds(30), ct: ct);
-
-        if (start.ExitCode != 0)
+        if (!gatewayAlreadyOwned)
         {
-            // Check if systemd start-limit-hit
-            if (start.Stderr.Contains("start-limit", StringComparison.OrdinalIgnoreCase))
+            var start = await ctx.Commands.RunInWslAsync(
+                distro, $"{pathCmd} && openclaw gateway start", TimeSpan.FromSeconds(30), ct: ct);
+
+            if (start.ExitCode != 0)
             {
-                ctx.Logger.Warn("Start-limit hit, resetting and retrying");
-                await ctx.Commands.RunInWslAsync(
-                    distro,
-                    "systemctl --user reset-failed openclaw-gateway.service",
-                    TimeSpan.FromSeconds(10),
-                    ct: ct);
-                await Task.Delay(2000, ct);
-                start = await ctx.Commands.RunInWslAsync(distro, $"{pathCmd} && openclaw gateway start", TimeSpan.FromSeconds(30), ct: ct);
-                if (start.ExitCode != 0)
-                    return StepResult.Fail($"Gateway start failed after reset: {start.Stderr}");
-            }
-            else
-            {
-                return StepResult.Fail($"Gateway start failed (exit {start.ExitCode}): {start.Stderr}");
+                var postStartListener = await InspectGatewayListenerAsync(ctx, ct);
+                if (postStartListener.IsOwned)
+                {
+                    ctx.Logger.Warn(
+                        $"Gateway start command ended with exit {start.ExitCode}, but the exact installed " +
+                        $"service MainPID owns port {ctx.Config.GatewayPort}; continuing with health verification");
+                }
+                else if (postStartListener.HasListener)
+                {
+                    ctx.Logger.Warn(
+                        $"Gateway start command ended with exit {start.ExitCode}, and the listener is not " +
+                        $"owned by the installed gateway service: {postStartListener.Diagnostic}");
+                    return StepResult.Fail(
+                        $"Port {ctx.Config.GatewayPort} is already in use by another process. Either stop the conflicting process or change GatewayPort in the setup config.");
+                }
+                else if (start.Stderr.Contains("start-limit", StringComparison.OrdinalIgnoreCase))
+                {
+                    ctx.Logger.Warn("Start-limit hit, resetting and retrying");
+                    await ctx.Commands.RunInWslAsync(
+                        distro,
+                        "systemctl --user reset-failed openclaw-gateway.service",
+                        TimeSpan.FromSeconds(10),
+                        ct: ct);
+                    await Task.Delay(2000, ct);
+                    start = await ctx.Commands.RunInWslAsync(
+                        distro,
+                        $"{pathCmd} && openclaw gateway start",
+                        TimeSpan.FromSeconds(30),
+                        ct: ct);
+                    if (start.ExitCode != 0)
+                    {
+                        postStartListener = await InspectGatewayListenerAsync(ctx, ct);
+                        if (!postStartListener.IsOwned)
+                            return StepResult.Fail($"Gateway start failed after reset: {start.Stderr}");
+                    }
+                }
+                else
+                {
+                    return StepResult.Fail($"Gateway start failed (exit {start.ExitCode}): {start.Stderr}");
+                }
             }
         }
 
@@ -1670,6 +1700,15 @@ public sealed class StartGatewayStep : SetupStep
 
             if (status.ExitCode == 0 && status.Stdout.Trim() is "200" or "401" or "403")
             {
+                var healthyListener = await InspectGatewayListenerAsync(ctx, ct);
+                if (!healthyListener.IsOwned)
+                {
+                    ctx.Logger.Warn(
+                        $"Gateway health endpoint responded, but the listener is not owned by the installed " +
+                        $"gateway service: {healthyListener.Diagnostic}");
+                    return StepResult.Fail(
+                        $"Gateway health endpoint on port {ctx.Config.GatewayPort} is not owned by the installed gateway service.");
+                }
                 ctx.Logger.Info($"Gateway is accepting connections (HTTP {status.Stdout.Trim()})");
                 return StepResult.Ok("Gateway running");
             }
@@ -1699,6 +1738,68 @@ public sealed class StartGatewayStep : SetupStep
 
         return StepResult.Fail($"Gateway did not become healthy within {ctx.Config.Gateway.HealthTimeoutSeconds}s");
     }
+
+    private static async Task<GatewayListenerInspection> InspectGatewayListenerAsync(
+        SetupContext ctx,
+        CancellationToken ct)
+    {
+        var port = ctx.Config.GatewayPort;
+        var portCheck = await ctx.Commands.RunInWslAsync(
+            ctx.DistroName!,
+            $"ss -tlnp 2>/dev/null | grep ':{port}\\b' || true",
+            TimeSpan.FromSeconds(10),
+            ct: ct);
+        if (string.IsNullOrWhiteSpace(portCheck.Stdout) ||
+            !portCheck.Stdout.Contains($":{port}", StringComparison.Ordinal))
+        {
+            return new GatewayListenerInspection(false, false, "No listener found.");
+        }
+
+        var serviceState = await ctx.Commands.RunInWslAsync(
+            ctx.DistroName!,
+            GatewayServiceStateCommand,
+            TimeSpan.FromSeconds(10),
+            ct: ct);
+        var isOwned = IsOwnedGatewayListener(portCheck.Stdout, serviceState.Stdout, out var diagnostic);
+        return new GatewayListenerInspection(true, isOwned, diagnostic);
+    }
+
+    internal static bool IsOwnedGatewayListener(
+        string listenerOutput,
+        string serviceStateOutput,
+        out string diagnostic)
+    {
+        var listenerPids = System.Text.RegularExpressions.Regex
+            .Matches(listenerOutput, @"\bpid=(\d+)\b", System.Text.RegularExpressions.RegexOptions.CultureInvariant)
+            .Select(match => match.Groups[1].Value)
+            .ToHashSet(StringComparer.Ordinal);
+        var properties = serviceStateOutput
+            .Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries)
+            .Select(line => line.Split('=', 2))
+            .Where(parts => parts.Length == 2)
+            .ToDictionary(parts => parts[0].Trim(), parts => parts[1].Trim(), StringComparer.Ordinal);
+
+        properties.TryGetValue("ActiveState", out var activeState);
+        properties.TryGetValue("SubState", out var subState);
+        properties.TryGetValue("MainPID", out var mainPid);
+        if (activeState == "active" &&
+            subState == "running" &&
+            mainPid is not null &&
+            mainPid != "0" &&
+            listenerPids.Contains(mainPid))
+        {
+            diagnostic = $"active/running MainPID {mainPid} matches the listener.";
+            return true;
+        }
+
+        diagnostic =
+            $"service ActiveState={activeState ?? "<missing>"}, " +
+            $"SubState={subState ?? "<missing>"}, MainPID={mainPid ?? "<missing>"}; " +
+            $"listener PIDs={string.Join(",", listenerPids.Order(StringComparer.Ordinal))}.";
+        return false;
+    }
+
+    private sealed record GatewayListenerInspection(bool HasListener, bool IsOwned, string Diagnostic);
 
     internal static string RedactTokens(string text)
     {
