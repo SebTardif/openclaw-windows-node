@@ -773,11 +773,13 @@ public class OpenClawGatewayClientTests
     }
 
     [Fact]
-    public void OwnerlessResponse_DoesNotPublishGenericPayload()
+    public void OwnerlessHealthResponse_PreservesGenericHealthRouting()
     {
         var helper = new GatewayClientTestHelper();
-        var updateCount = 0;
-        helper.Client.ChannelHealthUpdated += (_, _) => updateCount++;
+        ChannelHealth[]? channels = null;
+        GatewaySelfInfo? gateway = null;
+        helper.Client.ChannelHealthUpdated += (_, update) => channels = update;
+        helper.Client.GatewaySelfUpdated += (_, update) => gateway = update;
 
         helper.ProcessRawMessage("""
             {
@@ -787,12 +789,117 @@ public class OpenClawGatewayClientTests
               "payload": {
                 "channels": {
                   "telegram": { "configured": true, "status": "ready" }
-                }
+                },
+                "uptimeMs": 1234
               }
             }
             """);
 
-        Assert.Equal(0, updateCount);
+        Assert.Equal("telegram", Assert.Single(Assert.IsType<ChannelHealth[]>(channels)).Name);
+        Assert.Equal(1234, Assert.IsType<GatewaySelfInfo>(gateway).UptimeMs);
+    }
+
+    [Fact]
+    public void OwnerlessStatePayloads_PreserveGenericRouting()
+    {
+        var helper = new GatewayClientTestHelper();
+        SessionInfo[]? sessions = null;
+        GatewayUsageInfo? usage = null;
+        GatewayNodeInfo[]? nodes = null;
+        JsonElement? agents = null;
+        helper.Client.SessionsUpdated += (_, update) => sessions = update;
+        helper.Client.UsageUpdated += (_, update) => usage = update;
+        helper.Client.NodesUpdated += (_, update) => nodes = update;
+        helper.Client.AgentsListUpdated += (_, update) => agents = update;
+
+        helper.ProcessRawMessage("""
+            {
+              "type": "res",
+              "id": "ownerless-state",
+              "ok": true,
+              "payload": {
+                "sessions": [
+                  { "key": "agent:main:ownerless", "status": "idle" }
+                ],
+                "usage": {
+                  "inputTokens": 17,
+                  "outputTokens": 5,
+                  "totalTokens": 22
+                },
+                "nodes": [
+                  { "nodeId": "ownerless-node", "status": "online" }
+                ],
+                "agents": [
+                  { "id": "ownerless-agent" }
+                ]
+              }
+            }
+            """);
+
+        Assert.Equal("agent:main:ownerless", Assert.Single(Assert.IsType<SessionInfo[]>(sessions)).Key);
+        Assert.Equal(17, Assert.IsType<GatewayUsageInfo>(usage).InputTokens);
+        Assert.Equal("ownerless-node", Assert.Single(Assert.IsType<GatewayNodeInfo[]>(nodes)).NodeId);
+        Assert.Equal(
+            "ownerless-agent",
+            Assert.IsType<JsonElement>(agents)
+                .GetProperty("agents")[0]
+                .GetProperty("id")
+                .GetString());
+    }
+
+    [Fact]
+    public void TombstonedDuplicateStatePayloads_DoNotRepublishGenericState()
+    {
+        var helper = new GatewayClientTestHelper();
+        var sessionUpdates = 0;
+        var usageUpdates = 0;
+        var nodeUpdates = 0;
+        var agentUpdates = 0;
+        helper.Client.SessionsUpdated += (_, _) => sessionUpdates++;
+        helper.Client.UsageUpdated += (_, _) => usageUpdates++;
+        helper.Client.NodesUpdated += (_, _) => nodeUpdates++;
+        helper.Client.AgentsListUpdated += (_, _) => agentUpdates++;
+        helper.TrackPendingRequest("duplicate-state", "health");
+
+        const string response = """
+            {
+              "type": "res",
+              "id": "duplicate-state",
+              "ok": true,
+              "payload": {
+                "sessions": [],
+                "usage": { "totalTokens": 22 },
+                "nodes": [],
+                "agents": []
+              }
+            }
+            """;
+        helper.ProcessRawMessage(response);
+        helper.ProcessRawMessage(response);
+
+        Assert.Equal(1, sessionUpdates);
+        Assert.Equal(1, usageUpdates);
+        Assert.Equal(1, nodeUpdates);
+        Assert.Equal(1, agentUpdates);
+    }
+
+    [Fact]
+    public void UnknownOwnerlessPayload_DoesNotCompleteTypedOwner()
+    {
+        var helper = new GatewayClientTestHelper();
+        var pending = helper.RegisterPendingWizardResponse("pending-wizard");
+
+        helper.ProcessRawMessage("""
+            {
+              "type": "res",
+              "id": "unrelated-ownerless",
+              "ok": true,
+              "payload": { "unknown": true }
+            }
+            """);
+
+        Assert.False(pending.IsCompleted);
+        Assert.Equal(1, helper.Client.PendingRequests.ActiveCount);
     }
 
     [Fact]
@@ -864,6 +971,21 @@ public class OpenClawGatewayClientTests
               }
             }
             """);
+        helper.ProcessRawMessage("""
+            {
+              "type": "res",
+              "id": "sessions-snapshot",
+              "ok": true,
+              "payload": {
+                "sessions": [
+                  {
+                    "key": "agent:main:duplicate",
+                    "status": "idle"
+                  }
+                ]
+              }
+            }
+            """);
 
         var snapshot = await completion.Task;
         Assert.Equal("agent:main:test", Assert.Single(snapshot).Key);
@@ -872,7 +994,7 @@ public class OpenClawGatewayClientTests
     }
 
     [Fact]
-    public void LegacyUntrackedHelloOk_RemainsTheOnlyOwnerlessRoutingException()
+    public void LegacyUntrackedHelloOk_RemainsAccepted()
     {
         var helper = new GatewayClientTestHelper();
         var handshakeCount = 0;

@@ -119,7 +119,8 @@ public partial class SetupAndConnectTests
         transcript.Add(
             "SYNTHETIC_DUPLICATE_LATE_PROOF=TrackedHealthResponse_PublishesOnceAndSuppressesDuplicate;" +
             "SendWizardRequestAsync_LateResponseAfterTimeout_DoesNotChangeOutcomeOrTracking;" +
-            "OwnerlessResponse_DoesNotPublishGenericPayload");
+            "OwnerlessHealthResponse_PreservesGenericHealthRouting;" +
+            "TombstonedDuplicateStatePayloads_DoNotRepublishGenericState");
         transcript.Add("RESULT=PASS");
 
         var proofPath = Path.Combine(_fixture.ArtifactDir, "gateway-request-routing-proof.txt");

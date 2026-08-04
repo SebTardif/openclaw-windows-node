@@ -1702,11 +1702,16 @@ public partial class OpenClawGatewayClient : WebSocketClientBase, IOperatorGatew
 
         var responseTake = _pendingRequests.TakeForResponse(requestId);
         var pendingRequest = responseTake.Request;
-        if (responseTake.Disposition != PendingResponseDisposition.Active &&
-            (responseTake.Disposition != PendingResponseDisposition.Ownerless ||
-             !HasLegacyHelloOkPayload(root)))
+        switch (responseTake.Disposition)
         {
-            return;
+            case PendingResponseDisposition.Active:
+            case PendingResponseDisposition.Ownerless:
+                break;
+            case PendingResponseDisposition.Tombstoned:
+                return;
+            default:
+                throw new InvalidOperationException(
+                    $"Unknown pending response disposition: {responseTake.Disposition}");
         }
 
         if (pendingRequest?.Kind == PendingRequestKind.ChatSend)
@@ -1910,16 +1915,12 @@ public partial class OpenClawGatewayClient : WebSocketClientBase, IOperatorGatew
         {
             ParseNodeList(nodes);
         }
-    }
 
-    // Older gateways can emit the connect acknowledgement without preserving the
-    // request ID. This is the only response allowed to bypass registry ownership.
-    private static bool HasLegacyHelloOkPayload(JsonElement root) =>
-        root.TryGetProperty("payload", out var payload) &&
-        payload.ValueKind == JsonValueKind.Object &&
-        payload.TryGetProperty("type", out var type) &&
-        type.ValueKind == JsonValueKind.String &&
-        type.GetString() == "hello-ok";
+        if (payload.TryGetProperty("agents", out _))
+        {
+            AgentsListUpdated?.Invoke(this, payload.Clone());
+        }
+    }
 
     private void CompleteSessionSnapshotResponse(
         JsonElement root,
