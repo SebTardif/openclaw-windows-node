@@ -3181,6 +3181,7 @@ public sealed class CleanWindowsRunnerScriptTests
                     proof.GetProperty("phaseDiagnostic").GetString(),
                     StringComparison.Ordinal);
             }
+
             else
             {
                 Assert.Contains(expectedError, error, StringComparison.Ordinal);
@@ -3191,6 +3192,64 @@ public sealed class CleanWindowsRunnerScriptTests
         {
             DeleteTestDirectory(root);
         }
+    }
+
+    [Fact]
+    public void HyperVController_SmokeValidationRecoverySurvivesRepeatedTransportLoss()
+    {
+        var result = RunPowerShellCommand(BuildSmokeValidationRecoveryProof("three-losses-success"));
+
+        AssertPowerShellProofSucceeded(result);
+        using var document = JsonDocument.Parse(result.Stdout);
+        var proof = document.RootElement;
+        Assert.True(string.IsNullOrEmpty(proof.GetProperty("error").GetString()));
+        Assert.Equal(0, proof.GetProperty("exitCode").GetInt32());
+        Assert.Equal(4, proof.GetProperty("sessionCalls").GetInt32());
+        Assert.Equal(4, proof.GetProperty("recoveryAttempts").GetInt32());
+        Assert.True(proof.GetProperty("sessionRecovered").GetBoolean());
+    }
+
+    [Fact]
+    public void HyperVController_SmokeValidationCompletionSupportsShortHostDrivenPoll()
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"openclaw-smoke-poll-{Guid.NewGuid():N}");
+        var ownedArtifactsRoot = Path.Combine(root, "artifacts");
+        var artifactRoot = Path.Combine(ownedArtifactsRoot, "installed-smoke");
+        Directory.CreateDirectory(artifactRoot);
+        try
+        {
+            var result = RunPowerShellCommand(BuildSmokeValidationCompletionProof(
+                artifactRoot,
+                ownedArtifactsRoot,
+                "timeout",
+                pollOnce: true));
+
+            AssertPowerShellProofSucceeded(result);
+            using var document = JsonDocument.Parse(result.Stdout);
+            var proof = document.RootElement;
+            Assert.True(string.IsNullOrEmpty(proof.GetProperty("error").GetString()));
+            Assert.False(proof.GetProperty("complete").GetBoolean());
+            Assert.True(proof.GetProperty("elapsedMilliseconds").GetInt64() < 5000);
+        }
+        finally
+        {
+            DeleteTestDirectory(root);
+        }
+    }
+
+    [Fact]
+    public void HyperVController_SmokeValidationRecoveryFailsClosedWithoutRetryingIntegrityError()
+    {
+        var result = RunPowerShellCommand(BuildSmokeValidationRecoveryProof("integrity-failure"));
+
+        AssertPowerShellProofSucceeded(result);
+        using var document = JsonDocument.Parse(result.Stdout);
+        var proof = document.RootElement;
+        Assert.Contains(
+            "completion evidence contains a reparse point",
+            proof.GetProperty("error").GetString(),
+            StringComparison.Ordinal);
+        Assert.Equal(1, proof.GetProperty("sessionCalls").GetInt32());
     }
 
     [Fact]
@@ -3284,15 +3343,14 @@ public sealed class CleanWindowsRunnerScriptTests
         Assert.Equal(1, CountOccurrences(smoke, "& $validationEngine @validationArguments"));
         Assert.Contains("Receive-SmokeArtifactArchiveWithRecovery", smoke, StringComparison.Ordinal);
         Assert.Contains(
-            "for ($attempt = 1; $attempt -le 2; $attempt++)",
+            "while ((Get-Date) -lt $deadline)",
             controller,
             StringComparison.Ordinal);
         Assert.Contains("Get-SmokeArtifactRetrievalSession", controller, StringComparison.Ordinal);
         Assert.Contains("Remove-GuestSmokeArtifactArchiveResidue", controller, StringComparison.Ordinal);
-        Assert.Contains(
-            "Retry after exact-VM reconnect also failed",
-            controller,
-            StringComparison.Ordinal);
+        Assert.Contains("$transportLossCount++", controller, StringComparison.Ordinal);
+        Assert.Contains("$recoveryAttempts++", controller, StringComparison.Ordinal);
+        Assert.Contains("$true)", controller, StringComparison.Ordinal);
         Assert.Contains("Session recovery also failed", controller, StringComparison.Ordinal);
         Assert.Contains("Stale archive cleanup also failed", controller, StringComparison.Ordinal);
         Assert.Contains(
@@ -7384,10 +7442,79 @@ public sealed class CleanWindowsRunnerScriptTests
             "} | ConvertTo-Json -Compress))\n");
     }
 
+    private static string BuildSmokeValidationRecoveryProof(string scenario)
+    {
+        var controller = ReadScript("Invoke-CleanWindowsHyperV.ps1");
+        var recoveryFunction = ExtractPowerShellFunction(
+            controller,
+            "Wait-SmokeValidationCompletionWithRecovery",
+            "Receive-SmokeArtifactArchive");
+        recoveryFunction = recoveryFunction.Replace(
+            "[System.Management.Automation.Runspaces.PSSession]",
+            "[object]",
+            StringComparison.Ordinal);
+        var integrityFailure = string.Equals(
+            scenario,
+            "integrity-failure",
+            StringComparison.Ordinal);
+        return string.Concat(
+            "$ErrorActionPreference = 'Stop'\n",
+            "$script:sessionCalls = 0\n",
+            "$script:probeCalls = 0\n",
+            "$transportMessage = '[System.Management.Automation.Remoting.PSRemotingTransportException] ",
+            "The Hyper-V socket target process has ended.'\n",
+            "function Get-SmokeArtifactRetrievalSession {\n",
+            " param($Session,$GuestCredential,$ResolvedVhdPath,$ExpectedOwnerId,$ExpectedVmId,",
+            "$RecoveryTimeoutSec)\n",
+            " $script:sessionCalls++\n",
+            " return [pscustomobject]@{ Session = $Session; Reconnected = $true }\n",
+            "}\n",
+            "function Invoke-GuestCommandWithTimeout {\n",
+            " param($Session,$OperationName,$TimeoutSec,$ScriptBlock,$ArgumentList)\n",
+            " $script:probeCalls++\n",
+            integrityFailure
+                ? " throw 'Smoke validation completion evidence contains a reparse point.'\n"
+                : string.Concat(
+                    " if ($script:probeCalls -le 3) { throw $transportMessage }\n",
+                    " return [pscustomobject]@{ stage = 'smoke-validation-completion'; ",
+                    "complete = $true; exitCode = 0 }\n"),
+            "}\n",
+            "function Get-SmokeValidationCompletionProbeScriptBlock { return { } }\n",
+            "function Get-RequiredGuestStageResult { param($Output,$ExpectedStage) return $Output[0] }\n",
+            "function Test-SmokeValidationTransportLoss {\n",
+            " param($ErrorRecord)\n",
+            " return ([string]$ErrorRecord).Contains('PSRemotingTransportException') -and ",
+            "([string]$ErrorRecord).Contains('The Hyper-V socket target process has ended.')\n",
+            "}\n",
+            "function ConvertTo-SafeGuestDiagnosticText { param($Value,$MaxChars) return [string]$Value }\n",
+            "function Remove-PSSession { param($Session) }\n",
+            recoveryFunction,
+            "\n$result = $null\n",
+            "$errorMessage = $null\n",
+            "try {\n",
+            " $result = Wait-SmokeValidationCompletionWithRecovery ",
+            "-Session ([pscustomobject]@{}) ",
+            "-GuestCredential ([pscredential]::Empty) ",
+            "-ResolvedVhdPath 'D:\\owned.vhdx' ",
+            "-ExpectedOwnerId 'owner' ",
+            "-ExpectedVmId '00000000-0000-0000-0000-000000000001' ",
+            "-GuestArtifactRoot 'C:\\OpenClawRunner\\artifacts\\installed-smoke' ",
+            "-Lane 'Installed' -TimeoutSec 30\n",
+            "} catch { $errorMessage = $_.Exception.Message }\n",
+            "[Console]::Out.Write(([pscustomobject][ordered]@{\n",
+            " error = $errorMessage\n",
+            " exitCode = if ($result) { [int]$result.exitCode } else { $null }\n",
+            " sessionCalls = $script:sessionCalls\n",
+            " recoveryAttempts = if ($result) { [int]$result.recoveryAttempts } else { 0 }\n",
+            " sessionRecovered = if ($result) { [bool]$result.sessionRecovered } else { $false }\n",
+            "} | ConvertTo-Json -Compress))\n");
+    }
+
     private static string BuildSmokeValidationCompletionProof(
         string artifactRoot,
         string ownedArtifactsRoot,
-        string scenario)
+        string scenario,
+        bool pollOnce = false)
     {
         var controller = ReadScript("Invoke-CleanWindowsHyperV.ps1");
         var completionGetter = ExtractPowerShellFunction(
@@ -7430,7 +7557,8 @@ public sealed class CleanWindowsRunnerScriptTests
             "try {\n",
             " $result = & (Get-SmokeValidationCompletionProbeScriptBlock) ",
             PsQuote(artifactRoot), " ", PsQuote(ownedArtifactsRoot),
-            " 'Installed' ", timeout.ToString(System.Globalization.CultureInfo.InvariantCulture), " 100\n",
+            " 'Installed' ", timeout.ToString(System.Globalization.CultureInfo.InvariantCulture), " 100 ",
+            pollOnce ? "$true\n" : "$false\n",
             "} catch { $errorMessage = $_.Exception.Message } finally {\n",
             " $started.Stop()\n",
             " if ($null -ne $job) {\n",
@@ -7440,6 +7568,7 @@ public sealed class CleanWindowsRunnerScriptTests
             "}\n",
             "[Console]::Out.Write(([pscustomobject][ordered]@{\n",
             " error = $errorMessage\n",
+            " complete = if ($result) { [bool]$result.complete } else { $false }\n",
             " exitCode = if ($result) { [int]$result.exitCode } else { $null }\n",
             " phaseDiagnostic = if ($result) { [string]$result.phaseDiagnostic } else { $null }\n",
             " logDiagnostic = if ($result) { [string]$result.logDiagnostic } else { $null }\n",

@@ -9253,7 +9253,8 @@ function Get-SmokeValidationCompletionProbeScriptBlock {
             [Parameter(Mandatory = $true)]
             [int]$TimeoutSec,
             [Parameter(Mandatory = $true)]
-            [int]$PollIntervalMilliseconds
+            [int]$PollIntervalMilliseconds,
+            [bool]$PollOnce = $false
         )
 
         Set-StrictMode -Version 2.0
@@ -9332,11 +9333,22 @@ function Get-SmokeValidationCompletionProbeScriptBlock {
                     }
                     return [pscustomobject][ordered]@{
                         stage = "smoke-validation-completion"
+                        complete = $true
                         lane = $Lane
                         exitCode = [int]$doneValue
                         phaseDiagnostic = $phaseDiagnostic
                         logDiagnostic = $logDiagnostic
                     }
+                }
+            }
+            if ($PollOnce) {
+                return [pscustomobject][ordered]@{
+                    stage = "smoke-validation-completion"
+                    complete = $false
+                    lane = $Lane
+                    exitCode = $null
+                    phaseDiagnostic = $null
+                    logDiagnostic = $null
                 }
             }
             Start-Sleep -Milliseconds $PollIntervalMilliseconds
@@ -9357,7 +9369,9 @@ function Get-SmokeArtifactRetrievalSession {
         [Parameter(Mandatory = $true)]
         [string]$ExpectedOwnerId,
         [Parameter(Mandatory = $true)]
-        [string]$ExpectedVmId
+        [string]$ExpectedVmId,
+        [ValidateRange(1, 120)]
+        [int]$RecoveryTimeoutSec = 120
     )
 
     try {
@@ -9369,7 +9383,7 @@ function Get-SmokeArtifactRetrievalSession {
         Remove-PSSession -Session $Session -ErrorAction SilentlyContinue
     }
 
-    $deadline = (Get-Date).AddSeconds(120)
+    $deadline = (Get-Date).AddSeconds($RecoveryTimeoutSec)
     $lastError = $null
     do {
         $candidate = $null
@@ -9386,7 +9400,9 @@ function Get-SmokeArtifactRetrievalSession {
             }
             $candidate = Open-GuestSession `
                 -GuestCredential $GuestCredential `
-                -TimeoutSec 30
+                -TimeoutSec ([Math]::Min(
+                    30,
+                    [Math]::Max(1, [int][Math]::Ceiling(($deadline - (Get-Date)).TotalSeconds))))
             [void](Get-GuestBootIdentity `
                 -Session $candidate `
                 -OperationName "Validating reconnected smoke artifact session")
@@ -9401,7 +9417,7 @@ function Get-SmokeArtifactRetrievalSession {
     } while ((Get-Date) -lt $deadline)
 
     $safeLastError = ConvertTo-SafeGuestDiagnosticText -Value $lastError -MaxChars 1024
-    throw "Smoke artifact session recovery timed out after 120 seconds. Last error: $safeLastError"
+    throw "Smoke artifact session recovery timed out after $RecoveryTimeoutSec seconds. Last error: $safeLastError"
 }
 
 function Test-SmokeValidationTransportLoss {
@@ -9441,10 +9457,13 @@ function Wait-SmokeValidationCompletionWithRecovery {
     $activeSession = $Session
     $ownsActiveSession = $false
     $sessionRecovered = $false
-    $attemptErrors = New-Object 'Collections.Generic.List[object]'
+    $recoveryAttempts = 0
+    $transportLossCount = 0
+    $firstTransportError = $null
+    $lastTransportError = $null
     $deadline = (Get-Date).AddSeconds($TimeoutSec)
     try {
-        for ($attempt = 1; $attempt -le 2; $attempt++) {
+        while ((Get-Date) -lt $deadline) {
             $remainingSeconds = [int][Math]::Ceiling(($deadline - (Get-Date)).TotalSeconds)
             if ($remainingSeconds -lt 1) {
                 break
@@ -9455,11 +9474,13 @@ function Wait-SmokeValidationCompletionWithRecovery {
                     -GuestCredential $GuestCredential `
                     -ResolvedVhdPath $ResolvedVhdPath `
                     -ExpectedOwnerId $ExpectedOwnerId `
-                    -ExpectedVmId $ExpectedVmId
+                    -ExpectedVmId $ExpectedVmId `
+                    -RecoveryTimeoutSec ([Math]::Min(120, $remainingSeconds))
                 $activeSession = $sessionInfo.Session
                 if ([bool]$sessionInfo.Reconnected) {
                     $ownsActiveSession = $true
                     $sessionRecovered = $true
+                    $recoveryAttempts++
                 }
                 $remainingSeconds = [int][Math]::Ceiling(($deadline - (Get-Date)).TotalSeconds)
                 if ($remainingSeconds -lt 1) {
@@ -9468,40 +9489,52 @@ function Wait-SmokeValidationCompletionWithRecovery {
                 $probeOutput = @(
                     Invoke-GuestCommandWithTimeout `
                         -Session $activeSession `
-                        -OperationName "Waiting for $Lane smoke validation completion after transport loss" `
-                        -TimeoutSec ($remainingSeconds + 30) `
+                        -OperationName "Polling $Lane smoke validation completion after transport loss" `
+                        -TimeoutSec ([Math]::Min(30, $remainingSeconds)) `
                         -ScriptBlock (Get-SmokeValidationCompletionProbeScriptBlock) `
                         -ArgumentList @(
                             $GuestArtifactRoot,
                             (Split-Path -Parent $GuestArtifactRoot),
                             $Lane,
-                            $remainingSeconds,
-                            1000)
+                            1,
+                            1000,
+                            $true)
                 )
                 $proof = Get-RequiredGuestStageResult `
                     -Output $probeOutput `
                     -ExpectedStage "smoke-validation-completion"
-                $proof | Add-Member -NotePropertyName recoveryAttempts -NotePropertyValue $attempt
-                $proof | Add-Member -NotePropertyName sessionRecovered -NotePropertyValue $sessionRecovered
-                return $proof
+                if ([bool]$proof.complete) {
+                    $proof | Add-Member -NotePropertyName recoveryAttempts -NotePropertyValue $recoveryAttempts
+                    $proof | Add-Member -NotePropertyName sessionRecovered -NotePropertyValue $sessionRecovered
+                    return $proof
+                }
+                Start-Sleep -Seconds 2
             } catch {
-                $attemptErrors.Add($_)
+                if (-not (Test-SmokeValidationTransportLoss -ErrorRecord $_)) {
+                    throw
+                }
+                $transportLossCount++
+                if ($null -eq $firstTransportError) {
+                    $firstTransportError = $_
+                }
+                $lastTransportError = $_
                 Remove-PSSession -Session $activeSession -ErrorAction SilentlyContinue
                 $activeSession = $Session
+                if ((Get-Date) -lt $deadline) {
+                    Start-Sleep -Seconds 2
+                }
             }
         }
 
-        if ($attemptErrors.Count -eq 1) {
-            throw $attemptErrors[0]
-        }
-        if ($attemptErrors.Count -gt 1) {
-            $safeFirst = ConvertTo-SafeGuestDiagnosticText -Value $attemptErrors[0] -MaxChars 2048
-            $safeRetry = ConvertTo-SafeGuestDiagnosticText -Value $attemptErrors[1] -MaxChars 2048
+        if ($transportLossCount -gt 0) {
+            $safeFirst = ConvertTo-SafeGuestDiagnosticText -Value $firstTransportError -MaxChars 1024
+            $safeLast = ConvertTo-SafeGuestDiagnosticText -Value $lastTransportError -MaxChars 1024
             throw (
-                "Smoke validation completion recovery failed: $safeFirst " +
-                "Retry after exact-VM reconnect also failed: $safeRetry")
+                "$Lane smoke validation did not produce closed completion evidence within " +
+                "$TimeoutSec seconds after $transportLossCount transport losses and " +
+                "$recoveryAttempts exact-VM reconnects. First error: $safeFirst Last error: $safeLast")
         }
-        throw "$Lane smoke validation completion recovery exceeded its $TimeoutSec second deadline."
+        throw "$Lane smoke validation did not produce closed completion evidence within $TimeoutSec seconds."
     } finally {
         if ($ownsActiveSession -and $null -ne $activeSession) {
             Remove-PSSession -Session $activeSession -ErrorAction SilentlyContinue

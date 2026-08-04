@@ -675,13 +675,16 @@ manifest into that unique child. Guest and host archive copies are removed in
 `finally`; prior run directories are never overwritten or deleted. If the
 validation session ends with the exact PowerShell Direct transport-loss
 signature while the nested validation process is still running, the controller
-reconnects only to the unchanged owner-bound Running VM and waits boundedly for
-the lane completion marker and phase status. It never starts a second validation
-process. A recovered exit zero continues to artifact packaging; a recovered
-failure retains bounded phase/log diagnostics. Packaging then occurs only after
-the completion marker proves validation writers have closed. If the packaging
-session broke, retrieval reconnects under the same identity guard, removes only
-owned nonce archive residue, and retries packaging once. Healthy-session
+reconnects only to the unchanged owner-bound Running VM. It uses short,
+host-driven completion polls and may repeat exact-VM reconnects when subsequent
+PowerShell Direct target processes recycle, all within one absolute deadline.
+It never starts a second validation process. Non-transport integrity errors fail
+immediately rather than being retried. A recovered exit zero continues to
+artifact packaging; a recovered failure retains bounded phase/log diagnostics.
+Packaging then occurs only after the completion marker proves validation writers
+have closed. If the packaging session broke, retrieval reconnects under the same
+identity guard, removes only owned nonce archive residue, and retries packaging
+once. Healthy-session
 integrity failures are not retried. The host manifest records validation and
 artifact session recovery separately. Primary validation and artifact failures
 are both retained. A failed validation also reports a

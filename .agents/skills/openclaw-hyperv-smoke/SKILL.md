@@ -620,13 +620,15 @@ returned on success, and recorded even for pre-retrieval failures. Both
 archive copies are removed in `finally`, but prior run directories are never
 overwritten or deleted. On the exact PowerShell Direct transport-loss
 signature, the controller reconnects only to the unchanged owner-bound Running
-VM and waits boundedly for the already-running lane to write its completion
-marker and phase status. It never reruns validation. Recovered success proceeds
-to packaging; recovered failure preserves bounded phase/log diagnostics.
-Packaging starts only after those completion files prove artifact writers have
-closed. If the packaging session broke, artifact retrieval reconnects under
-the same guard, removes only owned nonce archive residue, and retries packaging
-once. Healthy-session integrity failures are not retried. The host manifest
+VM and uses short host-driven polls for the already-running lane's completion
+marker and phase status. Subsequent target-process recycling may trigger
+additional exact-VM reconnects within the same absolute deadline. It never
+reruns validation, and non-transport integrity failures fail immediately.
+Recovered success proceeds to packaging; recovered failure preserves bounded
+phase/log diagnostics. Packaging starts only after those completion files prove
+artifact writers have closed. If the packaging session broke, artifact retrieval
+reconnects under the same guard, removes only owned nonce archive residue, and
+retries packaging once. Healthy-session integrity failures are not retried. The host manifest
 records validation and artifact recovery separately. Commands have bounded
 timeouts.
 

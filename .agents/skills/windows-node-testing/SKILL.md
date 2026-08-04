@@ -423,9 +423,11 @@ Guest and host both reject unsafe paths, traversal, reparse/archive link types,
 count/size/hash mismatches, and missing lane-specific phase/log files. Never
 use recursive `Copy-Item -FromSession` on the directory. If the validation
 session ends with the exact PowerShell Direct transport-loss signature, reconnect
-only to the unchanged owner-bound Running VM and wait boundedly for the existing
-lane completion marker. Never rerun validation. Package only after completion
-evidence closes artifact writers, and preserve recovered phase/log diagnostics.
+only to the unchanged owner-bound Running VM. Use short host-driven completion
+polls so subsequent target-process recycling can reconnect again within the same
+absolute deadline. Never rerun validation, and fail non-transport integrity
+errors immediately. Package only after completion evidence closes artifact
+writers, and preserve recovered phase/log diagnostics.
 If the packaging session broke, reconnect under the same identity guard and
 retry packaging once after removing only owned nonce archive residue. Do not
 retry healthy-session integrity failures or suppress the primary failure.
