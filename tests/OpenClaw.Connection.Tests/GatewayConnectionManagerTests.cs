@@ -2000,7 +2000,7 @@ public class GatewayConnectionManagerTests : IDisposable
         Assert.NotEqual(RoleConnectionState.Connecting, snapshots.Last().NodeState);
         var nodeRoot = Assert.Single(
             activities.GetStopped(),
-            activity => activity.OperationName == GatewayConnectionManager.NodeConnectSpanName);
+            activity => activity.OperationName == NodeConnectionCoordinator.NodeConnectSpanName);
         Assert.Equal("failure", nodeRoot.GetTagItem(OpenClawTelemetryTagKey.Outcome.ToTelemetryName()));
         Assert.Equal(
             "networkunreachable",
@@ -2037,7 +2037,7 @@ public class GatewayConnectionManagerTests : IDisposable
 
         var stopped = activities.GetStopped();
         var root = Assert.Single(stopped, activity =>
-            activity.OperationName == GatewayConnectionManager.NodeConnectSpanName);
+            activity.OperationName == NodeConnectionCoordinator.NodeConnectSpanName);
         Assert.Equal(ActivityStatusCode.Ok, root.Status);
         Assert.Equal("success", root.GetTagItem(OpenClawTelemetryTagKey.Outcome.ToTelemetryName()));
         Assert.Equal("node", root.GetTagItem("openclaw.connection.role"));
@@ -2075,7 +2075,7 @@ public class GatewayConnectionManagerTests : IDisposable
 
         var stopped = activities.GetStopped();
         var root = Assert.Single(stopped, activity =>
-            activity.OperationName == GatewayConnectionManager.NodeConnectSpanName);
+            activity.OperationName == NodeConnectionCoordinator.NodeConnectSpanName);
         Assert.Equal(ActivityStatusCode.Unset, root.Status);
         Assert.Equal(
             "pairing_required",
@@ -2122,7 +2122,7 @@ public class GatewayConnectionManagerTests : IDisposable
 
         var stopped = activities.GetStopped();
         var reconnectRoot = Assert.Single(stopped, activity =>
-            activity.OperationName == GatewayConnectionManager.NodeReconnectSpanName);
+            activity.OperationName == NodeConnectionCoordinator.NodeReconnectSpanName);
         Assert.Equal("success", reconnectRoot.GetTagItem(OpenClawTelemetryTagKey.Outcome.ToTelemetryName()));
         AssertNodePhases(stopped, reconnectRoot, includePrepare: false);
     }
@@ -2161,7 +2161,7 @@ public class GatewayConnectionManagerTests : IDisposable
 
         var reconnectRoot = Assert.Single(
             activities.GetStopped(),
-            activity => activity.OperationName == GatewayConnectionManager.NodeReconnectSpanName);
+            activity => activity.OperationName == NodeConnectionCoordinator.NodeReconnectSpanName);
         Assert.Equal(
             "canceled",
             reconnectRoot.GetTagItem(OpenClawTelemetryTagKey.Outcome.ToTelemetryName()));
@@ -2193,7 +2193,7 @@ public class GatewayConnectionManagerTests : IDisposable
 
         var stopped = activities.GetStopped();
         var reconnectRoots = stopped
-            .Where(activity => activity.OperationName == GatewayConnectionManager.NodeReconnectSpanName)
+            .Where(activity => activity.OperationName == NodeConnectionCoordinator.NodeReconnectSpanName)
             .ToArray();
         Assert.Equal(2, reconnectRoots.Length);
         Assert.Single(reconnectRoots, activity =>
@@ -2201,7 +2201,7 @@ public class GatewayConnectionManagerTests : IDisposable
         Assert.Single(reconnectRoots, activity =>
             activity.GetTagItem(OpenClawTelemetryTagKey.Outcome.ToTelemetryName())?.ToString() == "superseded");
         var failedConnect = Assert.Single(stopped, activity =>
-            activity.OperationName == GatewayConnectionManager.NodeConnectSpanName &&
+            activity.OperationName == NodeConnectionCoordinator.NodeConnectSpanName &&
             activity.GetTagItem(OpenClawTelemetryTagKey.Outcome.ToTelemetryName())?.ToString() == "failure");
         Assert.Equal(
             "internalerror",
@@ -2244,7 +2244,7 @@ public class GatewayConnectionManagerTests : IDisposable
 
         var root = Assert.Single(
             activities.GetStopped(),
-            activity => activity.OperationName == GatewayConnectionManager.NodeConnectSpanName);
+            activity => activity.OperationName == NodeConnectionCoordinator.NodeConnectSpanName);
         Assert.Equal(
             expectedCategory,
             root.GetTagItem(OpenClawTelemetryTagKey.ErrorCategory.ToTelemetryName()));
@@ -2280,7 +2280,7 @@ public class GatewayConnectionManagerTests : IDisposable
     }
 
     [Fact]
-    public async Task BlockNodeStartAsync_StaleLifecycleGeneration_DoesNotOverwriteCurrentSnapshot()
+    public async Task NodeStateSink_StaleLifecycleGeneration_DoesNotOverwriteCurrentSnapshot()
     {
         SetupGateway("gw-remote", "wss://remote.example", isLocal: false);
         _resolver.OperatorCredential = new GatewayCredential("op-tok", false, "test");
@@ -2293,10 +2293,17 @@ public class GatewayConnectionManagerTests : IDisposable
         await manager.ConnectAsync("gw-remote");
         var before = manager.CurrentSnapshot;
 
-        await InvokeBlockNodeStartAsync(
-            manager,
+        var coordinator = GetNodeCoordinator(manager);
+        await ((INodeConnectionStateSink)manager).PublishNodeBlockedAsync(
+            new NodeAttemptStamp(
+                new GatewayAttemptStamp(
+                    GetPrivateLong(manager, "_generation") + 1,
+                    "gw-remote"),
+                coordinator.CurrentNodeGeneration),
             "stale blocker",
-            expectedLifecycleGeneration: GetPrivateLong(manager, "_generation") + 1);
+            resolution: null,
+            preserveCredentialResolution: false,
+            CancellationToken.None);
 
         Assert.Equal(before, manager.CurrentSnapshot);
     }
@@ -3078,32 +3085,14 @@ public class GatewayConnectionManagerTests : IDisposable
         await task;
     }
 
-    private static async Task<bool> InvokeStartNodeConnectionCoreAsync(
-        GatewayConnectionManager manager,
-        long nodeGeneration)
+    private static NodeConnectionCoordinator GetNodeCoordinator(
+        GatewayConnectionManager manager)
     {
-        var method = typeof(GatewayConnectionManager).GetMethod(
-            "StartNodeConnectionCoreAsync",
+        var field = typeof(GatewayConnectionManager).GetField(
+            "_nodeConnectionCoordinator",
             System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
-        Assert.NotNull(method);
-        var task = (Task<bool>)method!.Invoke(manager, [GetPrivateLong(manager, "_generation"), nodeGeneration, CancellationToken.None])!;
-        return await task;
-    }
-
-    private static async Task InvokeBlockNodeStartAsync(
-        GatewayConnectionManager manager,
-        string detail,
-        long? expectedLifecycleGeneration = null,
-        long? expectedNodeGeneration = null)
-    {
-        var method = typeof(GatewayConnectionManager).GetMethod(
-            "BlockNodeStartAsync",
-            System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
-        Assert.NotNull(method);
-        var task = (Task)method!.Invoke(
-            manager,
-            [detail, CancellationToken.None, expectedLifecycleGeneration, expectedNodeGeneration])!;
-        await task;
+        Assert.NotNull(field);
+        return Assert.IsType<NodeConnectionCoordinator>(field!.GetValue(manager));
     }
 
     private static void SetPrivateField(GatewayConnectionManager manager, string fieldName, object? value)
@@ -3265,7 +3254,7 @@ public class GatewayConnectionManagerTests : IDisposable
         Assert.Null(manager.CurrentSnapshot.NodeCredentialSource);
         var root = Assert.Single(
             activities.GetStopped(),
-            activity => activity.OperationName == GatewayConnectionManager.NodeConnectSpanName);
+            activity => activity.OperationName == NodeConnectionCoordinator.NodeConnectSpanName);
         Assert.Equal("failure", root.GetTagItem(OpenClawTelemetryTagKey.Outcome.ToTelemetryName()));
         Assert.Equal(
             "authfailure",
@@ -3273,7 +3262,7 @@ public class GatewayConnectionManagerTests : IDisposable
     }
 
     [Fact]
-    public async Task StartNodeConnectionCoreAsync_MissingActiveGatewayContext_ReportsBlockedNode()
+    public async Task NodeConnectionCoordinator_MissingActiveGatewayContext_ReportsBlockedNode()
     {
         SetupGateway("gw-1", "wss://test");
         _resolver.OperatorCredential = new GatewayCredential("operator-token", false, "test");
@@ -3291,11 +3280,12 @@ public class GatewayConnectionManagerTests : IDisposable
         await InvokeHandshakeSucceededAsync(manager);
         SetPrivateField(manager, "_activeGatewayRecordId", null);
 
-        var started = await InvokeStartNodeConnectionCoreAsync(
-            manager,
-            GetPrivateLong(manager, "_nodeConnectionGeneration"));
+        var coordinator = GetNodeCoordinator(manager);
+        var result = await coordinator.StartAsync(
+            GetPrivateLong(manager, "_generation"),
+            coordinator.CurrentNodeGeneration);
 
-        Assert.False(started);
+        Assert.NotEqual(NodeStartOutcome.Started, result.Outcome);
         Assert.Equal(0, node.ConnectCount);
         Assert.Equal(RoleConnectionState.Error, manager.CurrentSnapshot.NodeState);
         Assert.True(manager.CurrentSnapshot.NodeConnectionIntended);
@@ -3385,7 +3375,7 @@ public class GatewayConnectionManagerTests : IDisposable
 
         await manager.DisconnectAsync();
         var nodeRoots = activities.GetStopped()
-            .Where(activity => activity.OperationName == GatewayConnectionManager.NodeConnectSpanName)
+            .Where(activity => activity.OperationName == NodeConnectionCoordinator.NodeConnectSpanName)
             .ToArray();
         Assert.Equal(2, nodeRoots.Length);
         Assert.Single(nodeRoots, activity =>
@@ -3768,7 +3758,7 @@ public class GatewayConnectionManagerTests : IDisposable
 
         var root = Assert.Single(
             activities.GetStopped(),
-            activity => activity.OperationName == GatewayConnectionManager.NodeConnectSpanName);
+            activity => activity.OperationName == NodeConnectionCoordinator.NodeConnectSpanName);
         Assert.Equal(ActivityStatusCode.Error, root.Status);
         Assert.Equal(
             "pairing_rejected",
@@ -3857,14 +3847,14 @@ public class GatewayConnectionManagerTests : IDisposable
         var phaseNames = includePrepare
             ? new[]
             {
-                GatewayConnectionManager.NodePrepareSpanName,
-                GatewayConnectionManager.NodeTransportSpanName,
-                GatewayConnectionManager.NodeHandshakeSpanName
+                NodeConnectionCoordinator.NodePrepareSpanName,
+                NodeConnectionCoordinator.NodeTransportSpanName,
+                NodeConnectionCoordinator.NodeHandshakeSpanName
             }
             :
             [
-                GatewayConnectionManager.NodeTransportSpanName,
-                GatewayConnectionManager.NodeHandshakeSpanName
+                NodeConnectionCoordinator.NodeTransportSpanName,
+                NodeConnectionCoordinator.NodeHandshakeSpanName
             ];
 
         foreach (var phaseName in phaseNames)
@@ -3873,7 +3863,7 @@ public class GatewayConnectionManagerTests : IDisposable
                 activity.OperationName == phaseName &&
                 activity.TraceId == root.TraceId &&
                 activity.ParentSpanId == root.SpanId);
-            var expectedOutcome = phaseName == GatewayConnectionManager.NodeHandshakeSpanName
+            var expectedOutcome = phaseName == NodeConnectionCoordinator.NodeHandshakeSpanName
                 ? terminalOutcome
                 : "success";
             Assert.Equal(
@@ -3884,7 +3874,7 @@ public class GatewayConnectionManagerTests : IDisposable
         if (!includePrepare)
         {
             Assert.DoesNotContain(stopped, activity =>
-                activity.OperationName == GatewayConnectionManager.NodePrepareSpanName &&
+                activity.OperationName == NodeConnectionCoordinator.NodePrepareSpanName &&
                 activity.TraceId == root.TraceId);
         }
     }
