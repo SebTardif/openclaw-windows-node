@@ -183,8 +183,13 @@ public sealed class ThinkingLevelClearReconciler : IDisposable
         ArgumentNullException.ThrowIfNull(exception);
         lock (_gate)
         {
-            if (_disposed || !TryGetCurrentEntry(operation, out var entry))
+            if (_disposed ||
+                !TryGetCurrentEntry(operation, out var entry) ||
+                entry.State != ReconciliationState.AwaitingPatchAck ||
+                operation.PatchAcknowledged)
+            {
                 return false;
+            }
 
             entry.ClearCommitted = false;
             entry.ActiveRefreshRequestId = 0;

@@ -40,6 +40,34 @@ public sealed class ThinkingLevelClearReconcilerTests
     }
 
     [Fact]
+    public async Task RejectionAfterAcknowledgement_DoesNotReverseCommittedClear()
+    {
+        using var reconciler = Create();
+        var operation = reconciler.BeginClear("main", "off");
+        Assert.True(reconciler.TryAcknowledgePatch(operation, out var refresh));
+
+        var rejected = reconciler.RejectPatch(
+            operation,
+            new InvalidOperationException("late duplicate failure"));
+
+        Assert.False(rejected);
+        Assert.False(operation.Confirmation.IsCompleted);
+        Assert.Equal(
+            ThinkingLevelClearReconciler.ReconciliationState.CommittedAwaitingCanonicalNull,
+            operation.State);
+        Assert.Equal(
+            ThinkingLevelClearReconciler.ReconciliationState.CommittedAwaitingCanonicalNull,
+            reconciler.GetState("main"));
+
+        var confirmed = reconciler.ApplyCorrelatedSnapshot(refresh, null);
+
+        Assert.True(confirmed.Accepted);
+        Assert.Equal(
+            ThinkingLevelClearReconciler.ClearOutcome.Confirmed,
+            await reconciler.WaitForConfirmationAsync(operation));
+    }
+
+    [Fact]
     public void ConcreteValueWithoutReconciliation_LeavesCanonicalStateUntouched()
     {
         using var reconciler = Create();
