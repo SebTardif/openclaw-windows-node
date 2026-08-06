@@ -11,9 +11,13 @@ public sealed class SetupWizardRunner
     private const int MaxSameStepVisits = 3;
     internal const int MaxWizardRestartAttempts = 2;
     internal const int MaxRestartReconnectAttempts = 12;
+    internal const string RestartGatewayServiceCommand =
+        "systemctl --user start openclaw-gateway.service";
     internal static readonly TimeSpan RestartReconnectTimeout = TimeSpan.FromMinutes(2);
     internal static readonly TimeSpan RestartConnectAttemptTimeout = TimeSpan.FromSeconds(15);
     internal static readonly TimeSpan RestartReconnectPollDelay = TimeSpan.FromSeconds(3);
+    internal static readonly TimeSpan RestartGatewayServiceTimeout = TimeSpan.FromSeconds(30);
+    private const int MaxRestartServiceDiagnosticChars = 2048;
     private static readonly Regex s_normalizeKeyRegex = new("[^a-z0-9]+", RegexOptions.Compiled);
 
     // Progress steps can repeat while background work runs; keep bounded caps
@@ -106,9 +110,10 @@ public sealed class SetupWizardRunner
                 {
                     return await client!.SendWizardRequestAsync("wizard.next", parameters, timeoutMs);
                 }
-                catch (Exception ex) when (!ct.IsCancellationRequested &&
-                    IsRestartLikeWizardDisconnect(ex) &&
-                    restartAttempts < MaxWizardRestartAttempts)
+                catch (Exception ex) when (ShouldRecoverAfterWizardRequestFailure(
+                    ex,
+                    ct.IsCancellationRequested,
+                    restartAttempts))
                 {
                     restartAttempts++;
                     _ctx.Logger.Warn(
@@ -117,6 +122,15 @@ public sealed class SetupWizardRunner
 
                     try { await client!.DisconnectAsync(); } catch { }
                     client!.Dispose();
+
+                    _ctx.Logger.Info(
+                        "Starting the exact installed gateway service after the classified wizard restart");
+                    var serviceRecovery = await WakeGatewayServiceAfterWizardRestartAsync(
+                        _ctx.Commands,
+                        _ctx.DistroName!,
+                        ct);
+                    if (!serviceRecovery.IsSuccess)
+                        throw new WizardFatalException(serviceRecovery.Message!);
 
                     var reconnect = await WaitForGatewayRestartAsync(
                         () => CreateWizardClient(credential, identityPath, wsLogger),
@@ -292,6 +306,52 @@ public sealed class SetupWizardRunner
                 client.Dispose();
             }
         }
+    }
+
+    internal static async Task<StepResult> WakeGatewayServiceAfterWizardRestartAsync(
+        ICommandRunner commands,
+        string distroName,
+        CancellationToken ct)
+    {
+        var result = await commands.RunInWslAsync(
+            distroName,
+            RestartGatewayServiceCommand,
+            RestartGatewayServiceTimeout,
+            ct: ct);
+        var diagnostic = GetRestartServiceDiagnostic(result);
+
+        if (result.TimedOut)
+        {
+            return StepResult.Fail(
+                $"Gateway service activation after wizard restart timed out after " +
+                $"{RestartGatewayServiceTimeout.TotalSeconds:F0} seconds. Diagnostic: {diagnostic}");
+        }
+
+        if (result.ExitCode != 0)
+        {
+            return StepResult.Fail(
+                $"Gateway service activation after wizard restart failed with exit " +
+                $"{result.ExitCode}. Diagnostic: {diagnostic}");
+        }
+
+        return StepResult.Ok("Gateway service activation requested after wizard restart");
+    }
+
+    private static string GetRestartServiceDiagnostic(CommandResult result)
+    {
+        var raw = string.IsNullOrWhiteSpace(result.Stderr)
+            ? result.Stdout
+            : result.Stderr;
+        var sanitized = SetupLogger.Sanitize(raw).Trim()
+            .Replace("\r\n", " ", StringComparison.Ordinal)
+            .Replace('\r', ' ')
+            .Replace('\n', ' ');
+        if (string.IsNullOrWhiteSpace(sanitized))
+            return "<empty>";
+        if (sanitized.Length <= MaxRestartServiceDiagnosticChars)
+            return sanitized;
+
+        return "[truncated] " + sanitized[^MaxRestartServiceDiagnosticChars..];
     }
 
     internal static async Task<WizardReconnectResult<T>> WaitForGatewayRestartAsync<T>(
@@ -611,6 +671,16 @@ public sealed class SetupWizardRunner
             step.StepType,
             step.Options,
             answer);
+
+    internal static bool ShouldRecoverAfterWizardRequestFailure(
+        Exception ex,
+        bool cancellationRequested,
+        int restartAttempts)
+    {
+        return !cancellationRequested
+            && restartAttempts < MaxWizardRestartAttempts
+            && IsRestartLikeWizardDisconnect(ex);
+    }
 
     private static bool IsRestartLikeWizardDisconnect(Exception ex)
     {

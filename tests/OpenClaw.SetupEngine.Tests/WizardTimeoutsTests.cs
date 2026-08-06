@@ -10,6 +10,141 @@ public class WizardTimeoutsTests
         Assert.Equal(2, SetupWizardRunner.MaxWizardRestartAttempts);
     }
 
+    [Theory]
+    [InlineData("Gateway connection lost while waiting for wizard response")]
+    [InlineData("gateway restarting after config change")]
+    [InlineData("service restart interrupted the request")]
+    public void RestartRecovery_ClassifiesOnlyIntentionalRestartSignals(string message)
+    {
+        Assert.True(SetupWizardRunner.ShouldRecoverAfterWizardRequestFailure(
+            new InvalidOperationException(message),
+            cancellationRequested: false,
+            restartAttempts: 0));
+    }
+
+    [Theory]
+    [InlineData("No connection could be made because the target machine actively refused it")]
+    [InlineData("wizard response was malformed")]
+    [InlineData("operator pairing required")]
+    public void RestartRecovery_DoesNotClassifyArbitraryFailures(string message)
+    {
+        Assert.False(SetupWizardRunner.ShouldRecoverAfterWizardRequestFailure(
+            new InvalidOperationException(message),
+            cancellationRequested: false,
+            restartAttempts: 0));
+    }
+
+    [Fact]
+    public void RestartRecovery_DoesNotRecoverAfterCancellationOrReplayLimit()
+    {
+        var restart = new InvalidOperationException(
+            "Gateway connection lost while waiting for wizard response");
+
+        Assert.False(SetupWizardRunner.ShouldRecoverAfterWizardRequestFailure(
+            restart,
+            cancellationRequested: true,
+            restartAttempts: 0));
+        Assert.False(SetupWizardRunner.ShouldRecoverAfterWizardRequestFailure(
+            restart,
+            cancellationRequested: false,
+            restartAttempts: SetupWizardRunner.MaxWizardRestartAttempts));
+    }
+
+    [Fact]
+    public void RestartRecovery_SourceContract_StartsServiceOnceAndDoesNotResendAnswer()
+    {
+        var sourcePath = Path.Combine(
+            RepositoryRoot(),
+            "src",
+            "OpenClaw.SetupEngine",
+            "SetupWizardRunner.cs");
+        var source = File.ReadAllText(sourcePath);
+        const string catchMarker =
+            "catch (Exception ex) when (ShouldRecoverAfterWizardRequestFailure(";
+        var start = source.IndexOf(catchMarker, StringComparison.Ordinal);
+        var end = source.IndexOf(
+            "\n            while (true)",
+            start,
+            StringComparison.Ordinal);
+
+        Assert.True(start >= 0 && end > start, "Classified restart catch was not found.");
+        var recoveryBlock = source[start..end];
+        Assert.Equal(1, CountOccurrences(
+            recoveryBlock,
+            "WakeGatewayServiceAfterWizardRestartAsync("));
+        Assert.Equal(1, CountOccurrences(
+            recoveryBlock,
+            "SendWizardRequestAsync(\"wizard.start\""));
+        Assert.DoesNotContain(
+            "SendWizardRequestAsync(\"wizard.next\"",
+            recoveryBlock,
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task RestartServiceRecovery_StartsExactUnitOnceWithBoundedTimeout()
+    {
+        var commands = new RestartCommandRunner(
+            new CommandResult(0, "", "", TimeSpan.FromMilliseconds(20), TimedOut: false));
+
+        var result = await SetupWizardRunner.WakeGatewayServiceAfterWizardRestartAsync(
+            commands,
+            "OpenClawE2E-test",
+            CancellationToken.None);
+
+        Assert.True(result.IsSuccess, result.Message);
+        var call = Assert.Single(commands.WslCalls);
+        Assert.Equal("OpenClawE2E-test", call.DistroName);
+        Assert.Equal(SetupWizardRunner.RestartGatewayServiceCommand, call.Command);
+        Assert.Equal(SetupWizardRunner.RestartGatewayServiceTimeout, call.Timeout);
+    }
+
+    [Fact]
+    public async Task RestartServiceRecovery_TimeoutFailsClosedWithBoundedSanitizedDiagnostic()
+    {
+        var secret = new string('a', 64);
+        var commands = new RestartCommandRunner(
+            new CommandResult(
+                -1,
+                "",
+                $"token={secret} {string.Join(' ', Enumerable.Repeat("failure", 800))}",
+                SetupWizardRunner.RestartGatewayServiceTimeout,
+                TimedOut: true));
+
+        var result = await SetupWizardRunner.WakeGatewayServiceAfterWizardRestartAsync(
+            commands,
+            "OpenClawE2E-test",
+            CancellationToken.None);
+
+        Assert.False(result.IsSuccess);
+        Assert.Contains("timed out after 30 seconds", result.Message);
+        Assert.Contains("[truncated]", result.Message);
+        Assert.DoesNotContain(secret, result.Message);
+        Assert.True(result.Message!.Length < 2300);
+    }
+
+    [Fact]
+    public async Task RestartServiceRecovery_NonzeroFailsClosedWithoutReconnect()
+    {
+        var commands = new RestartCommandRunner(
+            new CommandResult(
+                1,
+                "",
+                "Failed to start exact unit",
+                TimeSpan.FromMilliseconds(20),
+                TimedOut: false));
+
+        var result = await SetupWizardRunner.WakeGatewayServiceAfterWizardRestartAsync(
+            commands,
+            "OpenClawE2E-test",
+            CancellationToken.None);
+
+        Assert.False(result.IsSuccess);
+        Assert.Contains("failed with exit 1", result.Message);
+        Assert.Contains("Failed to start exact unit", result.Message);
+        Assert.Single(commands.WslCalls);
+    }
+
     [Fact]
     public async Task RestartReconnect_RetriesFreshClientsUntilConnected()
     {
@@ -300,5 +435,62 @@ public class WizardTimeoutsTests
         }
 
         public void Advance(TimeSpan duration) => UtcNow += duration;
+    }
+
+    private sealed class RestartCommandRunner(CommandResult result) : ICommandRunner
+    {
+        public List<(string DistroName, string Command, TimeSpan Timeout)> WslCalls { get; } = [];
+
+        public Task<CommandResult> RunAsync(
+            string executable,
+            string[] arguments,
+            TimeSpan timeout,
+            IReadOnlyDictionary<string, string>? environment = null,
+            string? workingDirectory = null,
+            string? stdinInput = null,
+            CancellationToken ct = default)
+            => throw new InvalidOperationException("Windows process execution is not expected.");
+
+        public Task<CommandResult> RunInWslAsync(
+            string distroName,
+            string command,
+            TimeSpan timeout,
+            IReadOnlyDictionary<string, string>? environment = null,
+            CancellationToken ct = default,
+            string? user = null,
+            bool inputViaStdin = false)
+        {
+            ct.ThrowIfCancellationRequested();
+            WslCalls.Add((distroName, command, timeout));
+            return Task.FromResult(result);
+        }
+    }
+
+    private static int CountOccurrences(string value, string search)
+    {
+        var count = 0;
+        var index = 0;
+        while ((index = value.IndexOf(search, index, StringComparison.Ordinal)) >= 0)
+        {
+            count++;
+            index += search.Length;
+        }
+        return count;
+    }
+
+    private static string RepositoryRoot()
+    {
+        if (Environment.GetEnvironmentVariable("OPENCLAW_REPO_ROOT") is { Length: > 0 } configured)
+            return configured;
+
+        var directory = AppContext.BaseDirectory;
+        while (!string.IsNullOrWhiteSpace(directory))
+        {
+            if (File.Exists(Path.Combine(directory, "openclaw-windows-node.slnx")))
+                return directory;
+            directory = Directory.GetParent(directory)?.FullName;
+        }
+
+        throw new DirectoryNotFoundException("Could not locate the repository root.");
     }
 }

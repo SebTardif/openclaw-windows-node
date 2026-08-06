@@ -409,13 +409,15 @@ and preserve bounded sanitized timeout/nonzero diagnostics. Accept a nonzero
 selected request, then approve that exact environment-bound request once.
 
 When a gateway wizard answer restarts the gateway before `wizard.next`
-completes, retry fresh operator clients under one two-minute absolute deadline
-and a 12-attempt cap. Dispose every failed client. Connection-refused, error,
-and timeout outcomes are retryable; unexpected pairing fails closed. Bound each
-connect/status attempt by the smaller of 15 seconds and the remaining deadline,
-disposing the candidate on cancellation to interrupt a stalled WebSocket
-handshake. Replay the wizard only after a confirmed connection and preserve the
-two-restart cap.
+completes, dispose the old client and invoke one bounded, idempotent start of
+the exact installed `openclaw-gateway.service` unit. Fail closed with sanitized
+bounded diagnostics on service timeout or nonzero exit. Retry fresh operator
+clients under one two-minute absolute deadline and a 12-attempt cap. Dispose
+every failed client. Connection-refused, error, and timeout outcomes are
+retryable; unexpected pairing fails closed. Bound each connect/status attempt
+by the smaller of 15 seconds and the remaining deadline, disposing the candidate
+on cancellation to interrupt a stalled WebSocket handshake. Replay the wizard
+only after a confirmed connection and preserve the two-restart cap.
 
 After a failed `Prepare`, the driver must first confirm that the rollback
 restored the exact owned `clean-windows` checkpoint and finalized marker. The

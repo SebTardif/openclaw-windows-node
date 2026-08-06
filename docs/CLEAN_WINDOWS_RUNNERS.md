@@ -688,13 +688,18 @@ can be parsed.
 
 The gateway wizard can apply an answer and intentionally restart the gateway
 before `wizard.next` returns. Recovery disconnects and disposes the old client,
-then uses fresh operator clients under one two-minute absolute deadline and a
-12-attempt cap. Each WebSocket connect/status attempt is limited to the smaller
-of 15 seconds and the remaining absolute budget; cancellation disposes the
-candidate to interrupt a stalled handshake. Immediate connection-refused,
-error, and timeout outcomes are retryable; unexpected pairing is not. The
-wizard session and prior answers are replayed only after a confirmed operator
-connection, and the existing two-restart cap remains in force.
+then issues one bounded, idempotent
+`systemctl --user start openclaw-gateway.service` for the exact installed unit.
+This wakes a dormant WSL distribution and does not duplicate an already active
+service. A timeout or nonzero service result fails with bounded sanitized
+diagnostics. Fresh operator clients then retry under one two-minute absolute
+deadline and a 12-attempt cap. Each WebSocket connect/status attempt is limited
+to the smaller of 15 seconds and the remaining absolute budget; cancellation
+disposes the candidate to interrupt a stalled handshake. Immediate
+connection-refused, error, and timeout outcomes are retryable; unexpected
+pairing is not. The wizard session and prior answers are replayed only after a
+confirmed operator connection, and the existing two-restart cap remains in
+force.
 
 Before checkpoint restore, the guest validates the exact lane root under
 `GuestRoot\artifacts`, rejects reparse points and unsafe relative paths, bounds
