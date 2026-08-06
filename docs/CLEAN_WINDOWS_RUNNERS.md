@@ -635,6 +635,11 @@ cleanup is mandatory.
 The controller transfers one validated clean-HEAD source archive with
 PowerShell Direct `Copy-Item -ToSession`, runs the typed `Installed` validation
 lane by default, and never recursively copies the remote artifact directory.
+It starts the long validation process under the encrypted owned guest
+`PSCredential` with `LoadUserProfile=true`, a `SecureString` password, and
+fixed quoted arguments. This keeps the per-user registry hive loaded if the
+PowerShell Direct target recycles while WSL registers the app-owned distro;
+the credential is never added to command text or logs.
 Inside the lane, Inno install/uninstall and the E2E `dotnet.exe` build/test
 commands use one COM-independent `System.Diagnostics.Process` helper. It
 preserves typed argument boundaries, captures stdout and stderr separately,

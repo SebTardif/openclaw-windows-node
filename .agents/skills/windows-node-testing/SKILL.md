@@ -450,6 +450,11 @@ polls so subsequent target-process recycling can reconnect again within the same
 absolute deadline. Never rerun validation, and fail non-transport integrity
 errors immediately. Package only after completion evidence closes artifact
 writers, and preserve recovered phase/log diagnostics.
+Launch the long validation process under the encrypted owned guest
+`PSCredential` with `LoadUserProfile=true` and its `SecureString` password.
+This keeps the registry hive loaded across target recycling for WSL distro
+registration without putting the credential in command text, artifacts, or
+logs.
 If the packaging session broke, reconnect under the same identity guard and
 retry packaging once after removing only owned nonce archive residue. Do not
 retry healthy-session integrity failures or suppress the primary failure.

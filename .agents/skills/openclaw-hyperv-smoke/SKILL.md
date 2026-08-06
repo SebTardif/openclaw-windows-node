@@ -649,6 +649,10 @@ VM and uses short host-driven polls for the already-running lane's completion
 marker and phase status. Subsequent target-process recycling may trigger
 additional exact-VM reconnects within the same absolute deadline. It never
 reruns validation, and non-transport integrity failures fail immediately.
+Launch that long validation process under the encrypted owned guest
+`PSCredential` with `LoadUserProfile=true` and its `SecureString` password so
+target recycling cannot unload the registry hive required by WSL registration.
+Never place the credential in process arguments, artifacts, or logs.
 Recovered success proceeds to packaging; recovered failure preserves bounded
 phase/log diagnostics. Packaging starts only after those completion files prove
 artifact writers have closed. If the packaging session broke, artifact retrieval

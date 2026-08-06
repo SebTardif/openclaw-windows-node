@@ -3340,7 +3340,23 @@ public sealed class CleanWindowsRunnerScriptTests
         Assert.Contains("validationRecoveryAttempts", smoke, StringComparison.Ordinal);
         Assert.Contains("validationSessionRecovered", smoke, StringComparison.Ordinal);
         Assert.Contains("validationRecoveredExitCode", smoke, StringComparison.Ordinal);
-        Assert.Equal(1, CountOccurrences(smoke, "& $validationEngine @validationArguments"));
+        Assert.DoesNotContain("& $validationEngine @validationArguments", smoke, StringComparison.Ordinal);
+        Assert.Equal(1, CountOccurrences(smoke, "[Diagnostics.Process]::Start($processStartInfo)"));
+        Assert.Contains("$processStartInfo.LoadUserProfile = $true", smoke, StringComparison.Ordinal);
+        Assert.Contains("$processStartInfo.Password = $RemoteCredential.Password", smoke, StringComparison.Ordinal);
+        Assert.Contains("$processStartInfo.UseShellExecute = $false", smoke, StringComparison.Ordinal);
+        Assert.Contains(
+            "System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+            smoke,
+            StringComparison.Ordinal);
+        Assert.Contains("ConvertTo-SmokeNativeArgument", smoke, StringComparison.Ordinal);
+        Assert.Contains("$validationProcess.WaitForExit()", smoke, StringComparison.Ordinal);
+        Assert.Contains("$validationProcess.Dispose()", smoke, StringComparison.Ordinal);
+        Assert.Contains("$operationCredential", smoke, StringComparison.Ordinal);
+        Assert.DoesNotContain(
+            "$RemoteCredential.GetNetworkCredential().Password",
+            smoke,
+            StringComparison.Ordinal);
         Assert.Contains("Receive-SmokeArtifactArchiveWithRecovery", smoke, StringComparison.Ordinal);
         Assert.Contains(
             "while ((Get-Date) -lt $deadline)",

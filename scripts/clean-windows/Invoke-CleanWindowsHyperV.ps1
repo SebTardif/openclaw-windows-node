@@ -10342,7 +10342,8 @@ function Invoke-SmokeCommand {
                     $RemoteArtifactRoot,
                     $RemoteValidationLane,
                     $RemotePreviousRelease,
-                    $RemotePreviousInstallerSha256
+                    $RemotePreviousInstallerSha256,
+                    [pscredential]$RemoteCredential
                 )
                 if (Test-Path -LiteralPath $RemoteArtifactRoot) {
                     Remove-Item -LiteralPath $RemoteArtifactRoot -Recurse -Force
@@ -10364,7 +10365,7 @@ function Invoke-SmokeCommand {
                     )
                 } else {
                     $validationScript = Join-Path $RemoteRepoRoot "scripts\validate-installed-inno-smoke.ps1"
-                    $validationEngine = "powershell.exe"
+                    $validationEngine = Join-Path $env:SystemRoot "System32\WindowsPowerShell\v1.0\powershell.exe"
                     $validationArguments = @(
                         "-NoProfile",
                         "-ExecutionPolicy", "Bypass",
@@ -10376,6 +10377,15 @@ function Invoke-SmokeCommand {
 
                 if (-not (Test-Path -LiteralPath $validationScript -PathType Leaf)) {
                     throw "$RemoteValidationLane validation script does not exist: $validationScript"
+                }
+                if (-not (Test-Path -LiteralPath $validationEngine -PathType Leaf)) {
+                    throw "$RemoteValidationLane validation engine does not exist: $validationEngine"
+                }
+                if (
+                    $null -eq $RemoteCredential -or
+                    [string]::IsNullOrWhiteSpace($RemoteCredential.UserName)
+                ) {
+                    throw "$RemoteValidationLane validation requires the owned guest credential."
                 }
 
                 function ConvertTo-OpenClawSmokeDiagnostic {
@@ -10399,8 +10409,34 @@ function Invoke-SmokeCommand {
                     return $safe
                 }
 
-                & $validationEngine @validationArguments
-                $validationExitCode = $LASTEXITCODE
+                . (Join-Path $RemoteRepoRoot "scripts\_smoke-native-process.ps1")
+                $validationArgumentLine = (
+                    $validationArguments |
+                        ForEach-Object { ConvertTo-SmokeNativeArgument -Value ([string]$_) }
+                ) -join " "
+                $networkCredential = $RemoteCredential.GetNetworkCredential()
+                $processStartInfo = [Diagnostics.ProcessStartInfo]::new()
+                $processStartInfo.FileName = $validationEngine
+                $processStartInfo.Arguments = $validationArgumentLine
+                $processStartInfo.WorkingDirectory = $RemoteRepoRoot
+                $processStartInfo.UseShellExecute = $false
+                $processStartInfo.CreateNoWindow = $true
+                $processStartInfo.LoadUserProfile = $true
+                $processStartInfo.UserName = $networkCredential.UserName
+                $processStartInfo.Domain = $networkCredential.Domain
+                $processStartInfo.Password = $RemoteCredential.Password
+                $validationProcess = [Diagnostics.Process]::Start($processStartInfo)
+                if ($null -eq $validationProcess) {
+                    throw "$RemoteValidationLane validation process did not start."
+                }
+                try {
+                    $null = $validationProcess.Handle
+                    $validationProcess.WaitForExit()
+                    $validationProcess.WaitForExit()
+                    $validationExitCode = [int]$validationProcess.ExitCode
+                } finally {
+                    $validationProcess.Dispose()
+                }
                 if ($validationExitCode -ne 0) {
                     $phaseStatusPath = Join-Path $RemoteArtifactRoot "phase-status.json"
                     $phaseDiagnostic = if (Test-Path -LiteralPath $phaseStatusPath -PathType Leaf) {
@@ -10478,7 +10514,8 @@ function Invoke-SmokeCommand {
                 $guestArtifacts,
                 $ValidationLane,
                 $PreviousRelease,
-                $PreviousInstallerSha256.ToLowerInvariant()
+                $PreviousInstallerSha256.ToLowerInvariant(),
+                $operationCredential
             ) | Out-Null
         } catch {
             $smokeError = $_

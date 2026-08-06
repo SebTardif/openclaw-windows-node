@@ -331,6 +331,12 @@ does not inspect, overwrite, uninstall, or clean release identity state. Every p
 must report `passed`; a missing or skipped install, installed-payload check, roundtrip,
 or cleanup is a failure.
 
+The Hyper-V controller launches the long validation process with the encrypted
+owned guest `PSCredential`, `LoadUserProfile=true`, and a `SecureString`
+password. This preserves the user registry hive across PowerShell Direct target
+recycling so WSL distro registration cannot inherit an unloaded profile. The
+credential never appears in process arguments, artifacts, or logs.
+
 Artifacts are written to `TestResults\InstalledSmoke\<timestamp>`. The command prints
 the exact artifact path. `phase-status.json` is the phase gate; the folder also
 includes `installed-smoke.log`, `installed-smoke.done`, `installed-smoke.pid`, Inno
