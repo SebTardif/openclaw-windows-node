@@ -10409,10 +10409,43 @@ function Invoke-SmokeCommand {
                     return $safe
                 }
 
-                . (Join-Path $RemoteRepoRoot "scripts\_smoke-native-process.ps1")
+                function ConvertTo-OpenClawValidationArgument {
+                    param(
+                        [Parameter(Mandatory = $true)]
+                        [AllowEmptyString()]
+                        [string]$Value
+                    )
+
+                    $builder = [Text.StringBuilder]::new()
+                    [void]$builder.Append('"')
+                    $backslashes = 0
+                    foreach ($character in $Value.ToCharArray()) {
+                        if ($character -eq '\') {
+                            $backslashes++
+                            continue
+                        }
+                        if ($character -eq '"') {
+                            [void]$builder.Append(('\' * (($backslashes * 2) + 1)))
+                            [void]$builder.Append('"')
+                            $backslashes = 0
+                            continue
+                        }
+                        if ($backslashes -gt 0) {
+                            [void]$builder.Append(('\' * $backslashes))
+                            $backslashes = 0
+                        }
+                        [void]$builder.Append($character)
+                    }
+                    if ($backslashes -gt 0) {
+                        [void]$builder.Append(('\' * ($backslashes * 2)))
+                    }
+                    [void]$builder.Append('"')
+                    return $builder.ToString()
+                }
+
                 $validationArgumentLine = (
                     $validationArguments |
-                        ForEach-Object { ConvertTo-SmokeNativeArgument -Value ([string]$_) }
+                        ForEach-Object { ConvertTo-OpenClawValidationArgument -Value ([string]$_) }
                 ) -join " "
                 $networkCredential = $RemoteCredential.GetNetworkCredential()
                 $processStartInfo = [Diagnostics.ProcessStartInfo]::new()

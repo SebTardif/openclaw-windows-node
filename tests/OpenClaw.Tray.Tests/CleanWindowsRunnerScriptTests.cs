@@ -3349,7 +3349,11 @@ public sealed class CleanWindowsRunnerScriptTests
             "System32\\WindowsPowerShell\\v1.0\\powershell.exe",
             smoke,
             StringComparison.Ordinal);
-        Assert.Contains("ConvertTo-SmokeNativeArgument", smoke, StringComparison.Ordinal);
+        Assert.Contains("ConvertTo-OpenClawValidationArgument", smoke, StringComparison.Ordinal);
+        Assert.DoesNotContain(
+            ". (Join-Path $RemoteRepoRoot \"scripts\\_smoke-native-process.ps1\")",
+            smoke,
+            StringComparison.Ordinal);
         Assert.Contains("$validationProcess.WaitForExit()", smoke, StringComparison.Ordinal);
         Assert.Contains("$validationProcess.Dispose()", smoke, StringComparison.Ordinal);
         Assert.Contains("$operationCredential", smoke, StringComparison.Ordinal);
