@@ -248,6 +248,15 @@ lease-id capture and cleanup. Missing elevation, RBAC, image preparation, or
 lease proof is an external blocker, never a reason to weaken ownership or
 success-shape separate component evidence.
 
+Installed smoke creates its nonce WSL distro once. After successful exact
+registration, setup polls root readiness for at most three minutes using
+separately bounded 30-second probes, exact generated-distro and WSL2
+revalidation, and bounded exponential delay. Retry only timeout, empty output,
+and classified pristine first-launch transients. Missing or changed
+registration, unexpected identity/output, and terminal WSL errors fail closed.
+Failure and cancellation clean up only that exact nonce distro; install is
+never replayed.
+
 If `Checkpoint-VM` returned before an exact fixed-name snapshot became visible,
 do not issue ad hoc checkpoint commands. Route pending-intent or the narrowly
 documented completed-unattended markerless state through the Hyper-V skill's

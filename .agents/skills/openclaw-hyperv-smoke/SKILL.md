@@ -509,6 +509,15 @@ configuration then budgets 45 seconds per emitted cold
 default nine commands) and records command-count plus sanitized tail evidence
 on failure.
 
+After the one exact named `wsl.exe --install` succeeds, first launch gets one
+three-minute absolute root-readiness deadline. Every probe targets only the
+generated distro, runs for at most 30 seconds, and is guarded by exact
+registration plus WSL2 checks. Retry only timeout, empty output, and classified
+first-launch transients with bounded exponential polling. Never repeat install.
+Missing or changed registration, unexpected root identity/output, and other WSL
+errors fail closed with bounded sanitized attempt diagnostics. Cancellation or
+failure terminates and unregisters only the exact nonce distro.
+
 `openclaw gateway start` can outlive its bounded controller command after
 systemd has already created the socket. Recovery requires the installed
 `openclaw-gateway.service` to be `active/running` and its exact nonzero

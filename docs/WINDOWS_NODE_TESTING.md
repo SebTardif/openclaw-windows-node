@@ -342,6 +342,15 @@ Before that launch, the controller repeats its bounded reparse-safe owner walk
 after Git commit so generated `.git` metadata is also owned by the guest
 administrator SID and trusted to the profile-loaded token.
 
+Within the nested Installed setup, a successful exact WSL install is followed
+by a three-minute first-launch readiness deadline. Each exact root probe is
+bounded to 30 seconds and is preceded and followed after retryable failures by
+exact generated-distro registration and WSL2 checks. The setup engine retries
+only timeout, empty output, and classified first-launch transients, never
+repeats installation, and fails closed on missing or changed registration,
+unexpected identity/output, or terminal WSL diagnostics. Failure and
+cancellation clean up only that nonce distro.
+
 Artifacts are written to `TestResults\InstalledSmoke\<timestamp>`. The command prints
 the exact artifact path. `phase-status.json` is the phase gate; the folder also
 includes `installed-smoke.log`, `installed-smoke.done`, `installed-smoke.pid`, Inno

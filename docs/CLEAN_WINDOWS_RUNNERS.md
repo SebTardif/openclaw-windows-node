@@ -661,6 +661,17 @@ a 15-minute budget instead of the insufficient five-minute clean-bootstrap
 budget. Timeout and nonzero results report sanitized, bounded stdout and stderr
 tails without putting credentials in diagnostics.
 
+After the single exact `wsl.exe --install` succeeds, pristine first launch is
+allowed up to three minutes to become root-ready. The setup engine repeatedly
+confirms that only the exact generated distro remains registered as WSL2, then
+runs the exact root identity and filesystem probe with at most 30 seconds per
+attempt. Timeout, empty output, and explicitly classified first-launch
+transients use bounded exponential polling. Missing or changed registration,
+unexpected root identity/output, and other WSL errors fail closed. Installation
+is never repeated. Failure or cancellation terminates and unregisters only the
+exact generated distro, and diagnostics retain a sanitized bounded attempt
+tail.
+
 After CLI installation, gateway configuration launches the Node CLI once per
 emitted `openclaw config set`. Its aggregate deadline is fixed startup
 headroom plus 45 seconds per command (7.5 minutes for the default nine-command

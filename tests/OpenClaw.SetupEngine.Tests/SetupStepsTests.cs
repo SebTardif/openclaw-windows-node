@@ -19,6 +19,10 @@ public class SetupStepsTests : IDisposable
     private readonly ITestOutputHelper _output;
     private const string DevicePairPluginNotFoundOutput = "plugins.entries.device-pair: plugin not found: device-pair";
     private const string OtherPluginNotFoundOutput = "plugins.entries.other-plugin: plugin not found: other-plugin";
+    private const string FreshDistroReadyMarker = "OPENCLAW_FRESH_WSL_READY";
+    private const string FreshDistroReadyOutput = "0\nOPENCLAW_FRESH_WSL_READY\n";
+    private const string FreshDistroVerboseOutput =
+        "  NAME              STATE           VERSION\n* OpenClawGateway   Stopped         2\n";
 
     public SetupStepsTests(ITestOutputHelper output)
     {
@@ -1060,6 +1064,399 @@ public class SetupStepsTests : IDisposable
         Assert.Contains("--location", installCall.Arguments);
         Assert.Contains(Path.Combine(ctx.LocalDataDir, "wsl", "OpenClawGateway"), installCall.Arguments);
         Assert.Contains("--web-download", installCall.Arguments);
+    }
+
+    [Fact]
+    public async Task CreateWslInstance_RetriesFirstLaunchBeyondThirtySecondsThenSucceeds()
+    {
+        var installed = false;
+        var probeCalls = 0;
+        var clock = new AdvancingFreshDistroReadinessClock();
+        var commands = new FakeCommandRunner(args =>
+        {
+            if (args.SequenceEqual(["--list", "--quiet"]))
+                return Ok(installed ? "OpenClawGateway\n" : "");
+            if (args.Contains("--install"))
+            {
+                installed = true;
+                return Ok();
+            }
+            if (args.SequenceEqual(["--list", "--verbose"]))
+                return Ok(FreshDistroVerboseOutput);
+            if (IsFreshDistroRootProbe(args))
+            {
+                probeCalls++;
+                if (probeCalls == 1)
+                {
+                    clock.Advance(TimeSpan.FromSeconds(31));
+                    return TimedOut();
+                }
+
+                return Ok(FreshDistroReadyOutput);
+            }
+
+            return Fail($"unexpected args: {string.Join(' ', args)}");
+        });
+        var ctx = CreateContext(commands: commands);
+
+        var result = await new CreateWslInstanceStep(clock).ExecuteAsync(ctx, CancellationToken.None);
+
+        Assert.True(result.IsSuccess, result.Message);
+        Assert.Equal(2, probeCalls);
+        Assert.True(clock.Elapsed > TimeSpan.FromSeconds(30));
+        Assert.Single(commands.Calls, call => call.Arguments.Contains("--install"));
+        Assert.All(
+            commands.TimedCalls.Where(call => IsFreshDistroRootProbe(call.Arguments)),
+            call => Assert.InRange(call.Timeout, TimeSpan.Zero, CreateWslInstanceStep.FreshDistroProbeTimeout));
+    }
+
+    [Fact]
+    public async Task CreateWslInstance_RepeatedTimeoutsThenSuccessNeverRepeatsInstall()
+    {
+        var installed = false;
+        var probeCalls = 0;
+        var clock = new AdvancingFreshDistroReadinessClock();
+        var commands = new FakeCommandRunner(args =>
+        {
+            if (args.SequenceEqual(["--list", "--quiet"]))
+                return Ok(installed ? "OpenClawGateway\n" : "");
+            if (args.Contains("--install"))
+            {
+                installed = true;
+                return Ok();
+            }
+            if (args.SequenceEqual(["--list", "--verbose"]))
+                return Ok(FreshDistroVerboseOutput);
+            if (IsFreshDistroRootProbe(args))
+            {
+                probeCalls++;
+                if (probeCalls <= 2)
+                {
+                    clock.Advance(TimeSpan.FromSeconds(30));
+                    return TimedOut();
+                }
+
+                return Ok(FreshDistroReadyOutput);
+            }
+
+            return Fail($"unexpected args: {string.Join(' ', args)}");
+        });
+        var ctx = CreateContext(commands: commands);
+
+        var result = await new CreateWslInstanceStep(clock).ExecuteAsync(ctx, CancellationToken.None);
+
+        Assert.True(result.IsSuccess, result.Message);
+        Assert.Equal(3, probeCalls);
+        Assert.Single(commands.Calls, call => call.Arguments.Contains("--install"));
+    }
+
+    [Fact]
+    public async Task CreateWslInstance_RegistrationTimeReducesPerAttemptProbeTimeout()
+    {
+        var installed = false;
+        var clock = new AdvancingFreshDistroReadinessClock();
+        var commands = new FakeCommandRunner(args =>
+        {
+            if (args.SequenceEqual(["--list", "--quiet"]))
+            {
+                if (installed)
+                    clock.Advance(TimeSpan.FromSeconds(10));
+                return Ok(installed ? "OpenClawGateway\n" : "");
+            }
+            if (args.Contains("--install"))
+            {
+                installed = true;
+                return Ok();
+            }
+            if (args.SequenceEqual(["--list", "--verbose"]))
+            {
+                clock.Advance(TimeSpan.FromSeconds(10));
+                return Ok(FreshDistroVerboseOutput);
+            }
+            if (IsFreshDistroRootProbe(args))
+                return Ok(FreshDistroReadyOutput);
+
+            return Fail($"unexpected args: {string.Join(' ', args)}");
+        });
+        var ctx = CreateContext(commands: commands);
+
+        var result = await new CreateWslInstanceStep(
+            clock,
+            readinessTimeout: TimeSpan.FromSeconds(25)).ExecuteAsync(ctx, CancellationToken.None);
+
+        Assert.True(result.IsSuccess, result.Message);
+        var probe = Assert.Single(commands.TimedCalls, call => IsFreshDistroRootProbe(call.Arguments));
+        Assert.Equal(TimeSpan.FromSeconds(5), probe.Timeout);
+        Assert.Single(commands.Calls, call => call.Arguments.Contains("--install"));
+    }
+
+    [Fact]
+    public async Task CreateWslInstance_RetriesClassifiedTransientFirstLaunchFailure()
+    {
+        var installed = false;
+        var probeCalls = 0;
+        var clock = new AdvancingFreshDistroReadinessClock();
+        var commands = new FakeCommandRunner(args =>
+        {
+            if (args.SequenceEqual(["--list", "--quiet"]))
+                return Ok(installed ? "OpenClawGateway\n" : "");
+            if (args.Contains("--install"))
+            {
+                installed = true;
+                return Ok();
+            }
+            if (args.SequenceEqual(["--list", "--verbose"]))
+                return Ok(FreshDistroVerboseOutput);
+            if (IsFreshDistroRootProbe(args))
+            {
+                probeCalls++;
+                return probeCalls == 1
+                    ? Fail("Wsl/Service/CreateInstance/HCS_E_OPERATION_PENDING")
+                    : Ok(FreshDistroReadyOutput);
+            }
+
+            return Fail($"unexpected args: {string.Join(' ', args)}");
+        });
+        var ctx = CreateContext(commands: commands);
+
+        var result = await new CreateWslInstanceStep(clock).ExecuteAsync(ctx, CancellationToken.None);
+
+        Assert.True(result.IsSuccess, result.Message);
+        Assert.Equal(2, probeCalls);
+        Assert.Single(commands.Calls, call => call.Arguments.Contains("--install"));
+    }
+
+    [Fact]
+    public async Task CreateWslInstance_ReadinessDeadlineFailsAndCleansExactDistro()
+    {
+        var registered = false;
+        var installPath = "";
+        var probeCalls = 0;
+        var clock = new AdvancingFreshDistroReadinessClock();
+        var commands = new FakeCommandRunner(args =>
+        {
+            if (args.SequenceEqual(["--list", "--quiet"]))
+                return Ok(registered ? "OpenClawGateway\n" : "");
+            if (args.Contains("--install"))
+            {
+                registered = true;
+                Directory.CreateDirectory(installPath);
+                File.WriteAllText(Path.Combine(installPath, "ext4.vhdx"), "partial");
+                return Ok();
+            }
+            if (args.SequenceEqual(["--list", "--verbose"]))
+                return Ok(FreshDistroVerboseOutput);
+            if (IsFreshDistroRootProbe(args))
+            {
+                probeCalls++;
+                clock.Advance(TimeSpan.FromSeconds(30));
+                return TimedOut();
+            }
+            if (args.SequenceEqual(["--terminate", "OpenClawGateway"]))
+                return Ok();
+            if (args.SequenceEqual(["--unregister", "OpenClawGateway"]))
+            {
+                registered = false;
+                return Ok();
+            }
+
+            return Fail($"unexpected args: {string.Join(' ', args)}");
+        });
+        var ctx = CreateContext(commands: commands);
+        installPath = Path.Combine(ctx.LocalDataDir, "wsl", "OpenClawGateway");
+
+        var result = await new CreateWslInstanceStep(
+            clock,
+            readinessTimeout: TimeSpan.FromSeconds(65)).ExecuteAsync(ctx, CancellationToken.None);
+
+        Assert.Equal(StepOutcome.Failed, result.Outcome);
+        Assert.Contains("within 1 minute(s)", result.Message);
+        Assert.Contains("Bounded readiness diagnostics", result.Message);
+        Assert.Equal(2, probeCalls);
+        Assert.Single(commands.Calls, call => call.Arguments.Contains("--install"));
+        Assert.Single(commands.Calls, call => call.Arguments.SequenceEqual(["--unregister", "OpenClawGateway"]));
+        Assert.DoesNotContain(commands.Calls, call => call.Arguments.SequenceEqual(["--shutdown"]));
+        Assert.False(Directory.Exists(installPath));
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("DifferentGateway\n")]
+    public async Task CreateWslInstance_DistroDisappearanceOrChangeFailsClosed(string changedDistroList)
+    {
+        var listCalls = 0;
+        var installed = false;
+        var probeCalls = 0;
+        var clock = new AdvancingFreshDistroReadinessClock();
+        var commands = new FakeCommandRunner(args =>
+        {
+            if (args.SequenceEqual(["--list", "--quiet"]))
+            {
+                listCalls++;
+                if (!installed)
+                    return Ok("");
+                return Ok(listCalls <= 2 ? "OpenClawGateway\n" : changedDistroList);
+            }
+            if (args.Contains("--install"))
+            {
+                installed = true;
+                return Ok();
+            }
+            if (args.SequenceEqual(["--list", "--verbose"]))
+                return Ok(FreshDistroVerboseOutput);
+            if (IsFreshDistroRootProbe(args))
+            {
+                probeCalls++;
+                return TimedOut();
+            }
+
+            return Fail($"unexpected args: {string.Join(' ', args)}");
+        });
+        var ctx = CreateContext(commands: commands);
+
+        var result = await new CreateWslInstanceStep(clock).ExecuteAsync(ctx, CancellationToken.None);
+
+        Assert.Equal(StepOutcome.FailedTerminal, result.Outcome);
+        Assert.Contains("lost exact distro 'OpenClawGateway'", result.Message);
+        Assert.Equal(1, probeCalls);
+        Assert.Single(commands.Calls, call => call.Arguments.Contains("--install"));
+        Assert.DoesNotContain(commands.Calls, call =>
+            call.Arguments.Contains("DifferentGateway", StringComparer.Ordinal));
+    }
+
+    [Fact]
+    public async Task CreateWslInstance_TerminalProbeErrorFailsWithoutRetry()
+    {
+        var installed = false;
+        var probeCalls = 0;
+        var commands = new FakeCommandRunner(args =>
+        {
+            if (args.SequenceEqual(["--list", "--quiet"]))
+                return Ok(installed ? "OpenClawGateway\n" : "");
+            if (args.Contains("--install"))
+            {
+                installed = true;
+                return Ok();
+            }
+            if (args.SequenceEqual(["--list", "--verbose"]))
+                return Ok(FreshDistroVerboseOutput);
+            if (IsFreshDistroRootProbe(args))
+            {
+                probeCalls++;
+                return Fail(
+                    "Wsl/Service/CreateInstance/WSL_E_CORRUPT_DISTRO " +
+                    "token=abcDEF1234567890 " +
+                    string.Join(' ', Enumerable.Repeat("diagnostic", 100)));
+            }
+            if (args.SequenceEqual(["--terminate", "OpenClawGateway"]) ||
+                args.SequenceEqual(["--unregister", "OpenClawGateway"]))
+            {
+                if (args.Contains("--unregister"))
+                    installed = false;
+                return Ok();
+            }
+
+            return Fail($"unexpected args: {string.Join(' ', args)}");
+        });
+        var ctx = CreateContext(commands: commands);
+
+        var result = await new CreateWslInstanceStep().ExecuteAsync(ctx, CancellationToken.None);
+
+        Assert.Equal(StepOutcome.FailedTerminal, result.Outcome);
+        Assert.Contains("terminal root readiness result", result.Message);
+        Assert.Contains("WSL_E_CORRUPT_DISTRO", result.Message);
+        Assert.Contains("[truncated", result.Message);
+        Assert.DoesNotContain("abcDEF1234567890", result.Message);
+        Assert.True(result.Message!.Length < 2_000, result.Message);
+        Assert.Equal(1, probeCalls);
+        Assert.Single(commands.Calls, call => call.Arguments.Contains("--install"));
+    }
+
+    [Fact]
+    public async Task CreateWslInstance_UnexpectedRootIdentityFailsClosed()
+    {
+        var installed = false;
+        var probeCalls = 0;
+        var commands = new FakeCommandRunner(args =>
+        {
+            if (args.SequenceEqual(["--list", "--quiet"]))
+                return Ok(installed ? "OpenClawGateway\n" : "");
+            if (args.Contains("--install"))
+            {
+                installed = true;
+                return Ok();
+            }
+            if (args.SequenceEqual(["--list", "--verbose"]))
+                return Ok(FreshDistroVerboseOutput);
+            if (IsFreshDistroRootProbe(args))
+            {
+                probeCalls++;
+                return Ok($"1000\n{FreshDistroReadyMarker}\n");
+            }
+            if (args.SequenceEqual(["--terminate", "OpenClawGateway"]) ||
+                args.SequenceEqual(["--unregister", "OpenClawGateway"]))
+            {
+                if (args.Contains("--unregister"))
+                    installed = false;
+                return Ok();
+            }
+
+            return Fail($"unexpected args: {string.Join(' ', args)}");
+        });
+        var ctx = CreateContext(commands: commands);
+
+        var result = await new CreateWslInstanceStep().ExecuteAsync(ctx, CancellationToken.None);
+
+        Assert.Equal(StepOutcome.FailedTerminal, result.Outcome);
+        Assert.Contains("unexpected root identity or output", result.Message);
+        Assert.Equal(1, probeCalls);
+        Assert.Single(commands.Calls, call => call.Arguments.Contains("--install"));
+    }
+
+    [Fact]
+    public async Task CreateWslInstance_CancellationDuringReadinessCleansOnlyExactDistro()
+    {
+        using var cancellation = new CancellationTokenSource();
+        var registered = false;
+        var installPath = "";
+        var clock = new CancellingFreshDistroReadinessClock(cancellation);
+        var commands = new FakeCommandRunner(args =>
+        {
+            if (args.SequenceEqual(["--list", "--quiet"]))
+                return Ok(registered ? "OpenClawGateway\n" : "");
+            if (args.Contains("--install"))
+            {
+                registered = true;
+                Directory.CreateDirectory(installPath);
+                File.WriteAllText(Path.Combine(installPath, "ext4.vhdx"), "partial");
+                return Ok();
+            }
+            if (args.SequenceEqual(["--list", "--verbose"]))
+                return Ok(FreshDistroVerboseOutput);
+            if (IsFreshDistroRootProbe(args))
+                return TimedOut();
+            if (args.SequenceEqual(["--terminate", "OpenClawGateway"]))
+                return Ok();
+            if (args.SequenceEqual(["--unregister", "OpenClawGateway"]))
+            {
+                registered = false;
+                return Ok();
+            }
+
+            return Fail($"unexpected args: {string.Join(' ', args)}");
+        });
+        var ctx = CreateContext(commands: commands);
+        installPath = Path.Combine(ctx.LocalDataDir, "wsl", "OpenClawGateway");
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(
+            () => new CreateWslInstanceStep(clock).ExecuteAsync(ctx, cancellation.Token));
+
+        Assert.Single(commands.Calls, call => call.Arguments.Contains("--install"));
+        Assert.Single(commands.Calls, call => call.Arguments.SequenceEqual(["--terminate", "OpenClawGateway"]));
+        Assert.Single(commands.Calls, call => call.Arguments.SequenceEqual(["--unregister", "OpenClawGateway"]));
+        Assert.DoesNotContain(commands.Calls, call => call.Arguments.SequenceEqual(["--shutdown"]));
+        Assert.False(registered);
+        Assert.False(Directory.Exists(installPath));
     }
 
     [Fact]
@@ -3339,6 +3736,11 @@ public class SetupStepsTests : IDisposable
     private static CommandResult TimedOut()
         => new(-1, "", "", TimeSpan.FromSeconds(30), TimedOut: true);
 
+    private static bool IsFreshDistroRootProbe(string[] arguments)
+        => arguments.SequenceEqual(
+            ["-d", "OpenClawGateway", "-u", "root", "--", "sh", "-lc",
+             "id -u && test -d / && echo OPENCLAW_FRESH_WSL_READY"]);
+
     private static string AgentsListJson(string workspace, string id = "main", bool isDefault = true)
         => JsonSerializer.Serialize(new[] { new { id, workspace, isDefault } });
 
@@ -3874,6 +4276,7 @@ public class SetupStepsTests : IDisposable
     {
         public List<(string Executable, string[] Arguments)> Calls { get; } = [];
         public List<(string Executable, string[] Arguments, string? StdinInput)> DetailedCalls { get; } = [];
+        public List<(string Executable, string[] Arguments, TimeSpan Timeout)> TimedCalls { get; } = [];
         public List<(string DistroName, string Command, TimeSpan Timeout, string? User, bool InputViaStdin)> WslCalls { get; } = [];
         public List<IReadOnlyDictionary<string, string>?> WslEnvironments { get; } = [];
 
@@ -3888,6 +4291,7 @@ public class SetupStepsTests : IDisposable
         {
             Calls.Add((executable, arguments));
             DetailedCalls.Add((executable, arguments, stdinInput));
+            TimedCalls.Add((executable, arguments, timeout));
             return Task.FromResult(run(arguments));
         }
 
@@ -3930,6 +4334,37 @@ public class SetupStepsTests : IDisposable
         {
             cancellationToken.ThrowIfCancellationRequested();
             UtcNow = UtcNow.Add(delay);
+            return Task.CompletedTask;
+        }
+    }
+
+    private sealed class AdvancingFreshDistroReadinessClock : IFreshDistroReadinessClock
+    {
+        public TimeSpan Elapsed { get; private set; }
+
+        public long GetTimestamp() => 0;
+        public TimeSpan GetElapsedTime(long startingTimestamp) => Elapsed;
+
+        public Task DelayAsync(TimeSpan delay, CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            Advance(delay);
+            return Task.CompletedTask;
+        }
+
+        public void Advance(TimeSpan elapsed) => Elapsed += elapsed;
+    }
+
+    private sealed class CancellingFreshDistroReadinessClock(CancellationTokenSource cancellation)
+        : IFreshDistroReadinessClock
+    {
+        public long GetTimestamp() => 0;
+        public TimeSpan GetElapsedTime(long startingTimestamp) => TimeSpan.Zero;
+
+        public Task DelayAsync(TimeSpan delay, CancellationToken cancellationToken)
+        {
+            cancellation.Cancel();
+            cancellationToken.ThrowIfCancellationRequested();
             return Task.CompletedTask;
         }
     }

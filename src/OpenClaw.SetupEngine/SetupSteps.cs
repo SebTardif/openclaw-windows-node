@@ -738,8 +738,56 @@ public sealed class PreflightPortStep : SetupStep
 // WSL STEPS
 // ═══════════════════════════════════════════════════════════════════
 
+internal interface IFreshDistroReadinessClock
+{
+    long GetTimestamp();
+    TimeSpan GetElapsedTime(long startingTimestamp);
+    Task DelayAsync(TimeSpan delay, CancellationToken cancellationToken);
+}
+
+internal sealed class SystemFreshDistroReadinessClock : IFreshDistroReadinessClock
+{
+    public static readonly SystemFreshDistroReadinessClock Instance = new();
+
+    public long GetTimestamp() => Stopwatch.GetTimestamp();
+    public TimeSpan GetElapsedTime(long startingTimestamp) => Stopwatch.GetElapsedTime(startingTimestamp);
+    public Task DelayAsync(TimeSpan delay, CancellationToken cancellationToken) => Task.Delay(delay, cancellationToken);
+}
+
 public sealed class CreateWslInstanceStep : SetupStep
 {
+    internal static readonly TimeSpan FreshDistroReadinessTimeout = TimeSpan.FromMinutes(3);
+    internal static readonly TimeSpan FreshDistroProbeTimeout = TimeSpan.FromSeconds(30);
+    private static readonly TimeSpan InitialReadinessPollDelay = TimeSpan.FromSeconds(2);
+    private static readonly TimeSpan MaximumReadinessPollDelay = TimeSpan.FromSeconds(10);
+    private static readonly TimeSpan CancellationCleanupTimeout = TimeSpan.FromMinutes(4);
+    private const int MaximumReadinessDiagnosticAttempts = 8;
+    private const int MaximumReadinessDiagnosticCharacters = 512;
+    private const string FreshDistroReadyMarker = "OPENCLAW_FRESH_WSL_READY";
+    private const string FreshDistroRootProbe = "id -u && test -d / && echo OPENCLAW_FRESH_WSL_READY";
+    private readonly IFreshDistroReadinessClock _readinessClock;
+    private readonly TimeSpan _readinessTimeout;
+    private readonly TimeSpan _probeTimeout;
+
+    public CreateWslInstanceStep()
+        : this(SystemFreshDistroReadinessClock.Instance, FreshDistroReadinessTimeout, FreshDistroProbeTimeout)
+    {
+    }
+
+    internal CreateWslInstanceStep(
+        IFreshDistroReadinessClock readinessClock,
+        TimeSpan? readinessTimeout = null,
+        TimeSpan? probeTimeout = null)
+    {
+        _readinessClock = readinessClock;
+        _readinessTimeout = readinessTimeout ?? FreshDistroReadinessTimeout;
+        _probeTimeout = probeTimeout ?? FreshDistroProbeTimeout;
+        if (_readinessTimeout <= TimeSpan.Zero)
+            throw new ArgumentOutOfRangeException(nameof(readinessTimeout));
+        if (_probeTimeout <= TimeSpan.Zero)
+            throw new ArgumentOutOfRangeException(nameof(probeTimeout));
+    }
+
     public override string Id => "wsl-create";
     public override string DisplayName => "Create WSL instance";
     public override bool CanRetry => false;
@@ -772,27 +820,51 @@ public sealed class CreateWslInstanceStep : SetupStep
 
         var installArgs = WslInstallSupport.BuildDirectInstallArgs(baseDistro, distro, installPath);
         ctx.Logger.Info($"Installing fresh WSL distro with arguments: {string.Join(' ', installArgs)}");
-        var install = await ctx.Commands.RunAsync(
-            WslConstants.WslExePath,
-            installArgs,
-            TimeSpan.FromMinutes(15),
-            ct: ct);
-
-        if (install.ExitCode != 0)
+        try
         {
-            var cleanupError = await CleanupPartialInstall(ctx, distro, installPath, ct);
-            return StepResult.Fail(
-                $"Fresh WSL install failed for '{distro}' from '{baseDistro}' (exit {install.ExitCode}): {FirstNonEmpty(install.Stderr, install.Stdout)}{cleanupError}");
-        }
+            var install = await ctx.Commands.RunAsync(
+                WslConstants.WslExePath,
+                installArgs,
+                TimeSpan.FromMinutes(15),
+                ct: ct);
 
-        var verify = await VerifyFreshDistro(ctx, distro, installPath, ct);
-        if (!verify.IsSuccess)
+            if (install.ExitCode != 0)
+            {
+                var cleanupError = await CleanupPartialInstall(ctx, distro, installPath, ct);
+                return StepResult.Fail(
+                    $"Fresh WSL install failed for '{distro}' from '{baseDistro}' (exit {install.ExitCode}): {GetBoundedDiagnostic(install)}{cleanupError}");
+            }
+
+            var verify = await WaitForFreshDistroReadiness(ctx, distro, installPath, ct);
+            if (!verify.IsSuccess)
+            {
+                var cleanupError = await CleanupPartialInstall(ctx, distro, installPath, ct);
+                var message = $"{verify.Message}{cleanupError}";
+                return verify.Outcome == StepOutcome.FailedTerminal
+                    ? StepResult.Terminal(message)
+                    : StepResult.Fail(message);
+            }
+
+            return verify;
+        }
+        catch (OperationCanceledException cancellation) when (ct.IsCancellationRequested)
         {
-            var cleanupError = await CleanupPartialInstall(ctx, distro, installPath, ct);
-            return StepResult.Fail($"{verify.Message}{cleanupError}");
-        }
+            using var cleanupCts = new CancellationTokenSource(CancellationCleanupTimeout);
+            string cleanupError;
+            try
+            {
+                cleanupError = await CleanupPartialInstall(ctx, distro, installPath, cleanupCts.Token);
+            }
+            catch (OperationCanceledException cleanupCancellation)
+            {
+                cleanupError = $" Partial app-owned distro cleanup also failed: {GetBoundedDiagnostic(cleanupCancellation.Message)}";
+            }
 
-        return verify;
+            if (!string.IsNullOrEmpty(cleanupError))
+                throw new IOException($"Fresh WSL setup was cancelled.{cleanupError}", cancellation);
+
+            throw;
+        }
     }
 
     private static StepResult EnsureInstallPathReady(string installPath)
@@ -822,33 +894,273 @@ public sealed class CreateWslInstanceStep : SetupStep
         return StepResult.Ok();
     }
 
-    private static async Task<StepResult> VerifyFreshDistro(SetupContext ctx, string distro, string installPath, CancellationToken ct)
+    private async Task<StepResult> WaitForFreshDistroReadiness(
+        SetupContext ctx,
+        string distro,
+        string installPath,
+        CancellationToken ct)
     {
-        var list = await ctx.Commands.RunAsync(WslConstants.WslExePath, ["--list", "--quiet"], TimeSpan.FromSeconds(15), ct: ct);
-        if (list.ExitCode != 0 || !WslInstallSupport.ContainsDistro(list.Stdout, distro))
+        var started = _readinessClock.GetTimestamp();
+        var attempts = 0;
+        var omittedDiagnostics = 0;
+        var diagnostics = new Queue<string>();
+
+        while (true)
         {
-            var environmentIssue = await PreflightWslStep.DetectEnvironmentIssueAsync(ctx, ct);
-            var baseMessage = $"Fresh WSL install did not register expected distro '{distro}'.";
-            return StepResult.Fail(environmentIssue != null ? $"{baseMessage} {environmentIssue}" : baseMessage);
+            ct.ThrowIfCancellationRequested();
+            var remaining = GetRemainingReadinessTime(started);
+            if (remaining <= TimeSpan.Zero)
+                return BuildReadinessDeadlineFailure(distro, attempts, omittedDiagnostics, diagnostics);
+
+            var registration = await VerifyExactDistroRegistration(ctx, distro, started, ct);
+            if (!registration.IsSuccess)
+                return registration;
+
+            remaining = GetRemainingReadinessTime(started);
+            if (remaining <= TimeSpan.Zero)
+                return BuildReadinessDeadlineFailure(distro, attempts, omittedDiagnostics, diagnostics);
+
+            attempts++;
+            var currentProbeTimeout = remaining < _probeTimeout ? remaining : _probeTimeout;
+            var probe = await ctx.Commands.RunAsync(
+                WslConstants.WslExePath,
+                ["-d", distro, "-u", "root", "--", "sh", "-lc", FreshDistroRootProbe],
+                currentProbeTimeout,
+                ct: ct);
+
+            var disposition = ClassifyReadinessProbe(probe, out var terminalReason);
+            if (disposition == FreshDistroProbeDisposition.Ready)
+                return StepResult.Ok($"Created clean WSL2 distro '{distro}' at '{installPath}' after {attempts} readiness attempt(s)");
+
+            AddReadinessDiagnostic(diagnostics, ref omittedDiagnostics, attempts, probe);
+            if (disposition == FreshDistroProbeDisposition.Terminal)
+            {
+                return StepResult.Terminal(
+                    $"Fresh WSL distro '{distro}' returned a terminal root readiness result on attempt {attempts}: " +
+                    $"{terminalReason}. {FormatReadinessDiagnostics(omittedDiagnostics, diagnostics)}");
+            }
+
+            remaining = GetRemainingReadinessTime(started);
+            if (remaining <= TimeSpan.Zero)
+                return BuildReadinessDeadlineFailure(distro, attempts, omittedDiagnostics, diagnostics);
+
+            // A timed-out first launch can leave WSL initialization running after
+            // the exact probe process is killed. Reconfirm the same registration
+            // before waiting or issuing another probe. Never repeat installation.
+            registration = await VerifyExactDistroRegistration(ctx, distro, started, ct);
+            if (!registration.IsSuccess)
+                return registration;
+
+            remaining = GetRemainingReadinessTime(started);
+            if (remaining <= TimeSpan.Zero)
+                return BuildReadinessDeadlineFailure(distro, attempts, omittedDiagnostics, diagnostics);
+
+            var pollDelaySeconds = Math.Min(
+                MaximumReadinessPollDelay.TotalSeconds,
+                InitialReadinessPollDelay.TotalSeconds * Math.Pow(2, Math.Min(attempts - 1, 3)));
+            var pollDelay = TimeSpan.FromSeconds(pollDelaySeconds);
+            await _readinessClock.DelayAsync(remaining < pollDelay ? remaining : pollDelay, ct);
+        }
+    }
+
+    private async Task<StepResult> VerifyExactDistroRegistration(
+        SetupContext ctx,
+        string distro,
+        long started,
+        CancellationToken ct)
+    {
+        var remaining = GetRemainingReadinessTime(started);
+        if (remaining <= TimeSpan.Zero)
+            return StepResult.Fail($"Fresh WSL readiness deadline expired while verifying exact distro '{distro}' registration.");
+
+        var list = await ctx.Commands.RunAsync(
+            WslConstants.WslExePath,
+            ["--list", "--quiet"],
+            MinTimeout(TimeSpan.FromSeconds(15), remaining),
+            ct: ct);
+        if (GetRemainingReadinessTime(started) <= TimeSpan.Zero)
+            return StepResult.Fail($"Fresh WSL readiness deadline expired while listing exact distro '{distro}'.");
+
+        if (list.ExitCode != 0)
+        {
+            return StepResult.Terminal(
+                $"Fresh WSL readiness could not verify exact distro '{distro}' registration: {GetBoundedDiagnostic(list)}");
         }
 
-        var verbose = await ctx.Commands.RunAsync(WslConstants.WslExePath, ["--list", "--verbose"], TimeSpan.FromSeconds(15), ct: ct);
-        if (verbose.ExitCode != 0 || !WslInstallSupport.TryGetDistroVersion(verbose.Stdout, distro, out var version))
-            return StepResult.Fail($"Fresh WSL install registered '{distro}', but setup could not verify it is WSL2.");
+        if (!WslInstallSupport.ContainsDistro(list.Stdout, distro))
+        {
+            return StepResult.Terminal(
+                $"Fresh WSL readiness lost exact distro '{distro}'; refusing to install or probe a different distro.");
+        }
+
+        remaining = GetRemainingReadinessTime(started);
+        if (remaining <= TimeSpan.Zero)
+            return StepResult.Fail($"Fresh WSL readiness deadline expired while verifying exact distro '{distro}' version.");
+
+        var verbose = await ctx.Commands.RunAsync(
+            WslConstants.WslExePath,
+            ["--list", "--verbose"],
+            MinTimeout(TimeSpan.FromSeconds(15), remaining),
+            ct: ct);
+        if (GetRemainingReadinessTime(started) <= TimeSpan.Zero)
+            return StepResult.Fail($"Fresh WSL readiness deadline expired while reading exact distro '{distro}' version.");
+
+        if (verbose.ExitCode != 0)
+        {
+            return StepResult.Terminal(
+                $"Fresh WSL readiness could not verify exact distro '{distro}' version: {GetBoundedDiagnostic(verbose)}");
+        }
+
+        if (!WslInstallSupport.TryGetDistroVersion(verbose.Stdout, distro, out var version))
+        {
+            return StepResult.Terminal(
+                $"Fresh WSL readiness found exact distro '{distro}', but its registered WSL version was missing or malformed.");
+        }
 
         if (version != 2)
-            return StepResult.Fail($"Fresh WSL install registered '{distro}' as WSL{version}; WSL2 is required.");
+            return StepResult.Terminal($"Fresh WSL readiness found exact distro '{distro}' registered as WSL{version}; WSL2 is required.");
 
-        var probe = await ctx.Commands.RunAsync(
-            WslConstants.WslExePath,
-            ["-d", distro, "-u", "root", "--", "sh", "-lc", "id -u && test -d / && echo OPENCLAW_FRESH_WSL_READY"],
-            TimeSpan.FromSeconds(30),
-            ct: ct);
+        return StepResult.Ok();
+    }
 
-        if (probe.ExitCode != 0 || !probe.Stdout.Contains("OPENCLAW_FRESH_WSL_READY", StringComparison.Ordinal))
-            return StepResult.Fail($"Fresh WSL distro '{distro}' could not run a root verification command: {FirstNonEmpty(probe.Stderr, probe.Stdout)}");
+    private static FreshDistroProbeDisposition ClassifyReadinessProbe(
+        CommandResult probe,
+        out string terminalReason)
+    {
+        var stdoutLines = WslInstallSupport.Normalize(probe.Stdout)
+            .Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries)
+            .Select(line => line.Trim())
+            .Where(line => line.Length > 0)
+            .ToArray();
+        var hasExactReadyOutput =
+            probe.ExitCode == 0 &&
+            string.IsNullOrWhiteSpace(WslInstallSupport.Normalize(probe.Stderr)) &&
+            stdoutLines.SequenceEqual(["0", FreshDistroReadyMarker], StringComparer.Ordinal);
+        if (hasExactReadyOutput)
+        {
+            terminalReason = "";
+            return FreshDistroProbeDisposition.Ready;
+        }
 
-        return StepResult.Ok($"Created clean WSL2 distro '{distro}' at '{installPath}'");
+        var combined = string.Join(
+            " ",
+            new[] { probe.Stderr, probe.Stdout }
+                .Where(value => !string.IsNullOrWhiteSpace(value)));
+        if (WslInstallSupport.TryGetEnvironmentIssue(combined, out var environmentIssue))
+        {
+            terminalReason = environmentIssue;
+            return FreshDistroProbeDisposition.Terminal;
+        }
+
+        if (HasTerminalWslErrorShape(combined) &&
+        !combined.Contains("HCS_E_OPERATION_PENDING", StringComparison.OrdinalIgnoreCase))
+        {
+        terminalReason = $"terminal WSL diagnostic: {GetBoundedDiagnostic(probe)}";
+        return FreshDistroProbeDisposition.Terminal;
+        }
+
+        if (string.IsNullOrWhiteSpace(combined) ||
+        IsTransientFirstLaunchDiagnostic(combined))
+        {
+            terminalReason = "";
+            return FreshDistroProbeDisposition.Retryable;
+        }
+
+        terminalReason = probe.ExitCode == 0
+            ? "unexpected root identity or output"
+            : $"exit {probe.ExitCode}: {GetBoundedDiagnostic(probe)}";
+        return FreshDistroProbeDisposition.Terminal;
+    }
+
+    private static bool IsTransientFirstLaunchDiagnostic(string value)
+    {
+        var normalized = WslInstallSupport.Normalize(value);
+        return normalized.Contains("HCS_E_OPERATION_PENDING", StringComparison.OrdinalIgnoreCase) ||
+               normalized.Contains("The operation timed out", StringComparison.OrdinalIgnoreCase) ||
+               normalized.Contains("operation is pending", StringComparison.OrdinalIgnoreCase) ||
+               normalized.Contains("distribution is starting", StringComparison.OrdinalIgnoreCase) ||
+               normalized.Contains(
+                   "The virtual machine or container with the specified identifier is not running",
+                   StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool HasTerminalWslErrorShape(string value)
+        => value.Contains("WSL_E_", StringComparison.OrdinalIgnoreCase) ||
+           value.Contains("Wsl/Service/", StringComparison.OrdinalIgnoreCase) ||
+           value.Contains("HCS_E_", StringComparison.OrdinalIgnoreCase);
+
+    private static void AddReadinessDiagnostic(
+        Queue<string> diagnostics,
+        ref int omittedDiagnostics,
+        int attempt,
+        CommandResult probe)
+    {
+        if (diagnostics.Count == MaximumReadinessDiagnosticAttempts)
+        {
+            diagnostics.Dequeue();
+            omittedDiagnostics++;
+        }
+
+        diagnostics.Enqueue($"attempt {attempt}: {GetBoundedDiagnostic(probe)}");
+    }
+
+    private StepResult BuildReadinessDeadlineFailure(
+        string distro,
+        int attempts,
+        int omittedDiagnostics,
+        Queue<string> diagnostics)
+        => StepResult.Fail(
+            $"Fresh WSL distro '{distro}' did not become root-ready within " +
+            $"{FormatDuration(_readinessTimeout)} after {attempts} attempt(s). " +
+            FormatReadinessDiagnostics(omittedDiagnostics, diagnostics));
+
+    private static string FormatReadinessDiagnostics(int omittedDiagnostics, Queue<string> diagnostics)
+    {
+        var omitted = omittedDiagnostics > 0
+            ? $"{omittedDiagnostics} earlier attempt diagnostic(s) omitted; "
+            : "";
+        return $"Bounded readiness diagnostics: {omitted}{string.Join("; ", diagnostics)}";
+    }
+
+    private static string GetBoundedDiagnostic(CommandResult result)
+        => $"exit={result.ExitCode}, timedOut={result.TimedOut.ToString().ToLowerInvariant()}, " +
+           $"stdout={GetBoundedDiagnostic(result.Stdout)}, stderr={GetBoundedDiagnostic(result.Stderr)}";
+
+    private static string GetBoundedDiagnostic(string value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+            return "<empty>";
+
+        var sanitized = SetupLogger.Sanitize(WslInstallSupport.Normalize(value))
+            .Replace("\r\n", " ", StringComparison.Ordinal)
+            .Replace('\r', ' ')
+            .Replace('\n', ' ')
+            .Trim();
+        if (sanitized.Length <= MaximumReadinessDiagnosticCharacters)
+            return sanitized;
+
+        const int headCharacters = 256;
+        var marker = $" [truncated {sanitized.Length - MaximumReadinessDiagnosticCharacters} chars] ";
+        var tailCharacters = MaximumReadinessDiagnosticCharacters - headCharacters - marker.Length;
+        return sanitized[..headCharacters] + marker + sanitized[^tailCharacters..];
+    }
+
+    private static string FormatDuration(TimeSpan value)
+        => value.TotalMinutes >= 1
+            ? $"{value.TotalMinutes:F0} minute(s)"
+            : $"{value.TotalSeconds:F0} second(s)";
+
+    private TimeSpan GetRemainingReadinessTime(long started)
+        => _readinessTimeout - _readinessClock.GetElapsedTime(started);
+
+    private static TimeSpan MinTimeout(TimeSpan maximum, TimeSpan remaining)
+        => remaining < maximum ? remaining : maximum;
+
+    private enum FreshDistroProbeDisposition
+    {
+        Ready,
+        Retryable,
+        Terminal
     }
 
     private static async Task<string> CleanupPartialInstall(SetupContext ctx, string distro, string installPath, CancellationToken ct)
