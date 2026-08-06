@@ -1059,7 +1059,8 @@ public sealed class CreateWslInstanceStep : SetupStep
         return FreshDistroProbeDisposition.Terminal;
         }
 
-        if (string.IsNullOrWhiteSpace(combined) ||
+        if (probe.TimedOut ||
+        string.IsNullOrWhiteSpace(combined) ||
         IsTransientFirstLaunchDiagnostic(combined))
         {
             terminalReason = "";

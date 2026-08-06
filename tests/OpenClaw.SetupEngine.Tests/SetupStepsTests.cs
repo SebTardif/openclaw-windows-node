@@ -1151,6 +1151,46 @@ public class SetupStepsTests : IDisposable
     }
 
     [Fact]
+    public async Task CreateWslInstance_TimedOutProbeWithPartialOutputRetries()
+    {
+        var installed = false;
+        var probeCalls = 0;
+        var clock = new AdvancingFreshDistroReadinessClock();
+        var commands = new FakeCommandRunner(args =>
+        {
+            if (args.SequenceEqual(["--list", "--quiet"]))
+                return Ok(installed ? "OpenClawGateway\n" : "");
+            if (args.Contains("--install"))
+            {
+                installed = true;
+                return Ok();
+            }
+            if (args.SequenceEqual(["--list", "--verbose"]))
+                return Ok(FreshDistroVerboseOutput);
+            if (IsFreshDistroRootProbe(args))
+            {
+                probeCalls++;
+                if (probeCalls == 1)
+                {
+                    clock.Advance(TimeSpan.FromSeconds(30));
+                    return TimedOut(stderr: "first launch produced partial diagnostic output");
+                }
+
+                return Ok(FreshDistroReadyOutput);
+            }
+
+            return Fail($"unexpected args: {string.Join(' ', args)}");
+        });
+        var ctx = CreateContext(commands: commands);
+
+        var result = await new CreateWslInstanceStep(clock).ExecuteAsync(ctx, CancellationToken.None);
+
+        Assert.True(result.IsSuccess, result.Message);
+        Assert.Equal(2, probeCalls);
+        Assert.Single(commands.Calls, call => call.Arguments.Contains("--install"));
+    }
+
+    [Fact]
     public async Task CreateWslInstance_RegistrationTimeReducesPerAttemptProbeTimeout()
     {
         var installed = false;
@@ -1324,8 +1364,10 @@ public class SetupStepsTests : IDisposable
             call.Arguments.Contains("DifferentGateway", StringComparer.Ordinal));
     }
 
-    [Fact]
-    public async Task CreateWslInstance_TerminalProbeErrorFailsWithoutRetry()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task CreateWslInstance_TerminalProbeErrorFailsWithoutRetry(bool timedOut)
     {
         var installed = false;
         var probeCalls = 0;
@@ -1343,9 +1385,13 @@ public class SetupStepsTests : IDisposable
             if (IsFreshDistroRootProbe(args))
             {
                 probeCalls++;
-                return Fail(
+                return new CommandResult(
+                    -1,
+                    "",
                     "Wsl/Service/CreateInstance/WSL_E_CORRUPT_DISTRO " +
-                    string.Join(' ', Enumerable.Repeat("diagnostic", 100)));
+                    string.Join(' ', Enumerable.Repeat("diagnostic", 100)),
+                    TimeSpan.FromSeconds(30),
+                    timedOut);
             }
             if (args.SequenceEqual(["--terminate", "OpenClawGateway"]) ||
                 args.SequenceEqual(["--unregister", "OpenClawGateway"]))
@@ -3731,8 +3777,8 @@ public class SetupStepsTests : IDisposable
     private static CommandResult FailWithStdout(string stdout)
         => new(1, stdout, "", TimeSpan.Zero, TimedOut: false);
 
-    private static CommandResult TimedOut()
-        => new(-1, "", "", TimeSpan.FromSeconds(30), TimedOut: true);
+    private static CommandResult TimedOut(string stdout = "", string stderr = "")
+        => new(-1, stdout, stderr, TimeSpan.FromSeconds(30), TimedOut: true);
 
     private static bool IsFreshDistroRootProbe(string[] arguments)
         => arguments.SequenceEqual(
