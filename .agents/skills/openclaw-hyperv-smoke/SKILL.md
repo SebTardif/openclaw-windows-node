@@ -525,6 +525,15 @@ stdout/stderr diagnostics. Treat a nonzero
 `devices approve --latest --json` preview as actionable only when it contains a
 safe selected request, then approve that exact environment-bound request once.
 
+Gateway wizard answers can intentionally restart the gateway before
+`wizard.next` returns. Dispose the old client, then retry fresh operator clients
+under one two-minute absolute deadline and a 12-attempt cap. Retry immediate
+connection-refused, error, and timeout outcomes, but fail closed on unexpected
+pairing. Limit each connect/status attempt to the smaller of 15 seconds and the
+remaining deadline; cancellation must dispose the candidate to interrupt a
+stalled WebSocket handshake. Restart the wizard and replay prior answers only
+after a confirmed connection. Preserve the existing two-restart cap.
+
 `Prepare` does not install Ubuntu or another distribution. Installed smoke
 provisions its app-owned distribution later. Checkpoint observation, guest
 commands, restarts, and reconnects are bounded. Failed jobs report bounded,

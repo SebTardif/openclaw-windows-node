@@ -678,6 +678,16 @@ a safe selected scope-upgrade request; setup approves that exact
 environment-bound request once, but still fails closed when no safe selection
 can be parsed.
 
+The gateway wizard can apply an answer and intentionally restart the gateway
+before `wizard.next` returns. Recovery disconnects and disposes the old client,
+then uses fresh operator clients under one two-minute absolute deadline and a
+12-attempt cap. Each WebSocket connect/status attempt is limited to the smaller
+of 15 seconds and the remaining absolute budget; cancellation disposes the
+candidate to interrupt a stalled handshake. Immediate connection-refused,
+error, and timeout outcomes are retryable; unexpected pairing is not. The
+wizard session and prior answers are replayed only after a confirmed operator
+connection, and the existing two-restart cap remains in force.
+
 Before checkpoint restore, the guest validates the exact lane root under
 `GuestRoot\artifacts`, rejects reparse points and unsafe relative paths, bounds
 file count and expanded size, and creates a nonce ZIP with size and SHA-256

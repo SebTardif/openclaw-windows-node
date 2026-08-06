@@ -9,6 +9,11 @@ public sealed class SetupWizardRunner
 {
     private const int MaxWizardSteps = 50;
     private const int MaxSameStepVisits = 3;
+    internal const int MaxWizardRestartAttempts = 2;
+    internal const int MaxRestartReconnectAttempts = 12;
+    internal static readonly TimeSpan RestartReconnectTimeout = TimeSpan.FromMinutes(2);
+    internal static readonly TimeSpan RestartConnectAttemptTimeout = TimeSpan.FromSeconds(15);
+    internal static readonly TimeSpan RestartReconnectPollDelay = TimeSpan.FromSeconds(3);
     private static readonly Regex s_normalizeKeyRegex = new("[^a-z0-9]+", RegexOptions.Compiled);
 
     // Progress steps can repeat while background work runs; keep bounded caps
@@ -101,19 +106,44 @@ public sealed class SetupWizardRunner
                 {
                     return await client!.SendWizardRequestAsync("wizard.next", parameters, timeoutMs);
                 }
-                catch (Exception ex) when (!ct.IsCancellationRequested && IsRestartLikeWizardDisconnect(ex) && restartAttempts < 2)
+                catch (Exception ex) when (!ct.IsCancellationRequested &&
+                    IsRestartLikeWizardDisconnect(ex) &&
+                    restartAttempts < MaxWizardRestartAttempts)
                 {
                     restartAttempts++;
-                    _ctx.Logger.Warn($"Gateway restarted during wizard; reconnecting and replaying answers (attempt {restartAttempts}/2): {ex.Message}");
+                    _ctx.Logger.Warn(
+                        "Gateway restarted during wizard; reconnecting and replaying answers " +
+                        $"(attempt {restartAttempts}/{MaxWizardRestartAttempts}): {ex.Message}");
 
                     try { await client!.DisconnectAsync(); } catch { }
                     client!.Dispose();
 
-                    await Task.Delay(TimeSpan.FromSeconds(3), ct);
-                    client = CreateWizardClient(credential, identityPath, wsLogger);
-                    var reconnect = await PairOperatorStep.WaitForConnectionOrPairing(client, _ctx, TimeSpan.FromSeconds(30), ct);
-                    if (reconnect != PairOperatorStep.ConnectionOutcome.Connected)
-                        throw new WizardFatalException($"Gateway wizard reconnect failed after restart: {reconnect}");
+                    var reconnect = await WaitForGatewayRestartAsync(
+                        () => CreateWizardClient(credential, identityPath, wsLogger),
+                        async (candidate, attemptCt) =>
+                        {
+                            using var cancellationRegistration =
+                                attemptCt.Register(candidate.Dispose);
+                            return await PairOperatorStep.WaitForConnectionOrPairing(
+                                candidate,
+                                _ctx,
+                                RestartConnectAttemptTimeout,
+                                attemptCt);
+                        },
+                        async candidate =>
+                        {
+                            try { await candidate.DisconnectAsync(); } catch { }
+                            candidate.Dispose();
+                        },
+                        SystemWizardReconnectClock.Instance,
+                        ct);
+                    if (!reconnect.Connected)
+                    {
+                        throw new WizardFatalException(
+                            "Gateway wizard reconnect failed after restart " +
+                            $"after {reconnect.Attempts} bounded attempt(s): {reconnect.LastOutcome}");
+                    }
+                    client = reconnect.Resource!;
 
                     sessionId = "";
                     visits.Clear();
@@ -262,6 +292,101 @@ public sealed class SetupWizardRunner
                 client.Dispose();
             }
         }
+    }
+
+    internal static async Task<WizardReconnectResult<T>> WaitForGatewayRestartAsync<T>(
+        Func<T> create,
+        Func<T, CancellationToken, Task<PairOperatorStep.ConnectionOutcome>> connect,
+        Func<T, Task> discard,
+        IWizardReconnectClock clock,
+        CancellationToken ct,
+        TimeSpan? attemptTimeout = null)
+        where T : class
+    {
+        var deadline = clock.UtcNow + RestartReconnectTimeout;
+        var attempts = 0;
+        var lastOutcome = PairOperatorStep.ConnectionOutcome.Error;
+        var connectTimeout = attemptTimeout ?? RestartConnectAttemptTimeout;
+
+        await clock.DelayAsync(RestartReconnectPollDelay, ct);
+        while (clock.UtcNow < deadline && attempts < MaxRestartReconnectAttempts)
+        {
+            ct.ThrowIfCancellationRequested();
+            attempts++;
+
+            var resource = create();
+            var remaining = deadline - clock.UtcNow;
+            var currentTimeout = remaining < connectTimeout ? remaining : connectTimeout;
+            using var attemptCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            attemptCts.CancelAfter(currentTimeout);
+            try
+            {
+                lastOutcome = await connect(resource, attemptCts.Token);
+            }
+            catch (OperationCanceledException) when (
+                !ct.IsCancellationRequested &&
+                attemptCts.IsCancellationRequested)
+            {
+                lastOutcome = PairOperatorStep.ConnectionOutcome.Timeout;
+            }
+            catch
+            {
+                await discard(resource);
+                throw;
+            }
+
+            if (lastOutcome == PairOperatorStep.ConnectionOutcome.Connected)
+            {
+                return new WizardReconnectResult<T>(
+                    Connected: true,
+                    resource,
+                    lastOutcome,
+                    attempts);
+            }
+
+            await discard(resource);
+            if (lastOutcome == PairOperatorStep.ConnectionOutcome.PairingRequired)
+                break;
+
+            var remainingAfterAttempt = deadline - clock.UtcNow;
+            if (remainingAfterAttempt <= TimeSpan.Zero || attempts >= MaxRestartReconnectAttempts)
+                break;
+
+            await clock.DelayAsync(
+                remainingAfterAttempt < RestartReconnectPollDelay
+                    ? remainingAfterAttempt
+                    : RestartReconnectPollDelay,
+                ct);
+        }
+
+        return new WizardReconnectResult<T>(
+            Connected: false,
+            Resource: null,
+            lastOutcome,
+            attempts);
+    }
+
+    internal sealed record WizardReconnectResult<T>(
+        bool Connected,
+        T? Resource,
+        PairOperatorStep.ConnectionOutcome LastOutcome,
+        int Attempts)
+        where T : class;
+
+    internal interface IWizardReconnectClock
+    {
+        DateTimeOffset UtcNow { get; }
+        Task DelayAsync(TimeSpan delay, CancellationToken cancellationToken);
+    }
+
+    internal sealed class SystemWizardReconnectClock : IWizardReconnectClock
+    {
+        internal static SystemWizardReconnectClock Instance { get; } = new();
+
+        public DateTimeOffset UtcNow => DateTimeOffset.UtcNow;
+
+        public Task DelayAsync(TimeSpan delay, CancellationToken cancellationToken)
+            => Task.Delay(delay, cancellationToken);
     }
 
     private OpenClawGatewayClient CreateWizardClient(string credential, string identityPath, IOpenClawLogger wsLogger)

@@ -317,6 +317,15 @@ tails for timeouts and nonzero exits. A nonzero
 `devices approve --latest --json` preview is actionable only when its JSON
 contains one safe selected request; that exact request is approved once.
 
+If a wizard answer restarts the gateway, the Setup Engine disposes the old
+connection and retries fresh operator clients under one two-minute absolute
+deadline and a 12-attempt cap. Each connect/status attempt uses the smaller of
+15 seconds and the remaining budget; cancellation disposes the candidate so a
+stalled WebSocket handshake cannot defeat the deadline. Connection-refused,
+error, and timeout outcomes are retryable. Unexpected pairing fails closed.
+Wizard start and answer replay occur only after a confirmed connection, with at
+most two restart/replay cycles.
+
 The smoke refuses to start if existing DEV install/data/distro state is present. It
 does not inspect, overwrite, uninstall, or clean release identity state. Every phase
 must report `passed`; a missing or skipped install, installed-payload check, roundtrip,
