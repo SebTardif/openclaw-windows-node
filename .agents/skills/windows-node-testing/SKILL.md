@@ -455,6 +455,9 @@ Launch the long validation process under the encrypted owned guest
 This keeps the registry hive loaded across target recycling for WSL distro
 registration without putting the credential in command text, artifacts, or
 logs.
+After Git commit, repeat the bounded reparse-safe owner walk with `.git`
+metadata included and verify every entry against the guest administrator SID
+before launching the profile-loaded process.
 If the packaging session broke, reconnect under the same identity guard and
 retry packaging once after removing only owned nonce archive residue. Do not
 retry healthy-session integrity failures or suppress the primary failure.

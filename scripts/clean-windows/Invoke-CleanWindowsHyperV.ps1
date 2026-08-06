@@ -4152,7 +4152,8 @@ function Get-GuestSourceStagingScriptBlock {
                 [Parameter(Mandatory = $true)]
                 [string]$Root,
                 [Parameter(Mandatory = $true)]
-                [int]$ExpectedTrackedFileCount
+                [int]$ExpectedTrackedFileCount,
+                [switch]$IncludeGitMetadata
             )
 
             if ($ExpectedTrackedFileCount -lt 1 -or $ExpectedTrackedFileCount -gt 20000) {
@@ -4160,7 +4161,11 @@ function Get-GuestSourceStagingScriptBlock {
             }
             $canonicalRoot = [IO.Path]::GetFullPath($Root).TrimEnd("\")
             $rootPrefix = $canonicalRoot + "\"
-            $maximumEntries = ($ExpectedTrackedFileCount * 4) + 2
+            $maximumEntries = if ($IncludeGitMetadata) {
+                ($ExpectedTrackedFileCount * 8) + 2048
+            } else {
+                ($ExpectedTrackedFileCount * 4) + 2
+            }
             $currentSid = [Security.Principal.WindowsIdentity]::GetCurrent().User
             if ($null -eq $currentSid) {
                 throw "Guest source ownership could not resolve the current Windows user SID."
@@ -4205,9 +4210,25 @@ function Get-GuestSourceStagingScriptBlock {
             }
 
             $fileCount = @($entries | Where-Object { -not $_.PSIsContainer }).Count
-            if ($fileCount -ne ($ExpectedTrackedFileCount + 1)) {
+            if (
+                -not $IncludeGitMetadata -and
+                $fileCount -ne ($ExpectedTrackedFileCount + 1)
+            ) {
                 throw (
                     "Guest source ownership found $fileCount files; expected tracked files plus provenance.")
+            }
+            if ($IncludeGitMetadata) {
+                $gitRoot = Join-Path $canonicalRoot ".git"
+                if (-not (Test-Path -LiteralPath $gitRoot -PathType Container)) {
+                    throw "Guest source ownership expected generated Git metadata."
+                }
+                $gitRootItem = Get-Item -LiteralPath $gitRoot -Force -ErrorAction Stop
+                if (($gitRootItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+                    throw "Guest source ownership refuses reparse point '$gitRoot'."
+                }
+                if ($fileCount -le ($ExpectedTrackedFileCount + 1)) {
+                    throw "Guest source ownership found no generated Git metadata files."
+                }
             }
             foreach ($entry in $entries) {
                 if ($stopwatch.Elapsed.TotalSeconds -gt $NativeTimeoutSec) {
@@ -4260,6 +4281,7 @@ function Get-GuestSourceStagingScriptBlock {
                 ownerSid = $currentSid.Value
                 entryCount = $entries.Count
                 fileCount = $fileCount
+                includesGitMetadata = [bool]$IncludeGitMetadata
             }
         }
 
@@ -4421,6 +4443,10 @@ function Get-GuestSourceStagingScriptBlock {
                     [void]$warnings.Add("$operation`: $($result.stderr)")
                 }
             }
+            $ownershipProof = Set-OpenClawGuestSourceOwner `
+                -Root $canonicalRoot `
+                -ExpectedTrackedFileCount $provenanceTrackedFileCount `
+                -IncludeGitMetadata
 
             $statusResult = Invoke-OpenClawGuestGitProcess `
                 -Operation "Status" `

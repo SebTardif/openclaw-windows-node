@@ -3462,6 +3462,12 @@ public sealed class CleanWindowsRunnerScriptTests
         Assert.True(
             staging.IndexOf("$ownershipProof = Set-OpenClawGuestSourceOwner", StringComparison.Ordinal) <
             staging.IndexOf("$gitCommands = @(", StringComparison.Ordinal));
+        Assert.Equal(
+            2,
+            CountOccurrences(staging, "$ownershipProof = Set-OpenClawGuestSourceOwner"));
+        Assert.Contains("-IncludeGitMetadata", staging, StringComparison.Ordinal);
+        Assert.Contains("expected generated Git metadata", ownership, StringComparison.Ordinal);
+        Assert.Contains("found no generated Git metadata files", ownership, StringComparison.Ordinal);
         Assert.Contains("@(\"config\", \"--local\", \"core.autocrlf\", \"false\")", staging, StringComparison.Ordinal);
         Assert.Contains("@(\"config\", \"--local\", \"core.safecrlf\", \"true\")", staging, StringComparison.Ordinal);
         var stagingWorkflow = ExtractPowerShellRange(
@@ -3693,6 +3699,9 @@ public sealed class CleanWindowsRunnerScriptTests
                 Assert.Equal(
                     proof.GetProperty("ownerSid").GetString(),
                     proof.GetProperty("actualFileOwnerSid").GetString());
+                Assert.Equal(
+                    proof.GetProperty("ownerSid").GetString(),
+                    proof.GetProperty("actualGitOwnerSid").GetString());
                 if (proof.GetProperty("elevated").GetBoolean())
                 {
                     Assert.True(proof.GetProperty("normalizedFromWrongOwner").GetBoolean());
@@ -7904,6 +7913,9 @@ public sealed class CleanWindowsRunnerScriptTests
             "$fileOwner = [IO.File]::GetAccessControl((Join-Path ",
             PsQuote(destination),
             " 'src\\lf.txt'), [Security.AccessControl.AccessControlSections]::Owner).GetOwner([Security.Principal.SecurityIdentifier]).Value\n",
+            "$gitOwner = [IO.Directory]::GetAccessControl((Join-Path ",
+            PsQuote(destination),
+            " '.git'), [Security.AccessControl.AccessControlSections]::Owner).GetOwner([Security.Principal.SecurityIdentifier]).Value\n",
             "[Console]::Out.Write(([pscustomobject][ordered]@{\n",
             " clean = [bool]$proof.clean\n",
             " beforeSha256 = [string]$proof.beforeSha256\n",
@@ -7914,6 +7926,7 @@ public sealed class CleanWindowsRunnerScriptTests
             " ownerSid = [string]$proof.ownerSid\n",
             " actualRootOwnerSid = [string]$rootOwner\n",
             " actualFileOwnerSid = [string]$fileOwner\n",
+            " actualGitOwnerSid = [string]$gitOwner\n",
             " elevated = [bool]$elevated\n",
             " normalizedFromWrongOwner = [bool]$normalizedFromWrongOwner\n",
             " ownedEntryCount = [int]$proof.ownedEntryCount\n",
@@ -7977,6 +7990,11 @@ public sealed class CleanWindowsRunnerScriptTests
             "  default { throw \"Unexpected Git arguments: $ArgumentList\" }\n",
             " }\n",
             " [void]$script:calls.Add($operation)\n",
+            " if ($operation -eq 'Init') {\n",
+            "  $gitRoot = Join-Path $WorkingDirectory '.git'\n",
+            "  [void](New-Item -ItemType Directory -Path $gitRoot)\n",
+            "  Set-Content -LiteralPath (Join-Path $gitRoot 'HEAD') -Value 'ref: refs/heads/main' -NoNewline\n",
+            " }\n",
             " Set-Content -LiteralPath $RedirectStandardOutput -Value '' -NoNewline\n",
             " $exitCode = 0\n",
             " $stderr = ''\n",

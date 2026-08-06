@@ -572,7 +572,10 @@ Direct job. Nonzero exits fail with sanitized bounded diagnostics. The
 controller hashes every extracted source file before and after staging,
 excluding only `.git`, and requires identical digests plus an empty final
 `git status --porcelain`. This proves staging did not rewrite LF working-tree
-bytes and that the source provenance is part of the clean commit. Both guest
+bytes and that the source provenance is part of the clean commit. After that
+commit, the same bounded reparse-safe owner walk includes generated `.git`
+metadata and verifies every entry against the guest administrator SID before a
+profile-loaded validation process uses LibGit2Sharp. Both guest
 and host archives are removed in `finally`; cleanup failure fails the
 operation.
 

@@ -653,6 +653,9 @@ Launch that long validation process under the encrypted owned guest
 `PSCredential` with `LoadUserProfile=true` and its `SecureString` password so
 target recycling cannot unload the registry hive required by WSL registration.
 Never place the credential in process arguments, artifacts, or logs.
+After the provenance commit, repeat the bounded reparse-safe owner walk with
+generated `.git` metadata included and verify every entry against the guest
+administrator SID before launching that profile-loaded process.
 Recovered success proceeds to packaging; recovered failure preserves bounded
 phase/log diagnostics. Packaging starts only after those completion files prove
 artifact writers have closed. If the packaging session broke, artifact retrieval

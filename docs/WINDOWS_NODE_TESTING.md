@@ -336,6 +336,9 @@ owned guest `PSCredential`, `LoadUserProfile=true`, and a `SecureString`
 password. This preserves the user registry hive across PowerShell Direct target
 recycling so WSL distro registration cannot inherit an unloaded profile. The
 credential never appears in process arguments, artifacts, or logs.
+Before that launch, the controller repeats its bounded reparse-safe owner walk
+after Git commit so generated `.git` metadata is also owned by the guest
+administrator SID and trusted to the profile-loaded token.
 
 Artifacts are written to `TestResults\InstalledSmoke\<timestamp>`. The command prints
 the exact artifact path. `phase-status.json` is the phase gate; the folder also
