@@ -343,7 +343,7 @@ internal sealed class UpdateCoordinator(
     {
         if (Interlocked.Exchange(ref _automaticUpdateCheckStarted, 1) != 0)
             return;
-        if (!await CheckForUpdatesAsync(handshakeClient: client))
+        if (!await CheckForUpdatesAsync(handshakeClient: handshakeClient))
             exit();
     }
 

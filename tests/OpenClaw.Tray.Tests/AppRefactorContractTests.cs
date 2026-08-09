@@ -52,6 +52,13 @@ public sealed class AppRefactorContractTests
         Assert.DoesNotContain("await _updateCoordinator.CheckForUpdatesAsync()", startup);
         Assert.Contains("e.NewClient.HandshakeSucceeded += OnGatewayUpdateCheckHandshakeSucceeded", clientChanged);
         Assert.Contains("CheckForAutomaticUpdatesAfterGatewayResolutionAsync(client)", source);
+        var updateCoordinator = File.ReadAllText(Path.Combine(
+            TestRepositoryPaths.GetRepositoryRoot(),
+            "src",
+            "OpenClaw.Tray.WinUI",
+            "Services",
+            "UpdateCoordinator.cs"));
+        Assert.Contains("CheckForUpdatesAsync(handshakeClient: handshakeClient)", updateCoordinator);
         AssertInOrder(
             clientChanged,
             "e.NewClient.HandshakeSucceeded += OnGatewayUpdateCheckHandshakeSucceeded;",
