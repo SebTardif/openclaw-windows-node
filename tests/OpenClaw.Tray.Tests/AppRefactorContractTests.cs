@@ -57,6 +57,7 @@ public sealed class AppRefactorContractTests
             "e.NewClient.HandshakeSucceeded += OnGatewayUpdateCheckHandshakeSucceeded;",
             "if (_dispatcherQueue is { HasThreadAccess: false } dispatcher)");
         Assert.Contains("StartAutomaticUpdateCheckWithoutGateway();", startup);
+        Assert.Contains("if (snap.OperatorState == RoleConnectionState.Error)", source);
     }
 
     [Fact]
