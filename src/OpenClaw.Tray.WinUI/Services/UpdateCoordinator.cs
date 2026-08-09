@@ -20,6 +20,7 @@ internal sealed class UpdateCoordinator(
     UpdatumManager updater,
     AppState appState,
     SettingsManager? settings,
+    Func<IOperatorGatewayClient?> getGatewayClient,
     Func<XamlRoot?> getXamlRoot,
     Action refreshStatus,
     Action exit)
@@ -37,6 +38,7 @@ internal sealed class UpdateCoordinator(
     private int _updateInstallInProgress;
 #endif
     private int _manualUpdateCheckInFlight;
+    private int _automaticUpdateCheckStarted;
 
     public static UpdateCommandCenterInfo BuildInitialInfo() => new()
     {
@@ -44,7 +46,9 @@ internal sealed class UpdateCoordinator(
         CurrentVersion = AppVersionInfo.Version
     };
 
-    public async Task<bool> CheckForUpdatesAsync(bool userInitiated = false)
+    public async Task<bool> CheckForUpdatesAsync(
+        bool userInitiated = false,
+        IOperatorGatewayClient? handshakeClient = null)
     {
         // === Stage 1: metadata check (gate-protected) ===
         if (!await _updateCheckGate.WaitAsync(TimeSpan.FromSeconds(30)))
@@ -96,6 +100,21 @@ internal sealed class UpdateCoordinator(
         string changelog;
         try
         {
+            var gatewayUpdateStatus = await TryGetGatewayUpdateStatusAsync(
+                handshakeClient ?? getGatewayClient());
+            if (gatewayUpdateStatus?.SuppressesCompanionUpdate == true)
+            {
+                Logger.Info("Skipping companion update check: gateway is on extended-stable");
+                appState.UpdateInfo = new UpdateCommandCenterInfo
+                {
+                    Status = "Skipped",
+                    CurrentVersion = AppVersionInfo.Version,
+                    CheckedAt = DateTime.UtcNow,
+                    Detail = "The connected Gateway uses extended-stable, so ordinary Windows release updates are not offered."
+                };
+                return true;
+            }
+
             Logger.Info("Checking for updates...");
             appState.UpdateInfo = new UpdateCommandCenterInfo
             {
@@ -314,6 +333,36 @@ internal sealed class UpdateCoordinator(
 #endif
     }
 
+    /// <summary>
+    /// Starts the one automatic update check only after hello-ok. The Gateway owns
+    /// the installed release track; startup has no authenticated client yet.
+    /// </summary>
+    public async Task CheckForAutomaticUpdatesAfterHandshakeAsync(IOperatorGatewayClient client)
+    {
+        if (Interlocked.Exchange(ref _automaticUpdateCheckStarted, 1) != 0)
+            return;
+        if (!await CheckForUpdatesAsync(handshakeClient: client))
+            exit();
+    }
+
+    private static async Task<GatewayUpdateStatus?> TryGetGatewayUpdateStatusAsync(
+        IOperatorGatewayClient? gatewayClient)
+    {
+        if (gatewayClient is null)
+            return null;
+        try
+        {
+            return await gatewayClient.GetUpdateStatusAsync();
+        }
+        catch (Exception ex)
+        {
+            // An older or unauthorized gateway cannot identify its release track.
+            // Preserve the standalone updater behavior instead of losing update checks.
+            Logger.Info($"Gateway update channel unavailable; using companion updater: {ex.Message}");
+            return null;
+        }
+    }
+
     // Re-entrancy guard: the button/menu/deep-link are all fire-and-forget
     // (`_ = CheckForUpdatesUserInitiatedAsync()`), so a double-click would
     // otherwise open two ContentDialogs on the same XamlRoot which throws
@@ -369,7 +418,7 @@ internal sealed class UpdateCoordinator(
                         await ShowUpdateInfoDialogAsync(
                             "Skipped",
                             LocalizationHelper.GetString("Update_Title_Skipped"),
-                            LocalizationHelper.GetString(
+                            info.Detail ?? LocalizationHelper.GetString(
                                 AppIdentity.IsDev
                                     ? "Update_Message_Skipped_Dev"
                                     : "Update_Message_Skipped_Debug"));

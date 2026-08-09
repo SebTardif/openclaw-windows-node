@@ -36,6 +36,7 @@ public class GatewayProtocolModelsTests
             ("CreateSessionAsync", new[] { typeof(SessionCreateRequest), typeof(int) }),
             ("ResetSessionDetailedAsync", new[] { typeof(string), typeof(int) }),
             ("CompactSessionDetailedAsync", new[] { typeof(string), typeof(int) }),
+            ("GetUpdateStatusAsync", new[] { typeof(int) }),
         };
 
         foreach (var (name, args) in newMembers)

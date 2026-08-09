@@ -32,7 +32,6 @@ public sealed class AppRefactorContractTests
             "AppUserModelIdRegistrar.RegisterCurrentProcess(AppIdentity.AppUserModelId);",
             "appUserModelIdRegistration.Attempted",
             "_settings = new SettingsManager();",
-            "CheckForUpdatesAsync();",
             "ToastNotificationManagerCompat.OnActivated += OnToastActivated;",
             "InitializeTrayIcon();",
             "_gatewayRegistry = new GatewayRegistry",
@@ -40,7 +39,20 @@ public sealed class AppRefactorContractTests
             "await ShowOnboardingAsync();",
             "EnsureNodeService(_settings);",
             "InitializeGatewayClient();",
+            "client.HandshakeSucceeded += OnGatewayUpdateCheckHandshakeSucceeded;",
             "StartDeepLinkServer();");
+    }
+
+    [Fact]
+    public void AutomaticUpdateCheck_WaitsForAuthenticatedGatewayHandshake()
+    {
+        var source = ReadAppSources();
+        var startup = ExtractMethod(source, "OnLaunchedAsync");
+        var clientChanged = ExtractMethod(source, "OnOperatorClientChanged");
+
+        Assert.DoesNotContain("await _updateCoordinator.CheckForUpdatesAsync()", startup);
+        Assert.Contains("client.HandshakeSucceeded += OnGatewayUpdateCheckHandshakeSucceeded", clientChanged);
+        Assert.Contains("CheckForAutomaticUpdatesAfterHandshakeAsync(client)", source);
     }
 
     [Fact]

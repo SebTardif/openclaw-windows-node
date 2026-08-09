@@ -210,6 +210,7 @@ public partial class App : Application, OpenClawTray.Services.IAppCommands
     private AppState? _appState;
     internal AppState? AppState => _appState;
     private UpdateCoordinator? _updateCoordinator;
+    private IOperatorGatewayClient? _updateCheckClient;
     private GatewayService? _gatewayService;
     private PairingApprovalCoordinator? _pairingApprovalCoordinator;
     private OpenClawTray.Dialogs.PairingApprovalDialog? _pairingApprovalDialog;
@@ -642,6 +643,7 @@ public partial class App : Application, OpenClawTray.Services.IAppCommands
             AppUpdater,
             _appState,
             _settings,
+            () => _connectionManager?.OperatorClient,
             () =>
             {
                 XamlRoot? r = null;
@@ -705,19 +707,6 @@ public partial class App : Application, OpenClawTray.Services.IAppCommands
         // in-progress download/extraction. We still control shutdown
         // explicitly via Application.Exit().
         DispatcherShutdownMode = DispatcherShutdownMode.OnExplicitShutdown;
-
-        // Check for updates before launching. Skip in test instances — no UI dialogs,
-        // no network calls, no startup delay.
-        if (DataDirOverride is null &&
-            Environment.GetEnvironmentVariable("OPENCLAW_SKIP_UPDATE_CHECK") != "1")
-        {
-            var shouldLaunch = await _updateCoordinator.CheckForUpdatesAsync();
-            if (!shouldLaunch)
-            {
-                Exit();
-                return;
-            }
-        }
 
         // Register toast activation handler
         ToastNotificationManagerCompat.OnActivated += OnToastActivated;
@@ -2166,6 +2155,11 @@ public partial class App : Application, OpenClawTray.Services.IAppCommands
 
         // Delegate all 27 event subscriptions to GatewayService
         _gatewayService?.AttachClient(e.NewClient, e.OldClient);
+        if (e.OldClient != null)
+            e.OldClient.HandshakeSucceeded -= OnGatewayUpdateCheckHandshakeSucceeded;
+        _updateCheckClient = e.NewClient;
+        if (e.NewClient != null)
+            e.NewClient.HandshakeSucceeded += OnGatewayUpdateCheckHandshakeSucceeded;
 
         // Configure new client
         if (e.NewClient is { } client)
@@ -2189,6 +2183,18 @@ public partial class App : Application, OpenClawTray.Services.IAppCommands
         // Update UI references
         if (_appState != null)
             _appState.GatewaySelf = null;
+    }
+
+    private void OnGatewayUpdateCheckHandshakeSucceeded(object? sender, EventArgs e)
+    {
+        if (sender is not IOperatorGatewayClient client || !ReferenceEquals(client, _updateCheckClient) ||
+            DataDirOverride is not null ||
+            Environment.GetEnvironmentVariable("OPENCLAW_SKIP_UPDATE_CHECK") == "1")
+        {
+            return;
+        }
+
+        OnUiThread(() => _ = _updateCoordinator?.CheckForAutomaticUpdatesAfterHandshakeAsync(client));
     }
 
     private void RaiseChatProviderChanged()
