@@ -565,6 +565,69 @@ public class OpenClawGatewayClientTests
     }
 
     [Fact]
+    public async Task GetUpdateStatusAsync_RequestsEffectiveChannelAndParsesExtendedStable()
+    {
+        using var server = new LoopbackWebSocketServer();
+        using var identity = new TempDirectory("update-status-");
+        await server.StartAsync();
+        var helper = new GatewayClientTestHelper(
+            gatewayUrl: server.WebSocketUrl,
+            identityPath: identity.Path);
+        using var client = helper.Client;
+        await client.ConnectAsync();
+
+        var statusTask = client.GetUpdateStatusAsync(timeoutMs: 10_000);
+        var request = await server.ReceiveTextAsync().WaitAsync(TimeSpan.FromSeconds(2));
+        using var requestDocument = JsonDocument.Parse(request);
+        Assert.Equal("update.status", requestDocument.RootElement.GetProperty("method").GetString());
+        var requestId = ReadRequestId(request);
+
+        await server.SendTextAsync(
+            JsonSerializer.Serialize(new
+            {
+                type = "res",
+                id = requestId,
+                ok = true,
+                payload = new { effectiveChannel = "extended-stable" }
+            }));
+
+        var status = await statusTask.WaitAsync(TimeSpan.FromSeconds(2));
+
+        Assert.NotNull(status);
+        Assert.True(status!.SuppressesCompanionUpdate);
+    }
+
+    [Fact]
+    public async Task GetUpdateStatusAsync_GatewayError_PreservesLegacyUpdaterFallback()
+    {
+        using var server = new LoopbackWebSocketServer();
+        using var identity = new TempDirectory("update-status-");
+        await server.StartAsync();
+        var helper = new GatewayClientTestHelper(
+            gatewayUrl: server.WebSocketUrl,
+            identityPath: identity.Path);
+        using var client = helper.Client;
+        await client.ConnectAsync();
+
+        var statusTask = client.GetUpdateStatusAsync(timeoutMs: 10_000);
+        var request = await server.ReceiveTextAsync().WaitAsync(TimeSpan.FromSeconds(2));
+        var requestId = ReadRequestId(request);
+
+        await server.SendTextAsync(
+            JsonSerializer.Serialize(new
+            {
+                type = "res",
+                id = requestId,
+                ok = false,
+                error = new { message = "unknown method" }
+            }));
+
+        var status = await statusTask.WaitAsync(TimeSpan.FromSeconds(2));
+
+        Assert.Null(status);
+    }
+
+    [Fact]
     public async Task SendWizardRequestAsync_GatewayError_PropagatesUnchangedAndCleansTracking()
     {
         using var server = new LoopbackWebSocketServer();

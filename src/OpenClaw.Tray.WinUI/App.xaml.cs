@@ -909,6 +909,13 @@ public partial class App : Application, OpenClawTray.Services.IAppCommands
         _managedLocalAutoRepairMonitor.Start();
 
         InitializeGatewayClient();
+        if (_connectionManager.CurrentSnapshot.OperatorState == RoleConnectionState.Idle &&
+            _connectionManager.OperatorClient is null)
+        {
+            // InitializeGatewayClient found no operator connection to resolve. This
+            // is a terminal startup state, so retain the standalone updater path.
+            StartAutomaticUpdateCheckWithoutGateway();
+        }
 
         // Pre-warm chat window (WebView2 init takes 1-3s, do it now so left-click is instant)
         if (_settings != null &&
@@ -2144,6 +2151,14 @@ public partial class App : Application, OpenClawTray.Services.IAppCommands
     /// </summary>
     private void OnOperatorClientChanged(object? sender, OperatorClientChangedEventArgs e)
     {
+        // Subscribe before UI dispatch: GatewayConnectionManager starts its transport
+        // immediately after this event, and a local hello-ok can otherwise win the race.
+        if (e.OldClient != null)
+            e.OldClient.HandshakeSucceeded -= OnGatewayUpdateCheckHandshakeSucceeded;
+        _updateCheckClient = e.NewClient;
+        if (e.NewClient != null)
+            e.NewClient.HandshakeSucceeded += OnGatewayUpdateCheckHandshakeSucceeded;
+
         if (_dispatcherQueue is { HasThreadAccess: false } dispatcher)
         {
             if (!dispatcher.TryEnqueue(() => OnOperatorClientChanged(sender, e)))
@@ -2155,11 +2170,6 @@ public partial class App : Application, OpenClawTray.Services.IAppCommands
 
         // Delegate all 27 event subscriptions to GatewayService
         _gatewayService?.AttachClient(e.NewClient, e.OldClient);
-        if (e.OldClient != null)
-            e.OldClient.HandshakeSucceeded -= OnGatewayUpdateCheckHandshakeSucceeded;
-        _updateCheckClient = e.NewClient;
-        if (e.NewClient != null)
-            e.NewClient.HandshakeSucceeded += OnGatewayUpdateCheckHandshakeSucceeded;
 
         // Configure new client
         if (e.NewClient is { } client)
@@ -2194,7 +2204,18 @@ public partial class App : Application, OpenClawTray.Services.IAppCommands
             return;
         }
 
-        OnUiThread(() => _ = _updateCoordinator?.CheckForAutomaticUpdatesAfterHandshakeAsync(client));
+        OnUiThread(() => _ = _updateCoordinator?.CheckForAutomaticUpdatesAfterGatewayResolutionAsync(client));
+    }
+
+    private void StartAutomaticUpdateCheckWithoutGateway()
+    {
+        if (DataDirOverride is not null ||
+            Environment.GetEnvironmentVariable("OPENCLAW_SKIP_UPDATE_CHECK") == "1")
+        {
+            return;
+        }
+
+        OnUiThread(() => _ = _updateCoordinator?.CheckForAutomaticUpdatesAfterGatewayResolutionAsync());
     }
 
     private void RaiseChatProviderChanged()
@@ -2241,6 +2262,9 @@ public partial class App : Application, OpenClawTray.Services.IAppCommands
         {
             _lastManagerConnectedSideEffectsKey = null;
         }
+
+        if (snap.OperatorState == RoleConnectionState.Error)
+            StartAutomaticUpdateCheckWithoutGateway();
     }
 
     private NodeService? EnsureNodeService(SettingsManager settings)

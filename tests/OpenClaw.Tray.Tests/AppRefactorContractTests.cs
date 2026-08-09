@@ -39,7 +39,7 @@ public sealed class AppRefactorContractTests
             "await ShowOnboardingAsync();",
             "EnsureNodeService(_settings);",
             "InitializeGatewayClient();",
-            "client.HandshakeSucceeded += OnGatewayUpdateCheckHandshakeSucceeded;",
+            "e.NewClient.HandshakeSucceeded += OnGatewayUpdateCheckHandshakeSucceeded;",
             "StartDeepLinkServer();");
     }
 
@@ -51,8 +51,13 @@ public sealed class AppRefactorContractTests
         var clientChanged = ExtractMethod(source, "OnOperatorClientChanged");
 
         Assert.DoesNotContain("await _updateCoordinator.CheckForUpdatesAsync()", startup);
-        Assert.Contains("client.HandshakeSucceeded += OnGatewayUpdateCheckHandshakeSucceeded", clientChanged);
-        Assert.Contains("CheckForAutomaticUpdatesAfterHandshakeAsync(client)", source);
+        Assert.Contains("e.NewClient.HandshakeSucceeded += OnGatewayUpdateCheckHandshakeSucceeded", clientChanged);
+        Assert.Contains("CheckForAutomaticUpdatesAfterGatewayResolutionAsync(client)", source);
+        AssertInOrder(
+            clientChanged,
+            "e.NewClient.HandshakeSucceeded += OnGatewayUpdateCheckHandshakeSucceeded;",
+            "if (_dispatcherQueue is { HasThreadAccess: false } dispatcher)");
+        Assert.Contains("StartAutomaticUpdateCheckWithoutGateway();", startup);
     }
 
     [Fact]

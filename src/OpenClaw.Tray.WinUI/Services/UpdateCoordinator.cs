@@ -334,10 +334,12 @@ internal sealed class UpdateCoordinator(
     }
 
     /// <summary>
-    /// Starts the one automatic update check only after hello-ok. The Gateway owns
-    /// the installed release track; startup has no authenticated client yet.
+    /// Starts the one automatic update check after Gateway resolution. A successful
+    /// hello-ok supplies the authoritative track; unavailable Gateway paths retain
+    /// the standalone updater's established behavior.
     /// </summary>
-    public async Task CheckForAutomaticUpdatesAfterHandshakeAsync(IOperatorGatewayClient client)
+    public async Task CheckForAutomaticUpdatesAfterGatewayResolutionAsync(
+        IOperatorGatewayClient? handshakeClient = null)
     {
         if (Interlocked.Exchange(ref _automaticUpdateCheckStarted, 1) != 0)
             return;
