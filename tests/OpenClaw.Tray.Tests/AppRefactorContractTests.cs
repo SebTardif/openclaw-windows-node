@@ -58,6 +58,7 @@ public sealed class AppRefactorContractTests
             "OpenClaw.Tray.WinUI",
             "Services",
             "UpdateCoordinator.cs"));
+        Assert.Contains("private readonly Func<IOperatorGatewayClient?> _getGatewayClient = getGatewayClient;", updateCoordinator);
         Assert.Contains("CheckForUpdatesAsync(handshakeClient: handshakeClient)", updateCoordinator);
         AssertInOrder(
             clientChanged,

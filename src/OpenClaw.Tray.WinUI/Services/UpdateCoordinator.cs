@@ -26,6 +26,7 @@ internal sealed class UpdateCoordinator(
     Action exit)
 {
     private readonly SettingsManager? _settings = settings;
+    private readonly Func<IOperatorGatewayClient?> _getGatewayClient = getGatewayClient;
 
     // Cross-path concurrency for update checks, split into two phases:
     //  - _updateCheckGate: held only during the metadata/network check.
@@ -101,7 +102,7 @@ internal sealed class UpdateCoordinator(
         try
         {
             var gatewayUpdateStatus = await TryGetGatewayUpdateStatusAsync(
-                handshakeClient ?? getGatewayClient());
+                handshakeClient ?? GetGatewayClient());
             if (gatewayUpdateStatus?.SuppressesCompanionUpdate == true)
             {
                 Logger.Info("Skipping companion update check: gateway is on extended-stable");
@@ -364,6 +365,8 @@ internal sealed class UpdateCoordinator(
             return null;
         }
     }
+
+    private IOperatorGatewayClient? GetGatewayClient() => _getGatewayClient();
 
     // Re-entrancy guard: the button/menu/deep-link are all fire-and-forget
     // (`_ = CheckForUpdatesUserInitiatedAsync()`), so a double-click would
