@@ -39,7 +39,6 @@ public sealed class AppRefactorContractTests
             "await ShowOnboardingAsync();",
             "EnsureNodeService(_settings);",
             "InitializeGatewayClient();",
-            "e.NewClient.HandshakeSucceeded += OnGatewayUpdateCheckHandshakeSucceeded;",
             "StartDeepLinkServer();");
     }
 
