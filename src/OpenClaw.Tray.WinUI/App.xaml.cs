@@ -2263,7 +2263,10 @@ public partial class App : Application, OpenClawTray.Services.IAppCommands
             _lastManagerConnectedSideEffectsKey = null;
         }
 
-        if (snap.OperatorState == RoleConnectionState.Error)
+        // Only a successful operator handshake can identify the Gateway's release track.
+        // PairingRequired intentionally persists after its socket closes, so preserve the
+        // pre-existing standalone updater instead of silently losing automatic checks.
+        if (snap.OperatorState is RoleConnectionState.Error or RoleConnectionState.PairingRequired)
             StartAutomaticUpdateCheckWithoutGateway();
     }
 

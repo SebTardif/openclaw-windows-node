@@ -48,6 +48,7 @@ public sealed class AppRefactorContractTests
         var source = ReadAppSources();
         var startup = ExtractMethod(source, "OnLaunchedAsync");
         var clientChanged = ExtractMethod(source, "OnOperatorClientChanged");
+        var managerStateChanged = ExtractMethod(source, "OnManagerStateChanged");
 
         Assert.DoesNotContain("await _updateCoordinator.CheckForUpdatesAsync()", startup);
         Assert.Contains("e.NewClient.HandshakeSucceeded += OnGatewayUpdateCheckHandshakeSucceeded", clientChanged);
@@ -65,7 +66,9 @@ public sealed class AppRefactorContractTests
             "e.NewClient.HandshakeSucceeded += OnGatewayUpdateCheckHandshakeSucceeded;",
             "if (_dispatcherQueue is { HasThreadAccess: false } dispatcher)");
         Assert.Contains("StartAutomaticUpdateCheckWithoutGateway();", startup);
-        Assert.Contains("if (snap.OperatorState == RoleConnectionState.Error)", source);
+        Assert.Contains(
+            "if (snap.OperatorState is RoleConnectionState.Error or RoleConnectionState.PairingRequired)",
+            managerStateChanged);
     }
 
     [Fact]
