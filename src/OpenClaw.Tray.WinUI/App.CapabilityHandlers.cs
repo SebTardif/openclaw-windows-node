@@ -260,6 +260,14 @@ public partial class App
                 _nodeService?.McpStartupError);
             var diagnostics = _connectionManager?.Diagnostics;
             var recentDiagnostics = diagnostics?.GetRecent(50) ?? [];
+            var localNode = NodeCapabilityGating.GetLocalNodeInfo(
+                _appState?.Nodes,
+                _nodeService?.FullDeviceId);
+            var capabilityStates = NodeCapabilityTruthSource.Build(
+                _settings,
+                _nodeService,
+                localNode,
+                _connectionManager?.CurrentSnapshot.NodeState ?? RoleConnectionState.Idle);
             return Task.FromResult<object?>(ConnectionDiagnosticsProjection.BuildStatus(
                 _connectionManager?.CurrentSnapshot,
                 _gatewayRegistry?.GetActive(),
@@ -269,7 +277,8 @@ public partial class App
                 mcpError: mcpPlan.ShouldShow ? mcpPlan.Message : null,
                 nodeBrowserProxyEnabled: _settings?.NodeBrowserProxyEnabled != false,
                 recentDiagnostics: recentDiagnostics,
-                diagnosticEventCount: diagnostics?.Count ?? recentDiagnostics.Count));
+                diagnosticEventCount: diagnostics?.Count ?? recentDiagnostics.Count,
+                capabilities: capabilityStates));
         };
 
         connection.GatewaysHandler = () =>

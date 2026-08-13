@@ -7,6 +7,21 @@ namespace OpenClaw.Tray.Tests;
 public sealed class CommandCenterStateBuilderTests
 {
     [Fact]
+    public void CapabilityTruth_IsSharedByCommandCenterAndAgentFacingStatus()
+    {
+        var root = TestRepositoryPaths.GetRepositoryRoot();
+        var builder = File.ReadAllText(Path.Combine(
+            root, "src", "OpenClaw.Tray.WinUI", "Services", "CommandCenterStateBuilder.cs"));
+        var handlers = File.ReadAllText(Path.Combine(
+            root, "src", "OpenClaw.Tray.WinUI", "App.CapabilityHandlers.cs"));
+
+        Assert.Contains("NodeCapabilityTruthSource.Build(", builder, StringComparison.Ordinal);
+        Assert.Contains("CapabilityStates = capabilityStates.ToList()", builder, StringComparison.Ordinal);
+        Assert.Contains("NodeCapabilityTruthSource.Build(", handlers, StringComparison.Ordinal);
+        Assert.Contains("capabilities: capabilityStates", handlers, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void BrowserProxyAuthWarning_ShowsOnlyWhenNodeSessionLiveAndSharedTokenMissing()
     {
         Assert.True(CommandCenterBrowserProxyAuthWarningPolicy.ShouldShow(

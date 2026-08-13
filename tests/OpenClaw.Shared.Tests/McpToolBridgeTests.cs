@@ -215,6 +215,54 @@ public class McpToolBridgeTests
     }
 
     [Fact]
+    public async Task ConnectionStatus_ToolsListAndCall_ExposeCapabilityTruth()
+    {
+        var capability = new AppConnectionCapability(NullLogger.Instance)
+        {
+            StatusHandler = () => Task.FromResult<object?>(new
+            {
+                schemaVersion = 2,
+                capabilities = new[]
+                {
+                    CapabilityTruthProjection.Project(new(
+                        "camera",
+                        "Camera",
+                        ["camera.list", "camera.snap", "camera.clip"],
+                        true,
+                        CapabilityTruthProjection.WindowsPermissionKind.Unknown,
+                        false,
+                        CapabilityTruthProjection.ApprovalKind.NotConnected,
+                        [],
+                        [],
+                        new Dictionary<string, bool>(),
+                        true,
+                        CapabilityTruthProjection.RuntimeKind.Unknown))
+                }
+            })
+        };
+        var bridge = CreateBridge([capability]);
+
+        var listResponse = await bridge.HandleRequestAsync(
+            """{"jsonrpc":"2.0","id":1,"method":"tools/list"}""");
+        using (var list = JsonDocument.Parse(listResponse!))
+        {
+            Assert.Contains(
+                list.RootElement.GetProperty("result").GetProperty("tools").EnumerateArray(),
+                tool => tool.GetProperty("name").GetString() == "app.connection.status");
+        }
+
+        var callResponse = await bridge.HandleRequestAsync(
+            """{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"app.connection.status","arguments":{}}}""");
+        using var call = JsonDocument.Parse(callResponse!);
+        var text = call.RootElement.GetProperty("result").GetProperty("content")[0].GetProperty("text").GetString()!;
+        using var payload = JsonDocument.Parse(text);
+        var camera = payload.RootElement.GetProperty("capabilities")[0];
+        Assert.Equal("camera", camera.GetProperty("id").GetString());
+        Assert.Equal("unknown", camera.GetProperty("windowsPermission").GetString());
+        Assert.Equal("not-connected", camera.GetProperty("gatewayDeclaration").GetString());
+    }
+
+    [Fact]
     public async Task ToolsCall_UnknownTool_ReturnsToolErrorNotJsonRpcError()
     {
         var bridge = CreateBridge(new List<INodeCapability>());

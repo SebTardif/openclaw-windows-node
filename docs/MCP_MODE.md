@@ -25,6 +25,12 @@ The implementation is structured so that **adding a new node capability automati
 
 ## Architecture
 
+`app.connection.status` exposes an agent-facing `capabilities` projection for
+camera, browser proxy, and system.run. It keeps local MCP exposure distinct
+from the Gateway's effective declaration and reports Settings, Windows
+permission, approval, and runtime readiness without moving connection
+lifecycle out of `GatewayConnectionManager`.
+
 ### Single capability registry, two transports
 
 ![Single capability registry, two transports](diagrams/mcp-mode-dual-transport.svg)

@@ -7,6 +7,39 @@ namespace OpenClaw.Tray.Tests;
 public sealed class ConnectionDiagnosticsProjectionTests
 {
     [Fact]
+    public void BuildStatus_IncludesAuthoritativeCapabilityState()
+    {
+        var camera = CapabilityTruthProjection.Project(new(
+            "camera",
+            "Camera",
+            ["camera.list", "camera.snap", "camera.clip"],
+            true,
+            CapabilityTruthProjection.WindowsPermissionKind.Unknown,
+            false,
+            CapabilityTruthProjection.ApprovalKind.NotConnected,
+            [],
+            [],
+            new Dictionary<string, bool>(),
+            true,
+            CapabilityTruthProjection.RuntimeKind.Unknown));
+
+        var status = ConnectionDiagnosticsProjection.BuildStatus(
+            GatewayConnectionSnapshot.Idle,
+            activeGateway: null,
+            enableNodeMode: false,
+            enableMcpServer: true,
+            isMcpRunning: true,
+            mcpError: null,
+            nodeBrowserProxyEnabled: true,
+            recentDiagnostics: [],
+            diagnosticEventCount: 0,
+            capabilities: [camera]);
+
+        Assert.Equal(2, status.SchemaVersion);
+        Assert.Equal(camera, Assert.Single(status.Capabilities));
+    }
+
+    [Fact]
     public void BuildStatus_ExplainsActiveGatewayRolesCredentialsAndActions()
     {
         var gateway = new GatewayRecord

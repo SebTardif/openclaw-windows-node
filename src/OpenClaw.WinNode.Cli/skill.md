@@ -429,7 +429,7 @@ presence/outcome only.
 
 ### app.connection.status
 Read-only connection diagnostics for agents and CLIs. No params. Returns:
-`{ schemaVersion, connectionState, effectiveMode, legacyConnectionStatus, gateway, operator, node, mcp, browserProxy, pendingActions, retry, diagnostics }`.
+`{ schemaVersion, connectionState, effectiveMode, legacyConnectionStatus, gateway, operator, node, mcp, capabilities, browserProxy, pendingActions, retry, diagnostics }`.
 
 The payload includes the active gateway id/name/url, operator and node role
 states, credential sources/statuses, MCP enabled/running/error state, browser
@@ -437,6 +437,12 @@ proxy shared-token caveat, pending approval commands, retry hints inferred from
 recent diagnostics, and recent connection diagnostic events. `effectiveMode`
 reflects Settings mode (`EnableNodeMode` / `EnableMcpServer`); `node.intended`
 reflects the manager snapshot plus current Node mode setting.
+
+`capabilities` is the authoritative projection for `camera`, `browser-proxy`,
+and `system-run`. Each entry reports the Settings toggle, Windows permission,
+effective or pending Gateway declaration, approval state, local MCP exposure,
+Gateway-path state/repair, runtime readiness, overall state, and a repair path. Treat `ready` with runtime
+`unchecked` as discoverable but still requiring a safe live invocation.
 
 ### app.connection.gateways
 Read-only saved gateway diagnostics. No params. Returns:

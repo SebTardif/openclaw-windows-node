@@ -23,9 +23,11 @@ internal static class NodeCapabilityGating
 {
     public static bool ShouldRegisterCanvas(SettingsManager? s)       => s?.NodeCanvasEnabled       != false;
     public static bool ShouldRegisterScreen(SettingsManager? s)       => s?.NodeScreenEnabled       != false;
-    public static bool ShouldRegisterCamera(SettingsManager? s)       => s?.NodeCameraEnabled       != false;
+    public static bool ShouldRegisterCamera(SettingsManager? s)       =>
+        OpenClaw.Shared.CapabilityTruthProjection.ShouldDeclare(s?.NodeCameraEnabled != false);
     public static bool ShouldRegisterLocation(SettingsManager? s)     => s?.NodeLocationEnabled     != false;
-    public static bool ShouldRegisterBrowserProxy(SettingsManager? s) => s?.NodeBrowserProxyEnabled != false;
+    public static bool ShouldRegisterBrowserProxy(SettingsManager? s) =>
+        OpenClaw.Shared.CapabilityTruthProjection.ShouldDeclare(s?.NodeBrowserProxyEnabled != false);
     public static bool ShouldRegisterBrowserProxy(
         SettingsManager? s,
         string? sharedGatewayToken,
@@ -77,7 +79,8 @@ internal static class NodeCapabilityGating
             string.Equals(n.NodeId, localDeviceId, System.StringComparison.OrdinalIgnoreCase));
     }
 
-    public static bool ShouldRegisterSystemRun(SettingsManager? s)    => s?.NodeSystemRunEnabled    != false;
+    public static bool ShouldRegisterSystemRun(SettingsManager? s)    =>
+        OpenClaw.Shared.CapabilityTruthProjection.ShouldDeclare(s?.NodeSystemRunEnabled != false);
 
     /// <summary>Counts node capability categories served by local MCP without a gateway node client.</summary>
     public static int CountMcpServedCapabilities(SettingsManager? s)

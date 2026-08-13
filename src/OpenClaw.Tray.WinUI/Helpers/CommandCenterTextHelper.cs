@@ -195,6 +195,19 @@ internal static class CommandCenterTextHelper
         builder.AppendLine("OpenClaw capability diagnostics");
         builder.AppendLine($"Generated: {DateTimeOffset.Now:O}");
         builder.AppendLine();
+        builder.AppendLine("Authoritative capability state:");
+        foreach (var capability in state.CapabilityStates.OrderBy(c => c.DisplayName, StringComparer.OrdinalIgnoreCase))
+        {
+            builder.AppendLine($"- {capability.DisplayName}: {capability.OverallState}");
+            builder.AppendLine($"  settings={capability.SettingsEnabled.ToString().ToLowerInvariant()}, windowsPermission={capability.WindowsPermission}, gatewayDeclaration={capability.GatewayDeclaration}, approval={capability.Approval}, gatewayPath={capability.GatewayPathState}, localMcp={capability.LocalMcpExposed.ToString().ToLowerInvariant()}, runtime={capability.RuntimeReadiness}");
+            builder.AppendLine($"  {capability.Summary}");
+            if (!string.Equals(capability.GatewayPathState, "ready", StringComparison.OrdinalIgnoreCase))
+                builder.AppendLine($"  gateway repair: {capability.GatewayRepair}");
+            if (!string.Equals(capability.OverallState, "ready", StringComparison.OrdinalIgnoreCase))
+                builder.AppendLine($"  repair: {capability.Repair}");
+        }
+
+        builder.AppendLine();
         builder.AppendLine("Windows permission surfaces:");
         foreach (var permission in state.Permissions.OrderBy(p => p.Name, StringComparer.OrdinalIgnoreCase))
         {

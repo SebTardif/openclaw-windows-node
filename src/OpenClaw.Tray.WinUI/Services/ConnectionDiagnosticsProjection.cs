@@ -18,7 +18,8 @@ internal static class ConnectionDiagnosticsProjection
         string? mcpError,
         bool nodeBrowserProxyEnabled,
         IReadOnlyList<ConnectionDiagnosticEvent> recentDiagnostics,
-        int diagnosticEventCount)
+        int diagnosticEventCount,
+        IReadOnlyList<CapabilityTruthProjection.State>? capabilities = null)
     {
         var snapshot = currentSnapshot ?? GatewayConnectionSnapshot.Idle;
         var legacyStatus = ConnectionStatusPresenter.ToLegacyStatus(snapshot);
@@ -30,7 +31,7 @@ internal static class ConnectionDiagnosticsProjection
         var nodeSessionLive = BrowserProxyActivation.IsNodeSessionLive(snapshot.NodeState);
 
         return new ConnectionStatusDiagnostics(
-            SchemaVersion: 1,
+            SchemaVersion: 2,
             ConnectionState: snapshot.OverallState.ToString(),
             EffectiveMode: GetEffectiveMode(enableNodeMode, enableMcpServer),
             LegacyConnectionStatus: legacyStatus.ToString(),
@@ -70,6 +71,7 @@ internal static class ConnectionDiagnosticsProjection
                 Enabled: enableMcpServer,
                 Running: isMcpRunning,
                 Error: mcpError),
+            Capabilities: capabilities ?? [],
             BrowserProxy: BuildBrowserProxy(activeGateway, nodeBrowserProxyEnabled, nodeSessionLive),
             PendingActions: pendingActions,
             Retry: BuildRetry(recentDiagnostics),
@@ -303,6 +305,7 @@ internal sealed record ConnectionStatusDiagnostics(
     [property: JsonPropertyName("operator")] OperatorConnectionDiagnostics Operator,
     [property: JsonPropertyName("node")] NodeConnectionDiagnostics Node,
     [property: JsonPropertyName("mcp")] McpConnectionDiagnostics Mcp,
+    [property: JsonPropertyName("capabilities")] IReadOnlyList<CapabilityTruthProjection.State> Capabilities,
     [property: JsonPropertyName("browserProxy")] BrowserProxyDiagnostics BrowserProxy,
     [property: JsonPropertyName("pendingActions")] IReadOnlyList<ConnectionPendingActionDiagnostics> PendingActions,
     [property: JsonPropertyName("retry")] RetryDiagnostics Retry,

@@ -62,6 +62,7 @@ Every new Windows node call must be exposed through local MCP and `winnode`: reg
 - If the gateway omits a safe pending request ID, verify the copy action emits `openclaw nodes pending`, labels it as discovery only, and does not offer reconnect-after-approval yet
 - Approve the request explicitly, reconnect the node, and verify the effective capability/command counts update and the pending reapproval warning clears
 - Use "Copy fix" only for safe repair commands; privacy-sensitive commands remain informational unless you explicitly opt in on the gateway
+- Copy **Capability diagnostics** and verify camera, browser proxy, and system.run each report Settings, Windows permission, Gateway declaration, approval, local MCP exposure, runtime readiness, an overall state, and a repair path. The same entries must appear in `app.connection.status`.
 
 ## What Requires Gateway Support
 

@@ -572,6 +572,8 @@ public class SetupConfigTests : IDisposable
         Assert.StartsWith(WindowsNodeContextSection.BeginMarker + "\n", block);
         Assert.Contains("This WSL gateway may be paired", block);
         Assert.Contains("exec host=node", block);
+        Assert.Contains("app.connection.status", block);
+        Assert.Contains("Do not infer camera permission", block);
         Assert.DoesNotContain("tools.exec.security full", block);
         Assert.DoesNotContain("tools.exec.ask off", block);
         Assert.EndsWith("\n" + WindowsNodeContextSection.EndMarker, block);

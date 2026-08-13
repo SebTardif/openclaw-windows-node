@@ -161,6 +161,9 @@ public sealed class NodeService : IDisposable, IAsyncDisposable
     private McpToolBridge? _mcpToolBridge;
     private string? _mcpStartupError;
     public bool IsMcpRunning => _mcpServer != null;
+    public BrowserProxyReadiness.Result? BrowserProxyReadiness => _browserProxyCapability?.LastReadiness;
+    public CapabilityTruthProjection.WindowsPermissionKind CameraWindowsPermission { get; private set; } =
+        CapabilityTruthProjection.WindowsPermissionKind.Unknown;
     public VoiceService? VoiceService => _voiceService;
     public TextToSpeechService? TextToSpeech => _textToSpeechService;
     public string McpEndpoint => McpServerUrl;
@@ -190,6 +193,18 @@ public sealed class NodeService : IDisposable, IAsyncDisposable
     public string? ShortDeviceId => _nodeClient?.ShortDeviceId;
     public string? FullDeviceId => _nodeClient?.FullDeviceId;
     public string? GatewayUrl => _nodeClient?.GatewayUrl;
+
+    public IReadOnlyList<string> GetRegisteredCommands()
+    {
+        lock (_capabilitiesLock)
+        {
+            return _capabilities
+                .SelectMany(capability => capability.Commands)
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .Order(StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+        }
+    }
 
     /// <summary>Show the canvas window (creates it if needed).</summary>
     public void ShowCanvasWindow()
@@ -414,6 +429,7 @@ public sealed class NodeService : IDisposable, IAsyncDisposable
             browserEndpointVerified: BrowserProxyActivation.IsSshBrowserEndpointVerified(
                 activeGatewayTunnel,
                 browserControlPort));
+        _browserProxyCapability = null;
         if (browserProxyBlock == BrowserProxyActivation.RegistrationBlock.None)
         {
             // Tunnel state is resolved from the active GatewayRecord when a resolver is wired
@@ -1965,14 +1981,24 @@ public sealed class NodeService : IDisposable, IAsyncDisposable
     
     #region Camera Capability Handlers
     
-    private Task<CameraInfo[]> OnCameraList(CancellationToken cancellationToken)
+    private async Task<CameraInfo[]> OnCameraList(CancellationToken cancellationToken)
     {
         if (_cameraCaptureService == null)
         {
             throw new InvalidOperationException("Camera capture service not available");
         }
         
-        return _cameraCaptureService.ListCamerasAsync(cancellationToken);
+        try
+        {
+            var cameras = await _cameraCaptureService.ListCamerasAsync(cancellationToken);
+            CameraWindowsPermission = CapabilityTruthProjection.WindowsPermissionKind.Unknown;
+            return cameras;
+        }
+        catch (UnauthorizedAccessException)
+        {
+            CameraWindowsPermission = CapabilityTruthProjection.WindowsPermissionKind.Denied;
+            throw;
+        }
     }
     
     private async Task<CameraSnapResult> OnCameraSnap(
@@ -1986,10 +2012,13 @@ public sealed class NodeService : IDisposable, IAsyncDisposable
         
         try
         {
-            return await _cameraCaptureService.SnapAsync(args, cancellationToken);
+            var result = await _cameraCaptureService.SnapAsync(args, cancellationToken);
+            CameraWindowsPermission = CapabilityTruthProjection.WindowsPermissionKind.Allowed;
+            return result;
         }
         catch (UnauthorizedAccessException ex)
         {
+            CameraWindowsPermission = CapabilityTruthProjection.WindowsPermissionKind.Denied;
             RequestNodeToast(
                 LocalizationHelper.GetString("Toast_CameraBlocked"),
                 LocalizationHelper.GetString("Toast_CameraBlockedDetail"),
@@ -2023,6 +2052,7 @@ public sealed class NodeService : IDisposable, IAsyncDisposable
                 LocalizationHelper.GetString("Toast_CameraRecordingStartedDetail"),
                 "node:camera-recording-started");
             var result = await _cameraCaptureService.ClipAsync(args, cancellationToken);
+            CameraWindowsPermission = CapabilityTruthProjection.WindowsPermissionKind.Allowed;
             cancellationToken.ThrowIfCancellationRequested();
             RequestNodeToast(
                 LocalizationHelper.GetString("Toast_CameraRecordingComplete"),
@@ -2033,6 +2063,7 @@ public sealed class NodeService : IDisposable, IAsyncDisposable
         }
         catch (UnauthorizedAccessException ex)
         {
+            CameraWindowsPermission = CapabilityTruthProjection.WindowsPermissionKind.Denied;
             RequestNodeToast(
                 LocalizationHelper.GetString("Toast_CameraBlocked"),
                 LocalizationHelper.GetString("Toast_CameraBlockedDetail"),

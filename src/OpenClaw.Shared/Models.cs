@@ -1078,6 +1078,7 @@ public class GatewayCommandCenterState
     public GatewaySelfInfo? GatewaySelf { get; set; }
     public List<PortDiagnosticInfo> PortDiagnostics { get; set; } = new();
     public List<PermissionDiagnosticInfo> Permissions { get; set; } = new();
+    public List<CapabilityTruthProjection.State> CapabilityStates { get; set; } = new();
     public List<ChannelCommandCenterInfo> Channels { get; set; } = new();
     public List<SessionInfo> Sessions { get; set; } = new();
     public GatewayUsageInfo? Usage { get; set; }

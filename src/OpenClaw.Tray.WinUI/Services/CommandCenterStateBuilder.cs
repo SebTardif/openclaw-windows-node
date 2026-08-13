@@ -24,6 +24,14 @@ internal sealed class CommandCenterStateBuilder
         {
             nodes.Add(NodeCapabilityHealthInfo.FromLocalDeclarations(localNode));
         }
+        var gatewayLocalNode = NodeCapabilityGating.GetLocalNodeInfo(
+            _snapshot.Nodes,
+            _snapshot.NodeService?.FullDeviceId);
+        var capabilityStates = NodeCapabilityTruthSource.Build(
+            _snapshot.Settings,
+            _snapshot.NodeService,
+            gatewayLocalNode,
+            _snapshot.NodeConnectionState);
 
         var tunnelInputs = CommandCenterTopologyTunnelResolver.Derive(
             _snapshot.HasActiveGatewayRecord,
@@ -248,6 +256,7 @@ internal sealed class CommandCenterStateBuilder
             GatewaySelf = _snapshot.GatewaySelf,
             PortDiagnostics = portDiagnostics,
             Permissions = PermissionDiagnostics.BuildDefaultWindowsMatrix(),
+            CapabilityStates = capabilityStates.ToList(),
             Channels = _snapshot.Channels.Select(ChannelCommandCenterInfo.FromHealth).ToList(),
             Sessions = _snapshot.Sessions.ToList(),
             Usage = _snapshot.Usage,
