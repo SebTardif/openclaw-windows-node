@@ -4,8 +4,10 @@ using System.IO;
 using System.Net;
 using System.Net.Http;
 using System.Net.Http.Headers;
+using System.Net.Sockets;
 using System.Text;
 using System.Text.Json;
+using System.Threading;
 using System.Threading.Tasks;
 
 namespace OpenClaw.Shared.Capabilities;
@@ -26,6 +28,10 @@ public class BrowserProxyCapability : NodeCapabilityBase
     private readonly HttpClient _httpClient;
     private readonly Func<Uri, System.Threading.CancellationToken, Task<bool>>?
         _authorizeEndpointAsync;
+    private readonly SemaphoreSlim _preflightLock = new(1, 1);
+    private BrowserProxyReadiness.Result? _lastReadiness;
+
+    public BrowserProxyReadiness.Result? LastReadiness => _lastReadiness;
 
     public BrowserProxyCapability(
         IOpenClawLogger logger,
@@ -60,8 +66,16 @@ public class BrowserProxyCapability : NodeCapabilityBase
         if (!string.Equals(request.Command, "browser.proxy", StringComparison.OrdinalIgnoreCase))
             return Error($"Unknown command: {request.Command}");
 
-        if (!TryResolveControlEndpoint(out var controlPort, out var endpointError))
-            return Error(endpointError);
+        if (!TryResolveControlEndpoint(out var endpoint, out var endpointError))
+        {
+            var readiness = BrowserProxyReadiness.EndpointFailure(
+                endpointError,
+                _useSshTunnel,
+                explicitEndpointConfigured: _controlPortOverride.HasValue,
+                sshLocalEndpointConfigured: _sshTunnelLocalPort.HasValue);
+            _lastReadiness = readiness;
+            return Error(readiness.ToError());
+        }
 
         var method = GetStringArg(request.Args, "method", "GET")?.ToUpperInvariant() ?? "GET";
         if (method is not ("GET" or "POST" or "DELETE"))
@@ -74,7 +88,9 @@ public class BrowserProxyCapability : NodeCapabilityBase
         var timeoutMs = Math.Clamp(GetIntArg(request.Args, "timeoutMs", DefaultTimeoutMs), 1, MaxTimeoutMs);
         using var timeoutCts = new System.Threading.CancellationTokenSource(TimeSpan.FromMilliseconds(timeoutMs));
 
+        var controlPort = endpoint.Port;
         var uri = BuildUri(controlPort, path, request.Args);
+        var preflightPassed = false;
         try
         {
             if (!string.IsNullOrWhiteSpace(_bearerToken) &&
@@ -83,6 +99,11 @@ public class BrowserProxyCapability : NodeCapabilityBase
             {
                 return Error("Browser control authentication was blocked because the local listener owner could not be verified.");
             }
+
+            var preflight = await EnsurePreflightAsync(endpoint, timeoutCts.Token).ConfigureAwait(false);
+            if (!preflight.IsReady)
+                return Error(preflight.ToError());
+            preflightPassed = true;
 
             using var httpRequest = CreateHttpRequest(method, uri, request.Args, usePasswordAuth: false);
             using var response = await _httpClient.SendAsync(httpRequest, timeoutCts.Token);
@@ -101,12 +122,28 @@ public class BrowserProxyCapability : NodeCapabilityBase
         }
         catch (TaskCanceledException)
         {
-            return Error($"browser proxy timed out for {method} {path} after {timeoutMs}ms. {BuildReachabilityGuidance(controlPort, _sshRemoteGatewayPort)}");
+            if (!preflightPassed)
+            {
+                return Error(
+                    "Browser control preflight timed out before the requested browser action. Retry after verifying the trusted local browser-control listener. " +
+                    "The Gateway connection is separate and does not need to be restarted.");
+            }
+
+            return Error(
+                $"Browser proxy request timed out for {method} {path} after {timeoutMs}ms. " +
+                "Browser-control preflight passed; verify the requested browser action or profile. " +
+                "The Gateway connection is separate and does not need to be restarted.");
         }
         catch (HttpRequestException ex)
         {
             Logger.Warn($"browser proxy: control host unreachable on 127.0.0.1:{controlPort}: {ex.Message}");
-            return Error($"Browser control host is not reachable on 127.0.0.1:{controlPort}. {BuildReachabilityGuidance(controlPort, _sshRemoteGatewayPort)}");
+            var readiness = BrowserProxyReadiness.HostFailure(
+                controlPort,
+                endpoint.Source,
+                IsConnectionRefused(ex),
+                _sshRemoteGatewayPort);
+            _lastReadiness = readiness;
+            return Error(readiness.ToError());
         }
         catch (JsonException ex)
         {
@@ -171,6 +208,65 @@ public class BrowserProxyCapability : NodeCapabilityBase
             : Success(new { result, files });
     }
 
+    private async Task<BrowserProxyReadiness.Result> EnsurePreflightAsync(
+        BrowserControlEndpoint.Resolution endpoint,
+        CancellationToken cancellationToken)
+    {
+        if (_lastReadiness is { } ready && ready.IsReady)
+            return ready;
+
+        await _preflightLock.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            if (_lastReadiness is { } cached && cached.IsReady)
+                return cached;
+
+            var preflightUri = BuildUri(endpoint.Port, "/", default);
+            using var request = CreateHttpRequest("GET", preflightUri, default, usePasswordAuth: false);
+            using var response = await _httpClient.SendAsync(request, cancellationToken).ConfigureAwait(false);
+            var status = response.StatusCode;
+
+            if (status == HttpStatusCode.Unauthorized && !string.IsNullOrWhiteSpace(_bearerToken))
+            {
+                using var passwordRequest = CreateHttpRequest("GET", preflightUri, default, usePasswordAuth: true);
+                using var passwordResponse = await _httpClient.SendAsync(passwordRequest, cancellationToken).ConfigureAwait(false);
+                status = passwordResponse.StatusCode;
+            }
+
+            var result = BrowserProxyReadiness.FromHttpStatus(
+                status,
+                !string.IsNullOrWhiteSpace(_bearerToken),
+                endpoint.Source);
+            _lastReadiness = result;
+            return result;
+        }
+        catch (TaskCanceledException)
+        {
+            var result = BrowserProxyReadiness.HostFailure(
+                endpoint.Port,
+                endpoint.Source,
+                connectionRefused: false,
+                sshRemoteGatewayPort: _sshRemoteGatewayPort);
+            _lastReadiness = result;
+            return result;
+        }
+        catch (HttpRequestException ex)
+        {
+            Logger.Warn($"browser proxy preflight: control host unavailable on 127.0.0.1:{endpoint.Port}: {ex.Message}");
+            var result = BrowserProxyReadiness.HostFailure(
+                endpoint.Port,
+                endpoint.Source,
+                IsConnectionRefused(ex),
+                _sshRemoteGatewayPort);
+            _lastReadiness = result;
+            return result;
+        }
+        finally
+        {
+            _preflightLock.Release();
+        }
+    }
+
     private string BuildAuthenticationFailureGuidance()
     {
         return string.IsNullOrWhiteSpace(_bearerToken)
@@ -181,29 +277,34 @@ public class BrowserProxyCapability : NodeCapabilityBase
     // Resolves the browser-control port through the shared BrowserControlEndpoint contract
     // so the proxy, the Command Center diagnostics, and the copied SSH-forward guidance all
     // agree. Scoped to the active gateway/tunnel: override, else tunnel local + 2, else gateway + 2.
-    private bool TryResolveControlEndpoint(out int controlPort, out string error)
+    private bool TryResolveControlEndpoint(
+        out BrowserControlEndpoint.Resolution endpoint,
+        out string error)
     {
         int? gatewayLocalPort = null;
         if (Uri.TryCreate(_gatewayUrl, UriKind.Absolute, out var gatewayUri) && gatewayUri.Port > 0)
             gatewayLocalPort = gatewayUri.Port;
 
-        return BrowserControlEndpoint.TryResolveControlPort(
+        return BrowserControlEndpoint.TryResolve(
             gatewayLocalPort,
             _useSshTunnel,
             _sshTunnelLocalPort,
             _controlPortOverride,
-            out controlPort,
+            out endpoint,
             out error,
             _allowGatewayPortFallback);
     }
 
-    private static string BuildReachabilityGuidance(int localControlPort, int? sshRemoteGatewayPort)
+    private static bool IsConnectionRefused(Exception exception)
     {
-        var sshForward = sshRemoteGatewayPort is >= 1 and <= 65533
-            ? $"ssh -N -L {localControlPort}:127.0.0.1:{sshRemoteGatewayPort.Value + 2} <user>@<host>"
-            : $"ssh -N -L {localControlPort}:127.0.0.1:<remote-gateway-port+2> <user>@<host>";
-
-        return $"Start the local OpenClaw browser control host on gateway port + 2 ({localControlPort}). If the gateway is reached through SSH, also forward the browser-control port with: {sshForward}";
+        for (var current = exception; current is not null; current = current.InnerException!)
+        {
+            if (current is SocketException { SocketErrorCode: SocketError.ConnectionRefused })
+                return true;
+            if (current.InnerException is null)
+                break;
+        }
+        return false;
     }
 
     private static bool TryNormalizePath(string? rawPath, out string path, out string error)

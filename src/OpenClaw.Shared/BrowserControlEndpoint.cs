@@ -21,6 +21,15 @@ namespace OpenClaw.Shared;
 /// </summary>
 public static class BrowserControlEndpoint
 {
+    public enum Provenance
+    {
+        ExplicitOverride,
+        ManagedSshForward,
+        GatewayPortFallback,
+    }
+
+    public readonly record struct Resolution(int Port, Provenance Source);
+
     public static bool AllowsGatewayPortFallback(string? gatewayUrl)
     {
         var topology = GatewayTopologyClassifier.Classify(gatewayUrl, useSshTunnel: false);
@@ -45,7 +54,33 @@ public static class BrowserControlEndpoint
         out string error,
         bool allowGatewayPortFallback = true)
     {
-        controlPort = 0;
+        var resolved = TryResolve(
+            gatewayLocalPort,
+            useSshTunnel,
+            sshTunnelLocalPort,
+            controlPortOverride,
+            out var resolution,
+            out error,
+            allowGatewayPortFallback);
+        controlPort = resolved ? resolution.Port : 0;
+        return resolved;
+    }
+
+    /// <summary>
+    /// Resolves the endpoint together with its origin so readiness diagnostics can
+    /// distinguish an explicit/manual endpoint from the tray-managed SSH companion
+    /// forward and the co-located gateway fallback.
+    /// </summary>
+    public static bool TryResolve(
+        int? gatewayLocalPort,
+        bool useSshTunnel,
+        int? sshTunnelLocalPort,
+        int? controlPortOverride,
+        out Resolution resolution,
+        out string error,
+        bool allowGatewayPortFallback = true)
+    {
+        resolution = default;
         error = "";
 
         // (1) Explicit override pins the control port for the active connection.
@@ -56,7 +91,7 @@ public static class BrowserControlEndpoint
                 error = "Configured browser-control port is outside the valid TCP port range.";
                 return false;
             }
-            controlPort = overridePort;
+            resolution = new Resolution(overridePort, Provenance.ExplicitOverride);
             return true;
         }
 
@@ -68,7 +103,7 @@ public static class BrowserControlEndpoint
                 error = "SSH tunnel local port leaves no room for the browser-control port (local + 2).";
                 return false;
             }
-            controlPort = tunnelLocal + 2;
+            resolution = new Resolution(tunnelLocal + 2, Provenance.ManagedSshForward);
             return true;
         }
 
@@ -91,7 +126,7 @@ public static class BrowserControlEndpoint
                 error = "Browser proxy control port is outside the valid TCP port range.";
                 return false;
             }
-            controlPort = gatewayPort + 2;
+            resolution = new Resolution(gatewayPort + 2, Provenance.GatewayPortFallback);
             return true;
         }
 

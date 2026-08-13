@@ -355,6 +355,19 @@ internal sealed class CommandCenterStateBuilder
             if (port.Purpose.Equals("Browser proxy host", StringComparison.OrdinalIgnoreCase) &&
                 !port.IsListening)
             {
+                var endpointProvenance = browserControlPort is >= 1 and <= 65535
+                    ? BrowserControlEndpoint.Provenance.ExplicitOverride
+                    : topology.UsesSshTunnel
+                        ? BrowserControlEndpoint.Provenance.ManagedSshForward
+                        : BrowserControlEndpoint.Provenance.GatewayPortFallback;
+                var sshRemoteGatewayPort = TryGetEndpointPort(tunnel?.RemoteEndpoint, out var remoteGatewayPort)
+                    ? remoteGatewayPort
+                    : (int?)null;
+                var readiness = BrowserProxyReadiness.HostFailure(
+                    port.Port,
+                    endpointProvenance,
+                    connectionRefused: true,
+                    sshRemoteGatewayPort: sshRemoteGatewayPort);
                 if (topology.UsesSshTunnel)
                 {
                     yield return new GatewayDiagnosticWarning
@@ -362,7 +375,7 @@ internal sealed class CommandCenterStateBuilder
                         Severity = GatewayDiagnosticSeverity.Info,
                         Category = "browser",
                         Title = LocalizationHelper.GetString("CommandCenter_BrowserProxySshForwardNotListening"),
-                        Detail = $"browser.proxy over SSH needs a companion local forward for port {port.Port}. Add the browser-control forward to the same tunnel, or enable the managed SSH tunnel so Windows starts both forwards.",
+                        Detail = $"{readiness.Summary} {readiness.Repair}",
                         RepairAction = "Copy browser proxy SSH forward",
                         CopyText = BuildBrowserProxySshForwardHint(port.Port, tunnel, browserControlPort)
                     };
@@ -374,7 +387,7 @@ internal sealed class CommandCenterStateBuilder
                     Severity = GatewayDiagnosticSeverity.Info,
                     Category = "browser",
                     Title = LocalizationHelper.GetString("CommandCenter_BrowserProxyHostNotDetected"),
-                    Detail = "browser.proxy needs a compatible browser-control host listening on the gateway port + 2.",
+                    Detail = $"{readiness.Summary} {readiness.Repair}",
                     RepairAction = "Copy browser setup guidance",
                     // string formatter — no UI
                     CopyText = CommandCenterTextHelper.BuildBrowserSetupGuidance(port.Port, topology, tunnel, browserControlPort)

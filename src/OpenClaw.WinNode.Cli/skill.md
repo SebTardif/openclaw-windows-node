@@ -622,6 +622,13 @@ Returns `{ result, files? }` - `files` is an array of `{ path, base64, mimeType 
 
 Requires the gateway URL to have an explicit port (e.g. `ws://localhost:8080`).
 The browser control host must be running locally on `127.0.0.1:<gatewayPort + 2>`.
+Before the first requested browser action, the Windows node sends an authenticated
+read-only preflight to the resolved local endpoint. A blocked response distinguishes
+an invalid endpoint, missing SSH companion forward, absent or unreachable host, and
+missing or rejected browser-control authentication. Follow the returned repair path;
+restarting the Gateway does not repair these browser-host prerequisites. If browser
+control is not intended, disable **Browser proxy bridge** in Settings so agents no
+longer attempt the capability.
 
 ---
 

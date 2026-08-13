@@ -948,6 +948,8 @@ public class BrowserProxyCapabilityTests
         });
 
         Assert.True(res.Ok);
+        Assert.Equal(2, handler.Requests.Count);
+        Assert.Equal("/", handler.Requests[0].RequestUri!.AbsolutePath);
         Assert.NotNull(handler.LastRequest);
         Assert.Equal(HttpMethod.Post, handler.LastRequest!.Method);
         Assert.Equal("http://127.0.0.1:18791/snapshot?format=aria&profile=openclaw", handler.LastRequest.RequestUri!.ToString());
@@ -1097,29 +1099,35 @@ public class BrowserProxyCapabilityTests
 
         var serverTask = Task.Run(async () =>
         {
-            using var client = await server.AcceptTcpClientAsync(cts.Token);
-            using var stream = client.GetStream();
-            var buffer = new byte[4096];
-            var sb = new StringBuilder();
-            while (!sb.ToString().Contains("\r\n\r\n"))
+            for (var requestIndex = 0; requestIndex < 2; requestIndex++)
             {
-                var n = await stream.ReadAsync(buffer, cts.Token);
-                if (n == 0) break;
-                sb.Append(Encoding.ASCII.GetString(buffer, 0, n));
-            }
+                using var client = await server.AcceptTcpClientAsync(cts.Token);
+                using var stream = client.GetStream();
+                var buffer = new byte[4096];
+                var sb = new StringBuilder();
+                while (!sb.ToString().Contains("\r\n\r\n"))
+                {
+                    var n = await stream.ReadAsync(buffer, cts.Token);
+                    if (n == 0) break;
+                    sb.Append(Encoding.ASCII.GetString(buffer, 0, n));
+                }
 
-            var headerLines = sb.ToString().Split("\r\n");
-            requestLine = headerLines.Length > 0 ? headerLines[0] : null;
-            foreach (var line in headerLines)
-            {
-                if (line.StartsWith("Authorization:", StringComparison.OrdinalIgnoreCase))
-                    authHeader = line["Authorization:".Length..].Trim();
-            }
+                var headerLines = sb.ToString().Split("\r\n");
+                if (requestIndex == 1)
+                {
+                    requestLine = headerLines.Length > 0 ? headerLines[0] : null;
+                    foreach (var line in headerLines)
+                    {
+                        if (line.StartsWith("Authorization:", StringComparison.OrdinalIgnoreCase))
+                            authHeader = line["Authorization:".Length..].Trim();
+                    }
+                }
 
-            const string body = "{\"ok\":true}";
-            var response = $"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {body.Length}\r\nConnection: close\r\n\r\n{body}";
-            await stream.WriteAsync(Encoding.ASCII.GetBytes(response), cts.Token);
-            await stream.FlushAsync(cts.Token);
+                const string body = "{\"ok\":true}";
+                var response = $"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {body.Length}\r\nConnection: close\r\n\r\n{body}";
+                await stream.WriteAsync(Encoding.ASCII.GetBytes(response), cts.Token);
+                await stream.FlushAsync(cts.Token);
+            }
         }, cts.Token);
 
         try
@@ -1196,11 +1204,12 @@ public class BrowserProxyCapabilityTests
     [Fact]
     public async Task BrowserProxy_ReturnsUnauthorizedAsAuthError()
     {
+        var handler = new CapturingHandler("Unauthorized", HttpStatusCode.Unauthorized);
         var cap = new BrowserProxyCapability(
             NullLogger.Instance,
             "ws://127.0.0.1:18789",
             "wrong-token",
-            new CapturingHandler("Unauthorized", HttpStatusCode.Unauthorized));
+            handler);
 
         var res = await cap.ExecuteAsync(new NodeInvokeRequest
         {
@@ -1210,8 +1219,10 @@ public class BrowserProxyCapabilityTests
         });
 
         Assert.False(res.Ok);
+        Assert.Equal(2, handler.Requests.Count);
+        Assert.All(handler.Requests, request => Assert.Equal("/", request.RequestUri!.AbsolutePath));
         Assert.Contains("authentication", res.Error);
-        Assert.Contains("Verify the gateway token saved in Settings", res.Error);
+        Assert.Contains("matches browser-control auth", res.Error);
     }
 
     [Fact]
@@ -1231,8 +1242,8 @@ public class BrowserProxyCapabilityTests
         });
 
         Assert.False(res.Ok);
-        Assert.Contains("unauthenticated request", res.Error);
-        Assert.Contains("no gateway shared token saved", res.Error);
+        Assert.Contains("requires authentication", res.Error);
+        Assert.Contains("no saved shared token", res.Error);
         Assert.Contains("Settings", res.Error);
     }
 
@@ -1254,7 +1265,7 @@ public class BrowserProxyCapabilityTests
         });
 
         Assert.True(res.Ok);
-        Assert.Equal(2, handler.Requests.Count);
+        Assert.Equal(4, handler.Requests.Count);
         Assert.Equal("Bearer", handler.Requests[0].Headers.Authorization?.Scheme);
         Assert.Equal("Basic", handler.Requests[1].Headers.Authorization?.Scheme);
         Assert.Equal(
@@ -1262,6 +1273,8 @@ public class BrowserProxyCapabilityTests
             handler.Requests[1].Headers.Authorization?.Parameter);
         Assert.True(handler.Requests[1].Headers.TryGetValues("x-openclaw-password", out var passwordValues));
         Assert.Contains("browser-secret", passwordValues);
+        Assert.Equal("Bearer", handler.Requests[2].Headers.Authorization?.Scheme);
+        Assert.Equal("Basic", handler.Requests[3].Headers.Authorization?.Scheme);
     }
 
     [Fact]
@@ -1413,12 +1426,91 @@ public class BrowserProxyCapabilityTests
         Assert.Contains("profile=work", requestUri);
     }
 
+    [Fact]
+    public async Task BrowserProxy_ReadyPreflight_IsCachedAcrossRequestedActions()
+    {
+        var handler = new CapturingHandler("""{"ok":true}""");
+        var cap = new BrowserProxyCapability(
+            NullLogger.Instance,
+            "ws://127.0.0.1:18789",
+            "token",
+            handler);
+
+        var first = await cap.ExecuteAsync(new NodeInvokeRequest
+        {
+            Id = "preflight-cache-1",
+            Command = "browser.proxy",
+            Args = Parse("""{"path":"/tabs"}""")
+        });
+        var second = await cap.ExecuteAsync(new NodeInvokeRequest
+        {
+            Id = "preflight-cache-2",
+            Command = "browser.proxy",
+            Args = Parse("""{"path":"/status"}""")
+        });
+
+        Assert.True(first.Ok);
+        Assert.True(second.Ok);
+        Assert.Equal(new[] { "/", "/tabs", "/status" },
+            handler.Requests.Select(request => request.RequestUri!.AbsolutePath));
+        Assert.Equal(BrowserProxyReadiness.Kind.Ready, cap.LastReadiness?.State);
+    }
+
+    [Fact]
+    public async Task BrowserProxy_ActionTimeout_DoesNotMisreportPreflightFailure()
+    {
+        var cap = new BrowserProxyCapability(
+            NullLogger.Instance,
+            "ws://127.0.0.1:18789",
+            "token",
+            new ReadyThenTimeoutHandler());
+
+        var result = await cap.ExecuteAsync(new NodeInvokeRequest
+        {
+            Id = "action-timeout",
+            Command = "browser.proxy",
+            Args = Parse("""{"path":"/snapshot","timeoutMs":5000}""")
+        });
+
+        Assert.False(result.Ok);
+        Assert.Contains("request timed out for GET /snapshot", result.Error);
+        Assert.Contains("preflight passed", result.Error, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("preflight blocked", result.Error, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(BrowserProxyReadiness.Kind.Ready, cap.LastReadiness?.State);
+    }
+
+    [Fact]
+    public async Task BrowserProxy_AuthorizationTimeout_DoesNotClaimPreflightPassed()
+    {
+        var handler = new CapturingHandler("{}");
+        var cap = new BrowserProxyCapability(
+            NullLogger.Instance,
+            "ws://127.0.0.1:18789",
+            "token",
+            handler,
+            authorizeEndpointAsync: (_, _) => throw new TaskCanceledException("owner check timed out"));
+
+        var result = await cap.ExecuteAsync(new NodeInvokeRequest
+        {
+            Id = "authorization-timeout",
+            Command = "browser.proxy",
+            Args = Parse("""{"path":"/snapshot"}""")
+        });
+
+        Assert.False(result.Ok);
+        Assert.Contains("preflight timed out before", result.Error, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("preflight passed", result.Error, StringComparison.OrdinalIgnoreCase);
+        Assert.Empty(handler.Requests);
+        Assert.Null(cap.LastReadiness);
+    }
+
     private sealed class CapturingHandler : HttpMessageHandler
     {
         private readonly string _response;
         private readonly HttpStatusCode _statusCode;
 
         public HttpRequestMessage? LastRequest { get; private set; }
+        public List<HttpRequestMessage> Requests { get; } = new();
 
         public CapturingHandler(string response, HttpStatusCode statusCode = HttpStatusCode.OK)
         {
@@ -1431,6 +1523,7 @@ public class BrowserProxyCapabilityTests
             CancellationToken cancellationToken)
         {
             LastRequest = request;
+            Requests.Add(request);
             return Task.FromResult(new HttpResponseMessage(_statusCode)
             {
                 Content = new StringContent(_response)
@@ -1467,6 +1560,27 @@ public class BrowserProxyCapabilityTests
             HttpRequestMessage request,
             CancellationToken cancellationToken) =>
             throw new HttpRequestException("connection refused");
+    }
+
+    private sealed class ReadyThenTimeoutHandler : HttpMessageHandler
+    {
+        private int _requestCount;
+
+        protected override Task<HttpResponseMessage> SendAsync(
+            HttpRequestMessage request,
+            CancellationToken cancellationToken)
+        {
+            _requestCount++;
+            if (_requestCount == 1)
+            {
+                return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
+                {
+                    Content = new StringContent("{}")
+                });
+            }
+
+            throw new TaskCanceledException("requested action timed out");
+        }
     }
 }
 

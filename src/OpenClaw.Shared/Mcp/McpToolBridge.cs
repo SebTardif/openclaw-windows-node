@@ -420,7 +420,7 @@ public class McpToolBridge
 
         // browser.*
         ["browser.proxy"] =
-            "Proxy an HTTP request to the local OpenClaw browser control host (CDP server) running on gateway port + 2. Args: path (string, required — a local control path like '/json/list' or '/json/activate/<id>'), method ('GET'|'POST'|'DELETE', default 'GET'), body (JSON object, POST/DELETE only), query (object, appended as query params), profile (string, optional browser profile), timeoutMs (int, default 20000, max 120000). Returns { result, files? } where files is present if the response included local file paths. Requires the gateway URL to have an explicit port and the browser control host to be running.",
+            "Proxy an HTTP request to the local OpenClaw browser control host (CDP server) running on gateway port + 2. Before the first requested browser action, Windows preflights endpoint reachability and authentication. A blocked result identifies endpoint, SSH-forward, absent-host, unreachable-host, or authentication repair and should not be diagnosed by restarting the Gateway. Args: path (string, required, a local control path like '/json/list' or '/json/activate/<id>'), method ('GET'|'POST'|'DELETE', default 'GET'), body (JSON object, POST/DELETE only), query (object, appended as query params), profile (string, optional browser profile), timeoutMs (int, default 20000, max 120000). Returns { result, files? } where files is present if the response included local file paths. Requires the gateway URL to have an explicit port and the browser control host to be running.",
     };
 
     private object? HandleCancelledNotification(JsonElement parameters)

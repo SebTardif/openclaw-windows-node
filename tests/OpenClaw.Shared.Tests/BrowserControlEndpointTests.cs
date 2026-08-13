@@ -26,6 +26,27 @@ public class BrowserControlEndpointTests
     }
 
     [Theory]
+    [InlineData(false, null, 19000, BrowserControlEndpoint.Provenance.ExplicitOverride)]
+    [InlineData(true, 9100, null, BrowserControlEndpoint.Provenance.ManagedSshForward)]
+    [InlineData(false, null, null, BrowserControlEndpoint.Provenance.GatewayPortFallback)]
+    public void Resolve_PreservesEndpointProvenance(
+        bool useSshTunnel,
+        int? sshTunnelLocalPort,
+        int? controlPortOverride,
+        BrowserControlEndpoint.Provenance expected)
+    {
+        Assert.True(BrowserControlEndpoint.TryResolve(
+            18789,
+            useSshTunnel,
+            sshTunnelLocalPort,
+            controlPortOverride,
+            out var resolution,
+            out _));
+
+        Assert.Equal(expected, resolution.Source);
+    }
+
+    [Theory]
     [InlineData(18789, false, null)]  // co-located
     [InlineData(18789, true, 9100)]   // managed tunnel
     [InlineData(9000, true, 7000)]    // different active gateway + tunnel

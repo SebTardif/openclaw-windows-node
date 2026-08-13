@@ -152,6 +152,11 @@ Local MCP clients also see MCP-only `app.*` commands such as `app.navigate`, `ap
 - Enter the gateway shared token in Settings, save, and reconnect node mode. Bootstrap tokens are not the shared gateway token.
 
 ### `browser.proxy` reports no browser-control host
+- The first `browser.proxy` call performs an authenticated read-only preflight before
+  the requested browser action. Its blocked result distinguishes endpoint setup, SSH
+  forwarding, an absent listener, an unreachable listener, missing authentication,
+  and rejected authentication. Follow that repair path instead of restarting the
+  Gateway; the Gateway connection and browser-control host are separate prerequisites.
 - Confirm the Browser proxy bridge toggle is enabled in Settings, then save and reconnect or re-pair if the gateway keeps an older command snapshot.
 - The bridge is local-only: it calls `http://127.0.0.1:<gateway-port+2>` from Windows. For a gateway on `ws://127.0.0.1:18789`, the browser-control host must listen on `127.0.0.1:18791`.
 - In managed SSH tunnel mode, keep Browser proxy bridge enabled so the tray forwards local gateway port + 2 to remote gateway port + 2. Settings shows a selectable preview of the exact `ssh -N -L ...` command.
