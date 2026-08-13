@@ -36,6 +36,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Updatum;
 using WinUIEx;
+using SetupCompletionDestination = OpenClaw.SetupEngine.UI.SetupCompletionDestination;
 using SetupCompletedEventArgs = OpenClaw.SetupEngine.UI.SetupCompletedEventArgs;
 using SetupWindow = OpenClaw.SetupEngine.UI.SetupWindow;
 
@@ -604,7 +605,10 @@ public partial class App : Application, OpenClawTray.Services.IAppCommands, IPer
                 ?? (_startupArgs.Length > 1 && IsDeepLinkArg(_startupArgs[1])
                     ? _startupArgs[1] : null)
                 ?? (string.Equals(_postSetupLaunch, "chat", StringComparison.OrdinalIgnoreCase)
-                    ? $"{AppIdentity.ProtocolScheme}://chat" : null);
+                    ? $"{AppIdentity.ProtocolScheme}://chat"
+                    : string.Equals(_postSetupLaunch, "channels", StringComparison.OrdinalIgnoreCase)
+                        ? $"{AppIdentity.ProtocolScheme}://notifications"
+                        : null);
             if (deepLink != null)
             {
                 SendDeepLinkToRunningInstance(deepLink);
@@ -958,6 +962,10 @@ public partial class App : Application, OpenClawTray.Services.IAppCommands, IPer
         else if (!setupShownDuringStartup && string.Equals(_postSetupLaunch, "chat", StringComparison.OrdinalIgnoreCase))
         {
             await HandleDeepLinkAsync($"{AppIdentity.ProtocolScheme}://chat");
+        }
+        else if (!setupShownDuringStartup && string.Equals(_postSetupLaunch, "channels", StringComparison.OrdinalIgnoreCase))
+        {
+            ShowHub("channels");
         }
 
         Logger.Info("Application started (WinUI 3)");
@@ -4153,11 +4161,13 @@ public partial class App : Application, OpenClawTray.Services.IAppCommands, IPer
 
     private void OnSetupCompleted(object? sender, SetupCompletedEventArgs e) =>
         AsyncEventHandlerGuard.Run(
-            () => RestartAfterSetupAsync(e.EnableAutoStart),
+            () => RestartAfterSetupAsync(e.EnableAutoStart, e.Destination),
             new AppLogger(),
             nameof(OnSetupCompleted));
 
-    private async Task RestartAfterSetupAsync(bool enableAutoStart)
+    private async Task RestartAfterSetupAsync(
+        bool enableAutoStart,
+        SetupCompletionDestination destination)
     {
         var exePath = ResolveCurrentExecutablePath();
         if (string.IsNullOrWhiteSpace(exePath) || !File.Exists(exePath))
@@ -4188,7 +4198,7 @@ public partial class App : Application, OpenClawTray.Services.IAppCommands, IPer
             psi.ArgumentList.Add("--wait-for-pid");
             psi.ArgumentList.Add(Environment.ProcessId.ToString(CultureInfo.InvariantCulture));
             psi.ArgumentList.Add("--post-setup-launch");
-            psi.ArgumentList.Add("chat");
+            psi.ArgumentList.Add(destination == SetupCompletionDestination.Channels ? "channels" : "chat");
 
             var restarted = Process.Start(psi);
             if (restarted == null)

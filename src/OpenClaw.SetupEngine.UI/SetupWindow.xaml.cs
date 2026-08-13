@@ -352,7 +352,9 @@ public sealed partial class SetupWindow : Window
         AdvancedSetupRequested?.Invoke(this, EventArgs.Empty);
     }
 
-    public bool RequestSetupCompleted(bool enableAutoStart)
+    public bool RequestSetupCompleted(
+        bool enableAutoStart,
+        SetupCompletionDestination destination = SetupCompletionDestination.Chat)
     {
         var handler = SetupCompleted;
         if (handler == null)
@@ -374,7 +376,7 @@ public sealed partial class SetupWindow : Window
             return true;
         }
 
-        handler.Invoke(this, new SetupCompletedEventArgs(enableAutoStart));
+        handler.Invoke(this, new SetupCompletedEventArgs(enableAutoStart, destination));
         return true;
     }
 
@@ -460,4 +462,12 @@ public sealed record CompletePageArgs(
     SetupReviewSummary? ReviewSummary = null,
     bool CanRetryGatewayFallback = false,
     string? GatewayFallbackVersion = null);
-public sealed record SetupCompletedEventArgs(bool EnableAutoStart);
+public enum SetupCompletionDestination
+{
+    Chat,
+    Channels,
+}
+
+public sealed record SetupCompletedEventArgs(
+    bool EnableAutoStart,
+    SetupCompletionDestination Destination = SetupCompletionDestination.Chat);

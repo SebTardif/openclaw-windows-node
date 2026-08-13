@@ -10,6 +10,8 @@ The Setup Engine is a **config-driven system** for provisioning an OpenClaw WSL 
 
 The bundled `default-config.json` ships with the tray executable and provides secure defaults (loopback bind, WSL isolation, systemd enabled). Defaults can be overridden via config file or environment variables.
 
+The completion page treats Gateway/device readiness and channel readiness as separate states. Its channel handoff carries a typed `SetupCompletionDestination.Channels` result back to the tray composition root. The tray performs its normal restart, opens the existing Channels surface, and lets that surface verify live Gateway channel state. Setup does not own channel lifecycle or construct a parallel Gateway client.
+
 > **Status note (2026-07-06):** Current default setup includes `WindowsNodeBootstrapContextStep`, which injects Windows-node context into the WSL workspace `AGENTS.md` after onboarding.
 
 ---

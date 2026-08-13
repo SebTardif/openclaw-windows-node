@@ -105,12 +105,22 @@ public sealed partial class CompletePage : Page
     {
         if (LaunchButton.Content?.ToString() != "Close")
         {
-            var enableAutoStart = StartupRow.Visibility == Visibility.Visible && StartupToggle.IsOn;
-            if (SetupWindow.Active?.RequestSetupCompleted(enableAutoStart) == true)
+            if (CompleteSetup(SetupCompletionDestination.Chat))
                 return;
         }
 
         SetupWindow.Active?.Close();
+    }
+
+    private void ChannelSetupButton_Click(object sender, RoutedEventArgs e)
+    {
+        CompleteSetup(SetupCompletionDestination.Channels);
+    }
+
+    private bool CompleteSetup(SetupCompletionDestination destination)
+    {
+        var enableAutoStart = StartupRow.Visibility == Visibility.Visible && StartupToggle.IsOn;
+        return SetupWindow.Active?.RequestSetupCompleted(enableAutoStart, destination) == true;
     }
 
     private void ViewLog_Click(object sender, RoutedEventArgs e)

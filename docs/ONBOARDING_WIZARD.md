@@ -56,6 +56,8 @@ When the gateway config wizard surfaces an error and the active gateway is an ap
 ### All set
 Displays a completion summary, a Launch at startup toggle, and a Finish button that saves the startup preference before restarting the tray. Launch at startup defaults on so OpenClaw is ready after reboot.
 
+Completion reports the local gateway and Windows device as ready independently from mobile and chat channels. **Set up or verify channels** restarts the tray directly into Channels, where each channel exposes its current gateway-reported state. Configuration supported by the Gateway API stays in-app. If a gateway-host plugin is missing, the page provides the exact copyable install command, explains why it must run on the gateway host, states the expected result, and asks the user to return and refresh until the channel reports connected or running. The setup UI does not infer channel readiness from a successful Gateway connection and does not automate unknown Gateway commands.
+
 ## Security
 
 The onboarding wizard follows these security practices:

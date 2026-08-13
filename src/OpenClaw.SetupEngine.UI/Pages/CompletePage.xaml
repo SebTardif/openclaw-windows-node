@@ -83,6 +83,22 @@
                             <FontIcon Grid.Column="2" Glyph="&#xE73E;" FontSize="16" Foreground="{ThemeResource SystemFillColorSuccessBrush}" VerticalAlignment="Center" />
                         </Grid>
                     </Border>
+                    <Border Background="{ThemeResource CardBackgroundFillColorDefaultBrush}" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1" CornerRadius="4" Padding="14,12">
+                        <Grid ColumnDefinitions="Auto,*" ColumnSpacing="14">
+                            <FontIcon Grid.Column="0" Glyph="&#xE8BD;" FontSize="18" VerticalAlignment="Center" />
+                            <StackPanel Grid.Column="1" Spacing="6">
+                                <TextBlock Text="Mobile and chat channels" Style="{StaticResource BodyStrongTextBlockStyle}" />
+                                <TextBlock Text="Gateway connected does not mean a channel is ready. Review each channel separately, complete any gateway-host step, then refresh until it shows connected or running."
+                                           TextWrapping="Wrap"
+                                           Style="{StaticResource CaptionTextBlockStyle}"
+                                           Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                                <Button x:Name="ChannelSetupButton"
+                                        Content="Set up or verify channels"
+                                        HorizontalAlignment="Left"
+                                        Click="ChannelSetupButton_Click" />
+                            </StackPanel>
+                        </Grid>
+                    </Border>
                 </StackPanel>
 
                 <Border x:Name="ErrorCard" CornerRadius="4" Padding="16,12,16,12"

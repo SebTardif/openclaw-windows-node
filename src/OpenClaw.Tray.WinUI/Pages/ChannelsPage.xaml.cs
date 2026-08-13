@@ -2153,7 +2153,7 @@ public sealed partial class ChannelsPage : Page
 
         body.Children.Add(new TextBlock
         {
-            Text = "Run this command on the machine that hosts your gateway. After it finishes, come back and click Refresh.",
+            Text = "Run this command on the machine that hosts your gateway. Expected result: the plugin installs without an error. Return here, click Refresh, then start or save the channel until its status shows connected or running.",
             Style = (Style)Application.Current.Resources["CaptionTextBlockStyle"],
             Foreground = (Brush)Application.Current.Resources["TextFillColorTertiaryBrush"],
             TextWrapping = TextWrapping.Wrap,

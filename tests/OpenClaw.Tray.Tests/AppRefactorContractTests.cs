@@ -1137,6 +1137,36 @@ public sealed class AppRefactorContractTests
     }
 
     [Fact]
+    public void CompletePage_SeparatesGatewayReadinessFromChannelVerification()
+    {
+        var root = TestRepositoryPaths.GetRepositoryRoot();
+        var setupWindow = File.ReadAllText(Path.Combine(root, "src", "OpenClaw.SetupEngine.UI", "SetupWindow.xaml.cs"));
+        var completeXaml = File.ReadAllText(Path.Combine(root, "src", "OpenClaw.SetupEngine.UI", "Pages", "CompletePage.xaml"));
+        var completeCode = File.ReadAllText(Path.Combine(root, "src", "OpenClaw.SetupEngine.UI", "Pages", "CompletePage.xaml.cs"));
+        var app = File.ReadAllText(Path.Combine(root, "src", "OpenClaw.Tray.WinUI", "App.xaml.cs"));
+
+        Assert.Contains("Gateway connected does not mean a channel is ready", completeXaml);
+        Assert.Contains("Set up or verify channels", completeXaml);
+        Assert.Contains("CompleteSetup(SetupCompletionDestination.Channels)", completeCode);
+        Assert.Contains("SetupCompletionDestination Destination", setupWindow);
+        Assert.Contains("ShowHub(\"channels\")", app);
+        Assert.Contains("destination == SetupCompletionDestination.Channels ? \"channels\" : \"chat\"", app);
+    }
+
+    [Fact]
+    public void ChannelsPage_GatewayHostHandoff_IsCopyableAndVerifiable()
+    {
+        var root = TestRepositoryPaths.GetRepositoryRoot();
+        var channels = File.ReadAllText(Path.Combine(root, "src", "OpenClaw.Tray.WinUI", "Pages", "ChannelsPage.xaml.cs"));
+
+        Assert.Contains("openclaw plugins install {pkg}", channels);
+        Assert.Contains("pkgData.SetText(cmd)", channels);
+        Assert.Contains("Expected result: the plugin installs without an error", channels);
+        Assert.Contains("click Refresh", channels);
+        Assert.Contains("status shows connected or running", channels);
+    }
+
+    [Fact]
     public void CompletePage_OffersExactFallbackOnlyThroughTypedCompatibilityPath()
     {
         var root = TestRepositoryPaths.GetRepositoryRoot();
