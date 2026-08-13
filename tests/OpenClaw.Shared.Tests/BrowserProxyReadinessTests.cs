@@ -43,6 +43,7 @@ public sealed class BrowserProxyReadinessTests
 
         Assert.Equal(BrowserProxyReadiness.Kind.HostAbsent, result.State);
         Assert.Equal(BrowserControlEndpoint.Provenance.ManagedSshForward, result.EndpointProvenance);
+        Assert.Contains("managed SSH browser-control forward", result.Summary, StringComparison.OrdinalIgnoreCase);
         Assert.Contains("remote browser-control port 18791", result.Repair, StringComparison.OrdinalIgnoreCase);
     }
 
@@ -56,6 +57,7 @@ public sealed class BrowserProxyReadinessTests
             sshRemoteGatewayPort: null);
 
         Assert.Equal(BrowserProxyReadiness.Kind.HostUnreachable, result.State);
+        Assert.Contains("gateway port + 2", result.Summary, StringComparison.OrdinalIgnoreCase);
         Assert.Contains("did not respond", result.Summary, StringComparison.OrdinalIgnoreCase);
         Assert.Contains("disable Browser proxy bridge", result.Repair, StringComparison.OrdinalIgnoreCase);
     }

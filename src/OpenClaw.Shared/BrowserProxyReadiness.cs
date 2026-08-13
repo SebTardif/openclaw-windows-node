@@ -55,9 +55,10 @@ public static class BrowserProxyReadiness
         int? sshRemoteGatewayPort)
     {
         var state = connectionRefused ? Kind.HostAbsent : Kind.HostUnreachable;
+        var endpointDescription = DescribeEndpoint(provenance);
         var summary = connectionRefused
-            ? $"no browser-control host is listening at 127.0.0.1:{localPort}."
-            : $"the browser-control host at 127.0.0.1:{localPort} did not respond.";
+            ? $"no browser-control host is listening at 127.0.0.1:{localPort} ({endpointDescription})."
+            : $"the browser-control host at 127.0.0.1:{localPort} ({endpointDescription}) did not respond.";
         var repair = provenance == BrowserControlEndpoint.Provenance.ManagedSshForward ||
                      sshRemoteGatewayPort is not null
             ? BuildSshRepair(localPort, sshRemoteGatewayPort)
@@ -85,8 +86,8 @@ public static class BrowserProxyReadiness
         return hasSharedToken
             ? new Result(
                 Kind.AuthenticationRejected,
-                "the browser-control host rejected the saved shared gateway token.",
-                "Update the Gateway Token in Settings so it matches browser-control auth, or disable Browser proxy bridge.",
+                "the browser-control host rejected authentication for the saved shared gateway token.",
+                "Update the Gateway Token in Settings so it matches browser-control authentication, or disable Browser proxy bridge.",
                 provenance)
             : new Result(
                 Kind.AuthenticationRequired,
@@ -106,4 +107,13 @@ public static class BrowserProxyReadiness
                "Start the remote browser-control host, then retry. " +
                "If browser control is not intended, disable Browser proxy bridge in Settings.";
     }
+
+    private static string DescribeEndpoint(BrowserControlEndpoint.Provenance provenance) => provenance switch
+    {
+        BrowserControlEndpoint.Provenance.ExplicitOverride =>
+            "configured explicit browser-control port",
+        BrowserControlEndpoint.Provenance.ManagedSshForward =>
+            "managed SSH browser-control forward",
+        _ => "derived from gateway port + 2",
+    };
 }
