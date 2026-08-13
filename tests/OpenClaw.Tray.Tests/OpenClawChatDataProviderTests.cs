@@ -4213,7 +4213,13 @@ public class OpenClawChatDataProviderTests
         bridge.RaiseAgent(MakeAgentEvent("lifecycle", """{"phase":"start"}""", runId: "stress-run"));
         const int deltaCount = 10_000;
         for (var i = 0; i < deltaCount; i++)
-            bridge.RaiseAgent(MakeAgentEvent("assistant", """{"delta":"x"}""", runId: "stress-run"));
+        {
+            var delta = i % 2 == 0 ? "a" : "b";
+            bridge.RaiseAgent(MakeAgentEvent(
+                "assistant",
+                $$"""{"delta":"{{delta}}"}""",
+                runId: "stress-run"));
+        }
         bridge.RaiseAgent(MakeAgentEvent("lifecycle", """{"phase":"end"}""", runId: "stress-run"));
 
         Assert.Single(dispatcher);
@@ -4700,13 +4706,13 @@ public class OpenClawChatDataProviderTests
             Text = "first response",
             State = "final",
         });
-        for (var i = 0; i < 20 && bridge.SentMessages.Count < 2; i++)
-            await Task.Delay(10);
+        await WaitForConditionAsync(() =>
+            bridge.SentMessages.Count == 2 &&
+            GetQueuedMessages(snapshots[^1], "main").Count == 0 &&
+            snapshots[^1].Timelines["main"].Entries.Count(e =>
+                e.Kind == ChatTimelineItemKind.User && e.Text == "second") == 1);
 
         Assert.Equal(new[] { "first", "second" }, bridge.SentMessages);
-        Assert.Empty(GetQueuedMessages(snapshots[^1], "main"));
-        Assert.Single(snapshots[^1].Timelines["main"].Entries, e =>
-            e.Kind == ChatTimelineItemKind.User && e.Text == "second");
 
         secondSendGate.SetResult();
     }
