@@ -17,6 +17,7 @@ internal sealed class GatewayService
 {
     private readonly AppState _state;
     private readonly DispatcherQueue _dispatcher;
+    private readonly BoundedDispatcherBatchQueue<QueuedAgentEvent> _agentEventQueue;
 
     // Re-raised events — App subscribes for UI side effects that don't belong in this service.
     public event EventHandler<ConnectionStatus>? ConnectionStatusChanged;
@@ -38,11 +39,23 @@ internal sealed class GatewayService
     // Client tracking for stale-event safety
     private IOperatorGatewayClient? _currentClient;
     private int _clientGeneration;
+    private EventHandler<AgentEventInfo>? _agentEventHandler;
 
     public GatewayService(AppState state, DispatcherQueue dispatcher)
     {
         _state = state;
         _dispatcher = dispatcher;
+        _agentEventQueue = new BoundedDispatcherBatchQueue<QueuedAgentEvent>(
+            action => _dispatcher.TryEnqueue(DispatcherQueuePriority.Low, () => action()),
+            queued =>
+            {
+                if (queued.Generation == _clientGeneration &&
+                    ReferenceEquals(queued.Client, _currentClient))
+                    _state.AddAgentEvent(queued.Event);
+            },
+            maxPending: 400,
+            maxBatchSize: 32,
+            preferEviction: queued => AgentEventBackpressurePolicy.IsDisposableUpdate(queued.Event));
     }
 
     /// <summary>
@@ -65,6 +78,7 @@ internal sealed class GatewayService
 
         _clientGeneration++;
         _currentClient = newClient;
+        _agentEventQueue.Clear();
 
         // Clear service-level caches on actual client swap
         if (!ReferenceEquals(oldClient, newClient))
@@ -124,7 +138,9 @@ internal sealed class GatewayService
         client.ConfigUpdated += OnConfigUpdated;
         client.ConfigSchemaUpdated += OnConfigSchemaUpdated;
         client.SkillsStatusUpdated += OnSkillsStatusUpdated;
-        client.AgentEventReceived += OnAgentEventReceived;
+        var generation = _clientGeneration;
+        _agentEventHandler = (sender, evt) => OnAgentEventReceived(sender, evt, generation);
+        client.AgentEventReceived += _agentEventHandler;
         client.NodePairListUpdated += OnNodePairListUpdated;
         client.DevicePairListUpdated += OnDevicePairListUpdated;
         client.ModelsListUpdated += OnModelsListUpdated;
@@ -155,7 +171,11 @@ internal sealed class GatewayService
         client.ConfigUpdated -= OnConfigUpdated;
         client.ConfigSchemaUpdated -= OnConfigSchemaUpdated;
         client.SkillsStatusUpdated -= OnSkillsStatusUpdated;
-        client.AgentEventReceived -= OnAgentEventReceived;
+        if (_agentEventHandler is not null)
+        {
+            client.AgentEventReceived -= _agentEventHandler;
+            _agentEventHandler = null;
+        }
         client.NodePairListUpdated -= OnNodePairListUpdated;
         client.DevicePairListUpdated -= OnDevicePairListUpdated;
         client.ModelsListUpdated -= OnModelsListUpdated;
@@ -403,11 +423,17 @@ internal sealed class GatewayService
             _state.SetSessionPreview(preview.Key, preview);
     }
 
-    private void OnAgentEventReceived(object? sender, AgentEventInfo evt)
+    private void OnAgentEventReceived(object? sender, AgentEventInfo evt, int generation)
     {
-        if (sender != _currentClient) return;
-        EnqueueModelUpdate(() => _state.AddAgentEvent(evt));
+        if (sender is not IOperatorGatewayClient client ||
+            !ReferenceEquals(client, _currentClient)) return;
+        _agentEventQueue.Enqueue(new QueuedAgentEvent(client, generation, evt));
     }
+
+    private readonly record struct QueuedAgentEvent(
+        IOperatorGatewayClient Client,
+        int Generation,
+        AgentEventInfo Event);
 
     // ── Category A: Simple data (just update AppState) ──────────────────
 

@@ -90,6 +90,7 @@ public sealed class OpenClawChatDataProvider : IChatDataProvider
     private readonly IChatGatewayBridge _bridge;
     private readonly ChatTelemetryTracker _telemetry = new();
     private readonly Action<Action>? _post;
+    private readonly ChatSnapshotDelivery<ChatDataSnapshot> _snapshotDelivery;
     private readonly object _gate = new();
     private readonly object _toolMetaSaveGate = new();
     private readonly object _attachmentMetaSaveGate = new();
@@ -257,6 +258,14 @@ public sealed class OpenClawChatDataProvider : IChatDataProvider
     {
         _bridge = bridge ?? throw new ArgumentNullException(nameof(bridge));
         _post = post;
+        _snapshotDelivery = new ChatSnapshotDelivery<ChatDataSnapshot>(
+            post,
+            snapshot =>
+            {
+                Changed?.Invoke(this, new ChatDataChangedEventArgs(snapshot));
+                if (snapshot.Threads.Length > 0 || snapshot.AvailableModels.Length > 0)
+                    DebounceSaveLastChatState(snapshot);
+            });
         _toolMetaCacheFilePath = !string.IsNullOrWhiteSpace(toolMetaCacheFilePath)
             ? toolMetaCacheFilePath
             : throw new ArgumentException("Tool metadata cache path is required.", nameof(toolMetaCacheFilePath));
@@ -2224,6 +2233,7 @@ public sealed class OpenClawChatDataProvider : IChatDataProvider
             _localSentTexts.Clear();
             _locallyInitiatedThreads.Clear();
             _resetSubmittedLocalEchoTexts.Clear();
+            _snapshotDelivery.Cancel();
         }
         CancelAndDisposeHistoryGeneration(historyGenerationToCancel);
         timerToDispose?.Dispose();
@@ -2383,7 +2393,6 @@ public sealed class OpenClawChatDataProvider : IChatDataProvider
                 }
             }
         }
-
     }
 
     private CancellationTokenSource AdvanceHistoryGenerationLocked(bool clearLoaded)
@@ -5283,15 +5292,20 @@ public sealed class OpenClawChatDataProvider : IChatDataProvider
         // limit.
         evt = TruncateChatEvent(evt);
 
-        ChatDataSnapshot snapshot;
         lock (_gate)
         {
-            snapshot = ApplyEventLocked(threadId, evt, meta);
+            ApplyEventStateLocked(threadId, evt, meta);
         }
-        Publish(snapshot);
+        _snapshotDelivery.PublishFactory(BuildCurrentSnapshot);
     }
 
     private ChatDataSnapshot ApplyEventLocked(string threadId, ChatEvent evt, ChatEntryMetadata? meta)
+    {
+        ApplyEventStateLocked(threadId, evt, meta);
+        return BuildSnapshotLocked();
+    }
+
+    private void ApplyEventStateLocked(string threadId, ChatEvent evt, ChatEntryMetadata? meta)
     {
         var current = GetOrCreateTimelineLocked(threadId);
         var beforeIds = new HashSet<string>(current.Entries.Count);
@@ -5336,7 +5350,12 @@ public sealed class OpenClawChatDataProvider : IChatDataProvider
             }
         }
 
-        return BuildSnapshotLocked();
+    }
+
+    private ChatDataSnapshot BuildCurrentSnapshot()
+    {
+        lock (_gate)
+            return BuildSnapshotLocked();
     }
 
     private Dictionary<string, ChatEntryMetadata> GetOrCreateThreadMetaLocked(string threadId)
@@ -6502,20 +6521,7 @@ public sealed class OpenClawChatDataProvider : IChatDataProvider
 
     private void Publish(ChatDataSnapshot snapshot)
     {
-        var args = new ChatDataChangedEventArgs(snapshot);
-        if (_post is null)
-        {
-            Changed?.Invoke(this, args);
-        }
-        else
-        {
-            _post(() => Changed?.Invoke(this, args));
-        }
-
-        // Debounce-save last-known UI state so the next launch can show
-        // meaningful labels while reconnecting instead of "Main session"/"model".
-        if (snapshot.Threads.Length > 0 || snapshot.AvailableModels.Length > 0)
-            DebounceSaveLastChatState(snapshot);
+        _snapshotDelivery.Publish(snapshot);
     }
 
     // ── Last-chat-state cache ──────────────────────────────────────────

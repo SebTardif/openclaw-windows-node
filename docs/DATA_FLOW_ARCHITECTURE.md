@@ -67,6 +67,16 @@ private void EnqueueModelUpdate(Action update)
 }
 ```
 
+**Streaming backpressure**: Agent events use `BoundedDispatcherBatchQueue` and
+`AgentEventBackpressurePolicy`. The queue retains at most 400 pending events. Overflow
+evicts or rejects only known assistant, reasoning, command-output, item-update, tool-progress,
+and job-progress events before lifecycle/control events; unknown phases fail closed as
+controls. It applies no more than 32 per low-priority dispatcher turn, restores scheduling
+even if a handled listener throws, and rejects pending work when the subscription generation
+or client identity changes. Native chat still reduces every accepted event in arrival order,
+while `ChatSnapshotDelivery` coalesces superseded immutable snapshots so at most one chat
+render callback is pending.
+
 **Client lifecycle**: `AttachClient(newClient, oldClient)` unsubscribes from old, increments generation, clears service-level caches (channel signature, session activities, display state), subscribes to new.
 
 ### App.xaml.cs - orchestration layer
@@ -165,7 +175,7 @@ src/OpenClaw.Tray.WinUI/Services/
 ## Threading rules
 
 1. **AppState writes**: UI thread only. `SetField` asserts `DispatcherQueue.HasThreadAccess`.
-2. **GatewayService handlers**: Run on WebSocket background threads. Use `EnqueueModelUpdate` to dispatch to UI thread before writing to AppState.
+2. **GatewayService handlers**: Run on WebSocket background threads. Use `EnqueueModelUpdate` to dispatch to UI thread before writing to AppState. High-rate agent events instead use the bounded low-priority batch queue described above.
 3. **PropertyChanged handlers**: Fire on UI thread (guaranteed by rule 1). Pages can update UI directly - no `TryEnqueue` needed.
 4. **Session previews**: Thread-safe via `lock` (read from any thread, write from any thread).
 5. **Tray menu refresh**: Debounced via `DispatcherQueuePriority.Low` to coalesce rapid AppState changes.

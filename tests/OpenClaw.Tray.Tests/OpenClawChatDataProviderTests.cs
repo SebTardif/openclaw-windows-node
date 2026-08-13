@@ -4201,6 +4201,34 @@ public class OpenClawChatDataProviderTests
     }
 
     [Fact]
+    public async Task AgentEvent_StreamBurst_BoundsUiWorkAndDeliversTerminalTranscript()
+    {
+        var bridge = new FakeBridge { Sessions = new[] { MainSession() } };
+        var dispatcher = new Queue<Action>();
+        var provider = new OpenClawChatDataProvider(bridge, post: dispatcher.Enqueue);
+        var snapshots = new List<ChatDataSnapshot>();
+        provider.Changed += (_, e) => snapshots.Add(e.Snapshot);
+        await provider.LoadAsync();
+
+        bridge.RaiseAgent(MakeAgentEvent("lifecycle", """{"phase":"start"}""", runId: "stress-run"));
+        const int deltaCount = 10_000;
+        for (var i = 0; i < deltaCount; i++)
+            bridge.RaiseAgent(MakeAgentEvent("assistant", """{"delta":"x"}""", runId: "stress-run"));
+        bridge.RaiseAgent(MakeAgentEvent("lifecycle", """{"phase":"end"}""", runId: "stress-run"));
+
+        Assert.Single(dispatcher);
+        dispatcher.Dequeue()();
+
+        var snapshot = Assert.Single(snapshots);
+        var timeline = snapshot.Timelines["main"];
+        var assistant = Assert.Single(timeline.Entries);
+        Assert.Equal(deltaCount, assistant.Text.Length);
+        Assert.False(assistant.IsStreaming);
+        Assert.False(timeline.TurnActive);
+        Assert.Null(timeline.ActiveAssistantId);
+    }
+
+    [Fact]
     public async Task AgentEvent_AssistantContent_IsIgnoredBecauseChatMessageCarriesFinalText()
     {
         var (bridge, provider, snapshots, _) = CreateProvider(new[] { MainSession() });

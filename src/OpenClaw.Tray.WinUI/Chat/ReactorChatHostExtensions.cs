@@ -22,7 +22,7 @@ public static class ReactorChatHostExtensions
     public static Action<Action> AsPost(this DispatcherQueue dispatcher) =>
         action =>
         {
-            if (!dispatcher.TryEnqueue(() => action()))
+            if (!dispatcher.TryEnqueue(DispatcherQueuePriority.Low, () => action()))
                 System.Diagnostics.Debug.WriteLine("Dropped chat UI update because DispatcherQueue rejected the work item.");
         };
 
