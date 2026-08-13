@@ -6519,9 +6519,14 @@ public sealed class OpenClawChatDataProvider : IChatDataProvider
 
     // ── Dispatcher marshaling ──
 
-    private void Publish(ChatDataSnapshot snapshot)
+    private void Publish(ChatDataSnapshot _)
     {
-        _snapshotDelivery.Publish(snapshot);
+        // A snapshot built before this call can become stale while async work is
+        // resuming (for example, remote-history reconciliation can race a
+        // lifecycle.end). Materialize from the provider's authoritative state
+        // when the pending UI callback actually runs so a late stale publish
+        // cannot replace the terminal render state.
+        _snapshotDelivery.PublishFactory(BuildCurrentSnapshot);
     }
 
     // ── Last-chat-state cache ──────────────────────────────────────────
