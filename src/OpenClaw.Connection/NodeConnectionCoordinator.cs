@@ -650,7 +650,8 @@ internal sealed class NodeConnectionCoordinator : INodePairReconnectPort
         }
         catch (DeviceIdentityLoadException ex)
         {
-            if (!IsCurrentNodeAttempt(attempt))
+            if (cancellationToken.IsCancellationRequested ||
+                !IsCurrentNodeAttempt(attempt))
                 return new(NodeStartOutcome.Superseded);
 
             var detail = BuildIdentityFailureDetail(ex);
@@ -673,7 +674,8 @@ internal sealed class NodeConnectionCoordinator : INodePairReconnectPort
         }
         catch (Exception ex)
         {
-            if (!IsCurrentNodeAttempt(attempt))
+            if (cancellationToken.IsCancellationRequested ||
+                !IsCurrentNodeAttempt(attempt))
                 return new(NodeStartOutcome.Superseded);
 
             _logger.Error($"[ConnMgr] Node connect failed: {ex.Message}");

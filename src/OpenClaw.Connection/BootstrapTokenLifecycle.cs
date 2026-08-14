@@ -423,6 +423,7 @@ internal sealed class BootstrapTokenLifecycle
                 "credential",
                 "Failed to persist cleared bootstrap token",
                 ex.Message);
+            return false;
         }
 
         return true;

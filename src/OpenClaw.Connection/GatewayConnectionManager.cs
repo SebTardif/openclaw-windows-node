@@ -767,7 +767,8 @@ public sealed class GatewayConnectionManager :
                     tunnelAuthorization.Detail,
                     preserveCredentialResolution: true);
                 EmitStateChanged();
-                RecordNodePreflightTelemetryFailure(ConnectionErrorCategory.AuthFailure);
+                _nodeConnectionCoordinator.RecordPreflightTelemetryFailure(
+                    ConnectionErrorCategory.AuthFailure);
                 return null;
             }
         }
