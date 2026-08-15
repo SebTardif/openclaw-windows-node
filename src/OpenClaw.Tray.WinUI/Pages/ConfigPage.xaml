@@ -84,6 +84,90 @@
                                Foreground="{ThemeResource TextFillColorSecondaryBrush}"
                                VerticalAlignment="Center"/>
                 </StackPanel>
+
+                <Expander x:Uid="ConfigPage_Maintenance" x:Name="MaintenanceExpander"
+                          Header="Session maintenance"
+                          AutomationProperties.AutomationId="ConfigPageSessionMaintenance">
+                    <Border Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+                            BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                            BorderThickness="1"
+                            CornerRadius="8"
+                            Padding="16">
+                        <StackPanel Spacing="14">
+                            <TextBlock x:Uid="ConfigPage_MaintenanceDescription"
+                                       Text="Control automatic session retention and disk cleanup on this gateway. Changes use the Save changes button below."
+                                       Style="{StaticResource CaptionTextBlockStyle}"
+                                       Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                       TextWrapping="Wrap"/>
+
+                            <Grid ColumnSpacing="16" RowSpacing="12">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*"/>
+                                    <ColumnDefinition Width="*"/>
+                                </Grid.ColumnDefinitions>
+                                <Grid.RowDefinitions>
+                                    <RowDefinition Height="Auto"/>
+                                    <RowDefinition Height="Auto"/>
+                                    <RowDefinition Height="Auto"/>
+                                </Grid.RowDefinitions>
+
+                                <ComboBox x:Uid="ConfigPage_MaintenanceMode" x:Name="MaintenanceModeComboBox"
+                                          Grid.Row="0" Grid.Column="0"
+                                          Header="Mode"
+                                          HorizontalAlignment="Stretch"
+                                          SelectionChanged="OnMaintenanceValueChanged">
+                                    <ComboBoxItem x:Uid="ConfigPage_MaintenanceEnforce" Content="Enforce cleanup" Tag="enforce"/>
+                                    <ComboBoxItem x:Uid="ConfigPage_MaintenanceWarn" Content="Warn only" Tag="warn"/>
+                                </ComboBox>
+                                <TextBox x:Uid="ConfigPage_MaintenancePruneAfter" x:Name="PruneAfterTextBox"
+                                         Grid.Row="0" Grid.Column="1"
+                                         Header="Prune inactive sessions after"
+                                         PlaceholderText="30d"
+                                         TextChanged="OnMaintenanceValueChanged"/>
+
+                                <NumberBox x:Uid="ConfigPage_MaintenanceMaxEntries" x:Name="MaxEntriesNumberBox"
+                                           Grid.Row="1" Grid.Column="0"
+                                           Header="Maximum session entries"
+                                           Minimum="1"
+                                           Maximum="2147483647"
+                                           SpinButtonPlacementMode="Compact"
+                                           ValueChanged="OnMaintenanceNumberChanged"/>
+                                <TextBox x:Uid="ConfigPage_MaintenanceArchiveRetention" x:Name="ResetArchiveRetentionTextBox"
+                                         Grid.Row="1" Grid.Column="1"
+                                         Header="Reset archive retention"
+                                         PlaceholderText="14d"
+                                         TextChanged="OnMaintenanceValueChanged"/>
+
+                                <TextBox x:Uid="ConfigPage_MaintenanceMaxDisk" x:Name="MaxDiskBytesTextBox"
+                                         Grid.Row="2" Grid.Column="0"
+                                         Header="Maximum disk usage"
+                                         PlaceholderText="10gb"
+                                         TextChanged="OnMaintenanceValueChanged"/>
+                                <TextBox x:Uid="ConfigPage_MaintenanceHighWater" x:Name="HighWaterBytesTextBox"
+                                         Grid.Row="2" Grid.Column="1"
+                                         Header="Cleanup target"
+                                         PlaceholderText="80% of maximum (default)"
+                                         TextChanged="OnMaintenanceValueChanged"/>
+                            </Grid>
+
+                            <Grid ColumnSpacing="24">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*"/>
+                                    <ColumnDefinition Width="*"/>
+                                </Grid.ColumnDefinitions>
+                                <ToggleSwitch x:Uid="ConfigPage_MaintenanceDisableArchiveExpiry" x:Name="KeepResetArchivesToggle"
+                                              Header="Disable age-based archive expiry"
+                                              OnContent="On" OffContent="Off"
+                                              Toggled="OnMaintenanceOptionToggled"/>
+                                <ToggleSwitch x:Uid="ConfigPage_MaintenanceLimitDisk" x:Name="LimitDiskUsageToggle"
+                                              Grid.Column="1"
+                                              Header="Limit session disk usage"
+                                              OnContent="On" OffContent="Off"
+                                              Toggled="OnMaintenanceOptionToggled"/>
+                            </Grid>
+                        </StackPanel>
+                    </Border>
+                </Expander>
             </StackPanel>
 
             <!-- Editor controls -->

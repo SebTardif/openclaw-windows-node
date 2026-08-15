@@ -4688,6 +4688,28 @@ Opdrachten worden geblokkeerd zolang sandboxing niet beschikbaar is, omdat strik
   <data name="SandboxPage_64MiB.Content" xml:space="preserve">
     <value>64 MiB</value>
   </data>
++  <data name="ConfigPage_Maintenance.Header" xml:space="preserve"><value>Session maintenance</value></data>
+  <data name="ConfigPage_MaintenanceDescription.Text" xml:space="preserve"><value>Control automatic session retention and disk cleanup on this gateway. Changes use the Save changes button below.</value></data>
+  <data name="ConfigPage_MaintenanceMode.Header" xml:space="preserve"><value>Mode</value></data>
+  <data name="ConfigPage_MaintenanceEnforce.Content" xml:space="preserve"><value>Enforce cleanup</value></data>
+  <data name="ConfigPage_MaintenanceWarn.Content" xml:space="preserve"><value>Warn only</value></data>
+  <data name="ConfigPage_MaintenancePruneAfter.Header" xml:space="preserve"><value>Prune inactive sessions after</value></data>
+  <data name="ConfigPage_MaintenancePruneAfter.PlaceholderText" xml:space="preserve"><value>30d</value></data>
+  <data name="ConfigPage_MaintenanceMaxEntries.Header" xml:space="preserve"><value>Maximum session entries</value></data>
+  <data name="ConfigPage_MaintenanceArchiveRetention.Header" xml:space="preserve"><value>Reset archive retention</value></data>
+  <data name="ConfigPage_MaintenanceArchiveRetention.PlaceholderText" xml:space="preserve"><value>14d</value></data>
+  <data name="ConfigPage_MaintenanceMaxDisk.Header" xml:space="preserve"><value>Maximum disk usage</value></data>
+  <data name="ConfigPage_MaintenanceMaxDisk.PlaceholderText" xml:space="preserve"><value>10gb</value></data>
+  <data name="ConfigPage_MaintenanceHighWater.Header" xml:space="preserve"><value>Cleanup target</value></data>
+  <data name="ConfigPage_MaintenanceHighWater.PlaceholderText" xml:space="preserve"><value>80% of maximum (default)</value></data>
+  <data name="ConfigPage_MaintenanceDisableArchiveExpiry.Header" xml:space="preserve"><value>Disable age-based archive expiry</value></data>
+  <data name="ConfigPage_MaintenanceLimitDisk.Header" xml:space="preserve"><value>Limit session disk usage</value></data>
++  <data name="ConfigPage_MaintenanceModeError" xml:space="preserve"><value>Mode: choose Enforce or Warn only.</value></data>
+  <data name="ConfigPage_MaintenancePruneAfterError" xml:space="preserve"><value>Prune after: use a positive duration such as 30d, 12h, or 1h30m.</value></data>
+  <data name="ConfigPage_MaintenanceMaxEntriesError" xml:space="preserve"><value>Maximum entries: enter a whole number of at least 1.</value></data>
+  <data name="ConfigPage_MaintenanceArchiveRetentionError" xml:space="preserve"><value>Reset archive retention: use a positive duration such as 14d.</value></data>
+  <data name="ConfigPage_MaintenanceMaxDiskError" xml:space="preserve"><value>Maximum disk usage: use a positive size such as 10gb or 500mb.</value></data>
+  <data name="ConfigPage_MaintenanceHighWaterError" xml:space="preserve"><value>Cleanup target: use a non-negative size such as 8gb or leave it blank for 80%.</value></data>
   <data name="SessionsPage_Sessions.Text" xml:space="preserve">
     <value>Sessies</value>
   </data>
