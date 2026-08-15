@@ -4229,7 +4229,11 @@ public class OpenClawChatDataProviderTests
         var timeline = snapshot.Timelines["main"];
         var assistant = Assert.Single(timeline.Entries);
         Assert.Equal(deltaCount, assistant.Text.Length);
-        Assert.False(assistant.IsStreaming);
+        // The reducer intentionally keeps a delta-only tail reconcilable after
+        // lifecycle.end so a late final frame can replace it in place. The
+        // terminal guarantee here is TurnActive=false; rendering work remains
+        // bounded to the single coalesced snapshot above.
+        Assert.True(assistant.IsStreaming);
         Assert.False(timeline.TurnActive);
         Assert.Null(timeline.ActiveAssistantId);
     }
