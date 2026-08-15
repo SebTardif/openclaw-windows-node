@@ -36,6 +36,7 @@ public sealed partial class ConfigPage : Page
     private ConfigEditorSnapshot _serverSnapshot = ConfigEditorSnapshot.Empty;
     private ConfigEditorSnapshot _editSnapshot = ConfigEditorSnapshot.Empty;
     private IOperatorGatewayClient? _permissionClient;
+    private IOperatorGatewayClient? _configClient;
 
     private string _selectedPath = "";
     private string _searchText = "";
@@ -47,6 +48,7 @@ public sealed partial class ConfigPage : Page
     private bool _jsonPreviewCollapsedByUser;
     private bool _refreshConfigAfterReconnect;
     private bool _refreshConfigWhenGatewayAvailable;
+    private bool _syncingMaintenanceControls = true;
     private ContentDialog? _reconnectDialog;
     private TextBlock? _reconnectDialogMessage;
     private GridLength _jsonPreviewExpandedWidth = new(360);
@@ -64,6 +66,7 @@ public sealed partial class ConfigPage : Page
     public ConfigPage()
     {
         InitializeComponent();
+        _syncingMaintenanceControls = false;
         NavigationCacheMode = NavigationCacheMode.Required;
         Unloaded += (_, _) =>
         {
@@ -109,7 +112,9 @@ public sealed partial class ConfigPage : Page
 
         _appState = CurrentApp.AppState!;
         _appState.PropertyChanged += OnAppStateChanged;
-        SubscribePermissionClient(CurrentApp.GatewayClient);
+        var currentClient = CurrentApp.GatewayClient;
+        ResetForGatewayClientChange(currentClient);
+        SubscribePermissionClient(currentClient);
         Logger.Info("[ConfigPage] Initialize");
         if (CompleteReconnectIfReady())
             return;
@@ -147,6 +152,7 @@ public sealed partial class ConfigPage : Page
                 _serverSnapshot = ConfigEditorModel.CaptureSnapshot(configSnapshot);
                 if (_pendingChanges.Count == 0)
                     _editSnapshot = _serverSnapshot;
+                SyncMaintenanceControlsFromDraft();
 
                 if (configSnapshot.TryGetProperty("path", out var pathEl) &&
                     pathEl.ValueKind == JsonValueKind.String)
@@ -214,7 +220,10 @@ public sealed partial class ConfigPage : Page
                 if (_appState!.ConfigSchema.HasValue) UpdateConfigSchema(_appState.ConfigSchema.Value);
                 break;
             case nameof(AppState.Status):
-                SubscribePermissionClient(CurrentApp.GatewayClient);
+            {
+                var currentClient = CurrentApp.GatewayClient;
+                ResetForGatewayClientChange(currentClient);
+                SubscribePermissionClient(currentClient);
                 UpdateConnectionBanner();
                 UpdatePermissionBanner();
                 var configPermissionState = GetConfigPermissionState();
@@ -234,6 +243,7 @@ public sealed partial class ConfigPage : Page
                 }
                 UpdateMetaAndButtons();
                 break;
+            }
         }
     }
 
@@ -472,6 +482,14 @@ public sealed partial class ConfigPage : Page
             _validationErrors[fullPath] = error;
         }
 
+        if (sectionPath.StartsWith("session.maintenance", StringComparison.Ordinal) ||
+            args.Changes.Keys.Any(path =>
+                (string.IsNullOrEmpty(sectionPath) ? path : $"{sectionPath}.{path}")
+                    .StartsWith("session.maintenance", StringComparison.Ordinal)))
+        {
+            SyncMaintenanceControlsFromDraft();
+        }
+
         RenderTree();
         UpdateSelectedJsonPreviewForCurrentSelection();
         UpdateMetaAndButtons();
@@ -665,6 +683,7 @@ public sealed partial class ConfigPage : Page
         _pendingChanges.Clear();
         _validationErrors.Clear();
         _editSnapshot = ConfigEditorSnapshot.Empty;
+        SyncMaintenanceControlsFromDraft();
         ShowStatus(
             L("ConfigPage_StatusChangesDiscardedTitle"),
             L("ConfigPage_StatusChangesDiscardedMessage"),
@@ -679,6 +698,12 @@ public sealed partial class ConfigPage : Page
     {
         RemoveSectionEntries(_selectedPath, _pendingChanges);
         RemoveSectionEntries(_selectedPath, _validationErrors);
+        if (string.IsNullOrEmpty(_selectedPath) ||
+            _selectedPath.StartsWith("session.maintenance", StringComparison.Ordinal) ||
+            "session.maintenance".StartsWith(_selectedPath + ".", StringComparison.Ordinal))
+        {
+            SyncMaintenanceControlsFromDraft();
+        }
         var sectionLabel = string.IsNullOrEmpty(_selectedPath) ? L("ConfigPage_FullConfig") : _selectedPath;
         ShowStatus(
             L("ConfigPage_StatusSectionResetTitle"),
@@ -894,11 +919,182 @@ public sealed partial class ConfigPage : Page
         SaveStatusIcon.Glyph = BuildSaveStatusGlyph(permissionState, dirtyCount, invalidCount);
         AccessSummaryText.Text = BuildAccessSummaryText(permissionState, dirtyCount, invalidCount);
         SetDetailEditingEnabled(!editingLocked);
+        SetMaintenanceEditingEnabled(!editingLocked && _serverSnapshot.HasRoot);
         ResetSectionButton.IsEnabled = !editingLocked;
 
         SaveButton.IsEnabled = !_saving && !_loading && canWriteConfig && dirtyCount > 0 && invalidCount == 0;
         DiscardButton.IsEnabled = !editingLocked && dirtyCount > 0;
     }
+
+    private void SyncMaintenanceControlsFromDraft()
+    {
+        if (!_serverSnapshot.HasRoot || MaintenanceModeComboBox is null)
+            return;
+
+        var root = _pendingChanges.Count == 0
+            ? _serverSnapshot.Root
+            : ConfigEditorModel.ApplyChanges(_serverSnapshot.Root, _pendingChanges);
+        var settings = SessionMaintenanceConfigModel.Read(root);
+        _syncingMaintenanceControls = true;
+        try
+        {
+            MaintenanceModeComboBox.SelectedIndex = settings.Mode == "warn" ? 1 : 0;
+            PruneAfterTextBox.Text = settings.PruneAfter;
+            MaxEntriesNumberBox.Value = settings.MaxEntries;
+            KeepResetArchivesToggle.IsOn = settings.KeepResetArchives;
+            ResetArchiveRetentionTextBox.Text = settings.ResetArchiveRetention;
+            LimitDiskUsageToggle.IsOn = settings.LimitDiskUsage;
+            MaxDiskBytesTextBox.Text = settings.MaxDiskBytes;
+            HighWaterBytesTextBox.Text = settings.HighWaterBytes == "0" ? "" : settings.HighWaterBytes;
+        }
+        finally
+        {
+            _syncingMaintenanceControls = false;
+        }
+        SetMaintenanceEditingEnabled(!IsConfigEditingLocked(GetConfigPermissionState()));
+    }
+
+    private void ResetForGatewayClientChange(IOperatorGatewayClient? client)
+    {
+        if (ReferenceEquals(_configClient, client))
+            return;
+
+        _configClient = client;
+        _pendingChanges.Clear();
+        _validationErrors.Clear();
+        _serverSnapshot = ConfigEditorSnapshot.Empty;
+        _editSnapshot = ConfigEditorSnapshot.Empty;
+        _lastConfig = null;
+        _lastSchema = null;
+        _initialized = false;
+        _syncingMaintenanceControls = true;
+        try
+        {
+            var defaults = SessionMaintenanceSettings.Defaults;
+            MaintenanceModeComboBox.SelectedIndex = 0;
+            PruneAfterTextBox.Text = defaults.PruneAfter;
+            MaxEntriesNumberBox.Value = defaults.MaxEntries;
+            KeepResetArchivesToggle.IsOn = defaults.KeepResetArchives;
+            ResetArchiveRetentionTextBox.Text = defaults.ResetArchiveRetention;
+            LimitDiskUsageToggle.IsOn = defaults.LimitDiskUsage;
+            MaxDiskBytesTextBox.Text = defaults.MaxDiskBytes;
+            HighWaterBytesTextBox.Text = defaults.HighWaterBytes;
+        }
+        finally
+        {
+            _syncingMaintenanceControls = false;
+        }
+    }
+
+    private SessionMaintenanceSettings CaptureMaintenanceSettings()
+    {
+        var mode = (MaintenanceModeComboBox.SelectedItem as ComboBoxItem)?.Tag?.ToString() ?? "enforce";
+        var maxEntriesValue = MaxEntriesNumberBox.Value;
+        var maxEntries = double.IsFinite(maxEntriesValue) &&
+                         maxEntriesValue >= 1 &&
+                         maxEntriesValue <= int.MaxValue &&
+                         maxEntriesValue == Math.Truncate(maxEntriesValue)
+            ? Convert.ToInt64(maxEntriesValue)
+            : 0;
+        return new SessionMaintenanceSettings(
+            mode,
+            PruneAfterTextBox.Text,
+            maxEntries,
+            KeepResetArchivesToggle.IsOn,
+            ResetArchiveRetentionTextBox.Text,
+            LimitDiskUsageToggle.IsOn,
+            MaxDiskBytesTextBox.Text,
+            HighWaterBytesTextBox.Text);
+    }
+
+    private void OnMaintenanceValueChanged(object sender, RoutedEventArgs e)
+    {
+        if (!_syncingMaintenanceControls)
+            ApplyMaintenanceDraft();
+    }
+
+    private void OnMaintenanceNumberChanged(NumberBox sender, NumberBoxValueChangedEventArgs args)
+    {
+        if (!_syncingMaintenanceControls)
+            ApplyMaintenanceDraft();
+    }
+
+    private void OnMaintenanceOptionToggled(object sender, RoutedEventArgs e)
+    {
+        if (_syncingMaintenanceControls)
+            return;
+        ApplyMaintenanceDraft();
+        SetMaintenanceEditingEnabled(!IsConfigEditingLocked(GetConfigPermissionState()));
+    }
+
+    private void ApplyMaintenanceDraft()
+    {
+        if (IsConfigEditingLocked(GetConfigPermissionState()) || !_serverSnapshot.HasRoot)
+            return;
+        if (_pendingChanges.Count == 0)
+            _editSnapshot = _serverSnapshot;
+
+        const string section = "session.maintenance";
+        RemoveSectionEntries(section, _pendingChanges);
+        RemoveSectionEntries(section, _validationErrors);
+
+        var settings = CaptureMaintenanceSettings();
+        _pendingChanges[$"{section}.mode"] = settings.Mode;
+        _pendingChanges[$"{section}.pruneAfter"] = settings.PruneAfter.Trim();
+        _pendingChanges[$"{section}.maxEntries"] = settings.MaxEntries;
+        _pendingChanges[$"{section}.resetArchiveRetention"] = settings.KeepResetArchives
+            ? false
+            : settings.ResetArchiveRetention.Trim();
+        _pendingChanges[$"{section}.maxDiskBytes"] = settings.LimitDiskUsage
+            ? settings.MaxDiskBytes.Trim()
+            : false;
+        _pendingChanges[$"{section}.highWaterBytes"] = string.IsNullOrWhiteSpace(settings.HighWaterBytes)
+            ? 0L
+            : settings.HighWaterBytes.Trim();
+
+        foreach (var (field, _) in SessionMaintenanceConfigModel.Validate(settings))
+            _validationErrors[$"{section}.{MaintenanceFieldPath(field)}"] = MaintenanceValidationMessage(field);
+
+        RenderTree();
+        UpdateSelectedJsonPreviewForCurrentSelection();
+        UpdateMetaAndButtons();
+    }
+
+    private void SetMaintenanceEditingEnabled(bool isEnabled)
+    {
+        if (MaintenanceModeComboBox is null)
+            return;
+        MaintenanceModeComboBox.IsEnabled = isEnabled;
+        PruneAfterTextBox.IsEnabled = isEnabled;
+        MaxEntriesNumberBox.IsEnabled = isEnabled;
+        KeepResetArchivesToggle.IsEnabled = isEnabled;
+        ResetArchiveRetentionTextBox.IsEnabled = isEnabled && !KeepResetArchivesToggle.IsOn;
+        LimitDiskUsageToggle.IsEnabled = isEnabled;
+        MaxDiskBytesTextBox.IsEnabled = isEnabled && LimitDiskUsageToggle.IsOn;
+        HighWaterBytesTextBox.IsEnabled = isEnabled && LimitDiskUsageToggle.IsOn;
+    }
+
+    private static string MaintenanceFieldPath(string field) => field switch
+    {
+        "Mode" => "mode",
+        "Prune after" => "pruneAfter",
+        "Maximum entries" => "maxEntries",
+        "Reset archive retention" => "resetArchiveRetention",
+        "Maximum disk usage" => "maxDiskBytes",
+        "High-water target" => "highWaterBytes",
+        _ => field,
+    };
+
+    private static string MaintenanceValidationMessage(string field) => field switch
+    {
+        "Mode" => L("ConfigPage_MaintenanceModeError"),
+        "Prune after" => L("ConfigPage_MaintenancePruneAfterError"),
+        "Maximum entries" => L("ConfigPage_MaintenanceMaxEntriesError"),
+        "Reset archive retention" => L("ConfigPage_MaintenanceArchiveRetentionError"),
+        "Maximum disk usage" => L("ConfigPage_MaintenanceMaxDiskError"),
+        "High-water target" => L("ConfigPage_MaintenanceHighWaterError"),
+        _ => field,
+    };
 
     private bool IsConfigEditingLocked(ConfigPermissionState permissionState) =>
         _saving ||
