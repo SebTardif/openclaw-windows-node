@@ -56,8 +56,11 @@ public static class WindowsTcpListenerSnapshot
             var output = AwaitRedirectedOutput(process, readTask, timeoutMs: 5_000);
             return output?.Trim();
         }
-        catch
+        catch (Exception ex)
         {
+            Trace.WriteLine(
+                $"Windows process command-line lookup failed for PID {processId}: " +
+                $"{ex.GetType().Name}: {ex.Message}");
             return null;
         }
     }
@@ -75,8 +78,10 @@ public static class WindowsTcpListenerSnapshot
         var sw = Stopwatch.StartNew();
         if (!process.WaitForExit(timeoutMs))
         {
+            Trace.WriteLine(
+                $"Windows process command-line lookup timed out waiting for PID {process.Id}.");
             try { process.Kill(entireProcessTree: true); } catch { }
-            ObserveQuietly(readTask);
+            AbandonRead(process, readTask);
             return null;
         }
 
@@ -86,8 +91,10 @@ public static class WindowsTcpListenerSnapshot
         {
             if (!readTask.Wait(drainBudgetMs))
             {
+                Trace.WriteLine(
+                    $"Windows process command-line lookup timed out draining PID {process.Id} stdout.");
                 try { process.Kill(entireProcessTree: true); } catch { }
-                ObserveQuietly(readTask);
+                AbandonRead(process, readTask);
                 return null;
             }
         }
@@ -97,6 +104,12 @@ public static class WindowsTcpListenerSnapshot
         }
 
         return readTask.Status == TaskStatus.RanToCompletion ? readTask.Result : null;
+    }
+
+    private static void AbandonRead(Process process, Task readTask)
+    {
+        ObserveQuietly(readTask);
+        try { process.StandardOutput.Dispose(); } catch { }
     }
 
     private static void ObserveQuietly(Task task) =>
