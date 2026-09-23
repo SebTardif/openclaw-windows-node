@@ -102,6 +102,16 @@ public sealed class SetupWizardRunner
 
     internal void MarkReloadSuspended() => _reloadSuspended = true;
 
+    internal static bool ShouldReplaceOperatorDeviceId(
+        bool usingWizardIdentity,
+        string? currentOperatorDeviceId)
+    {
+        if (usingWizardIdentity)
+            return true;
+
+        return string.IsNullOrWhiteSpace(currentOperatorDeviceId);
+    }
+
     internal async Task<StepResult> SuspendReloadModeAsync()
     {
         try
@@ -173,9 +183,10 @@ public sealed class SetupWizardRunner
         _ctx.SharedGatewayToken ??= record.SharedGatewayToken;
         _ctx.BootstrapToken ??= record.BootstrapToken;
 
-        if (string.IsNullOrWhiteSpace(storedDeviceToken)
+        var usingWizardIdentity = string.IsNullOrWhiteSpace(storedDeviceToken)
             && !string.IsNullOrWhiteSpace(record.SharedGatewayToken)
-            && string.Equals(credential, record.SharedGatewayToken, StringComparison.Ordinal))
+            && string.Equals(credential, record.SharedGatewayToken, StringComparison.Ordinal);
+        if (usingWizardIdentity)
             identityPath = Path.Combine(identityPath, "setup-wizard");
 
         var wsLogger = new SetupOpenClawLogger(_ctx.Logger);
@@ -202,7 +213,7 @@ public sealed class SetupWizardRunner
             {
                 _ctx.Logger.Info("Wizard operator pairing required — auto-approving");
                 var requestId = client.PairingRequiredRequestId;
-                if (string.IsNullOrWhiteSpace(_ctx.OperatorDeviceId))
+                if (ShouldReplaceOperatorDeviceId(usingWizardIdentity, _ctx.OperatorDeviceId))
                 {
                     try
                     {
