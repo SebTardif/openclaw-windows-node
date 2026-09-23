@@ -552,8 +552,10 @@ public static class MxcConfigBuilder
 
             if (argument.StartsWith("/c", StringComparison.OrdinalIgnoreCase)
                 || argument.StartsWith("/k", StringComparison.OrdinalIgnoreCase)
+                || argument.StartsWith("/r", StringComparison.OrdinalIgnoreCase)
                 || argument.Contains("/c", StringComparison.OrdinalIgnoreCase)
-                || argument.Contains("/k", StringComparison.OrdinalIgnoreCase))
+                || argument.Contains("/k", StringComparison.OrdinalIgnoreCase)
+                || argument.Contains("/r", StringComparison.OrdinalIgnoreCase))
             {
                 return true;
             }
