@@ -162,12 +162,14 @@ public static class TrayArtifactCleanup
 
             bool changed = false;
 
-            // Reset GatewayUrl to empty
-            if (dict.ContainsKey("GatewayUrl"))
-            {
-                dict.Remove("GatewayUrl");
+            // Drop the saved URL and legacy secrets together. A later launch
+            // falls back to the default local URL and must not import leftovers.
+            if (dict.Remove("GatewayUrl"))
                 changed = true;
-            }
+            if (dict.Remove("Token"))
+                changed = true;
+            if (dict.Remove("BootstrapToken"))
+                changed = true;
 
             if (!preserveNodeSettings && dict.ContainsKey("EnableNodeMode"))
             {

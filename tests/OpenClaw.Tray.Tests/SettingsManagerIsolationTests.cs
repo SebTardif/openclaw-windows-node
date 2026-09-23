@@ -131,4 +131,40 @@ public sealed class SettingsManagerIsolationTests
             }
         }
     }
+
+    [Fact]
+    public void MissingGatewayUrl_DoesNotExposeLegacyTokensForDefaultUrl()
+    {
+        var dir = Path.Combine(Path.GetTempPath(), "OpenClawTray.Tests", Guid.NewGuid().ToString("N"));
+
+        try
+        {
+            Directory.CreateDirectory(dir);
+            File.WriteAllText(
+                Path.Combine(dir, "settings.json"),
+                """
+                {
+                  "Token": "leftover-shared-token",
+                  "BootstrapToken": "leftover-bootstrap-token",
+                  "EnableNodeMode": true
+                }
+                """);
+
+            var settings = new SettingsManager(dir);
+
+            Assert.Equal("ws://127.0.0.1:18789", settings.GetEffectiveGatewayUrl());
+            Assert.False(settings.HasPersistedGatewayUrl);
+            Assert.False(settings.HasLegacyGatewayCredentials);
+            Assert.Null(settings.LegacyToken);
+            Assert.Null(settings.LegacyBootstrapToken);
+        }
+        finally
+        {
+            if (Directory.Exists(dir))
+            {
+                // slopwatch-ignore: SW003 Test cleanup is best-effort and must not hide the assertion.
+                try { Directory.Delete(dir, recursive: true); } catch { }
+            }
+        }
+    }
 }
