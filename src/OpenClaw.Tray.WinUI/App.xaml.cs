@@ -149,6 +149,9 @@ public partial class App : Application, OpenClawTray.Services.IAppCommands, IPer
     /// Ensures the managed SSH tunnel is started using the current settings.
     /// Used by connection settings when the user picks the SSH topology.
     /// </summary>
+    internal SshTunnelSnapshot? CaptureSshTunnelSnapshot() =>
+        _sshTunnelService?.CreateSnapshot();
+
     public void EnsureSshTunnelStarted()
     {
         if (_sshTunnelService == null || _settings == null)
@@ -3892,6 +3895,40 @@ public partial class App : Application, OpenClawTray.Services.IAppCommands, IPer
     private void OpenDashboard(string? path = null)
     {
         if (_settings == null) return;
+
+        var active = _gatewayRegistry?.GetActive();
+        if (active?.SshTunnel is not null)
+        {
+            if (!GatewayClientEndpointResolver.TryResolveDashboardEndpoint(
+                    active,
+                    _sshTunnelService?.CreateSnapshot(),
+                    out var tunnelEndpoint,
+                    out var appendSharedToken))
+            {
+                _toastService?.ShowToast(new ToastContentBuilder()
+                    .AddText("SSH tunnel")
+                    .AddText("Dashboard blocked because the SSH tunnel is not up."));
+                return;
+            }
+
+            if (!TryResolveChatCredentials(out _, out var tunnelToken, out var tunnelCredentialSource, out var tunnelIsBootstrapToken))
+            {
+                ShowConnectionSettingsForPairingIssue(
+                    "Dashboard",
+                    "Gateway URL or credential is not configured");
+                return;
+            }
+
+            OpenDashboardUri(GatewayDashboardUrlBuilder.Build(
+                tunnelEndpoint,
+                path,
+                tunnelToken,
+                appendSharedToken &&
+                !tunnelIsBootstrapToken &&
+                tunnelCredentialSource == CredentialResolver.SourceSharedGatewayToken));
+            return;
+        }
+
         if (!EnsureSshTunnelConfigured())
         {
             _toastService?.ShowToast(new ToastContentBuilder()
@@ -3908,12 +3945,15 @@ public partial class App : Application, OpenClawTray.Services.IAppCommands, IPer
             return;
         }
 
-        var url = GatewayDashboardUrlBuilder.Build(
+        OpenDashboardUri(GatewayDashboardUrlBuilder.Build(
             gatewayUrl,
             path,
             token,
-            !isBootstrapToken && credentialSource == CredentialResolver.SourceSharedGatewayToken);
+            !isBootstrapToken && credentialSource == CredentialResolver.SourceSharedGatewayToken));
+    }
 
+    private static void OpenDashboardUri(string url)
+    {
         try
         {
             Process.Start(new ProcessStartInfo(url) { UseShellExecute = true });

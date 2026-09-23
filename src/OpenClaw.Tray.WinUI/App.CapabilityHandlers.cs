@@ -239,11 +239,29 @@ public partial class App
             if (!TryResolveChatCredentials(out var gatewayUrl, out var token, out var credentialSource, out var isBootstrapToken))
                 return new { error = "Gateway URL or credential is not configured" };
 
+            var endpoint = gatewayUrl;
+            var appendSharedToken =
+                !isBootstrapToken && credentialSource == CredentialResolver.SourceSharedGatewayToken;
+            var active = _gatewayRegistry?.GetActive();
+            if (active?.SshTunnel is not null)
+            {
+                if (!GatewayClientEndpointResolver.TryResolveDashboardEndpoint(
+                        active,
+                        _sshTunnelService?.CreateSnapshot(),
+                        out endpoint,
+                        out var tunnelAllowsToken))
+                {
+                    return new { error = "Dashboard blocked because the SSH tunnel is not up." };
+                }
+
+                appendSharedToken = appendSharedToken && tunnelAllowsToken;
+            }
+
             var url = GatewayDashboardUrlBuilder.Build(
-                gatewayUrl,
+                endpoint,
                 path,
                 token,
-                !isBootstrapToken && credentialSource == CredentialResolver.SourceSharedGatewayToken);
+                appendSharedToken);
 
             return new
             {

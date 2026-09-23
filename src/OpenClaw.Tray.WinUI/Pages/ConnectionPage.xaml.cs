@@ -2570,7 +2570,18 @@ public sealed partial class ConnectionPage : Page
         if (rec == null) return;
         try
         {
-            if (!string.IsNullOrWhiteSpace(rec.SharedGatewayToken))
+            if (!GatewayClientEndpointResolver.TryResolveDashboardEndpoint(
+                    rec,
+                    CurrentApp.CaptureSshTunnelSnapshot(),
+                    out var endpoint,
+                    out var appendSharedToken))
+            {
+                CurrentApp.ShowTransientConnectionError(
+                    "Dashboard blocked because the SSH tunnel is not up.");
+                return;
+            }
+
+            if (appendSharedToken && rec.SshTunnel is null)
             {
                 var provenanceService = CurrentApp.ManagedLocalPortProvenance;
                 if (provenanceService is null)
@@ -2589,10 +2600,10 @@ public sealed partial class ConnectionPage : Page
             }
 
             var url = GatewayDashboardUrlBuilder.Build(
-                rec.Url,
+                endpoint,
                 path: null,
                 rec.SharedGatewayToken,
-                appendSharedGatewayToken: !string.IsNullOrWhiteSpace(rec.SharedGatewayToken));
+                appendSharedGatewayToken: appendSharedToken);
             await global::Windows.System.Launcher.LaunchUriAsync(new Uri(url));
         }
         catch (Exception ex)
