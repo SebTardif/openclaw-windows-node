@@ -484,7 +484,7 @@ public class SetupStepsTests : IDisposable
 
         Assert.Contains("Refusing unsafe WSL rollback cleanup", error.Message);
         Assert.True(File.Exists(sentinel));
-        Assert.Equal(2, commands.Calls.Count(c => c.Arguments.SequenceEqual(["--unregister", legacyName])));
+        Assert.DoesNotContain(commands.Calls, call => call.Arguments.Contains("--unregister"));
     }
 
     [Fact]
@@ -3455,7 +3455,7 @@ public class SetupStepsTests : IDisposable
     }
 
     [Fact]
-    public async Task CreateWslInstance_PartialCleanupDeletesInstallPathWhenListFailsButDistroIsAlreadyGone()
+    public async Task CreateWslInstance_PartialCleanupKeepsInstallPathWhenListFails()
     {
         var listCalls = 0;
         var installPath = "";
@@ -3472,11 +3472,6 @@ public class SetupStepsTests : IDisposable
                 File.WriteAllText(Path.Combine(installPath, "ext4.vhdx"), "partial");
                 return Fail("download failed");
             }
-            if (args.SequenceEqual(["--terminate", "OpenClawGateway"]) ||
-                args.SequenceEqual(["--unregister", "OpenClawGateway"]))
-            {
-                return Fail("There is no distribution with the supplied name.");
-            }
 
             return Fail($"unexpected args: {string.Join(' ', args)}");
         });
@@ -3487,8 +3482,10 @@ public class SetupStepsTests : IDisposable
 
         Assert.Equal(StepOutcome.Failed, result.Outcome);
         Assert.Contains("download failed", result.Message);
-        Assert.DoesNotContain("Partial app-owned distro cleanup also failed", result.Message);
-        Assert.False(Directory.Exists(installPath));
+        Assert.Contains("could not confirm whether distro 'OpenClawGateway' is still registered", result.Message);
+        Assert.Contains("skipped deleting app-owned install path", result.Message);
+        Assert.True(File.Exists(Path.Combine(installPath, "ext4.vhdx")));
+        Assert.DoesNotContain(commands.Calls, call => call.Arguments.Contains("--unregister"));
         Assert.DoesNotContain(commands.Calls, c => c.Arguments.SequenceEqual(["--shutdown"]));
     }
 
@@ -3506,6 +3503,62 @@ public class SetupStepsTests : IDisposable
         Assert.Equal(StepOutcome.Failed, result.Outcome);
         Assert.Contains("still exists after cleanup", result.Message);
         Assert.DoesNotContain(commands.Calls, c => c.Arguments.Contains("--install"));
+    }
+
+    [Fact]
+    public async Task CreateWslInstance_RollbackDoesNotUnregisterDistroThatAlreadyExisted()
+    {
+        var commands = new FakeCommandRunner(args =>
+            args.SequenceEqual(["--list", "--quiet"])
+                ? Ok("OpenClawGateway\n")
+                : args.SequenceEqual(["--terminate", "OpenClawGateway"]) ||
+                  args.SequenceEqual(["--unregister", "OpenClawGateway"])
+                    ? Ok()
+                    : Fail($"unexpected args: {string.Join(' ', args)}"));
+        var ctx = CreateContext(
+            new SetupConfig { RollbackOnFailure = true },
+            commands);
+        var pipeline = new SetupPipeline([new CreateWslInstanceStep()]);
+
+        var result = await pipeline.RunAsync(ctx);
+
+        Assert.Equal(PipelineOutcome.Failed, result.Outcome);
+        Assert.Contains("still exists after cleanup", result.Message);
+        Assert.False(ManagedDistroOwnership.HasPathBoundMarkerEvidence(
+            ctx.LocalDataDir,
+            "OpenClawGateway"));
+        Assert.DoesNotContain(commands.Calls, call => call.Arguments.Contains("--unregister"));
+        Assert.DoesNotContain(commands.Calls, call => call.Arguments.Contains("--terminate"));
+    }
+
+    [Fact]
+    public async Task CreateWslInstance_PartialCleanupDoesNotUnregisterWhenListFails()
+    {
+        var listCalls = 0;
+        var commands = new FakeCommandRunner(args =>
+        {
+            if (args.SequenceEqual(["--list", "--quiet"]))
+            {
+                listCalls++;
+                return listCalls == 1 ? Ok("") : Fail("list failed");
+            }
+
+            if (args.Contains("--install"))
+                return Fail("download failed");
+            if (args.SequenceEqual(["--terminate", "OpenClawGateway"]) ||
+                args.SequenceEqual(["--unregister", "OpenClawGateway"]))
+                return Ok();
+
+            return Fail($"unexpected args: {string.Join(' ', args)}");
+        });
+        var ctx = CreateContext(commands: commands);
+
+        var result = await new CreateWslInstanceStep().ExecuteAsync(ctx, CancellationToken.None);
+
+        Assert.Equal(StepOutcome.Failed, result.Outcome);
+        Assert.Contains("download failed", result.Message);
+        Assert.DoesNotContain(commands.Calls, call => call.Arguments.Contains("--unregister"));
+        Assert.DoesNotContain(commands.Calls, call => call.Arguments.Contains("--terminate"));
     }
 
     [Fact]

@@ -198,15 +198,19 @@ public sealed class CreateWslInstanceStep : SetupStep
         var registrationStateKnown = list.ExitCode == 0;
         var distroExists = registrationStateKnown && WslInstallSupport.ContainsDistro(list.Stdout, distro);
         var canDeleteInstallPath = registrationStateKnown && !distroExists;
+        var ownsThisInstall = ManagedDistroOwnership.HasPathBoundMarkerEvidence(ctx.LocalDataDir, distro);
 
         if (!registrationStateKnown)
         {
-            ctx.Logger.Warn($"Partial install cleanup could not list WSL distros (exit {list.ExitCode}); attempting best-effort unregister for '{distro}' before deleting app-owned files");
+            ctx.Logger.Warn($"Partial install cleanup could not list WSL distros (exit {list.ExitCode}); refusing to unregister '{distro}'");
+        }
+        else if (distroExists && (ownsThisInstall || ctx.IsUninstalling))
+        {
             canDeleteInstallPath = await TryUnregisterPartialInstall(ctx, distro, cleanupErrors, ct);
         }
         else if (distroExists)
         {
-            canDeleteInstallPath = await TryUnregisterPartialInstall(ctx, distro, cleanupErrors, ct);
+            ctx.Logger.Warn($"Refusing to unregister '{distro}' because this install did not create it");
         }
 
         if (!canDeleteInstallPath)
