@@ -5235,6 +5235,8 @@ public class SetupStepsTests : IDisposable
                 }
                 if (command.Contains("nodes list --json", StringComparison.Ordinal))
                     return Ok("""{"pending":[{"requestId":"node-req-1"}]}""");
+                if (command.Contains("GATEWAY_CONFIGURED", StringComparison.Ordinal))
+                    return Ok("GATEWAY_CONFIGURED");
                 if (command.Contains("curl -s", StringComparison.Ordinal))
                     return Ok("200");
                 return Ok("""{"requestId":"device-req-1"}""");
@@ -5242,6 +5244,7 @@ public class SetupStepsTests : IDisposable
         var ctx = CreateContext(commands: commands);
         ctx.DistroName = "test-distro";
         ctx.SharedGatewayToken = "shared-token";
+        ctx.Config.Gateway.ReloadMode = "hybrid";
 
         Assert.True((await new InstallGatewayServiceStep().ExecuteAsync(ctx, CancellationToken.None)).IsSuccess);
         await new InstallGatewayServiceStep().RollbackAsync(ctx, CancellationToken.None);
@@ -5250,6 +5253,10 @@ public class SetupStepsTests : IDisposable
         Assert.True((await PairNodeStep.AutoApproveNodePairing(ctx, requestId: null, CancellationToken.None)).IsSuccess, "node approve");
         Assert.True((await StartGatewayStep.RestartAndWaitForHealthAsync(ctx, CancellationToken.None)).IsSuccess, "restart");
         Assert.True((await VerifyEndToEndStep.DrainPendingDeviceApprovalsAsync(ctx, CancellationToken.None)).IsSuccess, "drain");
+        Assert.True((await new ConfigureGatewayStep().ExecuteAsync(ctx, CancellationToken.None)).IsSuccess, "configure");
+        TrustManagedEndpoint(ctx);
+        Assert.True((await new SetupWizardRunner(ctx).SuspendReloadModeAsync()).IsSuccess, "suspend reload");
+        Assert.True((await new SetupWizardRunner(ctx).RestoreReloadModeAsync()).IsSuccess, "restore reload");
 
         var pathScripts = commands.WslCalls.Where(call => call.Command.Contains("$PATH", StringComparison.Ordinal)).ToList();
         Assert.Contains(pathScripts, call => call.Command.Contains("gateway install --force", StringComparison.Ordinal));
@@ -5259,6 +5266,9 @@ public class SetupStepsTests : IDisposable
         Assert.Contains(pathScripts, call => call.Command.Contains("nodes list --json", StringComparison.Ordinal));
         Assert.Contains(pathScripts, call => call.Command.Contains("nodes approve", StringComparison.Ordinal));
         Assert.Contains(pathScripts, call => call.Command.Contains("gateway restart", StringComparison.Ordinal));
+        Assert.Contains(pathScripts, call => call.Command.Contains("GATEWAY_CONFIGURED", StringComparison.Ordinal));
+        Assert.Contains(pathScripts, call => call.Command.Contains("gateway.reload.mode off", StringComparison.Ordinal));
+        Assert.Contains(pathScripts, call => call.Command.Contains("gateway.reload.mode 'hybrid'", StringComparison.Ordinal));
         Assert.All(pathScripts, call => Assert.True(call.InputViaStdin, call.Command));
     }
 
