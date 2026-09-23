@@ -2575,7 +2575,10 @@ public sealed partial class ConnectionPage : Page
                 listenerOwned = await CurrentApp.IsDashboardListenerOwnedAsync(ssh);
 
             if (!CurrentApp.DashboardPinStillMatches(pinned))
+            {
+                CurrentApp.ShowTransientConnectionError(DashboardCredentialGate.PinMismatchMessage);
                 return;
+            }
 
             if (!GatewayClientEndpointResolver.TryResolveDashboardEndpoint(
                     pinned,
@@ -2589,14 +2592,53 @@ public sealed partial class ConnectionPage : Page
                 return;
             }
 
-            if (appendSharedToken && pinned.SshTunnel is null)
+            string? dashboardToken = pinned.SharedGatewayToken;
+            var appendDashboardToken = appendSharedToken;
+            if (pinned.SshTunnel is not null)
+            {
+                if (!CurrentApp.TryResolvePinnedDashboardCredential(
+                        pinned,
+                        out var resolvedToken,
+                        out var credentialSource,
+                        out var isBootstrapToken,
+                        out var pinMismatch))
+                {
+                    CurrentApp.ShowTransientConnectionError(pinMismatch
+                        ? DashboardCredentialGate.PinMismatchMessage
+                        : "Gateway URL or credential is not configured");
+                    return;
+                }
+
+                var decision = DashboardCredentialGate.Decide(
+                    CurrentApp.DashboardPinStillMatches(pinned),
+                    samePinnedRecord: true,
+                    appendSharedToken,
+                    credentialSource,
+                    isBootstrapToken,
+                    resolvedToken,
+                    pinned.SharedGatewayToken);
+                if (decision.PinMismatch)
+                {
+                    CurrentApp.ShowTransientConnectionError(DashboardCredentialGate.PinMismatchMessage);
+                    return;
+                }
+
+                dashboardToken = decision.Token;
+                appendDashboardToken = decision.AppendToken &&
+                    !isBootstrapToken &&
+                    credentialSource == CredentialResolver.SourceSharedGatewayToken;
+            }
+            else if (appendSharedToken)
             {
                 var provenanceService = CurrentApp.ManagedLocalPortProvenance;
                 if (provenanceService is null)
                     return;
                 _ = await provenanceService.InspectAsync(pinned);
                 if (!CurrentApp.DashboardPinStillMatches(pinned))
+                {
+                    CurrentApp.ShowTransientConnectionError(DashboardCredentialGate.PinMismatchMessage);
                     return;
+                }
                 var candidate = new GatewayCredential(
                     pinned.SharedGatewayToken!,
                     IsBootstrapToken: false,
@@ -2612,8 +2654,8 @@ public sealed partial class ConnectionPage : Page
             var url = GatewayDashboardUrlBuilder.Build(
                 endpoint,
                 path: null,
-                pinned.SharedGatewayToken,
-                appendSharedGatewayToken: appendSharedToken);
+                dashboardToken,
+                appendSharedGatewayToken: appendDashboardToken);
             await global::Windows.System.Launcher.LaunchUriAsync(new Uri(url));
         }
         catch (Exception ex)

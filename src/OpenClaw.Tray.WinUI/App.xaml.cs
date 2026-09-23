@@ -162,7 +162,59 @@ public partial class App : Application, OpenClawTray.Services.IAppCommands, IPer
         return current is not null
             && string.Equals(current.Id, pinned.Id, StringComparison.Ordinal)
             && string.Equals(current.SharedGatewayToken, pinned.SharedGatewayToken, StringComparison.Ordinal)
+            && string.Equals(current.BootstrapToken, pinned.BootstrapToken, StringComparison.Ordinal)
+            && string.Equals(current.Url, pinned.Url, StringComparison.OrdinalIgnoreCase)
             && current.SshTunnel == pinned.SshTunnel;
+    }
+
+    internal bool TryResolvePinnedDashboardCredential(
+        GatewayRecord pinned,
+        out string token,
+        out string credentialSource,
+        out bool isBootstrapToken,
+        out bool pinMismatch)
+    {
+        token = string.Empty;
+        credentialSource = "none";
+        isBootstrapToken = false;
+        pinMismatch = false;
+
+        if (!DashboardPinStillMatches(pinned))
+        {
+            pinMismatch = true;
+            return false;
+        }
+
+        if (_gatewayRegistry is null || _settings is null)
+            return false;
+
+        var identityDirectory = _gatewayRegistry.GetIdentityDirectory(pinned.Id);
+        var credential = new CredentialResolver(DeviceIdentityFileReader.Instance)
+            .ResolveOperator(pinned, identityDirectory);
+
+        if (!DashboardPinStillMatches(pinned))
+        {
+            token = string.Empty;
+            credentialSource = "none";
+            isBootstrapToken = false;
+            pinMismatch = true;
+            Logger.Warn("Dashboard pin mismatch after credential resolution; refusing token URL.");
+            return false;
+        }
+
+        if (credential is null)
+            return false;
+
+        if (credential.Source == CredentialResolver.SourceSharedGatewayToken &&
+            _managedLocalPortProvenance?.IsStrongCredentialAllowed(pinned, credential) == false)
+        {
+            return false;
+        }
+
+        token = credential.Token;
+        credentialSource = credential.Source;
+        isBootstrapToken = credential.IsBootstrapToken;
+        return true;
     }
 
     public void EnsureSshTunnelStarted()
@@ -3918,8 +3970,29 @@ public partial class App : Application, OpenClawTray.Services.IAppCommands, IPer
         if (pinned?.SshTunnel is { } ssh)
         {
             var listenerOwned = await IsDashboardListenerOwnedAsync(ssh);
-            if (!DashboardPinStillMatches(pinned))
+            if (!TryResolvePinnedDashboardCredential(
+                    pinned,
+                    out var tunnelToken,
+                    out var tunnelCredentialSource,
+                    out var tunnelIsBootstrapToken,
+                    out var pinMismatch))
+            {
+                if (pinMismatch)
+                {
+                    Logger.Warn("Dashboard pin mismatch; refusing token URL.");
+                    _toastService?.ShowToast(new ToastContentBuilder()
+                        .AddText("Dashboard")
+                        .AddText(DashboardCredentialGate.PinMismatchMessage));
+                }
+                else
+                {
+                    ShowConnectionSettingsForPairingIssue(
+                        "Dashboard",
+                        "Gateway URL or credential is not configured");
+                }
+
                 return;
+            }
 
             if (!GatewayClientEndpointResolver.TryResolveDashboardEndpoint(
                     pinned,
@@ -3934,11 +4007,30 @@ public partial class App : Application, OpenClawTray.Services.IAppCommands, IPer
                 return;
             }
 
+            var decision = DashboardCredentialGate.Decide(
+                DashboardPinStillMatches(pinned),
+                samePinnedRecord: true,
+                appendSharedToken,
+                tunnelCredentialSource,
+                tunnelIsBootstrapToken,
+                tunnelToken,
+                pinned.SharedGatewayToken);
+            if (decision.PinMismatch)
+            {
+                Logger.Warn("Dashboard pin mismatch; refusing token URL.");
+                _toastService?.ShowToast(new ToastContentBuilder()
+                    .AddText("Dashboard")
+                    .AddText(DashboardCredentialGate.PinMismatchMessage));
+                return;
+            }
+
             OpenDashboardUri(GatewayDashboardUrlBuilder.Build(
                 tunnelEndpoint,
                 path,
-                pinned.SharedGatewayToken,
-                appendSharedToken));
+                decision.Token,
+                decision.AppendToken &&
+                !tunnelIsBootstrapToken &&
+                tunnelCredentialSource == CredentialResolver.SourceSharedGatewayToken));
             return;
         }
 

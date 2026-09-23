@@ -240,8 +240,18 @@ public partial class App
             if (pinned?.SshTunnel is { } ssh)
             {
                 var listenerOwned = await IsDashboardListenerOwnedAsync(ssh);
-                if (!DashboardPinStillMatches(pinned))
-                    return new { error = "Dashboard blocked because the gateway changed." };
+                if (!TryResolvePinnedDashboardCredential(
+                        pinned,
+                        out var pinnedToken,
+                        out var pinnedCredentialSource,
+                        out var pinnedIsBootstrapToken,
+                        out var pinMismatch))
+                {
+                    if (pinMismatch)
+                        return new { error = DashboardCredentialGate.PinMismatchMessage };
+
+                    return new { error = "Gateway URL or credential is not configured" };
+                }
 
                 if (!GatewayClientEndpointResolver.TryResolveDashboardEndpoint(
                         pinned,
@@ -253,17 +263,32 @@ public partial class App
                     return new { error = "Dashboard blocked because the SSH tunnel is not up." };
                 }
 
+                var decision = DashboardCredentialGate.Decide(
+                    DashboardPinStillMatches(pinned),
+                    samePinnedRecord: true,
+                    appendSharedToken,
+                    pinnedCredentialSource,
+                    pinnedIsBootstrapToken,
+                    pinnedToken,
+                    pinned.SharedGatewayToken);
+                if (decision.PinMismatch)
+                    return new { error = DashboardCredentialGate.PinMismatchMessage };
+
                 var url = GatewayDashboardUrlBuilder.Build(
                     endpoint,
                     path,
-                    pinned.SharedGatewayToken,
-                    appendSharedToken);
+                    decision.Token,
+                    decision.AppendToken &&
+                    !pinnedIsBootstrapToken &&
+                    pinnedCredentialSource == CredentialResolver.SourceSharedGatewayToken);
 
                 return new
                 {
                     url,
-                    credentialSource = CredentialResolver.SourceSharedGatewayToken,
-                    usesSharedGatewayToken = appendSharedToken,
+                    credentialSource = decision.CredentialSource,
+                    usesSharedGatewayToken = decision.AppendToken &&
+                        !pinnedIsBootstrapToken &&
+                        pinnedCredentialSource == CredentialResolver.SourceSharedGatewayToken,
                     hasTokenQuery = url.Contains("?token=", StringComparison.Ordinal) || url.Contains("&token=", StringComparison.Ordinal)
                 };
             }
