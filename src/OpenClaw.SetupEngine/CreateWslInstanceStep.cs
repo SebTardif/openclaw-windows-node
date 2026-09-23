@@ -43,6 +43,7 @@ public sealed class CreateWslInstanceStep : SetupStep
 
     public override async Task<StepResult> ExecuteAsync(SetupContext ctx, CancellationToken ct)
     {
+        _createdRegistrationThisAttempt = false;
         var distro = ctx.DistroName!;
         var baseDistro = ctx.Config.BaseDistro.Trim();
 
@@ -319,6 +320,15 @@ public sealed class CreateWslInstanceStep : SetupStep
 
         if (!DistroInstallPathPolicy.TryGetManagedInstallPath(ctx.LocalDataDir, distro, out var vhdDir, out var pathError))
             throw new IOException($"[Uninstall] Refusing WSL rollback filesystem cleanup: {pathError}");
+
+        // Execute's partial cleanup is reached only after creation starts; pipeline
+        // rollback also runs when Execute refuses pre-existing state.
+        if (!ctx.IsUninstalling && !_createdRegistrationThisAttempt)
+        {
+            ctx.Logger.Warn(
+                $"Preserving WSL distro '{distro}', install path, ownership marker, and parent directory because this attempt did not start creating it.");
+            return;
+        }
 
         var cleanupError = await CleanupPartialInstall(ctx, distro, vhdDir, ct);
         if (cleanupError.Length > 0)
