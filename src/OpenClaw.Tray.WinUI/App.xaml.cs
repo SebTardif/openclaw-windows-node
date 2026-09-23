@@ -2127,13 +2127,6 @@ public partial class App : Application, OpenClawTray.Services.IAppCommands, IPer
             return;
         }
 
-        // Uninstall deletes GatewayUrl. The getter then falls back to the
-        // default local URL, which must not inherit leftover secrets.
-        if (!_settings.HasPersistedGatewayUrl)
-        {
-            return;
-        }
-
         var legacyIdentityPath = Path.Combine(SettingsManager.SettingsDirectoryPath, "device-key-ed25519.json");
         if (!_settings.HasLegacyGatewayCredentials && !File.Exists(legacyIdentityPath))
         {

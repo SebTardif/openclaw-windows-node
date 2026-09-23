@@ -162,8 +162,10 @@ public static class TrayArtifactCleanup
 
             bool changed = false;
 
-            // Drop the saved URL and legacy secrets together. A later launch
-            // falls back to the default local URL and must not import leftovers.
+            // Drop the saved URL and legacy Token / BootstrapToken together, even
+            // when preserveNodeSettings is true. A later launch falls back to the
+            // default local URL and must not import leftovers. Node mode and
+            // autostart stay only when that flag is set.
             if (dict.Remove("GatewayUrl"))
                 changed = true;
             if (dict.Remove("Token"))
@@ -188,8 +190,8 @@ public static class TrayArtifactCleanup
                 var updatedJson = System.Text.Json.JsonSerializer.Serialize(dict, SetupConfig.JsonWriteOptions);
                 AtomicFile.WriteAllText(settingsPath, updatedJson);
                 logger.Info(preserveNodeSettings
-                    ? "[Uninstall] Reset onboarding settings (GatewayUrl)"
-                    : "[Uninstall] Reset onboarding settings (GatewayUrl, EnableNodeMode, AutoStart)");
+                    ? "[Uninstall] Reset onboarding settings (GatewayUrl, Token, BootstrapToken); node settings preserved"
+                    : "[Uninstall] Reset onboarding settings (GatewayUrl, Token, BootstrapToken, EnableNodeMode, AutoStart)");
             }
             else
             {
