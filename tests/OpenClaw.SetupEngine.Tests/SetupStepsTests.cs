@@ -3452,6 +3452,56 @@ public class SetupStepsTests : IDisposable
     }
 
     [Fact]
+    public async Task CreateWslInstance_RollbackKeepsPreexistingDistroWhenMarkerMatchesLivePath()
+    {
+        var commands = new FakeCommandRunner(args =>
+            args.SequenceEqual(["--list", "--quiet"])
+                ? Ok("OpenClawGateway\n")
+                : args.SequenceEqual(["--terminate", "OpenClawGateway"]) ||
+                  args.SequenceEqual(["--unregister", "OpenClawGateway"])
+                    ? Ok()
+                    : Fail($"unexpected args: {string.Join(' ', args)}"));
+        var ctx = CreateContext(commands: commands);
+        var installPath = Path.Combine(ctx.LocalDataDir, "wsl", "OpenClawGateway");
+        await ManagedDistroOwnership.WriteMarkerAsync(
+            ctx.LocalDataDir,
+            "OpenClawGateway",
+            installPath,
+            CancellationToken.None);
+        var step = new CreateWslInstanceStep(FakeWslRegistrationInspector.Found(installPath));
+
+        var result = await step.ExecuteAsync(ctx, CancellationToken.None);
+        await step.RollbackAsync(ctx, CancellationToken.None);
+
+        Assert.Equal(StepOutcome.Failed, result.Outcome);
+        Assert.Contains("still exists after cleanup", result.Message);
+        Assert.DoesNotContain(commands.Calls, call => call.Arguments.Contains("--unregister"));
+        Assert.DoesNotContain(commands.Calls, call => call.Arguments.Contains("--terminate"));
+    }
+
+    [Fact]
+    public async Task CreateWslInstance_UninstallUnregistersWhenDistroListFails()
+    {
+        var commands = new FakeCommandRunner(args =>
+        {
+            if (args.SequenceEqual(["--list", "--quiet"]))
+                return Fail("list failed");
+            if (args.SequenceEqual(["--terminate", "OpenClawGateway"]) ||
+                args.SequenceEqual(["--unregister", "OpenClawGateway"]))
+                return Ok();
+            return Fail($"unexpected args: {string.Join(' ', args)}");
+        });
+        var ctx = CreateContext(commands: commands);
+        ctx.IsUninstalling = true;
+        var step = new CreateWslInstanceStep(
+            FakeWslRegistrationInspector.Found(@"C:\other-distro"));
+
+        await step.RollbackAsync(ctx, CancellationToken.None);
+
+        Assert.Contains(commands.Calls, call => call.Arguments.SequenceEqual(["--unregister", "OpenClawGateway"]));
+    }
+
+    [Fact]
     public async Task CreateWslInstance_PartialCleanupSkipsInstallPathDeleteWhenDistroStateIsUnknown()
     {
         var listCalls = 0;

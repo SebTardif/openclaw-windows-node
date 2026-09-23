@@ -25,6 +25,7 @@ public sealed class CreateWslInstanceStep : SetupStep
     ];
 
     private readonly IWslRegistrationInspector _registrationInspector;
+    private bool _createdRegistrationThisAttempt;
 
     public override string Id => "wsl-create";
     public override string DisplayName => "Create WSL instance";
@@ -88,6 +89,7 @@ public sealed class CreateWslInstanceStep : SetupStep
 
         Directory.CreateDirectory(Path.GetDirectoryName(installPath)!);
 
+        _createdRegistrationThisAttempt = true;
         var installArgs = WslInstallSupport.BuildDirectInstallArgs(baseDistro, distro, installPath);
         ctx.Logger.Info($"Installing fresh WSL distro with arguments: {string.Join(' ', installArgs)}");
         var install = await ctx.Commands.RunAsync(
@@ -210,17 +212,16 @@ public sealed class CreateWslInstanceStep : SetupStep
         var registrationStateKnown = list.ExitCode == 0;
         var distroExists = registrationStateKnown && WslInstallSupport.ContainsDistro(list.Stdout, distro);
         var canDeleteInstallPath = registrationStateKnown && !distroExists;
-        var ownsThisInstall = ManagedDistroOwnership.HasPathBoundMarkerEvidence(ctx.LocalDataDir, distro);
 
-        if (!registrationStateKnown)
-        {
-            ctx.Logger.Warn($"Partial install cleanup could not list WSL distros (exit {list.ExitCode}); refusing to unregister '{distro}'");
-        }
-        else if (distroExists && ctx.IsUninstalling)
+        if (ctx.IsUninstalling)
         {
             canDeleteInstallPath = await TryUnregisterPartialInstall(ctx, distro, cleanupErrors, ct);
         }
-        else if (distroExists && ownsThisInstall)
+        else if (!registrationStateKnown)
+        {
+            ctx.Logger.Warn($"Partial install cleanup could not list WSL distros (exit {list.ExitCode}); refusing to unregister '{distro}'");
+        }
+        else if (distroExists && _createdRegistrationThisAttempt)
         {
             if (!ManagedDistroOwnership.HasRegisteredDistroEvidence(
                     ctx.DataDir,
