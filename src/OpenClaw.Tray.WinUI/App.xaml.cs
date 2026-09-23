@@ -189,8 +189,15 @@ public partial class App : Application, OpenClawTray.Services.IAppCommands, IPer
             return false;
 
         var identityDirectory = _gatewayRegistry.GetIdentityDirectory(pinned.Id);
-        var credential = new CredentialResolver(DeviceIdentityFileReader.Instance)
-            .ResolveOperator(pinned, identityDirectory);
+        var resolved = InteractiveGatewayCredentialResolver.TryResolveRecord(
+            pinned,
+            identityDirectory,
+            DeviceIdentityFileReader.Instance,
+            (record, candidate) =>
+                candidate.Source != CredentialResolver.SourceSharedGatewayToken ||
+                _managedLocalPortProvenance?.IsStrongCredentialAllowed(record, candidate) != false,
+            out var credential,
+            out _);
 
         if (!DashboardPinStillMatches(pinned))
         {
@@ -202,14 +209,8 @@ public partial class App : Application, OpenClawTray.Services.IAppCommands, IPer
             return false;
         }
 
-        if (credential is null)
+        if (!resolved || credential is null)
             return false;
-
-        if (credential.Source == CredentialResolver.SourceSharedGatewayToken &&
-            _managedLocalPortProvenance?.IsStrongCredentialAllowed(pinned, credential) == false)
-        {
-            return false;
-        }
 
         token = credential.Token;
         credentialSource = credential.Source;
