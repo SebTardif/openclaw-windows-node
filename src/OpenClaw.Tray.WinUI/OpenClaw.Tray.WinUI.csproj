@@ -37,6 +37,11 @@
     <AppIdentityMarker>release</AppIdentityMarker>
   </PropertyGroup>
 
+  <!-- Fixture launchers require this marker before starting an app with host-side effects suppressed. -->
+  <ItemGroup>
+    <RuntimeHostConfigurationOption Include="OpenClaw.GatewayFixtureIsolationVersion" Value="1" />
+  </ItemGroup>
+
   <!-- Work around dotnet/runtime#129191 in production builds. Explicit DevBuild
        builds retain debugger support for managed/native interop diagnostics. -->
   <ItemGroup Condition="'$(Configuration)' == 'Release' and '$(DevBuild)' != 'true'">
@@ -94,8 +99,10 @@
 
   <ItemGroup>
     <PackageReference Include="Microsoft.Extensions.DependencyInjection" Version="10.0.0" />
-    <PackageReference Include="Microsoft.UI.Reactor" Version="0.1.0-preview.15" />
-    <PackageReference Include="Microsoft.UI.Reactor.Advanced" Version="0.1.0-preview.15" />
+    <!-- Keep both on preview.12 until the WinUI ItemsView fix ships and is validated.
+         Retirement gates and Markdown ListItem workaround: openclaw/openclaw-windows-node#1424. -->
+    <PackageReference Include="Microsoft.UI.Reactor" Version="0.1.0-preview.12" />
+    <PackageReference Include="Microsoft.UI.Reactor.Advanced" Version="0.1.0-preview.12" />
     <PackageReference Include="Microsoft.WindowsAppSDK" Version="$(MicrosoftWindowsAppSDKVersion)" />
     <PackageReference Include="Microsoft.Windows.SDK.BuildTools" Version="$(MicrosoftWindowsSdkBuildToolsVersion)" />
     <PackageReference Include="OpenTelemetry" Version="1.16.0" />
@@ -116,6 +123,7 @@
 
   <ItemGroup>
     <Content Include="Assets\**\*" CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="THIRD_PARTY_NOTICES.md" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
     <None Include="..\OpenClaw.SetupEngine\default-config.json"
              Link="default-config.json"
              CopyToOutputDirectory="PreserveNewest" />
@@ -154,7 +162,11 @@
     <Task>
       <Code Type="Fragment" Language="cs">
         <![CDATA[
-        if (!System.Text.RegularExpressions.Regex.IsMatch(FourPartVersion, @"^\d+\.\d+\.\d+\.\d+$")) {
+        System.Version packageVersion;
+        if (!System.Text.RegularExpressions.Regex.IsMatch(FourPartVersion, @"^[1-9]\d*\.(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$") ||
+            !System.Version.TryParse(FourPartVersion, out packageVersion) ||
+            packageVersion.Major > 65535 || packageVersion.Minor > 65535 ||
+            packageVersion.Build > 65535 || packageVersion.Revision > 65535) {
             Log.LogError("GenerateOpenClawAppxManifest: '" + FourPartVersion + "' is not a valid four-part MSIX version.");
             return false;
         }
@@ -261,6 +273,8 @@
       <_AppxBaseVersion Condition="'$(_VersionDotCount)' == '3'">$([System.Text.RegularExpressions.Regex]::Replace('$(_StrippedVersion)', '\.\d+$', ''))</_AppxBaseVersion>
       <_AppxBaseVersion Condition="'$(_VersionDotCount)' == '2'">$(_StrippedVersion)</_AppxBaseVersion>
       <_AppxBaseVersion Condition="'$(_VersionDotCount)' == '1'">$(_StrippedVersion).0</_AppxBaseVersion>
+      <!-- CI allocates the package base independently of the application's GitVersion. -->
+      <_AppxBaseVersion Condition="'$(MsixPackageBaseVersion)' != ''">$(MsixPackageBaseVersion)</_AppxBaseVersion>
       <_AppxRevision Condition="'$(DevBuild)' == 'true' and '$(MsixRevision)' != ''">$(MsixRevision)</_AppxRevision>
       <_AppxRevision Condition="'$(DevBuild)' == 'true' and '$(_AppxRevision)' == '' and '$(GitVersion_CommitsSinceVersionSource)' != ''">$(GitVersion_CommitsSinceVersionSource)</_AppxRevision>
       <_AppxRevision Condition="'$(DevBuild)' == 'true' and '$(_AppxRevision)' == ''">1</_AppxRevision>
@@ -425,6 +439,11 @@
     </ItemGroup>
     <Copy SourceFiles="@(_SetupAssetPublishSource)"
           DestinationFiles="@(_SetupAssetPublishSource->'$(PublishDir)Assets\Setup\%(RecursiveDir)%(Filename)%(Extension)')"
+          SkipUnchangedFiles="true" />
+    <!-- WinUI adds library-qualified assets to build output, but not to the
+         .NET publish item list. Preserve the paths referenced by the setup PRI. -->
+    <Copy SourceFiles="@(_SetupAssetPublishSource)"
+          DestinationFiles="@(_SetupAssetPublishSource->'$(PublishDir)OpenClaw.SetupEngine.UI\Assets\Setup\%(RecursiveDir)%(Filename)%(Extension)')"
           SkipUnchangedFiles="true" />
   </Target>
 

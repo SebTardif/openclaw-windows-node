@@ -116,6 +116,23 @@ public class OpenClawGatewayClientTests
             method!.Invoke(_client, Array.Empty<object>());
         }
 
+        /// <summary>
+        /// Marks the hello-ok handshake snapshot complete without a wire
+        /// handshake. Mechanical wizard/transport tests use this to satisfy the
+        /// #1418 readiness gate without arming the post-handshake auto-request
+        /// burst, which would race their frame reads; the real
+        /// challenge → connect → hello-ok path is covered by
+        /// GatewayProtocolLiveRoundTripTests and the ProcessRawMessage tests.
+        /// </summary>
+        public void CompleteHandshakeForTest()
+        {
+            var field = typeof(OpenClawGatewayClient).GetField(
+                "_hasHandshakeSnapshot",
+                System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+            Assert.NotNull(field);
+            field!.SetValue(_client, true);
+        }
+
         public void ProcessRawMessage(string json)
         {
             var method = typeof(OpenClawGatewayClient).GetMethod(
@@ -468,6 +485,15 @@ public class OpenClawGatewayClientTests
 
         public string? GetPairingRequiredRequestId() => _client.PairingRequiredRequestId;
 
+        public bool IsTransportConnectedForTest()
+        {
+            var property = typeof(WebSocketClientBase).GetProperty(
+                "IsConnected",
+                System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+            Assert.NotNull(property);
+            return (bool)property!.GetValue(_client)!;
+        }
+
         public bool ShouldAutoReconnectForTest()
         {
             var method = typeof(OpenClawGatewayClient).GetMethod(
@@ -565,6 +591,7 @@ public class OpenClawGatewayClientTests
             identityPath: identity.Path);
         using var client = helper.Client;
         await client.ConnectAsync();
+        helper.CompleteHandshakeForTest();
 
         var responseTask = client.SendWizardRequestAsync("wizard.start", timeoutMs: 10_000);
         var request = await server.ReceiveTextAsync().WaitAsync(TimeSpan.FromSeconds(2));
@@ -599,6 +626,7 @@ public class OpenClawGatewayClientTests
             identityPath: identity.Path);
         using var client = helper.Client;
         await client.ConnectAsync();
+        helper.CompleteHandshakeForTest();
 
         var responseTask = client.SendWizardRequestAsync("wizard.next", timeoutMs: 10_000);
         var request = await server.ReceiveTextAsync().WaitAsync(TimeSpan.FromSeconds(2));
@@ -631,6 +659,7 @@ public class OpenClawGatewayClientTests
             identityPath: identity.Path);
         using var client = helper.Client;
         await client.ConnectAsync();
+        helper.CompleteHandshakeForTest();
 
         var responseTask = client.SendWizardRequestAsync("wizard.status", timeoutMs: 250);
         await server.ReceiveTextAsync().WaitAsync(TimeSpan.FromSeconds(2));
@@ -652,6 +681,7 @@ public class OpenClawGatewayClientTests
             identityPath: identity.Path);
         using var client = helper.Client;
         await client.ConnectAsync();
+        helper.CompleteHandshakeForTest();
 
         var timedOutTask = client.SendWizardRequestAsync("wizard.status", timeoutMs: 250);
         var timedOutRequest = await server.ReceiveTextAsync().WaitAsync(TimeSpan.FromSeconds(2));
@@ -698,6 +728,7 @@ public class OpenClawGatewayClientTests
             identityPath: identity.Path);
         using var client = helper.Client;
         await client.ConnectAsync();
+        helper.CompleteHandshakeForTest();
 
         var responseTask = client.SendWizardRequestAsync("wizard.cancel", timeoutMs: 10_000);
         await server.ReceiveTextAsync().WaitAsync(TimeSpan.FromSeconds(2));
@@ -720,6 +751,7 @@ public class OpenClawGatewayClientTests
             identityPath: identity.Path);
         using var client = helper.Client;
         await client.ConnectAsync();
+        helper.CompleteHandshakeForTest();
 
         var responseTask = client.SendWizardRequestAsync("wizard.next", timeoutMs: 10_000);
         await server.ReceiveTextAsync().WaitAsync(TimeSpan.FromSeconds(2));
@@ -801,6 +833,87 @@ public class OpenClawGatewayClientTests
         Assert.False(helper.ShouldAutoReconnectForTest());
         await Assert.ThrowsAsync<InvalidOperationException>(
             () => client.SendChatMessageAsync("blocked after protocol mismatch"));
+    }
+
+    [Fact]
+    public async Task TrackedRequest_BeforeHandshake_SuppressedWithoutClosingSocket()
+    {
+        using var server = new LoopbackWebSocketServer();
+        using var identity = new TempDirectory("pre-handshake-tracked-");
+        await server.StartAsync();
+        var helper = new GatewayClientTestHelper(
+            gatewayUrl: server.WebSocketUrl,
+            identityPath: identity.Path);
+        using var client = helper.Client;
+        await client.ConnectAsync();
+        Assert.False(client.HasHandshakeSnapshot);
+
+        await client.RequestNodesAsync();
+
+        // #1418: a tracked RPC sent before hello-ok must be dropped, not
+        // written to the wire — the gateway answers such a frame with a 1008
+        // PolicyViolation close. Nothing may reach the server, and the
+        // transport must stay alive with auto-reconnect armed.
+        try
+        {
+            await server.ReceiveTextAsync().WaitAsync(TimeSpan.FromMilliseconds(300));
+            Assert.Fail("A frame reached the wire before hello-ok; the gateway would 1008-close this socket.");
+        }
+        catch (TimeoutException)
+        {
+            // expected: the suppressed request never reached the loopback server
+        }
+
+        Assert.True(helper.IsTransportConnectedForTest());
+        Assert.True(helper.ShouldAutoReconnectForTest());
+    }
+
+    [Fact]
+    public async Task WizardRequest_BeforeHandshake_ThrowsPendingErrorAndKeepsSocket()
+    {
+        using var server = new LoopbackWebSocketServer();
+        using var identity = new TempDirectory("pre-handshake-wizard-");
+        await server.StartAsync();
+        var helper = new GatewayClientTestHelper(
+            gatewayUrl: server.WebSocketUrl,
+            identityPath: identity.Path);
+        using var client = helper.Client;
+        await client.ConnectAsync();
+        Assert.False(client.IsConnectedToGateway);
+
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => client.SendWizardRequestAsync("wizard.start", timeoutMs: 1_000));
+
+        // Distinct from the closed-socket message: the transport is healthy,
+        // only the handshake is pending, and the socket must survive.
+        Assert.Contains("handshake", exception.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("not open", exception.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.True(helper.IsTransportConnectedForTest());
+        Assert.False(client.HasHandshakeSnapshot);
+    }
+
+    [Fact]
+    public async Task IsConnectedToGateway_RequiresHelloOkSnapshot_AndClearsOnDisconnect()
+    {
+        using var server = new LoopbackWebSocketServer();
+        using var identity = new TempDirectory("handshake-gate-");
+        await server.StartAsync();
+        var helper = new GatewayClientTestHelper(
+            gatewayUrl: server.WebSocketUrl,
+            identityPath: identity.Path);
+        using var client = helper.Client;
+        await client.ConnectAsync();
+
+        // Transport open but hello-ok pending: operator readiness stays false.
+        Assert.True(helper.IsTransportConnectedForTest());
+        Assert.False(client.IsConnectedToGateway);
+
+        helper.CompleteHandshakeForTest();
+        Assert.True(client.IsConnectedToGateway);
+
+        helper.OnDisconnected();
+        Assert.False(client.HasHandshakeSnapshot);
+        Assert.False(client.IsConnectedToGateway);
     }
 
     private static string ReadRequestId(string request)
@@ -3243,6 +3356,122 @@ public class OpenClawGatewayClientTests
         """);
 
         Assert.True(Assert.Single(helper.GetSessionList()).IsMain);
+    }
+
+    [Theory]
+    [InlineData("""[{"key":"agent:main:main","status":"idle"}]""")]
+    [InlineData("""{"agent:main:main":{"status":"idle"}}""")]
+    public void ParseSessions_AuthoritativeThinkingOmissionClearsOnlyThinkingOverride(string refreshed)
+    {
+        var helper = new GatewayClientTestHelper();
+        using var client = helper.Client;
+        helper.ParseSessionsPayload("""[{"key":"agent:main:main","thinkingLevel":"off","model":"retained-model","verboseLevel":"on"}]""");
+        var previous = Assert.Single(helper.GetSessionList());
+
+        helper.ParseSessionsPayload(refreshed);
+
+        var current = Assert.Single(helper.GetSessionList());
+        Assert.Null(current.ThinkingLevel);
+        Assert.Equal("retained-model", current.Model);
+        Assert.Equal("on", current.VerboseLevel);
+        Assert.Equal("off", previous.ThinkingLevel);
+    }
+
+    [Theory]
+    [InlineData("""[{"key":"agent:main:main","thinkingLevel":null}]""", null)]
+    [InlineData("""{"agent:main:main":{"thinkingLevel":null}}""", null)]
+    [InlineData("""[{"key":"agent:main:main","thinkingLevel":"off"}]""", "off")]
+    public void ParseSessions_ExplicitThinkingValueIsAuthoritative(string refreshed, string? expected)
+    {
+        var helper = new GatewayClientTestHelper();
+        using var client = helper.Client;
+        helper.ParseSessionsPayload("""[{"key":"agent:main:main","thinkingLevel":"high"}]""");
+
+        helper.ParseSessionsPayload(refreshed);
+
+        Assert.Equal(expected, Assert.Single(helper.GetSessionList()).ThinkingLevel);
+    }
+
+    [Fact]
+    public void TrackedSessionActivity_SparseUpdatePreservesThinkingOverride()
+    {
+        var helper = new GatewayClientTestHelper();
+        using var client = helper.Client;
+        helper.ParseSessionsPayload("""[{"key":"agent:main:main","thinkingLevel":"off"}]""");
+        var update = typeof(OpenClawGatewayClient).GetMethod("UpdateTrackedSession",
+            System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!;
+
+        update.Invoke(client, ["agent:main:main", true, "working"]);
+
+        var session = Assert.Single(helper.GetSessionList());
+        Assert.Equal("off", session.ThinkingLevel);
+        Assert.Equal("working", session.CurrentActivity);
+    }
+
+    [Fact]
+    public void ParseSessions_LegacyStatusOnlyEntryDoesNotPretendToClearThinkingMetadata()
+    {
+        var helper = new GatewayClientTestHelper();
+        using var client = helper.Client;
+        helper.ParseSessionsPayload("""[{"key":"agent:main:main","thinkingLevel":"off"}]""");
+
+        helper.ParseSessionsPayload("""{"agent:main:main":"idle"}""");
+
+        var session = Assert.Single(helper.GetSessionList());
+        Assert.Equal("off", session.ThinkingLevel);
+        Assert.Equal("idle", session.Status);
+    }
+
+    [Fact]
+    public void ParseSessions_ThinkingProfilesAndDefaultsSurviveOmissionNotIdentityChanges()
+    {
+        var helper = new GatewayClientTestHelper();
+        using var client = helper.Client;
+        helper.ParseSessionsPayload("""
+            {"defaults":{"model":"m","modelProvider":"p","thinkingLevels":[{"id":"off","label":"Off"}]},
+             "sessions":[{"key":"agent:main:main","model":"m","modelProvider":"p","thinkingLevel":"off",
+                          "thinkingLevels":[{"id":"high","label":"High"}]}]}
+            """);
+        var previous = Assert.Single(helper.GetSessionList());
+        Assert.Equal("off", Assert.Single(previous.ThinkingDefaults!.Profile!.Levels!.Value).Id);
+        Assert.Equal("high", Assert.Single(previous.ThinkingContext!.Profile!.Levels!.Value).Id);
+        helper.ParseSessionsPayload("""
+            {"defaults":{"model":"m","modelProvider":"p"},
+             "sessions":[{"key":"agent:main:main","model":"m","modelProvider":"p"}]}
+            """);
+        var cleared = Assert.Single(helper.GetSessionList());
+        Assert.Null(cleared.ThinkingLevel);
+        Assert.Equal("off", previous.ThinkingLevel);
+        Assert.Equal("high", Assert.Single(cleared.ThinkingContext!.Profile!.Levels!.Value).Id);
+        Assert.Equal("off", Assert.Single(cleared.ThinkingDefaults!.Profile!.Levels!.Value).Id);
+        helper.ParseSessionsPayload("""
+            {"defaults":{"model":"other","modelProvider":"p"},
+             "sessions":{"agent:main:main":{"model":"other","modelProvider":"p"}}}
+            """);
+        var changed = Assert.Single(helper.GetSessionList());
+        Assert.Null(changed.ThinkingContext!.Profile);
+        Assert.Null(changed.ThinkingDefaults!.Profile);
+    }
+
+    [Fact]
+    public async Task ThinkingProfiles_NewConnectionCannotReusePreviousGatewayMetadata()
+    {
+        var helper = new GatewayClientTestHelper();
+        using var client = helper.Client;
+        const string payload = """
+            {"defaults":{"model":"m","modelProvider":"p","thinkingLevels":[]},
+             "sessions":[{"key":"agent:main:main","thinkingLevels":[{"id":"off","label":"Off"}]}]}
+            """;
+        helper.ParseSessionsPayload(payload);
+        var connected = typeof(OpenClawGatewayClient).GetMethod("OnConnectedAsync",
+            System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!;
+        await (Task)connected.Invoke(client, null)!;
+        helper.ParseSessionsPayload("""
+            {"defaults":{"model":"m","modelProvider":"p"},"sessions":[{"key":"agent:main:main"}]}
+            """);
+        var session = Assert.Single(helper.GetSessionList());
+        Assert.Null(session.ThinkingContext!.Profile);
+        Assert.Null(session.ThinkingDefaults!.Profile);
     }
 
     [Fact]
