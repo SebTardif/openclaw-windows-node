@@ -24,9 +24,21 @@ public sealed class CreateWslInstanceStep : SetupStep
         TimeSpan.FromSeconds(90),
     ];
 
+    private readonly IWslRegistrationInspector _registrationInspector;
+
     public override string Id => "wsl-create";
     public override string DisplayName => "Create WSL instance";
     public override bool CanRetry => false;
+
+    public CreateWslInstanceStep()
+        : this(new WindowsWslRegistrationInspector())
+    {
+    }
+
+    internal CreateWslInstanceStep(IWslRegistrationInspector registrationInspector)
+    {
+        _registrationInspector = registrationInspector ?? throw new ArgumentNullException(nameof(registrationInspector));
+    }
 
     public override async Task<StepResult> ExecuteAsync(SetupContext ctx, CancellationToken ct)
     {
@@ -186,7 +198,7 @@ public sealed class CreateWslInstanceStep : SetupStep
         return StepResult.Ok($"Created clean WSL2 distro '{distro}' at '{installPath}'");
     }
 
-    private static async Task<string> CleanupPartialInstall(SetupContext ctx, string distro, string installPath, CancellationToken ct)
+    private async Task<string> CleanupPartialInstall(SetupContext ctx, string distro, string installPath, CancellationToken ct)
     {
         var cleanupErrors = new List<string>();
         var installPathExists = Directory.Exists(installPath) || File.Exists(installPath);
@@ -204,9 +216,27 @@ public sealed class CreateWslInstanceStep : SetupStep
         {
             ctx.Logger.Warn($"Partial install cleanup could not list WSL distros (exit {list.ExitCode}); refusing to unregister '{distro}'");
         }
-        else if (distroExists && (ownsThisInstall || ctx.IsUninstalling))
+        else if (distroExists && ctx.IsUninstalling)
         {
             canDeleteInstallPath = await TryUnregisterPartialInstall(ctx, distro, cleanupErrors, ct);
+        }
+        else if (distroExists && ownsThisInstall)
+        {
+            if (!ManagedDistroOwnership.HasRegisteredDistroEvidence(
+                    ctx.DataDir,
+                    ctx.LocalDataDir,
+                    distro,
+                    installPath,
+                    _registrationInspector,
+                    out var registrationFailure))
+            {
+                ctx.Logger.Warn(
+                    $"Refusing to unregister '{distro}' because the live WSL registration is not this install: {registrationFailure}");
+            }
+            else
+            {
+                canDeleteInstallPath = await TryUnregisterPartialInstall(ctx, distro, cleanupErrors, ct);
+            }
         }
         else if (distroExists)
         {

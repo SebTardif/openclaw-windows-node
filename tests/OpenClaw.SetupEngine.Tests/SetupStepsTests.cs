@@ -3409,12 +3409,46 @@ public class SetupStepsTests : IDisposable
             return Fail($"unexpected args: {string.Join(' ', args)}");
         });
         var ctx = CreateContext(commands: commands);
+        var installPath = Path.Combine(ctx.LocalDataDir, "wsl", "OpenClawGateway");
+        var step = new CreateWslInstanceStep(FakeWslRegistrationInspector.Found(installPath));
 
-        var result = await new CreateWslInstanceStep().ExecuteAsync(ctx, CancellationToken.None);
+        var result = await step.ExecuteAsync(ctx, CancellationToken.None);
 
         Assert.Equal(StepOutcome.Failed, result.Outcome);
         Assert.Contains("download failed", result.Message);
+        Assert.Contains(commands.Calls, c => c.Arguments.SequenceEqual(["--unregister", "OpenClawGateway"]));
         Assert.DoesNotContain(commands.Calls, c => c.Arguments.SequenceEqual(["--shutdown"]));
+    }
+
+    [Fact]
+    public async Task CreateWslInstance_PartialCleanupDoesNotUnregisterWhenLiveRegistrationPathDiffers()
+    {
+        var listCalls = 0;
+        var commands = new FakeCommandRunner(args =>
+        {
+            if (args.SequenceEqual(["--list", "--quiet"]))
+            {
+                listCalls++;
+                return Ok(listCalls == 1 ? "" : "OpenClawGateway\n");
+            }
+            if (args.Contains("--install"))
+                return Fail("download failed");
+            if (args.SequenceEqual(["--terminate", "OpenClawGateway"]) ||
+                args.SequenceEqual(["--unregister", "OpenClawGateway"]))
+                return Ok();
+
+            return Fail($"unexpected args: {string.Join(' ', args)}");
+        });
+        var ctx = CreateContext(commands: commands);
+        var step = new CreateWslInstanceStep(
+            FakeWslRegistrationInspector.Found(@"C:\other-distro"));
+
+        var result = await step.ExecuteAsync(ctx, CancellationToken.None);
+
+        Assert.Equal(StepOutcome.Failed, result.Outcome);
+        Assert.Contains("download failed", result.Message);
+        Assert.DoesNotContain(commands.Calls, call => call.Arguments.Contains("--unregister"));
+        Assert.DoesNotContain(commands.Calls, call => call.Arguments.Contains("--terminate"));
     }
 
     [Fact]
