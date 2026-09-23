@@ -3986,7 +3986,7 @@ public class SetupStepsTests : IDisposable
             18789,
             "'[]'");
 
-        Assert.Contains("openclaw config set gateway.reload.mode hybrid", commands);
+        Assert.Contains("openclaw config set gateway.reload.mode 'hybrid'", commands);
     }
 
     [Fact]
@@ -4872,6 +4872,48 @@ public class SetupStepsTests : IDisposable
         Assert.Contains(
             "openclaw config set gateway.custom.note 'a'\\''b'",
             commands);
+    }
+
+    // A bind, auth mode, or reload mode that contains a semicolon or $PATH must be one
+    // POSIX single-quoted token. The script also exports $PATH, so wsl.exe must not see
+    // it on the bash -c argv path.
+    [Fact]
+    public async Task ConfigureGateway_QuotesBindAndPipesScriptThroughStdin()
+    {
+        const string bind = "lan;$PATH";
+        var commands = ConfigureGatewayStep.BuildConfigCommands(
+            new GatewayConfig
+            {
+                Bind = bind,
+                AuthMode = "token;$(id)",
+                ReloadMode = "hybrid;$PATH",
+            },
+            18789,
+            "'[]'");
+
+        Assert.Contains("openclaw config set gateway.bind 'lan;$PATH'", commands);
+        Assert.Contains("openclaw config set gateway.auth.mode 'token;$(id)'", commands);
+        Assert.Contains("openclaw config set gateway.reload.mode 'hybrid;$PATH'", commands);
+        Assert.DoesNotContain("openclaw config set gateway.bind lan;$PATH", commands);
+
+        var runner = new FakeCommandRunner(
+            _ => Ok(),
+            (_, _, _) => Ok("GATEWAY_CONFIGURED"));
+        var ctx = CreateContext(
+            new SetupConfig
+            {
+                Gateway = new GatewayConfig { Bind = "loopback" },
+            },
+            runner);
+        ctx.DistroName = "test-distro";
+
+        var result = await new ConfigureGatewayStep().ExecuteAsync(ctx, CancellationToken.None);
+
+        Assert.True(result.IsSuccess, result.Message);
+        var call = Assert.Single(runner.WslCalls);
+        Assert.True(call.InputViaStdin);
+        Assert.Contains("$PATH", call.Command);
+        Assert.Contains("openclaw config set gateway.bind 'loopback'", call.Command);
     }
 
     [Fact]
