@@ -82,12 +82,53 @@ public sealed class GatewayClientEndpointResolverTests
             record,
             tunnel,
             out var endpoint,
-            out var appendSharedToken);
+            out var appendSharedToken,
+            listenerOwned: true);
 
         Assert.True(opened);
         Assert.Equal("ws://localhost:45678", endpoint);
         Assert.True(appendSharedToken);
         Assert.DoesNotContain("gateway.example", endpoint, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void TryResolveDashboardEndpoint_SshRecordRejectsDifferentSshServerPort()
+    {
+        var record = SshRecord(sshPort: 2222);
+        var tunnel = UpTunnel(localPort: 45678, currentSshPort: 22);
+
+        var opened = GatewayClientEndpointResolver.TryResolveDashboardEndpoint(
+            record,
+            tunnel,
+            out var endpoint,
+            out var appendSharedToken,
+            listenerOwned: true);
+
+        Assert.False(opened);
+        Assert.False(appendSharedToken);
+        Assert.Equal("", endpoint);
+        Assert.DoesNotContain("gateway.example", endpoint, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("shared-secret", endpoint, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void TryResolveDashboardEndpoint_SshRecordDoesNotOpenWhenListenerIsNotOwned()
+    {
+        var record = SshRecord();
+        var tunnel = UpTunnel(localPort: 45678, currentSshPort: 22);
+
+        var opened = GatewayClientEndpointResolver.TryResolveDashboardEndpoint(
+            record,
+            tunnel,
+            out var endpoint,
+            out var appendSharedToken,
+            listenerOwned: false);
+
+        Assert.False(opened);
+        Assert.False(appendSharedToken);
+        Assert.Equal("", endpoint);
+        Assert.DoesNotContain("gateway.example", endpoint, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("shared-secret", endpoint, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -128,15 +169,15 @@ public sealed class GatewayClientEndpointResolverTests
         Assert.True(appendSharedToken);
     }
 
-    private static GatewayRecord SshRecord() => new()
+    private static GatewayRecord SshRecord(int sshPort = 22) => new()
     {
         Id = "ssh",
         Url = "ws://gateway.example:18789",
         SharedGatewayToken = "shared-secret",
-        SshTunnel = new SshTunnelConfig("user", "gateway.example", 18789, 45678),
+        SshTunnel = new SshTunnelConfig("user", "gateway.example", 18789, 45678, SshPort: sshPort),
     };
 
-    private static SshTunnelSnapshot UpTunnel(int localPort) => new(
+    private static SshTunnelSnapshot UpTunnel(int localPort, int currentSshPort = 22) => new(
         IsRunning: true,
         CurrentUser: "user",
         CurrentHost: "gateway.example",
@@ -146,5 +187,6 @@ public sealed class GatewayClientEndpointResolverTests
         CurrentBrowserProxyLocalPort: 0,
         StartedAtUtc: new DateTime(2026, 9, 22, 0, 0, 0, DateTimeKind.Utc),
         LastError: null,
-        Status: TunnelStatus.Up);
+        Status: TunnelStatus.Up,
+        CurrentSshPort: currentSshPort);
 }

@@ -455,8 +455,10 @@ public sealed class AppRefactorContractTests
     public void Dashboard_SurfacesSshTunnelConfigurationFailure()
     {
         var source = ReadAppSources();
-        var method = ExtractMethod(source, "OpenDashboard");
+        var method = ExtractMethod(source, "OpenDashboardAsync");
 
+        Assert.Contains("IsDashboardListenerOwnedAsync", method);
+        Assert.Contains("DashboardPinStillMatches", method);
         Assert.Contains("if (!EnsureSshTunnelConfigured())", method);
         Assert.Contains("_toastService?.ShowToast", method);
         Assert.Contains("Check SSH tunnel settings and logs.", method);

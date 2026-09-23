@@ -28,7 +28,8 @@ public static class GatewayClientEndpointResolver
         GatewayRecord record,
         SshTunnelSnapshot? tunnel,
         out string endpoint,
-        out bool appendSharedToken)
+        out bool appendSharedToken,
+        bool listenerOwned = false)
     {
         ArgumentNullException.ThrowIfNull(record);
 
@@ -39,7 +40,7 @@ public static class GatewayClientEndpointResolver
             return !string.IsNullOrWhiteSpace(endpoint);
         }
 
-        if (!IsDashboardTunnelUp(config, tunnel))
+        if (!listenerOwned || !IsDashboardTunnelUp(config, tunnel))
         {
             endpoint = "";
             appendSharedToken = false;
@@ -55,6 +56,7 @@ public static class GatewayClientEndpointResolver
         tunnel is { IsRunning: true, Status: OpenClaw.Shared.TunnelStatus.Up } &&
         tunnel.CurrentLocalPort == config.LocalPort &&
         tunnel.CurrentRemotePort == config.RemotePort &&
+        tunnel.CurrentSshPort == config.SshPort &&
         string.Equals(tunnel.CurrentUser, config.User, StringComparison.Ordinal) &&
         string.Equals(tunnel.CurrentHost, config.Host, StringComparison.OrdinalIgnoreCase);
 }

@@ -152,6 +152,19 @@ public partial class App : Application, OpenClawTray.Services.IAppCommands, IPer
     internal SshTunnelSnapshot? CaptureSshTunnelSnapshot() =>
         _sshTunnelService?.CreateSnapshot();
 
+    internal Task<bool> IsDashboardListenerOwnedAsync(SshTunnelConfig config) =>
+        _sshTunnelService?.IsOwnedListenerReadyAsync(config, config.LocalPort, CancellationToken.None)
+        ?? Task.FromResult(false);
+
+    internal bool DashboardPinStillMatches(GatewayRecord pinned)
+    {
+        var current = _gatewayRegistry?.GetById(pinned.Id);
+        return current is not null
+            && string.Equals(current.Id, pinned.Id, StringComparison.Ordinal)
+            && string.Equals(current.SharedGatewayToken, pinned.SharedGatewayToken, StringComparison.Ordinal)
+            && current.SshTunnel == pinned.SshTunnel;
+    }
+
     public void EnsureSshTunnelStarted()
     {
         if (_sshTunnelService == null || _settings == null)
@@ -3894,16 +3907,26 @@ public partial class App : Application, OpenClawTray.Services.IAppCommands, IPer
 
     private void OpenDashboard(string? path = null)
     {
+        _ = OpenDashboardAsync(path);
+    }
+
+    private async Task OpenDashboardAsync(string? path = null)
+    {
         if (_settings == null) return;
 
-        var active = _gatewayRegistry?.GetActive();
-        if (active?.SshTunnel is not null)
+        var pinned = _gatewayRegistry?.GetActive();
+        if (pinned?.SshTunnel is { } ssh)
         {
+            var listenerOwned = await IsDashboardListenerOwnedAsync(ssh);
+            if (!DashboardPinStillMatches(pinned))
+                return;
+
             if (!GatewayClientEndpointResolver.TryResolveDashboardEndpoint(
-                    active,
+                    pinned,
                     _sshTunnelService?.CreateSnapshot(),
                     out var tunnelEndpoint,
-                    out var appendSharedToken))
+                    out var appendSharedToken,
+                    listenerOwned))
             {
                 _toastService?.ShowToast(new ToastContentBuilder()
                     .AddText("SSH tunnel")
@@ -3911,21 +3934,11 @@ public partial class App : Application, OpenClawTray.Services.IAppCommands, IPer
                 return;
             }
 
-            if (!TryResolveChatCredentials(out _, out var tunnelToken, out var tunnelCredentialSource, out var tunnelIsBootstrapToken))
-            {
-                ShowConnectionSettingsForPairingIssue(
-                    "Dashboard",
-                    "Gateway URL or credential is not configured");
-                return;
-            }
-
             OpenDashboardUri(GatewayDashboardUrlBuilder.Build(
                 tunnelEndpoint,
                 path,
-                tunnelToken,
-                appendSharedToken &&
-                !tunnelIsBootstrapToken &&
-                tunnelCredentialSource == CredentialResolver.SourceSharedGatewayToken));
+                pinned.SharedGatewayToken,
+                appendSharedToken));
             return;
         }
 

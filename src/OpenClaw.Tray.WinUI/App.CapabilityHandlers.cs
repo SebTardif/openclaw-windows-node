@@ -234,41 +234,55 @@ public partial class App
             return matches;
         };
 
-        app.DashboardUrlHandler = (path) =>
+        app.DashboardUrlHandler = async (path) =>
         {
-            if (!TryResolveChatCredentials(out var gatewayUrl, out var token, out var credentialSource, out var isBootstrapToken))
-                return new { error = "Gateway URL or credential is not configured" };
-
-            var endpoint = gatewayUrl;
-            var appendSharedToken =
-                !isBootstrapToken && credentialSource == CredentialResolver.SourceSharedGatewayToken;
-            var active = _gatewayRegistry?.GetActive();
-            if (active?.SshTunnel is not null)
+            var pinned = _gatewayRegistry?.GetActive();
+            if (pinned?.SshTunnel is { } ssh)
             {
+                var listenerOwned = await IsDashboardListenerOwnedAsync(ssh);
+                if (!DashboardPinStillMatches(pinned))
+                    return new { error = "Dashboard blocked because the gateway changed." };
+
                 if (!GatewayClientEndpointResolver.TryResolveDashboardEndpoint(
-                        active,
+                        pinned,
                         _sshTunnelService?.CreateSnapshot(),
-                        out endpoint,
-                        out var tunnelAllowsToken))
+                        out var endpoint,
+                        out var appendSharedToken,
+                        listenerOwned))
                 {
                     return new { error = "Dashboard blocked because the SSH tunnel is not up." };
                 }
 
-                appendSharedToken = appendSharedToken && tunnelAllowsToken;
+                var url = GatewayDashboardUrlBuilder.Build(
+                    endpoint,
+                    path,
+                    pinned.SharedGatewayToken,
+                    appendSharedToken);
+
+                return new
+                {
+                    url,
+                    credentialSource = CredentialResolver.SourceSharedGatewayToken,
+                    usesSharedGatewayToken = appendSharedToken,
+                    hasTokenQuery = url.Contains("?token=", StringComparison.Ordinal) || url.Contains("&token=", StringComparison.Ordinal)
+                };
             }
 
-            var url = GatewayDashboardUrlBuilder.Build(
-                endpoint,
+            if (!TryResolveChatCredentials(out var gatewayUrl, out var token, out var credentialSource, out var isBootstrapToken))
+                return new { error = "Gateway URL or credential is not configured" };
+
+            var directUrl = GatewayDashboardUrlBuilder.Build(
+                gatewayUrl,
                 path,
                 token,
-                appendSharedToken);
+                !isBootstrapToken && credentialSource == CredentialResolver.SourceSharedGatewayToken);
 
             return new
             {
-                url,
+                url = directUrl,
                 credentialSource,
                 usesSharedGatewayToken = !isBootstrapToken && credentialSource == CredentialResolver.SourceSharedGatewayToken,
-                hasTokenQuery = url.Contains("?token=", StringComparison.Ordinal) || url.Contains("&token=", StringComparison.Ordinal)
+                hasTokenQuery = directUrl.Contains("?token=", StringComparison.Ordinal) || directUrl.Contains("&token=", StringComparison.Ordinal)
             };
         };
 
