@@ -4874,9 +4874,11 @@ public class SetupStepsTests : IDisposable
             commands);
     }
 
-    // A bind, auth mode, or reload mode that contains a semicolon or $PATH must be one
-    // POSIX single-quoted token. The script also exports $PATH, so wsl.exe must not see
-    // it on the bash -c argv path.
+    // Bind is allowlisted in ExecuteAsync before BuildConfigCommands, so a hostile bind
+    // never reaches the script. Auth mode and reload mode are not allowlisted. The
+    // ExtraConfig gateway.reload.mode override is unvalidated and is the value that can
+    // still reach the command. Those values must be one POSIX single-quoted token.
+    // The script also exports $PATH, so wsl.exe must not see it on the bash -c argv path.
     [Fact]
     public async Task ConfigureGateway_QuotesBindAndPipesScriptThroughStdin()
     {
@@ -4914,6 +4916,66 @@ public class SetupStepsTests : IDisposable
         Assert.True(call.InputViaStdin);
         Assert.Contains("$PATH", call.Command);
         Assert.Contains("openclaw config set gateway.bind 'loopback'", call.Command);
+    }
+
+    // ExtraConfig gateway.reload.mode is not allowlisted. A value with shell
+    // metacharacters must be quoted, or the step must reject it before WSL runs.
+    // Either way the metacharacters must not change the command that runs.
+    [Fact]
+    public async Task ConfigureGateway_ExecuteAsyncQuotesOrRejectsHostileReloadMode()
+    {
+        const string safeReload = "off";
+        const string hostileReload = "hybrid;$(id); echo PWNED";
+
+        var safeRunner = new FakeCommandRunner(
+            _ => Ok(),
+            (_, _, _) => Ok("GATEWAY_CONFIGURED"));
+        var safeResult = await new ConfigureGatewayStep().ExecuteAsync(
+            CreateReloadContext(safeRunner, safeReload),
+            CancellationToken.None);
+        Assert.True(safeResult.IsSuccess, safeResult.Message);
+        var safeCall = Assert.Single(safeRunner.WslCalls);
+
+        var hostileRunner = new FakeCommandRunner(
+            _ => Ok(),
+            (_, _, _) => Ok("GATEWAY_CONFIGURED"));
+        var hostileResult = await new ConfigureGatewayStep().ExecuteAsync(
+            CreateReloadContext(hostileRunner, hostileReload),
+            CancellationToken.None);
+
+        if (!hostileResult.IsSuccess)
+        {
+            Assert.Empty(hostileRunner.WslCalls);
+            return;
+        }
+
+        var hostileCall = Assert.Single(hostileRunner.WslCalls);
+        var quotedHostile = "'" + hostileReload + "'";
+        var quotedSafe = "'" + safeReload + "'";
+        Assert.Contains($"openclaw config set gateway.reload.mode {quotedHostile}", hostileCall.Command);
+        Assert.DoesNotContain($"openclaw config set gateway.reload.mode {hostileReload}", hostileCall.Command);
+        Assert.Equal(
+            safeCall.Command.Replace(quotedSafe, quotedHostile, StringComparison.Ordinal),
+            hostileCall.Command);
+    }
+
+    private SetupContext CreateReloadContext(ICommandRunner runner, string reloadMode)
+    {
+        var ctx = CreateContext(
+            new SetupConfig
+            {
+                Gateway = new GatewayConfig
+                {
+                    Bind = "loopback",
+                    ExtraConfig = new Dictionary<string, string>
+                    {
+                        ["gateway.reload.mode"] = reloadMode,
+                    },
+                },
+            },
+            runner);
+        ctx.DistroName = "test-distro";
+        return ctx;
     }
 
     [Fact]
