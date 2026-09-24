@@ -1884,6 +1884,33 @@ public class GatewayConnectionManagerTests : IDisposable
     }
 
     [Fact]
+    public async Task ConnectWithSharedTokenAsync_RejectedTokenPreservesBootstrapAndSshTunnel()
+    {
+        var ssh = new SshTunnelConfig("user", "host.example", 18789, 45678);
+        _registry.AddOrUpdate(new GatewayRecord
+        {
+            Id = "gw-setup",
+            Url = "ws://127.0.0.1:9",
+            BootstrapToken = "setup-bootstrap",
+            SshTunnel = ssh,
+        });
+        _registry.SetActive("gw-setup");
+        _registry.Save();
+
+        var result = await _manager.ConnectWithSharedTokenAsync(
+            "ws://127.0.0.1:9",
+            "rejected-shared-token").WaitAsync(TimeSpan.FromSeconds(10));
+
+        Assert.Equal(SetupCodeOutcome.ConnectionFailed, result.Outcome);
+        Assert.False(result.GatewayCommitted);
+        var record = _registry.GetById("gw-setup");
+        Assert.Equal("setup-bootstrap", record?.BootstrapToken);
+        Assert.Equal(ssh, record?.SshTunnel);
+        Assert.Null(record?.SharedGatewayToken);
+        Assert.Equal("gw-setup", _registry.ActiveGatewayId);
+    }
+
+    [Fact]
     public async Task ConnectWithSharedTokenAsync_PostCommitConnectionFailureReportsCommittedGateway()
     {
         SetupGateway("gw-1", "wss://test1");

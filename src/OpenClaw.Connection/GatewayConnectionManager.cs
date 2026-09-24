@@ -1722,8 +1722,11 @@ public sealed class GatewayConnectionManager :
                 var hasDurableTokens =
                     DeviceIdentity.HasStoredDeviceTokenForRole(identityDir, "operator", _logger) ||
                     DeviceIdentity.HasStoredDeviceTokenForRole(identityDir, "node", _logger);
+                var hasSetupCredential =
+                    existing != null &&
+                    (!string.IsNullOrWhiteSpace(existing.BootstrapToken) || existing.SshTunnel is not null);
 
-                if (existing != null && hasDurableTokens)
+                if (existing != null && (hasDurableTokens || hasSetupCredential))
                 {
                     var validationUrl = gatewayUrl;
                     if (sshTunnel is not null)
@@ -1871,9 +1874,38 @@ public sealed class GatewayConnectionManager :
                 await ConnectCoreAsync(recordId);
                 if (_stateMachine.Current.OperatorState == RoleConnectionState.Error)
                 {
+                    var operatorError = _stateMachine.Current.OperatorError ?? "Gateway connection failed.";
+                    if (hasSetupCredential && !hasDurableTokens && previousRecord is not null)
+                    {
+                        _registry.AddOrUpdate(previousRecord);
+                        _registry.SetActive(previousActiveId);
+                        try
+                        {
+                            _registry.Save();
+                            gatewayCommitted = false;
+                        }
+                        catch (Exception rollbackException)
+                        {
+                            _registry.AddOrUpdate(record);
+                            _registry.SetActive(recordId);
+                            gatewayCommitted = true;
+                            return new SetupCodeResult(
+                                SetupCodeOutcome.ConnectionFailed,
+                                $"{operatorError} Registry rollback failed; the new gateway remains active: {rollbackException.Message}",
+                                GatewayUrl: gatewayUrl,
+                                GatewayCommitted: true);
+                        }
+
+                        return new SetupCodeResult(
+                            SetupCodeOutcome.ConnectionFailed,
+                            operatorError,
+                            GatewayUrl: gatewayUrl,
+                            GatewayCommitted: false);
+                    }
+
                     return new SetupCodeResult(
                         SetupCodeOutcome.ConnectionFailed,
-                        _stateMachine.Current.OperatorError ?? "Gateway connection failed.",
+                        operatorError,
                         GatewayUrl: gatewayUrl,
                         GatewayCommitted: true);
                 }
