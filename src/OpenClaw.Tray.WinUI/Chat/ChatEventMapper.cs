@@ -463,18 +463,23 @@ internal static class ChatEventMapper
             return new(null);
 
         var host = StringProperty(evt.Data, "host");
-        var command = ExecApprovalCommandDisplaySanitizer.Sanitize(StringProperty(evt.Data, "command"));
+        var commandStatus = ExecApprovalCommandDisplaySanitizer.SanitizeWithStatus(StringProperty(evt.Data, "command"));
         var title = StringProperty(evt.Data, "title");
-        var message = ExecApprovalCommandDisplaySanitizer.Sanitize(StringProperty(evt.Data, "message"));
-        var detail = string.IsNullOrEmpty(message)
-            ? command
-            : string.IsNullOrEmpty(command) ? message : message + "\n\n" + command;
+        var messageStatus = ExecApprovalCommandDisplaySanitizer.SanitizeWithStatus(StringProperty(evt.Data, "message"));
+        var detail = string.IsNullOrEmpty(messageStatus.Text)
+            ? commandStatus.Text
+            : string.IsNullOrEmpty(commandStatus.Text)
+                ? messageStatus.Text
+                : messageStatus.Text + "\n\n" + commandStatus.Text;
+        var canReviewInFull = !string.IsNullOrWhiteSpace(commandStatus.Text)
+            && !commandStatus.Truncated && !commandStatus.Oversized && !commandStatus.UnsafeConcealment
+            && !messageStatus.Truncated && !messageStatus.Oversized && !messageStatus.UnsafeConcealment;
         var mapped = new ChatPermissionRequestEvent(
             requestId,
             !string.IsNullOrEmpty(title) ? title : "Exec approval",
             !string.IsNullOrEmpty(host) ? host : "node",
             detail,
-            ChatPermissionActionKeys.ExecApprovalDefaults);
+            canReviewInFull ? ChatPermissionActionKeys.ExecApprovalDefaults : [ChatPermissionActionKeys.Deny]);
         var alternateId = !string.IsNullOrEmpty(slug) ? approvalId : slug;
         return new(mapped, new ChatApprovalIdentity(requestId, alternateId));
     }

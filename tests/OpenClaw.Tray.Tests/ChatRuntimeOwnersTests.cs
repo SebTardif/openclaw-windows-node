@@ -1051,6 +1051,7 @@ public sealed class ChatEventMapperTests
         Assert.Equal("approve-1", request.RequestId);
         Assert.Equal("approval-uuid", mapping.Approval?.AlternateId);
         Assert.Equal(ChatPermissionActionKeys.ExecApprovalDefaults, request.Actions);
+        Assert.Equal("echo ok", request.Detail);
     }
 
     [Fact]
@@ -1081,6 +1082,57 @@ public sealed class ChatEventMapperTests
             + ExecApprovalCommandDisplaySanitizer.Sanitize(command);
         Assert.Equal(requestId, request.RequestId);
         Assert.Equal(expected, request.Detail);
+        Assert.Equal(ChatPermissionActionKeys.ExecApprovalDefaults, request.Actions);
+    }
+
+    public static TheoryData<string, string> UnreviewableApprovalText => new()
+    {
+        { "", "Please approve" },
+        { new string('x', 300 * 1024), "" },
+        { new string('x', 20 * 1024), "" },
+        { "echo API_SECRET=sk-abc123456789012345678", "" },
+        { "echo client_id=visible&app_se" + char.ConvertFromUtf32(0x200B) + "cret=opaque-app-secret", "" },
+        { "echo ok", new string('x', 300 * 1024) },
+        { "echo ok", new string('x', 20 * 1024) },
+        { "echo ok", "echo API_SECRET=sk-abc123456789012345678" },
+    };
+
+    [Theory]
+    [MemberData(nameof(UnreviewableApprovalText))]
+    public void Map_ApprovalRequestOffersOnlyDenyWhenTextCannotBeReviewed(string command, string message)
+    {
+        using var document = JsonDocument.Parse(
+            JsonSerializer.Serialize(new { phase = "requested", approvalId = "unsafe-1", command, message }));
+
+        var mapping = ChatEventMapper.Map(new AgentEventInfo
+        {
+            Stream = "approval",
+            SessionKey = "main",
+            Data = document.RootElement.Clone(),
+        });
+
+        var request = Assert.IsType<ChatPermissionRequestEvent>(mapping.Event);
+        Assert.Equal([ChatPermissionActionKeys.Deny], request.Actions);
+        Assert.Equal("unsafe-1", request.RequestId);
+    }
+
+    [Fact]
+    public void Map_ApprovalRequestKeepsAllowForReviewSafeRedaction()
+    {
+        const string command = "curl https://example.test/search?key=$GOOGLE_KEY";
+        using var document = JsonDocument.Parse(
+            JsonSerializer.Serialize(new { phase = "requested", approvalId = "safe-1", command }));
+
+        var mapping = ChatEventMapper.Map(new AgentEventInfo
+        {
+            Stream = "approval",
+            SessionKey = "main",
+            Data = document.RootElement.Clone(),
+        });
+
+        var request = Assert.IsType<ChatPermissionRequestEvent>(mapping.Event);
+        Assert.Equal(ChatPermissionActionKeys.ExecApprovalDefaults, request.Actions);
+        Assert.Equal(ExecApprovalCommandDisplaySanitizer.Sanitize(command), request.Detail);
     }
 
     [Fact]
