@@ -1726,7 +1726,7 @@ public sealed class GatewayConnectionManager :
                     existing != null &&
                     (!string.IsNullOrWhiteSpace(existing.BootstrapToken) || existing.SshTunnel is not null);
 
-                if (existing != null && (hasDurableTokens || hasSetupCredential))
+                if (existing != null && hasDurableTokens)
                 {
                     var validationUrl = gatewayUrl;
                     if (sshTunnel is not null)
