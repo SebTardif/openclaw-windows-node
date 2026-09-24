@@ -43,6 +43,35 @@ public class CanvasGatewayAuthTests
     }
 
     [Fact]
+    public void ShouldAttach_WhenDocumentIsAboutBlankDuringFirstNavigation()
+    {
+        Assert.True(CanvasGatewayAuth.ShouldAttachGatewayBearer(
+            "about:blank",
+            TrustedOrigin + "/a2ui",
+            TrustedOrigin));
+    }
+
+    [Fact]
+    public void ShouldNotAttach_WhenInitiatorIsUntrustedEvenIfDocumentIsTrusted()
+    {
+        Assert.False(CanvasGatewayAuth.ShouldAttachGatewayBearer(
+            TrustedOrigin + "/page",
+            TrustedOrigin + "/api",
+            TrustedOrigin,
+            "https://evil.example/frame"));
+    }
+
+    [Fact]
+    public void ShouldAttach_WhenInitiatorIsTheTrustedGateway()
+    {
+        Assert.True(CanvasGatewayAuth.ShouldAttachGatewayBearer(
+            "about:blank",
+            TrustedOrigin + "/api",
+            TrustedOrigin,
+            TrustedOrigin + "/a2ui"));
+    }
+
+    [Fact]
     public void ShouldNotAttach_WhenRequestIsPrefixLookalike()
     {
         Assert.False(CanvasGatewayAuth.ShouldAttachGatewayBearer(
