@@ -317,6 +317,7 @@ public sealed partial class CanvasWindow : WindowEx
 
             // Handle navigation events
             CanvasWebView.CoreWebView2.NavigationStarting += OnNavigationStarting;
+            CanvasWebView.CoreWebView2.NewWindowRequested += OnNewWindowRequested;
             CanvasWebView.CoreWebView2.NavigationCompleted += OnNavigationCompleted;
             
             _isWebViewInitialized = true;
@@ -436,6 +437,13 @@ public sealed partial class CanvasWindow : WindowEx
             args.Cancel = true;
     }
 
+    // Canvas popups are out of scope. window.open and target=_blank stay cancelled
+    // instead of inheriting the gateway bearer or the navigation allowlist.
+    private void OnNewWindowRequested(CoreWebView2 sender, CoreWebView2NewWindowRequestedEventArgs args)
+    {
+        args.Handled = true;
+    }
+
     private void OnNavigationCompleted(CoreWebView2 sender, CoreWebView2NavigationCompletedEventArgs args)
     {
         if (_navigationTcs != null)
@@ -498,6 +506,7 @@ public sealed partial class CanvasWindow : WindowEx
             }
             RemoveGatewayAuthHeaderInjection(CanvasWebView.CoreWebView2);
             CanvasWebView.CoreWebView2.NavigationStarting -= OnNavigationStarting;
+            CanvasWebView.CoreWebView2.NewWindowRequested -= OnNewWindowRequested;
             CanvasWebView.CoreWebView2.NavigationCompleted -= OnNavigationCompleted;
         }
 

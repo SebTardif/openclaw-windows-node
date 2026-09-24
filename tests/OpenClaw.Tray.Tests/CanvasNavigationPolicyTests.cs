@@ -12,6 +12,21 @@ public class CanvasNavigationPolicyTests
         Assert.False(CanvasNavigationPolicy.IsPresentableDataUrl(url));
     }
 
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("data:")]
+    public void IsPresentableDataUrl_DoesNotThrowOnShortOrEmptyInput(string? url)
+    {
+        Assert.False(CanvasNavigationPolicy.IsPresentableDataUrl(url));
+    }
+
+    [Fact]
+    public void IsPresentableDataUrl_AllowsRfcDefaultWhenMediaTypeIsOmitted()
+    {
+        Assert.True(CanvasNavigationPolicy.IsPresentableDataUrl("data:,hello"));
+    }
+
     [Fact]
     public void IsPresentableDataUrl_AllowsTextPlain()
     {

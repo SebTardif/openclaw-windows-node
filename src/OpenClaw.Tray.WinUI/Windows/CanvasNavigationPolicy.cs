@@ -13,10 +13,19 @@ public static class CanvasNavigationPolicy
         @"^https?://\[(::1|0:0:0:0:0:0:0:1|::)\]",
         RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
-    public static bool IsPresentableDataUrl(string url)
+    public static bool IsPresentableDataUrl(string? url)
     {
+        // data:text/html is not a canvas document. Only text/plain (and the
+        // RFC 2397 default of text/plain) can be presented. Callers must not
+        // treat a rejected data URL as an exception.
+        if (string.IsNullOrEmpty(url) ||
+            !url.StartsWith("data:", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
         var commaIndex = url.IndexOf(',');
-        if (commaIndex < 0)
+        if (commaIndex < 5)
             return false;
 
         var header = url.Substring(5, commaIndex - 5);
