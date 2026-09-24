@@ -53,4 +53,29 @@ public sealed class GatewayDashboardUrlBuilderTests
         Assert.Equal("http://localhost:4317#token=tok", url);
         Assert.DoesNotContain("&token=", url);
     }
+
+    [Fact]
+    public void Build_JoinsRouteQueryBeforeGatewayQueryAndDropsOldFragments()
+    {
+        var url = GatewayDashboardUrlBuilder.Build(
+            "wss://gateway.example/ui?x=1&to%6ben=old#old-base",
+            "config?tab=one&token=old-route#old-route",
+            "new token",
+            appendSharedGatewayToken: true);
+
+        Assert.Equal("https://gateway.example/ui/config?tab=one&x=1#token=new%20token", url);
+        Assert.DoesNotContain("old", url);
+    }
+
+    [Fact]
+    public void Build_DoesNotRetainOldTokenWhenNoSharedTokenIsAppended()
+    {
+        var url = GatewayDashboardUrlBuilder.Build(
+            "ws://localhost:4317/ui?token=old&x=1#old-base",
+            "config?tab=one&to%6ben=old-route#old-route",
+            "device-token",
+            appendSharedGatewayToken: false);
+
+        Assert.Equal("http://localhost:4317/ui/config?tab=one&x=1", url);
+    }
 }
