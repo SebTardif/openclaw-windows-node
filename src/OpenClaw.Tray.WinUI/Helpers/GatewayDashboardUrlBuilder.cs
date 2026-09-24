@@ -10,8 +10,11 @@ public static class GatewayDashboardUrlBuilder
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(gatewayUrl);
 
-        if (!Uri.TryCreate(gatewayUrl.Trim(), UriKind.Absolute, out var uri))
-            throw new ArgumentException("Gateway URL must be absolute.", nameof(gatewayUrl));
+        if (!Uri.TryCreate(gatewayUrl.Trim(), UriKind.Absolute, out var uri) ||
+            !IsDashboardScheme(uri.Scheme))
+            throw new ArgumentException(
+                "Gateway URL must be an absolute http, https, ws, or wss URL.",
+                nameof(gatewayUrl));
 
         var route = path?.Trim() ?? string.Empty;
         var fragmentStart = route.IndexOf('#');
@@ -34,6 +37,12 @@ public static class GatewayDashboardUrlBuilder
 
         return url;
     }
+
+    private static bool IsDashboardScheme(string scheme) =>
+        scheme.Equals("http", StringComparison.OrdinalIgnoreCase) ||
+        scheme.Equals("https", StringComparison.OrdinalIgnoreCase) ||
+        scheme.Equals("ws", StringComparison.OrdinalIgnoreCase) ||
+        scheme.Equals("wss", StringComparison.OrdinalIgnoreCase);
 
     private static string ToHttpScheme(string scheme)
     {

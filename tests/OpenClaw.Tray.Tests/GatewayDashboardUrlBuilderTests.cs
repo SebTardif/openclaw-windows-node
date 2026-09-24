@@ -68,6 +68,19 @@ public sealed class GatewayDashboardUrlBuilderTests
     }
 
     [Fact]
+    public void Build_RejectsSchemeLessGatewayInput()
+    {
+        var error = Assert.Throws<ArgumentException>(() =>
+            GatewayDashboardUrlBuilder.Build(
+                "localhost:18789/ui",
+                "config",
+                "tok",
+                appendSharedGatewayToken: true));
+
+        Assert.Equal("gatewayUrl", error.ParamName);
+    }
+
+    [Fact]
     public void Build_DoesNotRetainOldTokenWhenNoSharedTokenIsAppended()
     {
         var url = GatewayDashboardUrlBuilder.Build(
