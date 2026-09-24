@@ -18,7 +18,7 @@ internal static class ExecShellWrapperNormalizer
         new(StringComparer.OrdinalIgnoreCase) { "-lc", "-c", "--command" };
 
     private static readonly HashSet<string> s_powerShellInlineFlags =
-        new(StringComparer.OrdinalIgnoreCase) { "-c", "-command", "--command" };
+        new(StringComparer.OrdinalIgnoreCase) { "-c", "-command", "--command", "/c", "/command" };
 
     private static readonly WrapperSpec[] s_specs =
     [
@@ -78,12 +78,17 @@ internal static class ExecShellWrapperNormalizer
 
     private static string? ExtractPosixPayload(IReadOnlyList<string> command)
     {
-        if (command.Count < 2) return null;
-        var flag = command[1].Trim();
-        if (!s_posixInlineFlags.Contains(flag)) return null;
-        if (command.Count < 3) return null;
-        var payload = command[2].Trim();
-        return payload.Length == 0 ? null : payload;
+        for (var i = 1; i < command.Count; i++)
+        {
+            var flag = command[i].Trim();
+            if (flag.Length == 0) continue;
+            if (flag == "--") break;
+            if (!s_posixInlineFlags.Contains(flag)) continue;
+            if (i + 1 >= command.Count) return null;
+            var payload = command[i + 1].Trim();
+            return payload.Length == 0 ? null : payload;
+        }
+        return null;
     }
 
     private static string? ExtractCmdPayload(IReadOnlyList<string> command)
@@ -103,9 +108,11 @@ internal static class ExecShellWrapperNormalizer
     {
         for (var i = 1; i < command.Count; i++)
         {
-            var t = command[i].Trim().ToLowerInvariant();
+            var t = command[i].Trim();
             if (t.Length == 0) continue;
             if (t == "--") break;
+            if (TryReadPowerShellColonPayload(t, out var inline))
+                return inline.Length == 0 ? null : inline;
             if (s_powerShellInlineFlags.Contains(t))
             {
                 if (i + 1 >= command.Count) return null;
@@ -114,5 +121,16 @@ internal static class ExecShellWrapperNormalizer
             }
         }
         return null;
+    }
+
+    private static bool TryReadPowerShellColonPayload(string token, out string payload)
+    {
+        payload = "";
+        var colon = token.IndexOf(':');
+        if (colon <= 0) return false;
+        var flag = token[..colon];
+        if (!s_powerShellInlineFlags.Contains(flag)) return false;
+        payload = token[(colon + 1)..].Trim();
+        return true;
     }
 }
