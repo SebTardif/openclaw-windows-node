@@ -1134,7 +1134,7 @@ public sealed class PermissionsPageViewModelTests
 
         var saved = harness.RecordingExecStore!.CurrentSnapshot.File;
         Assert.Equal(ExecSecurity.Allowlist, saved.Agents!["main"].Security);
-        Assert.Equal(ExecAsk.Off, saved.Agents["main"].Ask);
+        Assert.Equal(ExecAsk.Always, saved.Agents["main"].Ask);
         Assert.Equal(ExecSecurity.Deny, saved.Agents["main"].AskFallback);
         Assert.Equal(ExecSecurity.Full, saved.Defaults!.Security);
         Assert.Equal(ExecSecurity.Deny, saved.Agents["*"].Security);
