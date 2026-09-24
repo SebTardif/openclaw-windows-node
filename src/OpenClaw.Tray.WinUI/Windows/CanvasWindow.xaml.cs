@@ -485,7 +485,7 @@ public sealed partial class CanvasWindow : WindowEx
         if (string.IsNullOrEmpty(trustedOrigin) || string.IsNullOrEmpty(token))
             return;
 
-        if (IsUriForOrigin(args.Request.Uri, trustedOrigin))
+        if (CanvasGatewayAuth.ShouldAttachGatewayBearer(sender.Source, args.Request.Uri, trustedOrigin))
         {
             args.Request.Headers.SetHeader("Authorization", $"Bearer {token}");
         }
@@ -788,15 +788,6 @@ public sealed partial class CanvasWindow : WindowEx
         return uri.AbsolutePath.StartsWith("/__openclaw__/a2ui/", StringComparison.OrdinalIgnoreCase);
     }
 
-    private static bool IsUriForOrigin(string uri, string origin)
-    {
-        return uri.StartsWith(origin, StringComparison.OrdinalIgnoreCase) &&
-            (uri.Length == origin.Length ||
-             uri[origin.Length] == '/' ||
-             uri[origin.Length] == '?' ||
-             uri[origin.Length] == '#');
-    }
-    
     private Task EnsureWebViewReadyAsync()
     {
         return _isWebViewInitialized ? Task.CompletedTask : _webViewReadyTcs.Task;
