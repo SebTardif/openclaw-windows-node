@@ -120,21 +120,20 @@ internal static class ConfigEditorModel
         JsonElement document,
         IEnumerable<string> editedPaths)
     {
-        var edited = new HashSet<string>(editedPaths, StringComparer.Ordinal);
-        return FindUneditedRedactionSentinel(document, "", edited);
+        _ = editedPaths;
+        return FindUneditedRedactionSentinel(document, "");
     }
 
     private static string? FindUneditedRedactionSentinel(
         JsonElement element,
-        string path,
-        HashSet<string> editedPaths)
+        string path)
     {
         if (element.ValueKind == JsonValueKind.Object)
         {
             foreach (var property in element.EnumerateObject())
             {
                 var childPath = string.IsNullOrEmpty(path) ? property.Name : $"{path}.{property.Name}";
-                var hit = FindUneditedRedactionSentinel(property.Value, childPath, editedPaths);
+                var hit = FindUneditedRedactionSentinel(property.Value, childPath);
                 if (hit != null)
                     return hit;
             }
@@ -145,13 +144,12 @@ internal static class ConfigEditorModel
             foreach (var item in element.EnumerateArray())
             {
                 var childPath = $"{path}[{index++}]";
-                var hit = FindUneditedRedactionSentinel(item, childPath, editedPaths);
+                var hit = FindUneditedRedactionSentinel(item, childPath);
                 if (hit != null)
                     return hit;
             }
         }
         else if (element.ValueKind == JsonValueKind.String &&
-                 !editedPaths.Contains(path) &&
                  ChannelConfigPatchBuilder.IsRedactionSentinel(element.GetString()))
         {
             return path;

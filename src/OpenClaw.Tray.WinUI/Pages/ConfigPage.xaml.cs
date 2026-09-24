@@ -555,7 +555,7 @@ public sealed partial class ConfigPage : Page
             {
                 ShowStatus(
                     L("ConfigPage_StatusSaveFailedTitle"),
-                    L("ConfigPage_StatusSaveRejectedMessage"),
+                    Lf("ConfigPage_StatusSaveBlockedSentinelFormat", blockedPath),
                     InfoBarSeverity.Error);
                 return;
             }
