@@ -923,6 +923,64 @@ public sealed class PermissionsPageViewModelTests
         Assert.Equal(PermissionsExecApprovalsStatus.ExternalInvalid, harness.ViewModel.ExecApprovalsStatus);
     }
 
+    [Fact]
+    public void ExecSnapshot_WildcardSecurityAndAllowlist_DisplayWhenMainSecurityUnset()
+    {
+        var file = new ExecApprovalsFile
+        {
+            Version = 1,
+            Agents = new Dictionary<string, ExecApprovalsAgent>(StringComparer.Ordinal)
+            {
+                ["main"] = new ExecApprovalsAgent(),
+                ["*"] = new ExecApprovalsAgent
+                {
+                    Security = ExecSecurity.Full,
+                    Allowlist =
+                    [
+                        new ExecAllowlistEntry { Pattern = "  " },
+                        new ExecAllowlistEntry { Pattern = @"C:\tools\*" },
+                    ],
+                },
+            },
+        };
+
+        using var harness = PermissionsHarness.CreateWithRecordingStore(BuildSnapshot("wildcard-only", file));
+        harness.ViewModel.Activate(null);
+
+        Assert.Equal("allow", harness.ViewModel.DefaultExecActionTag);
+        Assert.Equal(@"C:\tools\*", Assert.Single(harness.ViewModel.ExecApprovalRules).Pattern);
+    }
+
+    [Fact]
+    public void ExecSnapshot_MainSecurityWins_AndBothAllowlistsStayVisible()
+    {
+        var file = new ExecApprovalsFile
+        {
+            Version = 1,
+            Agents = new Dictionary<string, ExecApprovalsAgent>(StringComparer.Ordinal)
+            {
+                ["main"] = new ExecApprovalsAgent
+                {
+                    Security = ExecSecurity.Deny,
+                    Allowlist = [new ExecAllowlistEntry { Pattern = @"C:\main\*" }],
+                },
+                ["*"] = new ExecApprovalsAgent
+                {
+                    Security = ExecSecurity.Full,
+                    Allowlist = [new ExecAllowlistEntry { Pattern = @"C:\tools\*" }],
+                },
+            },
+        };
+
+        using var harness = PermissionsHarness.CreateWithRecordingStore(BuildSnapshot("main-over-wildcard", file));
+        harness.ViewModel.Activate(null);
+
+        Assert.Equal("deny", harness.ViewModel.DefaultExecActionTag);
+        Assert.Equal(
+            new[] { @"C:\tools\*", @"C:\main\*" },
+            harness.ViewModel.ExecApprovalRules.Select(rule => rule.Pattern).ToArray());
+    }
+
     private static ExecApprovalsSnapshot BuildSnapshot(string hash, ExecApprovalsFile file) =>
         new("D:\\exec-approvals.json", true, hash, file);
 

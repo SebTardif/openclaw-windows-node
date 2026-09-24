@@ -708,12 +708,9 @@ internal sealed class PermissionsPageViewModel : INavigationAware, IDisposable, 
     private void ApplyExecSnapshot(ExecApprovalsSnapshot snapshot)
     {
         _execApprovalsBaseHash = snapshot.Hash;
-        SetField(ref _defaultExecActionTag, MapDefaultAction(snapshot.File), nameof(DefaultExecActionTag));
-        var rules = ((IEnumerable<ExecAllowlistEntry>)(snapshot.File.Agents is not null
-                && snapshot.File.Agents.TryGetValue("main", out var main)
-                && main?.Allowlist is not null
-                ? main.Allowlist
-                : Array.Empty<ExecAllowlistEntry>()))
+        var displayed = ResolveDisplayedExecPolicy(snapshot.File);
+        SetField(ref _defaultExecActionTag, MapDefaultAction(displayed), nameof(DefaultExecActionTag));
+        var rules = displayed.Allowlist
             .Where(entry => !string.IsNullOrWhiteSpace(entry.Pattern))
             .Select(entry => new PermissionsExecApprovalRule(
                 entry.Id,
@@ -758,20 +755,41 @@ internal sealed class PermissionsPageViewModel : INavigationAware, IDisposable, 
         _ => null,
     };
 
-    private static string MapDefaultAction(ExecApprovalsFile file)
+    private readonly record struct DisplayedExecPolicy(
+        ExecSecurity Security,
+        ExecAsk Ask,
+        IReadOnlyList<ExecAllowlistEntry> Allowlist);
+
+    private static DisplayedExecPolicy ResolveDisplayedExecPolicy(ExecApprovalsFile file)
     {
-        file.Defaults ??= new ExecApprovalsDefaults();
-        file.Agents ??= new Dictionary<string, ExecApprovalsAgent>(StringComparer.Ordinal);
-        file.Agents.TryGetValue("main", out var main);
-        var security = main?.Security ?? file.Defaults.Security ?? ExecSecurity.Deny;
-        var ask = main?.Ask ?? file.Defaults.Ask ?? ExecAsk.OnMiss;
-        return security switch
+        ExecApprovalsAgent? main = null;
+        ExecApprovalsAgent? wildcard = null;
+        file.Agents?.TryGetValue("main", out main);
+        file.Agents?.TryGetValue("*", out wildcard);
+        var allowlist = new List<ExecAllowlistEntry>();
+        if (wildcard?.Allowlist is not null)
+        {
+            allowlist.AddRange(wildcard.Allowlist);
+        }
+
+        if (main?.Allowlist is not null)
+        {
+            allowlist.AddRange(main.Allowlist);
+        }
+
+        return new DisplayedExecPolicy(
+            main?.Security ?? wildcard?.Security ?? file.Defaults?.Security ?? ExecSecurity.Deny,
+            main?.Ask ?? wildcard?.Ask ?? file.Defaults?.Ask ?? ExecAsk.OnMiss,
+            allowlist);
+    }
+
+    private static string MapDefaultAction(DisplayedExecPolicy displayed) =>
+        displayed.Security switch
         {
             ExecSecurity.Full => "allow",
-            ExecSecurity.Allowlist when ask is ExecAsk.OnMiss or ExecAsk.Always => "prompt",
+            ExecSecurity.Allowlist when displayed.Ask is ExecAsk.OnMiss or ExecAsk.Always => "prompt",
             _ => "deny",
         };
-    }
 
     private static string NormalizeAction(string? action)
     {
