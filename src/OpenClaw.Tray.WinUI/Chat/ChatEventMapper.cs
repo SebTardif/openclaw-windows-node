@@ -1,6 +1,7 @@
 using System.Text.Json;
 using OpenClaw.Chat;
 using OpenClaw.Shared;
+using OpenClaw.Shared.ExecApprovals;
 
 namespace OpenClawTray.Chat;
 
@@ -462,9 +463,9 @@ internal static class ChatEventMapper
             return new(null);
 
         var host = StringProperty(evt.Data, "host");
-        var command = StringProperty(evt.Data, "command");
+        var command = ExecApprovalCommandDisplaySanitizer.Sanitize(StringProperty(evt.Data, "command"));
         var title = StringProperty(evt.Data, "title");
-        var message = StringProperty(evt.Data, "message");
+        var message = ExecApprovalCommandDisplaySanitizer.Sanitize(StringProperty(evt.Data, "message"));
         var detail = string.IsNullOrEmpty(message)
             ? command
             : string.IsNullOrEmpty(command) ? message : message + "\n\n" + command;

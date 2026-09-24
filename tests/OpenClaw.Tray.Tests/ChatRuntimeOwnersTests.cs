@@ -1,6 +1,7 @@
 using System.Text.Json;
 using OpenClaw.Chat;
 using OpenClaw.Shared;
+using OpenClaw.Shared.ExecApprovals;
 using OpenClawTray.Chat;
 
 namespace OpenClaw.Tray.Tests;
@@ -1050,6 +1051,36 @@ public sealed class ChatEventMapperTests
         Assert.Equal("approve-1", request.RequestId);
         Assert.Equal("approval-uuid", mapping.Approval?.AlternateId);
         Assert.Equal(ChatPermissionActionKeys.ExecApprovalDefaults, request.Actions);
+    }
+
+    [Fact]
+    public void Map_ApprovalRequestSanitizesCommandAndMessage()
+    {
+        var command = "echo " + char.ConvertFromUtf32(0x202E) + "ok" + char.ConvertFromUtf32(0x200B);
+        var message = "review" + char.ConvertFromUtf32(0x2028) + "this";
+        const string requestId = "approval-req-bidi";
+        using var document = JsonDocument.Parse(
+            JsonSerializer.Serialize(new Dictionary<string, string>
+            {
+                ["phase"] = "requested",
+                ["approvalId"] = requestId,
+                ["command"] = command,
+                ["message"] = message,
+            }));
+
+        var mapping = ChatEventMapper.Map(new AgentEventInfo
+        {
+            Stream = "approval",
+            SessionKey = "main",
+            Data = document.RootElement.Clone(),
+        });
+
+        var request = Assert.IsType<ChatPermissionRequestEvent>(mapping.Event);
+        var expected = ExecApprovalCommandDisplaySanitizer.Sanitize(message)
+            + "\n\n"
+            + ExecApprovalCommandDisplaySanitizer.Sanitize(command);
+        Assert.Equal(requestId, request.RequestId);
+        Assert.Equal(expected, request.Detail);
     }
 
     [Fact]
