@@ -27,4 +27,30 @@ public sealed class GatewayDashboardUrlBuilderTests
 
         Assert.Equal("http://localhost:4317/config", url);
     }
+
+    [Fact]
+    public void Build_PutsRouteOnPathAndTokenInFragment()
+    {
+        var url = GatewayDashboardUrlBuilder.Build(
+            "ws://user:secret@host:18789/ui?x=1#old",
+            "config",
+            "tok",
+            appendSharedGatewayToken: true);
+
+        Assert.Equal("http://host:18789/ui/config?x=1#token=tok", url);
+        Assert.DoesNotContain("user:secret", url);
+    }
+
+    [Fact]
+    public void Build_ReplacesExistingTokenFragment()
+    {
+        var url = GatewayDashboardUrlBuilder.Build(
+            "ws://localhost:4317#token=old",
+            null,
+            "tok",
+            appendSharedGatewayToken: true);
+
+        Assert.Equal("http://localhost:4317#token=tok", url);
+        Assert.DoesNotContain("&token=", url);
+    }
 }

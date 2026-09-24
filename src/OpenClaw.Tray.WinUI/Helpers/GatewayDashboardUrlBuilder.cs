@@ -10,21 +10,77 @@ public static class GatewayDashboardUrlBuilder
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(gatewayUrl);
 
-        var baseUrl = gatewayUrl
-            .Replace("ws://", "http://", StringComparison.OrdinalIgnoreCase)
-            .Replace("wss://", "https://", StringComparison.OrdinalIgnoreCase)
-            .TrimEnd('/');
+        if (!Uri.TryCreate(gatewayUrl.Trim(), UriKind.Absolute, out var uri))
+            throw new ArgumentException("Gateway URL must be absolute.", nameof(gatewayUrl));
 
-        var url = string.IsNullOrWhiteSpace(path)
-            ? baseUrl
-            : $"{baseUrl}/{path.TrimStart('/')}";
+        var scheme = ToHttpScheme(uri.Scheme);
+        var url = $"{scheme}://{FormatHost(uri)}{FormatPort(scheme, uri.Port)}{JoinPath(uri.AbsolutePath, path)}{WithoutTokenQuery(uri.Query)}";
 
         if (appendSharedGatewayToken && !string.IsNullOrEmpty(sharedGatewayToken))
-        {
-            var separator = url.Contains('#') ? "&" : "#";
-            url = $"{url}{separator}token={Uri.EscapeDataString(sharedGatewayToken)}";
-        }
+            url += $"#token={Uri.EscapeDataString(sharedGatewayToken)}";
 
         return url;
+    }
+
+    private static string ToHttpScheme(string scheme)
+    {
+        if (scheme.Equals("wss", StringComparison.OrdinalIgnoreCase) ||
+            scheme.Equals("https", StringComparison.OrdinalIgnoreCase))
+        {
+            return "https";
+        }
+
+        return "http";
+    }
+
+    private static string FormatHost(Uri uri)
+    {
+        if (uri.HostNameType == UriHostNameType.IPv6)
+            return $"[{uri.IdnHost}]";
+
+        return uri.IdnHost;
+    }
+
+    private static string FormatPort(string scheme, int port)
+    {
+        if (port <= 0)
+            return string.Empty;
+
+        if ((scheme == "http" && port == 80) || (scheme == "https" && port == 443))
+            return string.Empty;
+
+        return $":{port}";
+    }
+
+    private static string JoinPath(string absolutePath, string? route)
+    {
+        var path = string.IsNullOrEmpty(absolutePath) ? "/" : absolutePath;
+        if (!string.IsNullOrWhiteSpace(route))
+            path = $"{path.TrimEnd('/')}/{route.Trim().TrimStart('/')}";
+
+        if (path.Length > 1)
+            path = path.TrimEnd('/');
+
+        return path == "/" ? string.Empty : path;
+    }
+
+    private static string WithoutTokenQuery(string query)
+    {
+        if (string.IsNullOrEmpty(query) || query == "?")
+            return string.Empty;
+
+        var body = query[0] == '?' ? query[1..] : query;
+        var kept = new List<string>();
+        foreach (var part in body.Split('&', StringSplitOptions.RemoveEmptyEntries))
+        {
+            var nameEnd = part.IndexOf('=');
+            var name = nameEnd >= 0 ? part[..nameEnd] : part;
+            if (name.Equals("token", StringComparison.OrdinalIgnoreCase))
+                continue;
+
+            kept.Add(part);
+        }
+
+        return kept.Count == 0 ? string.Empty : "?" + string.Join('&', kept);
     }
 }
