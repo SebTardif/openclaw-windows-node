@@ -244,7 +244,8 @@ internal sealed class PermissionsPageViewModel : INavigationAware, IDisposable, 
             null,
             rule.Pattern,
             rule.Id,
-            rule.ArgPattern));
+            rule.ArgPattern,
+            rule.IsWildcard));
     }
 
     private void PersistSetting(Action<ISettingsEditor> edit)
@@ -623,6 +624,22 @@ internal sealed class PermissionsPageViewModel : INavigationAware, IDisposable, 
 
     private void ApplyMutation(ExecApprovalsFile file, ExecApprovalsMutation mutation)
     {
+        if (mutation.Kind == ExecApprovalsMutationKind.RemoveRule)
+        {
+            if (file.Agents is not null
+                && file.Agents.TryGetValue(mutation.IsWildcard ? "*" : "main", out var agent))
+            {
+                agent?.Allowlist?.RemoveAll(entry =>
+                    mutation.RuleId.HasValue
+                        ? entry.Id == mutation.RuleId
+                        : entry.Id is null
+                            && string.Equals(entry.Pattern?.Trim(), mutation.Pattern, StringComparison.OrdinalIgnoreCase)
+                            && string.Equals(entry.ArgPattern, mutation.ArgPattern, StringComparison.Ordinal));
+            }
+
+            return;
+        }
+
         file.Version = 1;
         file.Defaults ??= new ExecApprovalsDefaults();
         file.Agents ??= new Dictionary<string, ExecApprovalsAgent>(StringComparer.Ordinal);
@@ -654,7 +671,7 @@ internal sealed class PermissionsPageViewModel : INavigationAware, IDisposable, 
         var allowlist = main.Allowlist ??= new List<ExecAllowlistEntry>();
         if (mutation.Kind == ExecApprovalsMutationKind.AddRule)
         {
-            if ((main.Security ?? file.Defaults.Security ?? ExecSecurity.Deny) == ExecSecurity.Deny)
+            if (ResolveDisplayedExecPolicy(file).Security == ExecSecurity.Deny)
             {
                 main.Security = ExecSecurity.Allowlist;
                 main.Ask = ExecAsk.Off;
@@ -675,13 +692,6 @@ internal sealed class PermissionsPageViewModel : INavigationAware, IDisposable, 
 
             return;
         }
-
-        allowlist.RemoveAll(entry =>
-            mutation.RuleId.HasValue
-                ? entry.Id == mutation.RuleId
-                : entry.Id is null
-                    && string.Equals(entry.Pattern?.Trim(), mutation.Pattern, StringComparison.OrdinalIgnoreCase)
-                    && string.Equals(entry.ArgPattern, mutation.ArgPattern, StringComparison.Ordinal));
     }
 
     private void LoadExecApprovals(ExecApprovalsReadOnlySnapshotResult result)
@@ -711,13 +721,14 @@ internal sealed class PermissionsPageViewModel : INavigationAware, IDisposable, 
         var displayed = ResolveDisplayedExecPolicy(snapshot.File);
         SetField(ref _defaultExecActionTag, MapDefaultAction(displayed), nameof(DefaultExecActionTag));
         var rules = displayed.Allowlist
-            .Where(entry => !string.IsNullOrWhiteSpace(entry.Pattern))
-            .Select(entry => new PermissionsExecApprovalRule(
-                entry.Id,
-                entry.Pattern!,
-                entry.ArgPattern,
-                entry.LastUsedAt,
-                entry.LastResolvedPath))
+            .Where(rule => !string.IsNullOrWhiteSpace(rule.Entry.Pattern))
+            .Select(rule => new PermissionsExecApprovalRule(
+                rule.Entry.Id,
+                rule.Entry.Pattern!,
+                rule.Entry.ArgPattern,
+                rule.Entry.LastUsedAt,
+                rule.Entry.LastResolvedPath,
+                rule.IsWildcard))
             .ToArray();
         SetField(ref _execApprovalRules, rules, nameof(ExecApprovalRules));
     }
@@ -758,7 +769,7 @@ internal sealed class PermissionsPageViewModel : INavigationAware, IDisposable, 
     private readonly record struct DisplayedExecPolicy(
         ExecSecurity Security,
         ExecAsk Ask,
-        IReadOnlyList<ExecAllowlistEntry> Allowlist);
+        IReadOnlyList<(ExecAllowlistEntry Entry, bool IsWildcard)> Allowlist);
 
     private static DisplayedExecPolicy ResolveDisplayedExecPolicy(ExecApprovalsFile file)
     {
@@ -766,15 +777,15 @@ internal sealed class PermissionsPageViewModel : INavigationAware, IDisposable, 
         ExecApprovalsAgent? wildcard = null;
         file.Agents?.TryGetValue("main", out main);
         file.Agents?.TryGetValue("*", out wildcard);
-        var allowlist = new List<ExecAllowlistEntry>();
+        var allowlist = new List<(ExecAllowlistEntry Entry, bool IsWildcard)>();
         if (wildcard?.Allowlist is not null)
         {
-            allowlist.AddRange(wildcard.Allowlist);
+            allowlist.AddRange(wildcard.Allowlist.Select(entry => (entry, true)));
         }
 
         if (main?.Allowlist is not null)
         {
-            allowlist.AddRange(main.Allowlist);
+            allowlist.AddRange(main.Allowlist.Select(entry => (entry, false)));
         }
 
         return new DisplayedExecPolicy(
@@ -878,5 +889,6 @@ internal sealed class PermissionsPageViewModel : INavigationAware, IDisposable, 
         string? Action,
         string? Pattern,
         Guid? RuleId = null,
-        string? ArgPattern = null);
+        string? ArgPattern = null,
+        bool IsWildcard = false);
 }
