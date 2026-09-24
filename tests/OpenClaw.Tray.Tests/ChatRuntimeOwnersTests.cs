@@ -1114,6 +1114,8 @@ public sealed class ChatEventMapperTests
         var request = Assert.IsType<ChatPermissionRequestEvent>(mapping.Event);
         Assert.Equal([ChatPermissionActionKeys.Deny], request.Actions);
         Assert.Equal("unsafe-1", request.RequestId);
+        if (string.IsNullOrEmpty(command))
+            Assert.Contains("only Deny is available", request.Detail);
     }
 
     [Fact]

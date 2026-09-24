@@ -471,6 +471,13 @@ internal static class ChatEventMapper
             : string.IsNullOrEmpty(commandStatus.Text)
                 ? messageStatus.Text
                 : messageStatus.Text + "\n\n" + commandStatus.Text;
+        if (string.IsNullOrWhiteSpace(commandStatus.Text))
+        {
+            const string missingCommand =
+                "No command was included with this approval, so only Deny is available.";
+            detail = string.IsNullOrEmpty(detail) ? missingCommand : detail + "\n\n" + missingCommand;
+        }
+
         var canReviewInFull = !string.IsNullOrWhiteSpace(commandStatus.Text)
             && !commandStatus.Truncated && !commandStatus.Oversized && !commandStatus.UnsafeConcealment
             && !messageStatus.Truncated && !messageStatus.Oversized && !messageStatus.UnsafeConcealment;
