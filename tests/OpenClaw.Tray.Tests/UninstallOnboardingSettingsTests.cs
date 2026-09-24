@@ -31,13 +31,13 @@ public sealed class UninstallOnboardingSettingsTests
             settings["GatewayUrl"] = "ws://localhost:18789";
         if (hasTokens)
         {
-            settings["Token"] = "synthetic-shared-token";
-            settings["BootstrapToken"] = "synthetic-bootstrap-token";
+            settings["Token"] = "gateway-token";
+            settings["BootstrapToken"] = "test-auth-token";
         }
         var path = temp.Combine("settings.json");
         File.WriteAllText(path, settings.ToJsonString());
         // This pins the reset helper's boundary, not the separate registry-cleanup path.
-        const string externalRegistry = """{"activeId":"external","gateways":[{"id":"external","url":"wss://gateway.example","sharedGatewayToken":"synthetic-external-token"}]}""";
+        const string externalRegistry = """{"activeId":"external","gateways":[{"id":"external","url":"wss://gateway.example","sharedGatewayToken":"test-token-placeholder"}]}""";
         File.WriteAllText(temp.Combine("gateways.json"), externalRegistry);
 
         await RunResetAsync(temp, preserveNodeSettings);
@@ -51,9 +51,9 @@ public sealed class UninstallOnboardingSettingsTests
         Assert.Equal(externalRegistry, File.ReadAllText(temp.Combine("gateways.json")));
         Assert.Empty(Directory.GetFiles(temp.Path, "*.tmp"));
         var log = File.ReadAllText(temp.Combine("uninstall.log"));
-        Assert.DoesNotContain("synthetic-shared-token", log);
-        Assert.DoesNotContain("synthetic-bootstrap-token", log);
-        Assert.DoesNotContain("synthetic-external-token", log);
+        Assert.DoesNotContain("gateway-token", log);
+        Assert.DoesNotContain("test-auth-token", log);
+        Assert.DoesNotContain("test-token-placeholder", log);
         var resetJson = File.ReadAllText(path);
         await RunResetAsync(temp, preserveNodeSettings);
         Assert.Equal(resetJson, File.ReadAllText(path));
@@ -85,7 +85,7 @@ public sealed class UninstallOnboardingSettingsTests
     {
         using var temp = new TempDirectory("uninstall-settings-");
         var path = temp.Combine("settings.json");
-        const string original = """{"Token":"synthetic-shared-token","BootstrapToken":"synthetic-bootstrap-token","Theme":"Dark"}""";
+        const string original = """{"Token":"gateway-token","BootstrapToken":"test-auth-token","Theme":"Dark"}""";
         File.WriteAllText(path, original);
         using (File.Open(path, FileMode.Open, FileAccess.Read, FileShare.Read))
             await RunResetAsync(temp, preserveNodeSettings, expectedWarnings: 1);
@@ -95,8 +95,8 @@ public sealed class UninstallOnboardingSettingsTests
         var log = File.ReadAllText(temp.Combine("uninstall.log"));
         Assert.Contains("Failed to reset onboarding settings:", log);
         Assert.DoesNotContain("Reset onboarding settings;", log);
-        Assert.DoesNotContain("synthetic-shared-token", log);
-        Assert.DoesNotContain("synthetic-bootstrap-token", log);
+        Assert.DoesNotContain("gateway-token", log);
+        Assert.DoesNotContain("test-auth-token", log);
     }
 
     private static async Task RunResetAsync(
