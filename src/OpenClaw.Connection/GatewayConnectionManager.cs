@@ -1685,6 +1685,66 @@ public sealed class GatewayConnectionManager :
         return new SetupCodeResult(SetupCodeOutcome.Success, GatewayUrl: gatewayUrl);
     }
 
+    private async Task WaitForDeferredSharedTokenRejectionAsync(long generation, TimeSpan timeout)
+    {
+        var deadline = DateTime.UtcNow + timeout;
+        while (DateTime.UtcNow < deadline)
+        {
+            if (_stateMachine.Current.OperatorState != RoleConnectionState.Connecting)
+                return;
+            if (Interlocked.Read(ref _generation) != generation)
+                return;
+            await Task.Delay(50).ConfigureAwait(false);
+        }
+    }
+
+    private async Task<string?> RestoreRejectedSharedTokenSideEffectsAsync(
+        GatewayRecord previousRecord,
+        string? previousActiveId,
+        bool previousOperatorWasLive,
+        Func<GatewayRecord, CancellationToken, Task>? onGatewayCommitted)
+    {
+        string? settingsError = null;
+        if (onGatewayCommitted is not null)
+        {
+            try
+            {
+                await onGatewayCommitted(previousRecord, CancellationToken.None)
+                    .ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                settingsError = $"Saved settings rollback failed: {ex.Message}";
+            }
+        }
+
+        if (!previousOperatorWasLive)
+            return settingsError;
+
+        var restoreId = previousActiveId ?? previousRecord.Id;
+        string? connectionError = null;
+        try
+        {
+            await ConnectCoreAsync(restoreId).ConfigureAwait(false);
+            if (_stateMachine.Current.OperatorState == RoleConnectionState.Error)
+            {
+                connectionError =
+                    "Failed to restore the previous gateway connection: " +
+                    (_stateMachine.Current.OperatorError ?? "Gateway connection failed.");
+            }
+        }
+        catch (Exception ex)
+        {
+            connectionError = $"Failed to restore the previous gateway connection: {ex.Message}";
+        }
+
+        if (settingsError is null)
+            return connectionError;
+        if (connectionError is null)
+            return settingsError;
+        return $"{settingsError} {connectionError}";
+    }
+
     public Task<SetupCodeResult> ConnectWithSharedTokenAsync(
         string gatewayUrl,
         string token,
@@ -1714,6 +1774,7 @@ public sealed class GatewayConnectionManager :
         {
             using var lifecycleLease = await BeginManualGatewayLifecycleOperationAsync();
             await _transitionSemaphore.WaitAsync();
+            var transitionLockHeld = true;
             try
             {
                 var existing = _registry.FindByUrl(gatewayUrl);
@@ -1863,6 +1924,8 @@ public sealed class GatewayConnectionManager :
                 SetGatewayConnectionIntent(recordId, shouldBeConnected: true);
 
                 // Disconnect current gateway only after replacement credentials have been validated and persisted.
+                var previousOperatorWasLive =
+                    _stateMachine.Current.OperatorState == RoleConnectionState.Connected;
                 await DisconnectCoreAsync();
 
                 // The replacement shared token was validated above. Preserve durable device tokens;
@@ -1872,6 +1935,26 @@ public sealed class GatewayConnectionManager :
 
                 // Connect to the gateway
                 await ConnectCoreAsync(recordId);
+                if (hasSetupCredential && !hasDurableTokens && previousRecord is not null &&
+                    _stateMachine.Current.OperatorState == RoleConnectionState.Connecting)
+                {
+                    // The status handler needs this lock before it can record auth failure.
+                    var observedGeneration = Interlocked.Read(ref _generation);
+                    _transitionSemaphore.Release();
+                    transitionLockHeld = false;
+                    try
+                    {
+                        await WaitForDeferredSharedTokenRejectionAsync(
+                            observedGeneration,
+                            TimeSpan.FromSeconds(15)).ConfigureAwait(false);
+                    }
+                    finally
+                    {
+                        await _transitionSemaphore.WaitAsync().ConfigureAwait(false);
+                        transitionLockHeld = true;
+                    }
+                }
+
                 if (_stateMachine.Current.OperatorState == RoleConnectionState.Error)
                 {
                     var operatorError = _stateMachine.Current.OperatorError ?? "Gateway connection failed.";
@@ -1896,9 +1979,16 @@ public sealed class GatewayConnectionManager :
                                 GatewayCommitted: true);
                         }
 
+                        var restoreError = await RestoreRejectedSharedTokenSideEffectsAsync(
+                            previousRecord,
+                            previousActiveId,
+                            previousOperatorWasLive,
+                            onGatewayCommitted).ConfigureAwait(false);
                         return new SetupCodeResult(
                             SetupCodeOutcome.ConnectionFailed,
-                            operatorError,
+                            string.IsNullOrWhiteSpace(restoreError)
+                                ? operatorError
+                                : $"{operatorError} {restoreError}",
                             GatewayUrl: gatewayUrl,
                             GatewayCommitted: false);
                     }
@@ -1915,7 +2005,8 @@ public sealed class GatewayConnectionManager :
                 if (isolatedValidationTunnel is not null)
                     await StopAndDisposeValidationTunnelAsync(isolatedValidationTunnel).ConfigureAwait(false);
 
-                _transitionSemaphore.Release();
+                if (transitionLockHeld)
+                    _transitionSemaphore.Release();
             }
             return new SetupCodeResult(
                 SetupCodeOutcome.Success,
