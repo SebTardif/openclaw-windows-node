@@ -17,7 +17,8 @@ internal static class ConfigPathSensitivity
 
         foreach (var segment in path.Split('.'))
         {
-            if (segment.Equals("nsec", StringComparison.OrdinalIgnoreCase))
+            if (segment.Equals("nsec", StringComparison.OrdinalIgnoreCase)
+                || segment.Equals("privateKey", StringComparison.OrdinalIgnoreCase))
                 return true;
         }
 
