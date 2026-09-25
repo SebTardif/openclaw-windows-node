@@ -1,4 +1,5 @@
 using OpenClaw.Shared;
+using System.Diagnostics;
 using System.Net;
 using System.Net.Sockets;
 
@@ -346,11 +347,11 @@ public sealed class SshTunnelServiceTests
         var port = ((IPEndPoint)listener.LocalEndpoint).Port;
         using var service = new SshTunnelService(NullLogger.Instance);
 
-        var ready = await service.EnsureSettingsOwnedForwardReadyAsync(
+        var ownership = await service.EnsureSettingsOwnedForwardReadyAsync(
             new SshTunnelConfig("user", "host", 18789, port),
             CancellationToken.None);
 
-        Assert.False(ready);
+        Assert.Null(ownership);
         Assert.False(service.IsRunning);
         Assert.NotEqual(TunnelStatus.Up, service.Status);
         Assert.Contains(port.ToString(), service.LastError);
@@ -366,7 +367,7 @@ public sealed class SshTunnelServiceTests
         var localPort = proxyPort - 2;
         using var service = new SshTunnelService(NullLogger.Instance);
 
-        var ready = await service.EnsureSettingsOwnedForwardReadyAsync(
+        var ownership = await service.EnsureSettingsOwnedForwardReadyAsync(
             new SshTunnelConfig(
                 "user",
                 "host",
@@ -375,11 +376,108 @@ public sealed class SshTunnelServiceTests
                 IncludeBrowserProxyForward: true),
             CancellationToken.None);
 
-        Assert.False(ready);
+        Assert.Null(ownership);
         Assert.False(service.IsRunning);
         Assert.NotEqual(TunnelStatus.Up, service.Status);
         Assert.NotNull(service.LastError);
         Assert.Contains("already owned", service.LastError);
+    }
+
+    [Fact]
+    public void SettingsForwardFailure_DoesNotOverwriteNewerRunningTunnel()
+    {
+        using var service = new SshTunnelService(NullLogger.Instance);
+        using var currentProcess = Process.GetCurrentProcess();
+        using var staleProcess = new Process();
+        var config = new SshTunnelConfig("user", "host", 18789, 45678);
+        InjectRunningTunnel(service, currentProcess, config, generation: 42);
+        try
+        {
+            var published = service.TryFailSettingsForwardAttempt(
+                staleProcess,
+                generation: 41,
+                "older attempt failed");
+
+            Assert.False(published);
+            Assert.True(service.IsRunning);
+            Assert.Equal(TunnelStatus.Up, service.Status);
+            Assert.Null(service.LastError);
+        }
+        finally
+        {
+            DetachInjectedProcess(service);
+        }
+    }
+
+    [Fact]
+    public void SettingsForwardFailure_DoesNotOverwriteNewerFailedTunnel()
+    {
+        using var service = new SshTunnelService(NullLogger.Instance);
+        SetPrivateField(service, "_lifecycleGeneration", 42L);
+        typeof(SshTunnelService)
+            .GetProperty(nameof(SshTunnelService.Status))!
+            .SetValue(service, TunnelStatus.Failed);
+        typeof(SshTunnelService)
+            .GetProperty(nameof(SshTunnelService.LastError))!
+            .SetValue(service, "newer tunnel exited");
+
+        var published = service.TryFailSettingsForwardAttempt(
+            process: null,
+            generation: 41,
+            "older attempt failed");
+
+        Assert.False(published);
+        Assert.Equal(TunnelStatus.Failed, service.Status);
+        Assert.Equal("newer tunnel exited", service.LastError);
+    }
+
+    [Fact]
+    public void TryUseOwnedListener_InvokesCallbackOnlyForCurrentOwnership()
+    {
+        using var listener = new TcpListener(IPAddress.Loopback, 0);
+        listener.Start();
+        var port = ((IPEndPoint)listener.LocalEndpoint).Port;
+        using var service = new SshTunnelService(NullLogger.Instance);
+        using var currentProcess = Process.GetCurrentProcess();
+        var config = new SshTunnelConfig("user", "host", 18789, port);
+        InjectRunningTunnel(service, currentProcess, config, generation: 42);
+        try
+        {
+            var ownership = new SshTunnelStartResult(
+                $"ws://localhost:{port}",
+                config,
+                OwnershipGeneration: 42);
+            var invoked = false;
+
+            var used = service.TryUseOwnedListener(
+                ownership,
+                port,
+                () =>
+                {
+                    invoked = true;
+                    return true;
+                });
+
+            Assert.True(used);
+            Assert.True(invoked);
+
+            invoked = false;
+            used = service.TryUseOwnedListener(
+                ownership with { OwnershipGeneration = 41 },
+                port,
+                () =>
+                {
+                    invoked = true;
+                    return true;
+                });
+
+            Assert.False(used);
+            Assert.False(invoked);
+        }
+        finally
+        {
+            DetachInjectedProcess(service);
+        }
     }
 
     [Fact]
@@ -399,4 +497,38 @@ public sealed class SshTunnelServiceTests
                 4321,
                 DateTime.UtcNow));
     }
+
+    private static void InjectRunningTunnel(
+        SshTunnelService service,
+        Process process,
+        SshTunnelConfig config,
+        long generation)
+    {
+        SetPrivateField(service, "_process", process);
+        SetPrivateField(service, "_processStarted", true);
+        SetPrivateField(service, "_currentConfig", config);
+        SetPrivateField(service, "_currentOwner", SshTunnelOwner.Settings);
+        SetPrivateField(service, "_lifecycleGeneration", generation);
+        typeof(SshTunnelService)
+            .GetProperty(nameof(SshTunnelService.Status))!
+            .SetValue(service, TunnelStatus.Up);
+    }
+
+    private static void DetachInjectedProcess(SshTunnelService service)
+    {
+        SetPrivateField<Process?>(service, "_process", null);
+        SetPrivateField(service, "_processStarted", false);
+        SetPrivateField<SshTunnelConfig?>(service, "_currentConfig", null);
+    }
+
+    private static void SetPrivateField<T>(
+        SshTunnelService service,
+        string name,
+        T value) =>
+        typeof(SshTunnelService)
+            .GetField(
+                name,
+                System.Reflection.BindingFlags.Instance |
+                System.Reflection.BindingFlags.NonPublic)!
+            .SetValue(service, value);
 }

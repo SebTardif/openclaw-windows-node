@@ -472,34 +472,44 @@ public sealed class AppRefactorContractTests
         var source = ReadAppSources();
         var method = ExtractMethod(source, "OpenDashboardAsync");
 
-        Assert.Contains("if (!await EnsureDashboardSshForwardOwnedAsync())", method);
+        Assert.Contains(
+            "await EnsureDashboardSshForwardOwnedAsync(snapshot.Record.SshTunnel)",
+            method);
         Assert.Contains("_toastService?.ShowToast", method);
         Assert.Contains("Check SSH tunnel settings and logs.", method);
         AssertInOrder(
             method,
-            "await EnsureDashboardSshForwardOwnedAsync()",
+            "new DashboardGatewaySnapshotResolver(",
+            "snapshotResolver.TryCapture(",
+            "await EnsureDashboardSshForwardOwnedAsync(snapshot.Record.SshTunnel)",
+            "snapshotResolver.ResolveCredentials(",
             "GatewayDashboardUrlBuilder.Build(");
         Assert.DoesNotContain("EnsureStarted(", method);
     }
 
     [Fact]
-    public void Dashboard_AwaitsSettingsOwnedForwardBeforeTokenUrl()
+    public void Dashboard_HoldsSameGatewayAndTunnelOwnershipThroughBrowserLaunch()
     {
         var source = ReadAppSources();
+        var method = ExtractMethod(source, "OpenDashboardAsync");
         var gate = ExtractMethod(source, "EnsureDashboardSshForwardOwnedAsync");
 
-        Assert.Contains("if (!_settings.UseSshTunnel)", gate);
-        Assert.Contains("_sshTunnelService?.Stop()", gate);
-        Assert.Contains("return true;", gate);
+        Assert.Contains("snapshotResolver.IsCurrent(snapshot)", method);
+        Assert.Contains("_sshTunnelService?.TryUseOwnedListener(", method);
+        Assert.Contains("ownership.Config.LocalPort", method);
+        Assert.Contains("Process.Start(", method);
+        AssertInOrder(
+            method,
+            "_sshTunnelService?.TryUseOwnedListener(",
+            "snapshotResolver.IsCurrent(snapshot)",
+            "Process.Start(");
+        Assert.Contains("SshTunnelConfig? tunnel", gate);
         Assert.Contains("EnsureSettingsOwnedForwardReadyAsync(", gate);
-        Assert.Contains("if (!owned)", gate);
+        Assert.DoesNotContain("_settings.UseSshTunnel", gate);
         Assert.DoesNotContain("GatewayDashboardUrlBuilder.Build(", gate);
         Assert.DoesNotContain("EnsureStarted(", gate);
-        AssertInOrder(
-            gate,
-            "if (!_settings.UseSshTunnel)",
-            "EnsureSettingsOwnedForwardReadyAsync(",
-            "if (!owned)");
+        Assert.Contains("var gatewayChanged = false;", method);
+        Assert.Contains("if (gatewayChanged)", method);
     }
 
     [Fact]

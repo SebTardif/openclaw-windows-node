@@ -7,7 +7,7 @@ public sealed class ConnectionRegressionSourceTests
     {
         var appSource = ReadSource("src", "OpenClaw.Tray.WinUI", "App.xaml.cs");
 
-        Assert.Contains("credentialSource == CredentialResolver.SourceSharedGatewayToken", appSource);
+        Assert.Contains("dashboardAuth.Source == CredentialResolver.SourceSharedGatewayToken", appSource);
         Assert.DoesNotContain("if (!isBootstrapToken && !string.IsNullOrEmpty(token))", appSource);
     }
 

@@ -3915,8 +3915,23 @@ public partial class App : Application, OpenClawTray.Services.IAppCommands, IPer
 
     private async Task OpenDashboardAsync(string? path)
     {
-        if (_settings == null) return;
-        if (!await EnsureDashboardSshForwardOwnedAsync())
+        if (_settings == null)
+            return;
+
+        var snapshotResolver = new DashboardGatewaySnapshotResolver(
+            _gatewayRegistry,
+            _settings,
+            SettingsManager.SettingsDirectoryPath);
+        if (!snapshotResolver.TryCapture(out var snapshot) || snapshot == null)
+        {
+            ShowConnectionSettingsForPairingIssue(
+                "Dashboard",
+                "Gateway URL or credential is not configured");
+            return;
+        }
+
+        var ownership = await EnsureDashboardSshForwardOwnedAsync(snapshot.Record.SshTunnel);
+        if (snapshot.Record.SshTunnel != null && ownership == null)
         {
             _toastService?.ShowToast(new ToastContentBuilder()
                 .AddText("SSH tunnel")
@@ -3924,7 +3939,19 @@ public partial class App : Application, OpenClawTray.Services.IAppCommands, IPer
             return;
         }
 
-        if (!TryResolveChatCredentials(out var gatewayUrl, out var token, out var credentialSource, out var isBootstrapToken))
+        if (!snapshotResolver.IsCurrent(snapshot))
+        {
+            ShowTransientConnectionError(
+                "Dashboard was not opened because the active gateway changed.");
+            return;
+        }
+
+        var dashboardAuth = snapshotResolver.ResolveCredentials(
+            snapshot,
+            DeviceIdentityFileReader.Instance,
+            (record, candidate) =>
+                _managedLocalPortProvenance?.IsStrongCredentialAllowed(record, candidate) == true);
+        if (dashboardAuth == null)
         {
             ShowConnectionSettingsForPairingIssue(
                 "Dashboard",
@@ -3933,13 +3960,55 @@ public partial class App : Application, OpenClawTray.Services.IAppCommands, IPer
         }
 
         var url = GatewayDashboardUrlBuilder.Build(
-            gatewayUrl,
+            dashboardAuth.GatewayUrl,
             path,
-            token,
-            !isBootstrapToken && credentialSource == CredentialResolver.SourceSharedGatewayToken);
+            dashboardAuth.Token,
+            !dashboardAuth.IsBootstrapToken &&
+                dashboardAuth.Source == CredentialResolver.SourceSharedGatewayToken);
 
         try
         {
+            if (ownership != null)
+            {
+                var gatewayChanged = false;
+                var launched = _sshTunnelService?.TryUseOwnedListener(
+                    ownership,
+                    ownership.Config.LocalPort,
+                    () =>
+                    {
+                        if (!snapshotResolver.IsCurrent(snapshot))
+                        {
+                            gatewayChanged = true;
+                            return false;
+                        }
+
+                        Process.Start(new ProcessStartInfo(url) { UseShellExecute = true });
+                        return true;
+                    }) == true;
+                if (!launched)
+                {
+                    if (gatewayChanged)
+                    {
+                        ShowTransientConnectionError(
+                            "Dashboard was not opened because the active gateway changed.");
+                    }
+                    else
+                    {
+                        _toastService?.ShowToast(new ToastContentBuilder()
+                            .AddText("SSH tunnel")
+                            .AddText("Dashboard was not opened because SSH forward ownership changed."));
+                    }
+                }
+                return;
+            }
+
+            if (!snapshotResolver.IsCurrent(snapshot))
+            {
+                ShowTransientConnectionError(
+                    "Dashboard was not opened because the active gateway changed.");
+                return;
+            }
+
             Process.Start(new ProcessStartInfo(url) { UseShellExecute = true });
         }
         catch (Exception ex)
@@ -4268,66 +4337,49 @@ public partial class App : Application, OpenClawTray.Services.IAppCommands, IPer
 
     #endregion
 
-    private async Task<bool> EnsureDashboardSshForwardOwnedAsync()
+    private async Task<SshTunnelStartResult?> EnsureDashboardSshForwardOwnedAsync(
+        SshTunnelConfig? tunnel)
     {
-        if (_settings == null)
-        {
-            return false;
-        }
+        if (tunnel == null)
+            return null;
 
-        if (!_settings.UseSshTunnel)
-        {
-            _sshTunnelService?.Stop();
-            return true;
-        }
-
-        if (string.IsNullOrWhiteSpace(_settings.SshTunnelUser) ||
-            string.IsNullOrWhiteSpace(_settings.SshTunnelHost) ||
-            _settings.SshTunnelRemotePort is < 1 or > 65535 ||
-            _settings.SshTunnelLocalPort is < 1 or > 65535)
+        if (string.IsNullOrWhiteSpace(tunnel.User) ||
+            string.IsNullOrWhiteSpace(tunnel.Host) ||
+            tunnel.RemotePort is < 1 or > 65535 ||
+            tunnel.LocalPort is < 1 or > 65535 ||
+            tunnel.SshPort is < 1 or > 65535)
         {
             Logger.Warn("SSH tunnel is enabled but settings are incomplete");
             UpdateTrayIcon();
-            return false;
+            return null;
         }
 
         try
         {
             _sshTunnelService ??= new SshTunnelService(new AppLogger());
-            var includeBrowserProxy = BrowserProxySshTunnelForwardPolicy.ShouldInclude(
-                _settings.NodeBrowserProxyEnabled,
-                _settings.SshTunnelRemotePort,
-                _settings.SshTunnelLocalPort);
-            var owned = await _sshTunnelService.EnsureSettingsOwnedForwardReadyAsync(
-                new SshTunnelConfig(
-                    _settings.SshTunnelUser,
-                    _settings.SshTunnelHost,
-                    _settings.SshTunnelRemotePort,
-                    _settings.SshTunnelLocalPort,
-                    includeBrowserProxy,
-                    _settings.SshTunnelSshPort),
+            var ownership = await _sshTunnelService.EnsureSettingsOwnedForwardReadyAsync(
+                tunnel,
                 CancellationToken.None);
             DiagnosticsJsonlService.Write("tunnel.ensure_started", new
             {
                 status = _sshTunnelService.Status.ToString(),
-                localEndpoint = $"127.0.0.1:{_settings.SshTunnelLocalPort}",
-                remoteHost = string.IsNullOrWhiteSpace(_settings.SshTunnelHost) ? null : _settings.SshTunnelHost,
-                remotePort = _settings.SshTunnelRemotePort
+                localEndpoint = $"127.0.0.1:{tunnel.LocalPort}",
+                remoteHost = tunnel.Host,
+                remotePort = tunnel.RemotePort
             });
-            if (!owned)
+            if (ownership == null)
             {
                 UpdateTrayIcon();
-                return false;
             }
+
+            return ownership;
         }
         catch (Exception ex)
         {
             Logger.Error($"Failed to start SSH tunnel: {ex.Message}");
             UpdateTrayIcon();
-            return false;
+            return null;
         }
-
-        return true;
     }
 
     private void OnSshTunnelExited(object? sender, SshTunnelExit tunnelExit) =>
