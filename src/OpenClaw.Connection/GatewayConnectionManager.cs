@@ -1935,17 +1935,18 @@ public sealed class GatewayConnectionManager :
 
                 // Connect to the gateway
                 await ConnectCoreAsync(recordId);
+                long? observedGeneration = null;
                 if (hasSetupCredential && !hasDurableTokens && previousRecord is not null &&
                     _stateMachine.Current.OperatorState == RoleConnectionState.Connecting)
                 {
                     // The status handler needs this lock before it can record auth failure.
-                    var observedGeneration = Interlocked.Read(ref _generation);
+                    observedGeneration = Interlocked.Read(ref _generation);
                     _transitionSemaphore.Release();
                     transitionLockHeld = false;
                     try
                     {
                         await WaitForDeferredSharedTokenRejectionAsync(
-                            observedGeneration,
+                            observedGeneration.Value,
                             TimeSpan.FromSeconds(15)).ConfigureAwait(false);
                     }
                     finally
@@ -1953,6 +1954,20 @@ public sealed class GatewayConnectionManager :
                         await _transitionSemaphore.WaitAsync().ConfigureAwait(false);
                         transitionLockHeld = true;
                     }
+                }
+
+                if (observedGeneration is long generation &&
+                    Interlocked.Read(ref _generation) != generation)
+                {
+                    var stillOurs = string.Equals(
+                        _registry.ActiveGatewayId,
+                        recordId,
+                        StringComparison.Ordinal);
+                    return new SetupCodeResult(
+                        SetupCodeOutcome.ConnectionFailed,
+                        "The shared-token connection was superseded by a newer gateway connection.",
+                        GatewayUrl: gatewayUrl,
+                        GatewayCommitted: stillOurs);
                 }
 
                 if (_stateMachine.Current.OperatorState == RoleConnectionState.Error)
@@ -1979,8 +1994,15 @@ public sealed class GatewayConnectionManager :
                                 GatewayCommitted: true);
                         }
 
+                        var settingsRecord = previousRecord;
+                        if (previousActiveId is not null &&
+                            !string.Equals(previousActiveId, previousRecord.Id, StringComparison.Ordinal))
+                        {
+                            settingsRecord = _registry.GetById(previousActiveId) ?? previousRecord;
+                        }
+
                         var restoreError = await RestoreRejectedSharedTokenSideEffectsAsync(
-                            previousRecord,
+                            settingsRecord,
                             previousActiveId,
                             previousOperatorWasLive,
                             onGatewayCommitted).ConfigureAwait(false);
