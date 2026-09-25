@@ -168,8 +168,7 @@ public sealed class SshTunnelService : ISshTunnelManager
     private void EnsureStartedCore(
         SshTunnelConfig tunnel,
         SshTunnelOwner owner,
-        Action<SshTunnelConfig>? beforeStart = null,
-        Action<long>? generationCaptured = null)
+        Action<SshTunnelConfig>? beforeStart = null)
     {
         lock (_operationLock)
         {
@@ -191,16 +190,11 @@ public sealed class SshTunnelService : ISshTunnelManager
                 {
                     _currentOwner = ResolveOwnerForReuse(_currentOwner, owner);
                     Status = TunnelStatus.Up;
-                    generationCaptured?.Invoke(_lifecycleGeneration);
                     return;
                 }
             }
 
             StopLocked();
-            lock (_stateLock)
-            {
-                generationCaptured?.Invoke(_lifecycleGeneration);
-            }
             beforeStart?.Invoke(tunnel);
             lock (_stateLock)
             {
@@ -564,7 +558,7 @@ public sealed class SshTunnelService : ISshTunnelManager
     public async Task<string> StartAsync(SshTunnelConfig config, CancellationToken ct) =>
         (await StartOwnedAsync(config, ct).ConfigureAwait(false)).Url;
 
-    public async Task<SshTunnelStartResult?> EnsureSettingsOwnedForwardReadyAsync(
+    public async Task<bool> EnsureSettingsOwnedForwardReadyAsync(
         SshTunnelConfig config,
         CancellationToken cancellationToken)
     {
@@ -576,8 +570,7 @@ public sealed class SshTunnelService : ISshTunnelManager
             EnsureStartedCore(
                 config,
                 SshTunnelOwner.Settings,
-                tunnel => RejectOccupiedForwardPorts(tunnel),
-                capturedGeneration => generation = capturedGeneration);
+                tunnel => RejectOccupiedForwardPorts(tunnel));
 
             var normalizedConfig = config with
             {
@@ -619,130 +612,21 @@ public sealed class SshTunnelService : ISshTunnelManager
                     cancellationToken).ConfigureAwait(false);
             }
 
-            return new SshTunnelStartResult(
-                $"ws://localhost:{config.LocalPort}",
-                normalizedConfig,
-                generation);
+            return true;
         }
         catch (Exception ex)
         {
-            TryFailSettingsForwardAttempt(process, generation, ex.Message);
-            _logger.Warn($"SSH dashboard forward is not owned: {ex.Message}");
-            return null;
-        }
-    }
-
-    internal bool TryFailSettingsForwardAttempt(
-        Process? process,
-        long generation,
-        string error)
-    {
-        lock (_operationLock)
-        {
-            lock (_stateLock)
-            {
-                if (process is not null)
-                {
-                    if (generation != _lifecycleGeneration ||
-                        !ReferenceEquals(_process, process))
-                    {
-                        return false;
-                    }
-                }
-                else if (generation != _lifecycleGeneration ||
-                    IsRunningLocked())
-                {
-                    return false;
-                }
-            }
-
             if (process is not null)
-                StopLocked();
+                StopIfCurrent(process, generation);
 
             lock (_stateLock)
             {
-                if (IsRunningLocked())
-                    return false;
-
-                LastError = error;
+                LastError = ex.Message;
                 Status = TunnelStatus.Failed;
-                return true;
             }
-        }
-    }
 
-    public bool TryUseOwnedListener(
-        SshTunnelStartResult ownership,
-        int destinationPort,
-        Func<bool> use)
-    {
-        ArgumentNullException.ThrowIfNull(ownership);
-        ArgumentNullException.ThrowIfNull(use);
-
-        var config = ownership.Config;
-        var isConfiguredForward =
-            destinationPort == config.LocalPort ||
-            (config.IncludeBrowserProxyForward && destinationPort == config.LocalPort + 2);
-        if (!isConfiguredForward)
+            _logger.Warn($"SSH dashboard forward is not owned: {ex.Message}");
             return false;
-
-        lock (_operationLock)
-        {
-            Process process;
-            int processId;
-            DateTime processStartTimeUtc;
-            lock (_stateLock)
-            {
-                if (ownership.OwnershipGeneration != _lifecycleGeneration ||
-                    !IsRunningLocked() ||
-                    _process is null ||
-                    !Equals(_currentConfig, config))
-                {
-                    return false;
-                }
-
-                process = _process;
-                processId = process.Id;
-                try
-                {
-                    processStartTimeUtc = process.StartTime.ToUniversalTime();
-                }
-                catch (Exception ex)
-                {
-                    _logger.Debug($"SSH dashboard ownership process inspection failed: {ex.Message}");
-                    return false;
-                }
-            }
-
-            try
-            {
-                if (!ValidateListenerOwnership(
-                    WindowsTcpListenerSnapshot.Capture(),
-                    destinationPort,
-                    processId,
-                    processStartTimeUtc))
-                {
-                    return false;
-                }
-            }
-            catch (Exception ex)
-            {
-                _logger.Warn($"SSH dashboard ownership verification failed: {ex.Message}");
-                return false;
-            }
-
-            lock (_stateLock)
-            {
-                if (ownership.OwnershipGeneration != _lifecycleGeneration ||
-                    !ReferenceEquals(_process, process) ||
-                    !IsRunningLocked() ||
-                    !Equals(_currentConfig, config))
-                {
-                    return false;
-                }
-            }
-
-            return use();
         }
     }
 
