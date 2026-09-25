@@ -1970,9 +1970,15 @@ public sealed class GatewayConnectionManager :
                         GatewayCommitted: stillOurs);
                 }
 
-                if (_stateMachine.Current.OperatorState == RoleConnectionState.Error)
+                var handshakeUnfinished =
+                    observedGeneration is long ownedGeneration &&
+                    Interlocked.Read(ref _generation) == ownedGeneration &&
+                    _stateMachine.Current.OperatorState == RoleConnectionState.Connecting;
+                if (_stateMachine.Current.OperatorState == RoleConnectionState.Error || handshakeUnfinished)
                 {
-                    var operatorError = _stateMachine.Current.OperatorError ?? "Gateway connection failed.";
+                    var operatorError = handshakeUnfinished
+                        ? "The shared-token connection did not finish."
+                        : _stateMachine.Current.OperatorError ?? "Gateway connection failed.";
                     if (hasSetupCredential && !hasDurableTokens && previousRecord is not null)
                     {
                         _registry.AddOrUpdate(previousRecord);

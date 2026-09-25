@@ -2036,6 +2036,35 @@ public class GatewayConnectionManagerTests : IDisposable
     }
 
     [Fact]
+    public async Task ConnectWithSharedTokenAsync_UnfinishedHandshakeRollsBack()
+    {
+        _registry.AddOrUpdate(new GatewayRecord
+        {
+            Id = "gw-setup",
+            Url = "wss://deferred.example",
+            BootstrapToken = "setup-bootstrap",
+        });
+        _registry.SetActive("gw-setup");
+        _registry.Save();
+        _resolver.OperatorCredential = new GatewayCredential(
+            "rejected-shared-token",
+            IsBootstrapToken: false,
+            CredentialResolver.SourceSharedGatewayToken);
+
+        var result = await _manager.ConnectWithSharedTokenAsync(
+            "wss://deferred.example",
+            "rejected-shared-token",
+            sshTunnel: null,
+            (_, _) => Task.CompletedTask);
+
+        Assert.Equal(SetupCodeOutcome.ConnectionFailed, result.Outcome);
+        Assert.False(result.GatewayCommitted);
+        Assert.Contains("did not finish", result.ErrorMessage ?? "", StringComparison.Ordinal);
+        Assert.Equal("setup-bootstrap", _registry.GetById("gw-setup")?.BootstrapToken);
+        Assert.Null(_registry.GetById("gw-setup")?.SharedGatewayToken);
+    }
+
+    [Fact]
     public async Task ConnectWithSharedTokenAsync_NewerGenerationSkipsRollback()
     {
         _registry.AddOrUpdate(new GatewayRecord

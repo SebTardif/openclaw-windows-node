@@ -220,7 +220,6 @@ internal sealed class GatewayDirectConnectService
             throw new InvalidOperationException(
                 "The committed gateway was superseded before its settings could be synchronized.");
         }
-        var previous = ConnectionSettingsSnapshot.Capture(_settings);
         try
         {
             ApplySettings(committedGateway);
@@ -228,20 +227,18 @@ internal sealed class GatewayDirectConnectService
         }
         catch (Exception ex)
         {
-            string? rollbackError = null;
             try
             {
-                previous.Restore(_settings);
+                ApplySettings(committedGateway);
                 _reconcileRuntimeTunnel();
+                return;
             }
-            catch (Exception rollbackException)
+            catch (Exception recoveryException)
             {
-                rollbackError = $" Settings rollback failed: {rollbackException.Message}";
+                throw new InvalidOperationException(
+                    $"Saved settings are out of sync with the active gateway: {ex.Message} Recovery failed: {recoveryException.Message}",
+                    ex);
             }
-
-            throw new InvalidOperationException(
-                $"Failed to synchronize gateway settings: {ex.Message}{rollbackError}",
-                ex);
         }
     }
 

@@ -441,6 +441,27 @@ public sealed class GatewayDirectConnectServiceTests : IDisposable
         Assert.Equal(1, _tunnelReconcileCount);
     }
 
+    [Fact]
+    public void SynchronizeSettings_TunnelFailure_KeepsCommittedGatewaySettings()
+    {
+        var active = AddPreviousGateway();
+        _settings.GatewayUrl = "wss://rejected.example";
+        _settings.SaveOrThrow();
+        var service = new GatewayDirectConnectService(
+            _manager,
+            _registry,
+            _settings,
+            () => throw new InvalidOperationException("tunnel down"),
+            NullLogger.Instance,
+            TimeSpan.FromMilliseconds(100));
+
+        var error = Assert.Throws<InvalidOperationException>(
+            () => service.SynchronizeSettingsWithCommittedGateway(active));
+
+        Assert.Contains("out of sync", error.Message, StringComparison.Ordinal);
+        Assert.Equal(active.Url, _settings.GatewayUrl);
+    }
+
     private GatewayDirectConnectService CreateService() =>
         new(
             _manager,
