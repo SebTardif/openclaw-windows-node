@@ -28,4 +28,36 @@ public class ConfigPathSensitivityTests
     {
         Assert.Equal(expected, ConfigPathSensitivity.IsSensitive(path));
     }
+
+    [Fact]
+    public void SchemaEditor_HidesStoredValuesInSensitiveArrays()
+    {
+        var source = File.ReadAllText(Path.Combine(
+            FindRepoRoot(),
+            "src", "OpenClaw.Tray.WinUI", "Controls", "SchemaConfigEditor.xaml.cs"));
+
+        Assert.Contains("itemType == \"string\" && IsSensitive(path)", source, StringComparison.Ordinal);
+        Assert.Contains("passwordBox.Tag = value", source, StringComparison.Ordinal);
+        Assert.DoesNotContain("Password = value", source, StringComparison.Ordinal);
+        Assert.Contains("else if (password.Tag is string existing", source, StringComparison.Ordinal);
+        Assert.Contains("if (IsSensitive(path))", source, StringComparison.Ordinal);
+        Assert.Contains("if (IsSensitive(childPath))", source, StringComparison.Ordinal);
+    }
+
+    private static string FindRepoRoot()
+    {
+        var env = Environment.GetEnvironmentVariable("OPENCLAW_REPO_ROOT");
+        if (!string.IsNullOrWhiteSpace(env) && Directory.Exists(env))
+            return env;
+
+        var directory = new DirectoryInfo(AppContext.BaseDirectory);
+        while (directory != null)
+        {
+            if (File.Exists(Path.Combine(directory.FullName, "openclaw-windows-node.slnx")))
+                return directory.FullName;
+            directory = directory.Parent;
+        }
+
+        throw new InvalidOperationException("Could not find repository root. Set OPENCLAW_REPO_ROOT to the repo path.");
+    }
 }

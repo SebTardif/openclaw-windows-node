@@ -458,6 +458,16 @@ public sealed partial class SchemaConfigEditor : UserControl
             });
         }
 
+        if (IsSensitive(path))
+        {
+            panel.Children.Add(new PasswordBox
+            {
+                IsEnabled = false,
+                PlaceholderText = "Leave blank to keep existing value"
+            });
+            return panel;
+        }
+
         var textBox = new TextBox
         {
             Text = config.ValueKind == JsonValueKind.Array
@@ -570,24 +580,48 @@ public sealed partial class SchemaConfigEditor : UserControl
         row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
         row.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
 
-        var textBox = new TextBox
+        FrameworkElement editor;
+        if (itemType == "string" && IsSensitive(path))
         {
-            Text = value,
-            MinWidth = 250,
-            Height = 34,
-            PlaceholderText = itemType switch
+            var passwordBox = new PasswordBox
             {
-                "boolean" => "true or false",
-                "integer" => "Integer value",
-                "number" => "Number value",
-                _ => "Value"
-            }
-        };
-        textBox.TextChanged += (s, e) =>
+                MinWidth = 250,
+                Height = 34,
+                PlaceholderText = string.IsNullOrEmpty(value)
+                    ? "Value"
+                    : "Leave blank to keep existing value"
+            };
+            if (!string.IsNullOrEmpty(value))
+                passwordBox.Tag = value;
+            passwordBox.PasswordChanged += (s, e) =>
+            {
+                if (_loading) return;
+                UpdateArrayChanges(itemsPanel, path, itemType, onChanged);
+            };
+            editor = passwordBox;
+        }
+        else
         {
-            if (_loading) return;
-            UpdateArrayChanges(itemsPanel, path, itemType, onChanged);
-        };
+            var textBox = new TextBox
+            {
+                Text = value,
+                MinWidth = 250,
+                Height = 34,
+                PlaceholderText = itemType switch
+                {
+                    "boolean" => "true or false",
+                    "integer" => "Integer value",
+                    "number" => "Number value",
+                    _ => "Value"
+                }
+            };
+            textBox.TextChanged += (s, e) =>
+            {
+                if (_loading) return;
+                UpdateArrayChanges(itemsPanel, path, itemType, onChanged);
+            };
+            editor = textBox;
+        }
 
         var removeBtn = new Button
         {
@@ -604,9 +638,9 @@ public sealed partial class SchemaConfigEditor : UserControl
             UpdateArrayChanges(itemsPanel, path, itemType, onChanged);
         };
 
-        Grid.SetColumn(textBox, 0);
+        Grid.SetColumn(editor, 0);
         Grid.SetColumn(removeBtn, 1);
-        row.Children.Add(textBox);
+        row.Children.Add(editor);
         row.Children.Add(removeBtn);
         itemsPanel.Children.Add(new Border
         {
@@ -624,11 +658,20 @@ public sealed partial class SchemaConfigEditor : UserControl
         var values = new List<object?>();
         foreach (var child in itemsPanel.Children)
         {
-            if (child is Border { Child: Grid row } && row.Children.Count > 0
-                && row.Children[0] is TextBox tb)
+            if (child is not Border { Child: Grid row } || row.Children.Count == 0)
+                continue;
+
+            if (row.Children[0] is PasswordBox password)
             {
-                values.Add(CoerceArrayItem(tb.Text, itemType));
+                if (!string.IsNullOrEmpty(password.Password))
+                    values.Add(password.Password);
+                else if (password.Tag is string existing && existing.Length > 0)
+                    values.Add(existing);
+                continue;
             }
+
+            if (row.Children[0] is TextBox tb)
+                values.Add(CoerceArrayItem(tb.Text, itemType));
         }
         onChanged(values.ToArray());
     }
@@ -940,6 +983,17 @@ public sealed partial class SchemaConfigEditor : UserControl
                     break;
 
                 case JsonValueKind.Array:
+                    if (IsSensitive(childPath))
+                    {
+                        parent.Children.Add(new PasswordBox
+                        {
+                            Header = GetLabel(childPath, prop.Name),
+                            IsEnabled = false,
+                            PlaceholderText = "Leave blank to keep existing value"
+                        });
+                        break;
+                    }
+
                     var arrayLabel = new TextBlock { Text = GetLabel(childPath, prop.Name), FontWeight = FontWeights.SemiBold, Margin = new Thickness(0, 8, 0, 4) };
                     parent.Children.Add(arrayLabel);
                     var arrayText = new TextBox
