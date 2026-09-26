@@ -463,6 +463,40 @@ public sealed class GatewayDirectConnectServiceTests : IDisposable
     }
 
     [Fact]
+    public void SynchronizeSettings_RollbackTunnelFailure_KeepsPreAttemptSnapshot()
+    {
+        var prior = AddPreviousGateway();
+        var priorUrl = _settings.GatewayUrl;
+        var calls = 0;
+        var service = new GatewayDirectConnectService(
+            _manager,
+            _registry,
+            _settings,
+            () =>
+            {
+                calls++;
+                if (calls > 1)
+                    throw new InvalidOperationException("tunnel down");
+            },
+            NullLogger.Instance,
+            TimeSpan.FromMilliseconds(100));
+        var candidate = prior with { Url = "wss://rejected.example" };
+        _registry.AddOrUpdate(candidate);
+        _registry.Save();
+        service.SynchronizeSettingsWithCommittedGateway(candidate);
+        Assert.Equal("wss://rejected.example", _settings.GatewayUrl);
+
+        _registry.AddOrUpdate(prior);
+        _registry.SetActive(prior.Id);
+        _registry.Save();
+        var error = Assert.Throws<InvalidOperationException>(
+            () => service.SynchronizeSettingsWithCommittedGateway(prior));
+
+        Assert.Contains("out of sync", error.Message, StringComparison.Ordinal);
+        Assert.Equal(priorUrl, _settings.GatewayUrl);
+    }
+
+    [Fact]
     public void SynchronizeSettings_NoActiveGateway_RestoresSnapshot()
     {
         var active = AddPreviousGateway();

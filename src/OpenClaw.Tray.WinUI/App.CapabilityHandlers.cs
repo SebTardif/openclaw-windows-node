@@ -317,6 +317,7 @@ public partial class App
             if (_gatewayDirectConnectService is null)
                 return new { outcome = "ConnectionFailed", error = "Gateway settings service is not initialized", connected = false };
 
+            _gatewayDirectConnectService.BeginSharedTokenSettingsAttempt();
             var result = await _connectionManager.ConnectWithSharedTokenAsync(
                 gatewayUrl,
                 token,

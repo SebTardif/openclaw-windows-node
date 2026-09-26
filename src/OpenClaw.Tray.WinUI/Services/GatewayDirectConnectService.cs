@@ -212,6 +212,9 @@ internal sealed class GatewayDirectConnectService
         }
     }
 
+    public void BeginSharedTokenSettingsAttempt() =>
+        _settingsBeforeCandidate = ConnectionSettingsSnapshot.Capture(_settings);
+
     public void SynchronizeSettingsWithCommittedGateway(GatewayRecord committedGateway)
     {
         var active = _registry.GetActive();
@@ -233,11 +236,21 @@ internal sealed class GatewayDirectConnectService
             throw new InvalidOperationException(
                 "The committed gateway was superseded before its settings could be synchronized.");
         }
-        _settingsBeforeCandidate = ConnectionSettingsSnapshot.Capture(_settings);
+
+        var capturedThisCall = false;
+        if (_settingsBeforeCandidate is null)
+        {
+            _settingsBeforeCandidate = ConnectionSettingsSnapshot.Capture(_settings);
+            capturedThisCall = true;
+        }
+
         try
         {
             ApplySettings(committedGateway);
             _reconcileRuntimeTunnel();
+            if (!capturedThisCall)
+                _settingsBeforeCandidate = null;
+            return;
         }
         catch (Exception ex)
         {
@@ -245,6 +258,8 @@ internal sealed class GatewayDirectConnectService
             {
                 ApplySettings(committedGateway);
                 _reconcileRuntimeTunnel();
+                if (!capturedThisCall)
+                    _settingsBeforeCandidate = null;
                 return;
             }
             catch (Exception recoveryException)
