@@ -442,7 +442,7 @@ public sealed class GatewayDirectConnectServiceTests : IDisposable
     }
 
     [Fact]
-    public void SynchronizeSettings_TunnelFailure_KeepsCommittedGatewaySettings()
+    public void SynchronizeSettings_TunnelFailureTwice_RestoresPriorSettings()
     {
         var active = AddPreviousGateway();
         _settings.GatewayUrl = "wss://rejected.example";
@@ -459,7 +459,7 @@ public sealed class GatewayDirectConnectServiceTests : IDisposable
             () => service.SynchronizeSettingsWithCommittedGateway(active));
 
         Assert.Contains("out of sync", error.Message, StringComparison.Ordinal);
-        Assert.Equal(active.Url, _settings.GatewayUrl);
+        Assert.Equal("wss://rejected.example", _settings.GatewayUrl);
     }
 
     [Fact]

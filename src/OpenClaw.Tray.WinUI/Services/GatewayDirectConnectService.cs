@@ -249,8 +249,24 @@ internal sealed class GatewayDirectConnectService
             }
             catch (Exception recoveryException)
             {
+                string? restoreError = null;
+                if (_settingsBeforeCandidate is not null)
+                {
+                    try
+                    {
+                        _settingsBeforeCandidate.Restore(_settings);
+                        _reconcileRuntimeTunnel();
+                    }
+                    catch (Exception restoreException)
+                    {
+                        restoreError = $" Prior settings restore failed: {restoreException.Message}";
+                    }
+
+                    _settingsBeforeCandidate = null;
+                }
+
                 throw new InvalidOperationException(
-                    $"Saved settings are out of sync with the active gateway: {ex.Message} Recovery failed: {recoveryException.Message}",
+                    $"Saved settings are out of sync with the active gateway: {ex.Message} Recovery failed: {recoveryException.Message}{restoreError}",
                     ex);
             }
         }
