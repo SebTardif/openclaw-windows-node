@@ -37,6 +37,7 @@ internal sealed class GatewayDirectConnectService
     private readonly IOpenClawLogger _logger;
     private readonly TimeSpan _terminalTimeout;
     private ConnectionSettingsSnapshot? _settingsBeforeCandidate;
+    private bool _candidateSynchronized;
 
     public GatewayDirectConnectService(
         IGatewayConnectionManager connectionManager,
@@ -212,8 +213,11 @@ internal sealed class GatewayDirectConnectService
         }
     }
 
-    public void BeginSharedTokenSettingsAttempt() =>
+    public void BeginSharedTokenSettingsAttempt()
+    {
         _settingsBeforeCandidate = ConnectionSettingsSnapshot.Capture(_settings);
+        _candidateSynchronized = false;
+    }
 
     public void SynchronizeSettingsWithCommittedGateway(GatewayRecord committedGateway)
     {
@@ -227,6 +231,7 @@ internal sealed class GatewayDirectConnectService
 
             _settingsBeforeCandidate.Restore(_settings);
             _settingsBeforeCandidate = null;
+            _candidateSynchronized = false;
             _reconcileRuntimeTunnel();
             return;
         }
@@ -237,19 +242,17 @@ internal sealed class GatewayDirectConnectService
                 "The committed gateway was superseded before its settings could be synchronized.");
         }
 
-        var capturedThisCall = false;
         if (_settingsBeforeCandidate is null)
         {
             _settingsBeforeCandidate = ConnectionSettingsSnapshot.Capture(_settings);
-            capturedThisCall = true;
+            _candidateSynchronized = false;
         }
 
         try
         {
             ApplySettings(committedGateway);
             _reconcileRuntimeTunnel();
-            if (!capturedThisCall)
-                _settingsBeforeCandidate = null;
+            FinishSettingsSynchronization();
             return;
         }
         catch (Exception ex)
@@ -258,8 +261,7 @@ internal sealed class GatewayDirectConnectService
             {
                 ApplySettings(committedGateway);
                 _reconcileRuntimeTunnel();
-                if (!capturedThisCall)
-                    _settingsBeforeCandidate = null;
+                FinishSettingsSynchronization();
                 return;
             }
             catch (Exception recoveryException)
@@ -278,6 +280,7 @@ internal sealed class GatewayDirectConnectService
                     }
 
                     _settingsBeforeCandidate = null;
+                    _candidateSynchronized = false;
                 }
 
                 throw new InvalidOperationException(
@@ -285,6 +288,18 @@ internal sealed class GatewayDirectConnectService
                     ex);
             }
         }
+    }
+
+    private void FinishSettingsSynchronization()
+    {
+        if (_candidateSynchronized)
+        {
+            _settingsBeforeCandidate = null;
+            _candidateSynchronized = false;
+            return;
+        }
+
+        _candidateSynchronized = true;
     }
 
     internal static GatewayRecord BuildCandidate(
