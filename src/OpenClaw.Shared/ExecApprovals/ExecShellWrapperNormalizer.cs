@@ -83,7 +83,7 @@ internal static class ExecShellWrapperNormalizer
             var flag = command[i].Trim();
             if (flag.Length == 0) continue;
             if (flag == "--") return null;
-            if (s_posixInlineFlags.Contains(flag))
+            if (s_posixInlineFlags.Contains(flag) || IsPosixInlineCluster(flag))
             {
                 if (i + 1 >= command.Count) return null;
                 var payload = command[i + 1].Trim();
@@ -128,6 +128,22 @@ internal static class ExecShellWrapperNormalizer
             }
         }
         return null;
+    }
+
+    private static bool IsPosixInlineCluster(string flag)
+    {
+        if (flag.Length < 3 || flag[0] != '-' || flag[1] == '-')
+            return false;
+        var sawCommand = false;
+        for (var i = 1; i < flag.Length; i++)
+        {
+            if (!char.IsLetter(flag[i]))
+                return false;
+            if (flag[i] is 'c' or 'C')
+                sawCommand = true;
+        }
+
+        return sawCommand;
     }
 
     private static bool IsPowerShellFileSwitch(string token)

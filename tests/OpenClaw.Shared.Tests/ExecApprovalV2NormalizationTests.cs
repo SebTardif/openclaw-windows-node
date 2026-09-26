@@ -48,6 +48,9 @@ public class ExecApprovalV2NormalizationTests
     [Fact] public void Normalizer_PowerShellCommandColon() => AssertWrapper(["powershell.exe", "-command:Get-Date"], "Get-Date");
     [Fact] public void Normalizer_PwshSlashCommandColon() => AssertWrapper(["pwsh.exe", "/command:Get-Date"], "Get-Date");
     [Fact] public void Normalizer_BashLoginInlineCommand() => AssertWrapper(["bash", "-l", "-c", "echo hello"], "echo hello");
+    [Fact] public void Normalizer_BashCombinedEc() => AssertWrapper(["bash", "-ec", "echo hello"], "echo hello");
+    [Fact] public void Normalizer_BashCombinedCe() => AssertWrapper(["bash", "-ce", "echo hello"], "echo hello");
+    [Fact] public void Normalizer_BashLoginCombinedEc() => AssertWrapper(["bash", "-l", "-ec", "echo hello"], "echo hello");
 
     [Fact]
     public void Normalizer_BashScript_IsNotWrapper()
@@ -56,6 +59,14 @@ public class ExecApprovalV2NormalizationTests
         Assert.False(ExecShellWrapperNormalizer.Extract(["bash", "-l", "script.sh"]).IsWrapper);
         Assert.False(ExecShellWrapperNormalizer.Extract(["bash", "script.sh", "-c", "value"]).IsWrapper);
         Assert.False(ExecShellWrapperNormalizer.Extract(["bash", "-l", "script.sh", "-c", "value"]).IsWrapper);
+        Assert.False(ExecShellWrapperNormalizer.Extract(["bash", "script.sh", "-ec", "value"]).IsWrapper);
+        Assert.False(ExecShellWrapperNormalizer.Extract(["bash", "-e", "script.sh"]).IsWrapper);
+        Assert.Null(ExecReusableCommandBinder.TryBind(
+            ["bash", "-ec", "echo hello"],
+            cwd: null,
+            env: null,
+            out var failure));
+        Assert.Equal(ExecReusableCommandBinder.BindFailure.ShellWrapper, failure);
     }
 
     [Fact]
