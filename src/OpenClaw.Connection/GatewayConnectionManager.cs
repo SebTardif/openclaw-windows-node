@@ -1981,6 +1981,9 @@ public sealed class GatewayConnectionManager :
                         : _stateMachine.Current.OperatorError ?? "Gateway connection failed.";
                     if (hasSetupCredential && !hasDurableTokens && previousRecord is not null)
                     {
+                        if (handshakeUnfinished)
+                            await DisconnectCoreAsync().ConfigureAwait(false);
+
                         _registry.AddOrUpdate(previousRecord);
                         _registry.SetActive(previousActiveId);
                         try
@@ -2012,6 +2015,43 @@ public sealed class GatewayConnectionManager :
                             previousActiveId,
                             previousOperatorWasLive,
                             onGatewayCommitted).ConfigureAwait(false);
+                        if (previousOperatorWasLive &&
+                            _stateMachine.Current.OperatorState == RoleConnectionState.Connecting)
+                        {
+                            var restoreGeneration = Interlocked.Read(ref _generation);
+                            _transitionSemaphore.Release();
+                            transitionLockHeld = false;
+                            try
+                            {
+                                await WaitForDeferredSharedTokenRejectionAsync(
+                                    restoreGeneration,
+                                    TimeSpan.FromSeconds(15)).ConfigureAwait(false);
+                            }
+                            finally
+                            {
+                                await _transitionSemaphore.WaitAsync().ConfigureAwait(false);
+                                transitionLockHeld = true;
+                            }
+
+                            if (_stateMachine.Current.OperatorState == RoleConnectionState.Error)
+                            {
+                                var connectionError =
+                                    "Failed to restore the previous gateway connection: " +
+                                    (_stateMachine.Current.OperatorError ?? "Gateway connection failed.");
+                                restoreError = string.IsNullOrWhiteSpace(restoreError)
+                                    ? connectionError
+                                    : $"{restoreError} {connectionError}";
+                            }
+                            else if (_stateMachine.Current.OperatorState == RoleConnectionState.Connecting)
+                            {
+                                const string connectionError =
+                                    "The previous gateway connection did not finish.";
+                                restoreError = string.IsNullOrWhiteSpace(restoreError)
+                                    ? connectionError
+                                    : $"{restoreError} {connectionError}";
+                            }
+                        }
+
                         return new SetupCodeResult(
                             SetupCodeOutcome.ConnectionFailed,
                             string.IsNullOrWhiteSpace(restoreError)

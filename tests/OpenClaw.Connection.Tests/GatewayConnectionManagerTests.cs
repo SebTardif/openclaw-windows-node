@@ -1983,7 +1983,7 @@ public class GatewayConnectionManagerTests : IDisposable
             {
                 committed.Add(record);
                 return Task.CompletedTask;
-            }).WaitAsync(TimeSpan.FromSeconds(10));
+            }).WaitAsync(TimeSpan.FromSeconds(25));
 
         Assert.Equal(SetupCodeOutcome.ConnectionFailed, result.Outcome);
         Assert.False(result.GatewayCommitted);
@@ -2062,6 +2062,45 @@ public class GatewayConnectionManagerTests : IDisposable
         Assert.Contains("did not finish", result.ErrorMessage ?? "", StringComparison.Ordinal);
         Assert.Equal("setup-bootstrap", _registry.GetById("gw-setup")?.BootstrapToken);
         Assert.Null(_registry.GetById("gw-setup")?.SharedGatewayToken);
+        Assert.Equal(RoleConnectionState.Idle, _manager.CurrentSnapshot.OperatorState);
+    }
+
+    [Fact]
+    public async Task ConnectWithSharedTokenAsync_UnfinishedHandshakeReconnectsPriorGateway()
+    {
+        _registry.AddOrUpdate(new GatewayRecord
+        {
+            Id = "gw-live",
+            Url = "wss://live.example",
+            BootstrapToken = "setup-bootstrap",
+        });
+        _registry.SetActive("gw-live");
+        _registry.Save();
+        _resolver.OperatorCredential = new GatewayCredential(
+            "setup-bootstrap",
+            IsBootstrapToken: true,
+            CredentialResolver.SourceBootstrapToken);
+        await _manager.ConnectAsync("gw-live");
+        _factory.CreatedClients[0].SimulateHandshake();
+        await WaitUntilAsync(
+            () => _manager.CurrentSnapshot.OperatorState == RoleConnectionState.Connected);
+
+        var result = await _manager.ConnectWithSharedTokenAsync(
+            "wss://live.example",
+            "rejected-shared-token",
+            sshTunnel: null,
+            (_, _) => Task.CompletedTask);
+
+        Assert.Equal(SetupCodeOutcome.ConnectionFailed, result.Outcome);
+        Assert.False(result.GatewayCommitted);
+        Assert.Equal("setup-bootstrap", _registry.GetById("gw-live")?.BootstrapToken);
+        Assert.True(_factory.CreatedClients.Count >= 3);
+        Assert.Equal("wss://live.example", _factory.CreatedGatewayUrls[^1]);
+        Assert.Contains(
+            "The previous gateway connection did not finish.",
+            result.ErrorMessage ?? "",
+            StringComparison.Ordinal);
+        Assert.Equal(RoleConnectionState.Connecting, _manager.CurrentSnapshot.OperatorState);
     }
 
     [Fact]

@@ -36,6 +36,7 @@ internal sealed class GatewayDirectConnectService
     private readonly Action _reconcileRuntimeTunnel;
     private readonly IOpenClawLogger _logger;
     private readonly TimeSpan _terminalTimeout;
+    private ConnectionSettingsSnapshot? _settingsBeforeCandidate;
 
     public GatewayDirectConnectService(
         IGatewayConnectionManager connectionManager,
@@ -213,13 +214,26 @@ internal sealed class GatewayDirectConnectService
 
     public void SynchronizeSettingsWithCommittedGateway(GatewayRecord committedGateway)
     {
-        var active = _registry.GetActive()
-            ?? throw new InvalidOperationException("The committed gateway is no longer active.");
+        var active = _registry.GetActive();
+        if (active is null)
+        {
+            if (_settingsBeforeCandidate is null)
+            {
+                throw new InvalidOperationException("The committed gateway is no longer active.");
+            }
+
+            _settingsBeforeCandidate.Restore(_settings);
+            _settingsBeforeCandidate = null;
+            _reconcileRuntimeTunnel();
+            return;
+        }
+
         if (!string.Equals(active.Id, committedGateway.Id, StringComparison.Ordinal))
         {
             throw new InvalidOperationException(
                 "The committed gateway was superseded before its settings could be synchronized.");
         }
+        _settingsBeforeCandidate = ConnectionSettingsSnapshot.Capture(_settings);
         try
         {
             ApplySettings(committedGateway);

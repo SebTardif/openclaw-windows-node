@@ -462,6 +462,23 @@ public sealed class GatewayDirectConnectServiceTests : IDisposable
         Assert.Equal(active.Url, _settings.GatewayUrl);
     }
 
+    [Fact]
+    public void SynchronizeSettings_NoActiveGateway_RestoresSnapshot()
+    {
+        var active = AddPreviousGateway();
+        var before = _settings.GatewayUrl;
+        var service = CreateService();
+        service.SynchronizeSettingsWithCommittedGateway(active);
+        Assert.Equal(active.Url, _settings.GatewayUrl);
+
+        _registry.SetActive(null);
+        _registry.Save();
+        service.SynchronizeSettingsWithCommittedGateway(active);
+
+        Assert.Equal(before, _settings.GatewayUrl);
+        Assert.Null(_registry.ActiveGatewayId);
+    }
+
     private GatewayDirectConnectService CreateService() =>
         new(
             _manager,
