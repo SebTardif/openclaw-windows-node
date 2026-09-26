@@ -15,7 +15,7 @@ internal static class ExecShellWrapperNormalizer
     private sealed record WrapperSpec(WrapperKind Kind, HashSet<string> Names);
 
     private static readonly HashSet<string> s_posixInlineFlags =
-        new(StringComparer.OrdinalIgnoreCase) { "-lc", "-c", "--command" };
+        new(StringComparer.Ordinal) { "-lc", "-c", "--command" };
 
     private static readonly HashSet<string> s_powerShellInlineFlags =
         new(StringComparer.OrdinalIgnoreCase) { "-c", "-command", "--command", "/c", "/command" };
@@ -139,7 +139,7 @@ internal static class ExecShellWrapperNormalizer
         {
             if (!char.IsLetter(flag[i]))
                 return false;
-            if (flag[i] is 'c' or 'C')
+            if (flag[i] == 'c')
                 sawCommand = true;
         }
 

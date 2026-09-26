@@ -53,6 +53,21 @@ public class ExecApprovalV2NormalizationTests
     [Fact] public void Normalizer_BashLoginCombinedEc() => AssertWrapper(["bash", "-l", "-ec", "echo hello"], "echo hello");
 
     [Fact]
+    public void Normalizer_BashUppercaseC_IsNoclobberNotInline()
+    {
+        Assert.False(ExecShellWrapperNormalizer.Extract(["bash", "-C", "script.sh"]).IsWrapper);
+        Assert.False(ExecShellWrapperNormalizer.Extract(["bash", "-eC", "script.sh"]).IsWrapper);
+        Assert.False(ExecShellWrapperNormalizer.Extract(["bash", "-Ce", "script.sh"]).IsWrapper);
+        var bound = ExecReusableCommandBinder.TryBind(
+            ["bash", "-eC", "script.sh"],
+            cwd: null,
+            env: null,
+            out var failure);
+        Assert.Equal(ExecReusableCommandBinder.BindFailure.None, failure);
+        Assert.NotNull(bound);
+    }
+
+    [Fact]
     public void Normalizer_BashScript_IsNotWrapper()
     {
         Assert.False(ExecShellWrapperNormalizer.Extract(["bash", "script.sh"]).IsWrapper);
