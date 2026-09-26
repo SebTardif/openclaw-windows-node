@@ -219,6 +219,71 @@ internal sealed class GatewayDirectConnectService
         _candidateSynchronized = false;
     }
 
+    internal SharedTokenSettingsAttempt CaptureSharedTokenSettingsAttempt() =>
+        new(ConnectionSettingsSnapshot.Capture(_settings));
+
+    internal void SynchronizeSettingsWithCommittedGateway(
+        GatewayRecord committedGateway,
+        SharedTokenSettingsAttempt attempt)
+    {
+        var active = _registry.GetActive();
+        if (active is null)
+        {
+            attempt.Snapshot.Restore(_settings);
+            _reconcileRuntimeTunnel();
+            return;
+        }
+
+        if (!string.Equals(active.Id, committedGateway.Id, StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException(
+                "The committed gateway was superseded before its settings could be synchronized.");
+        }
+
+        try
+        {
+            ApplySettings(committedGateway);
+            _reconcileRuntimeTunnel();
+            FinishAttempt(attempt);
+            return;
+        }
+        catch (Exception ex)
+        {
+            try
+            {
+                ApplySettings(committedGateway);
+                _reconcileRuntimeTunnel();
+                FinishAttempt(attempt);
+                return;
+            }
+            catch (Exception recoveryException)
+            {
+                string? restoreError = null;
+                try
+                {
+                    attempt.Snapshot.Restore(_settings);
+                    _reconcileRuntimeTunnel();
+                }
+                catch (Exception restoreException)
+                {
+                    restoreError = $" Prior settings restore failed: {restoreException.Message}";
+                }
+
+                throw new InvalidOperationException(
+                    $"Saved settings are out of sync with the active gateway: {ex.Message} Recovery failed: {recoveryException.Message}{restoreError}",
+                    ex);
+            }
+        }
+    }
+
+    private static void FinishAttempt(SharedTokenSettingsAttempt attempt)
+    {
+        if (attempt.CandidateSynchronized)
+            return;
+
+        attempt.CandidateSynchronized = true;
+    }
+
     public void SynchronizeSettingsWithCommittedGateway(GatewayRecord committedGateway)
     {
         var active = _registry.GetActive();
@@ -578,7 +643,16 @@ internal sealed class GatewayDirectConnectService
             gatewayCommitted,
             error);
 
-    private sealed record ConnectionSettingsSnapshot(
+    internal sealed class SharedTokenSettingsAttempt
+    {
+        internal SharedTokenSettingsAttempt(ConnectionSettingsSnapshot snapshot) => Snapshot = snapshot;
+
+        internal ConnectionSettingsSnapshot Snapshot { get; }
+
+        internal bool CandidateSynchronized { get; set; }
+    }
+
+    internal sealed record ConnectionSettingsSnapshot(
         string GatewayUrl,
         bool UseSshTunnel,
         string SshUser,
