@@ -440,13 +440,16 @@ public sealed partial class SchemaConfigEditor : UserControl
         JsonElement config, TextBlock errorBlock, Action<object?> onChanged)
     {
         var panel = new StackPanel { Spacing = 6 };
+        var hideStoredValues = IsSensitive(path);
         panel.Children.Add(new InfoBar
         {
             IsOpen = true,
             IsClosable = false,
             Severity = InfoBarSeverity.Informational,
             Title = label,
-            Message = "This array uses complex items. Edit its JSON below; local validation will run before Save is enabled."
+            Message = hideStoredValues
+                ? "Stored values in this array stay hidden. They cannot be edited on this page."
+                : "This array uses complex items. Edit its JSON below; local validation will run before Save is enabled."
         });
 
         if (!string.IsNullOrEmpty(description))
@@ -460,7 +463,7 @@ public sealed partial class SchemaConfigEditor : UserControl
             });
         }
 
-        if (IsSensitive(path))
+        if (hideStoredValues)
         {
             panel.Children.Add(new PasswordBox
             {

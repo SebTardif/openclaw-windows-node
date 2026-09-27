@@ -46,7 +46,8 @@ public class ConfigPathSensitivityTests
         Assert.DoesNotContain("passwordBox.Tag", source, StringComparison.Ordinal);
         Assert.DoesNotContain("Password = value", source, StringComparison.Ordinal);
         Assert.Contains("_keptArraySecrets.TryGetValue(password, out var existing)", source, StringComparison.Ordinal);
-        Assert.Contains("if (IsSensitive(path))", source, StringComparison.Ordinal);
+        Assert.Contains("var hideStoredValues = IsSensitive(path)", source, StringComparison.Ordinal);
+        Assert.Contains("They cannot be edited on this page.", source, StringComparison.Ordinal);
         Assert.Contains("if (IsSensitive(childPath))", source, StringComparison.Ordinal);
     }
 
