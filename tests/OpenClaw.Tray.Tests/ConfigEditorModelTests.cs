@@ -259,6 +259,36 @@ public class ConfigEditorModelTests
     }
 
     [Fact]
+    public void FindUneditedRedactionSentinel_AllowsLiteralMaskInAnUntouchedArray()
+    {
+        using var document = JsonDocument.Parse("""
+        {
+          "labels": ["***", "public"],
+          "channels": { "telegram": { "botToken": "old" } }
+        }
+        """);
+
+        var updated = ConfigEditorModel.ApplyChanges(
+            document.RootElement,
+            new Dictionary<string, object?>
+            {
+                ["channels.telegram.botToken"] = "new-token",
+            });
+
+        var blocked = ConfigEditorModel.FindUneditedRedactionSentinel(
+            updated,
+            new[] { "channels.telegram.botToken" },
+            document.RootElement);
+        var sent = ConfigEditorModel.OmitUntouchedRedactionSentinels(
+            updated,
+            new[] { "channels.telegram.botToken" });
+
+        Assert.Null(blocked);
+        Assert.Equal("***", sent.GetProperty("labels")[0].GetString());
+        Assert.Equal("new-token", sent.GetProperty("channels").GetProperty("telegram").GetProperty("botToken").GetString());
+    }
+
+    [Fact]
     public void FindUneditedRedactionSentinel_AllowsLiteralMaskInANonSecretField()
     {
         using var document = JsonDocument.Parse("""

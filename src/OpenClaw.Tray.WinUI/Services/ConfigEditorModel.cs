@@ -184,10 +184,30 @@ internal static class ConfigEditorModel
             if (edited.Contains(path))
                 return loadedSentinel ? path : null;
 
-            return path.Contains('[', StringComparison.Ordinal) ? path : null;
+            if (!path.Contains('[', StringComparison.Ordinal) || !loadedSentinel || !IsCredentialPath(path))
+                return null;
+
+            return path;
         }
 
         return null;
+    }
+
+    private static bool IsCredentialPath(string path)
+    {
+        var name = path;
+        var bracket = name.LastIndexOf('[');
+        if (bracket >= 0 && name.EndsWith("]", StringComparison.Ordinal))
+            name = name[..bracket];
+        var dot = name.LastIndexOf('.');
+        if (dot >= 0)
+            name = name[(dot + 1)..];
+
+        return name.Contains("token", StringComparison.OrdinalIgnoreCase) ||
+            name.Contains("secret", StringComparison.OrdinalIgnoreCase) ||
+            name.Contains("password", StringComparison.OrdinalIgnoreCase) ||
+            name.Contains("webhook", StringComparison.OrdinalIgnoreCase) ||
+            name.Equals("key", StringComparison.OrdinalIgnoreCase);
     }
 
     private static void RemoveUntouchedRedactionSentinels(
