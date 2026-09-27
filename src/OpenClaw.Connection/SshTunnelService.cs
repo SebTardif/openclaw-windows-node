@@ -20,7 +20,6 @@ public sealed class SshTunnelService : ISshTunnelManager
     private string? _lastSpec;
     private long _lifecycleGeneration;
     private int _browserHandoffLeases;
-    private bool _stopAfterBrowserHandoff;
 
     /// <summary>Raised when the SSH tunnel exits unexpectedly (not during shutdown).</summary>
     public event EventHandler<SshTunnelExit>? TunnelExited;
@@ -194,6 +193,9 @@ public sealed class SshTunnelService : ISshTunnelManager
                     Status = TunnelStatus.Up;
                     return;
                 }
+
+                if (_browserHandoffLeases > 0)
+                    throw new InvalidOperationException("SSH tunnel is held for a dashboard launch.");
             }
 
             StopLocked();
@@ -220,10 +222,7 @@ public sealed class SshTunnelService : ISshTunnelManager
         lock (_stateLock)
         {
             if (_browserHandoffLeases > 0)
-            {
-                _stopAfterBrowserHandoff = true;
                 return;
-            }
 
             // Claim and clear the current process before stopping it. Exit callbacks can
             // then only observe stale ownership and cannot overwrite a replacement.
@@ -670,20 +669,11 @@ public sealed class SshTunnelService : ISshTunnelManager
 
     public void ExitBrowserHandoff()
     {
-        var stop = false;
         lock (_stateLock)
         {
             if (_browserHandoffLeases > 0)
                 _browserHandoffLeases--;
-            if (_browserHandoffLeases == 0 && _stopAfterBrowserHandoff)
-            {
-                _stopAfterBrowserHandoff = false;
-                stop = true;
-            }
         }
-
-        if (stop)
-            Stop();
     }
 
     private bool IsForwardCurrentLocked(long generation, int localPort)
