@@ -3924,11 +3924,17 @@ public partial class App : Application, OpenClawTray.Services.IAppCommands, IPer
             return;
         }
 
-        var url = GatewayDashboardUrlBuilder.Build(
-            gatewayUrl,
-            path,
-            token,
-            !isBootstrapToken && credentialSource == CredentialResolver.SourceSharedGatewayToken);
+        if (!GatewayDashboardUrlBuilder.TryBuild(
+                gatewayUrl,
+                path,
+                token,
+                !isBootstrapToken && credentialSource == CredentialResolver.SourceSharedGatewayToken,
+                out var url,
+                out var urlError))
+        {
+            ShowConnectionSettingsForPairingIssue("Dashboard", urlError);
+            return;
+        }
 
         try
         {

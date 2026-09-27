@@ -81,6 +81,22 @@ public sealed class GatewayDashboardUrlBuilderTests
     }
 
     [Fact]
+    public void TryBuild_UnsupportedScheme_ReturnsFalseWithoutAUrl()
+    {
+        var ok = GatewayDashboardUrlBuilder.TryBuild(
+            "ftp://gateway.example",
+            "config",
+            "tok",
+            appendSharedGatewayToken: true,
+            out var url,
+            out var error);
+
+        Assert.False(ok);
+        Assert.Equal(string.Empty, url);
+        Assert.Contains("http, https, ws, or wss", error, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void Build_DoesNotRetainOldTokenWhenNoSharedTokenIsAppended()
     {
         var url = GatewayDashboardUrlBuilder.Build(

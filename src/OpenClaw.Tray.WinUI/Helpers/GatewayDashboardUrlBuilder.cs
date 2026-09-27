@@ -38,6 +38,28 @@ public static class GatewayDashboardUrlBuilder
         return url;
     }
 
+    public static bool TryBuild(
+        string gatewayUrl,
+        string? path,
+        string? sharedGatewayToken,
+        bool appendSharedGatewayToken,
+        out string url,
+        out string error)
+    {
+        try
+        {
+            url = Build(gatewayUrl, path, sharedGatewayToken, appendSharedGatewayToken);
+            error = string.Empty;
+            return true;
+        }
+        catch (ArgumentException ex)
+        {
+            url = string.Empty;
+            error = ex.Message;
+            return false;
+        }
+    }
+
     private static bool IsDashboardScheme(string scheme) =>
         scheme.Equals("http", StringComparison.OrdinalIgnoreCase) ||
         scheme.Equals("https", StringComparison.OrdinalIgnoreCase) ||
