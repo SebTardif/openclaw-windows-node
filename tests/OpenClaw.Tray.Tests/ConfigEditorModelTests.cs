@@ -135,7 +135,7 @@ public class ConfigEditorModelTests
     }
 
     [Fact]
-    public void FindUneditedRedactionSentinel_BlocksUntouchedRedactedSibling()
+    public void FindUneditedRedactionSentinel_OmitsUntouchedRedactedSibling()
     {
         using var document = JsonDocument.Parse("""
         {
@@ -155,11 +155,16 @@ public class ConfigEditorModelTests
 
         var blocked = ConfigEditorModel.FindUneditedRedactionSentinel(
             updated,
+            new[] { "channels.telegram.botToken" },
+            document.RootElement);
+        var sent = ConfigEditorModel.OmitUntouchedRedactionSentinels(
+            updated,
             new[] { "channels.telegram.botToken" });
 
-        Assert.Equal("channels.slack.signingSecret", blocked);
-        Assert.Equal("<redacted>", updated.GetProperty("channels").GetProperty("slack").GetProperty("signingSecret").GetString());
-        Assert.Equal("new-token", updated.GetProperty("channels").GetProperty("telegram").GetProperty("botToken").GetString());
+        Assert.Null(blocked);
+        Assert.False(sent.GetProperty("channels").GetProperty("slack").TryGetProperty("signingSecret", out _));
+        Assert.True(sent.GetProperty("channels").GetProperty("slack").GetProperty("enabled").GetBoolean());
+        Assert.Equal("new-token", sent.GetProperty("channels").GetProperty("telegram").GetProperty("botToken").GetString());
     }
 
     [Fact]
@@ -182,7 +187,8 @@ public class ConfigEditorModelTests
 
         var blocked = ConfigEditorModel.FindUneditedRedactionSentinel(
             updated,
-            new[] { "channels.telegram.botToken" });
+            new[] { "channels.telegram.botToken" },
+            document.RootElement);
 
         Assert.Null(blocked);
         Assert.Equal("real-new-token", updated.GetProperty("channels").GetProperty("telegram").GetProperty("botToken").GetString());
@@ -201,7 +207,8 @@ public class ConfigEditorModelTests
 
         var blocked = ConfigEditorModel.FindUneditedRedactionSentinel(
             document.RootElement,
-            Array.Empty<string>());
+            Array.Empty<string>(),
+            document.RootElement);
 
         Assert.Null(blocked);
     }
@@ -226,7 +233,8 @@ public class ConfigEditorModelTests
 
         var blocked = ConfigEditorModel.FindUneditedRedactionSentinel(
             updated,
-            new[] { "channels.telegram.botToken" });
+            new[] { "channels.telegram.botToken" },
+            document.RootElement);
 
         Assert.Equal("channels.telegram.botToken", blocked);
     }
@@ -244,8 +252,39 @@ public class ConfigEditorModelTests
 
         var blocked = ConfigEditorModel.FindUneditedRedactionSentinel(
             document.RootElement,
-            new[] { "channels.slack.accounts.token" });
+            new[] { "channels.slack.accounts.token" },
+            document.RootElement);
 
         Assert.Equal("channels.slack.accounts[0].token", blocked);
+    }
+
+    [Fact]
+    public void FindUneditedRedactionSentinel_AllowsLiteralMaskInANonSecretField()
+    {
+        using var document = JsonDocument.Parse("""
+        {
+          "channels": {
+            "slack": { "label": "hello", "enabled": true }
+          }
+        }
+        """);
+
+        var updated = ConfigEditorModel.ApplyChanges(
+            document.RootElement,
+            new Dictionary<string, object?>
+            {
+                ["channels.slack.label"] = "***",
+            });
+
+        var blocked = ConfigEditorModel.FindUneditedRedactionSentinel(
+            updated,
+            new[] { "channels.slack.label" },
+            document.RootElement);
+        var sent = ConfigEditorModel.OmitUntouchedRedactionSentinels(
+            updated,
+            new[] { "channels.slack.label" });
+
+        Assert.Null(blocked);
+        Assert.Equal("***", sent.GetProperty("channels").GetProperty("slack").GetProperty("label").GetString());
     }
 }

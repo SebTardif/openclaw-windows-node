@@ -117,45 +117,115 @@ internal static class ConfigEditorModel
     }
 
     public static string? FindUneditedRedactionSentinel(
+        JsonElement updated,
+        IEnumerable<string> editedPaths,
+        JsonElement baseDocument)
+    {
+        var edited = new HashSet<string>(editedPaths, StringComparer.OrdinalIgnoreCase);
+        return FindBlockedRedactionSentinel(updated, baseDocument, "", edited);
+    }
+
+    public static JsonElement OmitUntouchedRedactionSentinels(
         JsonElement document,
         IEnumerable<string> editedPaths)
     {
-        _ = editedPaths;
-        return FindUneditedRedactionSentinel(document, "");
+        var node = JsonNode.Parse(document.GetRawText());
+        if (node is null)
+            return document.Clone();
+
+        var edited = new HashSet<string>(editedPaths, StringComparer.OrdinalIgnoreCase);
+        RemoveUntouchedRedactionSentinels(node, "", edited);
+        using var rewritten = JsonDocument.Parse(node.ToJsonString());
+        return rewritten.RootElement.Clone();
     }
 
-    private static string? FindUneditedRedactionSentinel(
-        JsonElement element,
-        string path)
+    private static string? FindBlockedRedactionSentinel(
+        JsonElement updated,
+        JsonElement baseDocument,
+        string path,
+        HashSet<string> edited)
     {
-        if (element.ValueKind == JsonValueKind.Object)
+        if (updated.ValueKind == JsonValueKind.Object)
         {
-            foreach (var property in element.EnumerateObject())
+            var baseObject = baseDocument.ValueKind == JsonValueKind.Object
+                ? baseDocument
+                : default;
+            foreach (var property in updated.EnumerateObject())
             {
                 var childPath = string.IsNullOrEmpty(path) ? property.Name : $"{path}.{property.Name}";
-                var hit = FindUneditedRedactionSentinel(property.Value, childPath);
+                var childBase = default(JsonElement);
+                if (baseObject.ValueKind == JsonValueKind.Object)
+                    baseObject.TryGetProperty(property.Name, out childBase);
+                var hit = FindBlockedRedactionSentinel(property.Value, childBase, childPath, edited);
                 if (hit != null)
                     return hit;
             }
         }
-        else if (element.ValueKind == JsonValueKind.Array)
+        else if (updated.ValueKind == JsonValueKind.Array)
         {
             var index = 0;
-            foreach (var item in element.EnumerateArray())
+            foreach (var item in updated.EnumerateArray())
             {
-                var childPath = $"{path}[{index++}]";
-                var hit = FindUneditedRedactionSentinel(item, childPath);
+                var childPath = $"{path}[{index}]";
+                var childBase = default(JsonElement);
+                if (baseDocument.ValueKind == JsonValueKind.Array && index < baseDocument.GetArrayLength())
+                    childBase = baseDocument[index];
+                index++;
+                var hit = FindBlockedRedactionSentinel(item, childBase, childPath, edited);
                 if (hit != null)
                     return hit;
             }
         }
-        else if (element.ValueKind == JsonValueKind.String &&
-                 ChannelConfigPatchBuilder.IsRedactionSentinel(element.GetString()))
+        else if (updated.ValueKind == JsonValueKind.String &&
+                 ChannelConfigPatchBuilder.IsRedactionSentinel(updated.GetString()))
         {
-            return path;
+            var loadedSentinel = baseDocument.ValueKind == JsonValueKind.String &&
+                                 ChannelConfigPatchBuilder.IsRedactionSentinel(baseDocument.GetString());
+            if (edited.Contains(path))
+                return loadedSentinel ? path : null;
+
+            return path.Contains('[', StringComparison.Ordinal) ? path : null;
         }
 
         return null;
+    }
+
+    private static void RemoveUntouchedRedactionSentinels(
+        JsonNode node,
+        string path,
+        HashSet<string> edited)
+    {
+        if (node is JsonObject obj)
+        {
+            var removals = new List<string>();
+            foreach (var property in obj)
+            {
+                var childPath = string.IsNullOrEmpty(path) ? property.Key : $"{path}.{property.Key}";
+                if (property.Value is JsonValue value &&
+                    value.TryGetValue<string>(out var text) &&
+                    ChannelConfigPatchBuilder.IsRedactionSentinel(text) &&
+                    !edited.Contains(childPath) &&
+                    !childPath.Contains('[', StringComparison.Ordinal))
+                {
+                    removals.Add(property.Key);
+                    continue;
+                }
+
+                if (property.Value is not null)
+                    RemoveUntouchedRedactionSentinels(property.Value, childPath, edited);
+            }
+
+            foreach (var key in removals)
+                obj.Remove(key);
+        }
+        else if (node is JsonArray array)
+        {
+            for (var index = 0; index < array.Count; index++)
+            {
+                if (array[index] is JsonNode item)
+                    RemoveUntouchedRedactionSentinels(item, $"{path}[{index}]", edited);
+            }
+        }
     }
 
     private static void SetPath(JsonNode node, string dotPath, JsonNode? value)

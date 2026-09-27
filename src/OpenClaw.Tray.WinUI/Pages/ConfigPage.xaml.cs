@@ -550,7 +550,10 @@ public sealed partial class ConfigPage : Page
         try
         {
             var updated = ConfigEditorModel.ApplyChanges(saveBase.Root, _pendingChanges);
-            var blockedPath = ConfigEditorModel.FindUneditedRedactionSentinel(updated, _pendingChanges.Keys);
+            var blockedPath = ConfigEditorModel.FindUneditedRedactionSentinel(
+                updated,
+                _pendingChanges.Keys,
+                saveBase.Root);
             if (blockedPath != null)
             {
                 ShowStatus(
@@ -559,6 +562,8 @@ public sealed partial class ConfigPage : Page
                     InfoBarSeverity.Error);
                 return;
             }
+
+            updated = ConfigEditorModel.OmitUntouchedRedactionSentinels(updated, _pendingChanges.Keys);
 
             var result = await client.PatchConfigDetailedAsync(updated, saveBase.BaseHash);
             if (!result.Ok)
