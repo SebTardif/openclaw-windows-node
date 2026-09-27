@@ -355,6 +355,7 @@ public sealed class SshTunnelServiceTests
         Assert.NotEqual(TunnelStatus.Up, service.Status);
         Assert.Contains(port.ToString(), service.LastError);
         Assert.Contains("already owned", service.LastError);
+        Assert.False(service.IsSettingsOwnedForwardCurrent(service.OwnershipGeneration, port));
     }
 
     [Fact]

@@ -472,13 +472,17 @@ public sealed class AppRefactorContractTests
         var source = ReadAppSources();
         var method = ExtractMethod(source, "OpenDashboardAsync");
 
-        Assert.Contains("if (!await EnsureDashboardSshForwardOwnedAsync())", method);
+        Assert.Contains("var sshGate = await EnsureDashboardSshForwardOwnedAsync();", method);
+        Assert.Contains("if (!sshGate.Allowed)", method);
         Assert.Contains("_toastService?.ShowToast", method);
         Assert.Contains("Check SSH tunnel settings and logs.", method);
+        Assert.Contains("IsSettingsOwnedForwardCurrent(generation, sshGate.LocalPort)", method);
         AssertInOrder(
             method,
             "await EnsureDashboardSshForwardOwnedAsync()",
-            "GatewayDashboardUrlBuilder.Build(");
+            "GatewayDashboardUrlBuilder.Build(",
+            "IsSettingsOwnedForwardCurrent(generation, sshGate.LocalPort)",
+            "Process.Start(");
         Assert.DoesNotContain("EnsureStarted(", method);
     }
 
@@ -490,9 +494,10 @@ public sealed class AppRefactorContractTests
 
         Assert.Contains("if (!_settings.UseSshTunnel)", gate);
         Assert.Contains("_sshTunnelService?.Stop()", gate);
-        Assert.Contains("return true;", gate);
+        Assert.Contains("return (true, null, 0);", gate);
         Assert.Contains("EnsureSettingsOwnedForwardReadyAsync(", gate);
         Assert.Contains("if (!owned)", gate);
+        Assert.Contains("OwnershipGeneration", gate);
         Assert.DoesNotContain("GatewayDashboardUrlBuilder.Build(", gate);
         Assert.DoesNotContain("EnsureStarted(", gate);
         AssertInOrder(

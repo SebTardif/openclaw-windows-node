@@ -3916,7 +3916,8 @@ public partial class App : Application, OpenClawTray.Services.IAppCommands, IPer
     private async Task OpenDashboardAsync(string? path)
     {
         if (_settings == null) return;
-        if (!await EnsureDashboardSshForwardOwnedAsync())
+        var sshGate = await EnsureDashboardSshForwardOwnedAsync();
+        if (!sshGate.Allowed)
         {
             _toastService?.ShowToast(new ToastContentBuilder()
                 .AddText("SSH tunnel")
@@ -3937,6 +3938,15 @@ public partial class App : Application, OpenClawTray.Services.IAppCommands, IPer
             path,
             token,
             !isBootstrapToken && credentialSource == CredentialResolver.SourceSharedGatewayToken);
+
+        if (sshGate.Generation is long generation &&
+            _sshTunnelService?.IsSettingsOwnedForwardCurrent(generation, sshGate.LocalPort) != true)
+        {
+            _toastService?.ShowToast(new ToastContentBuilder()
+                .AddText("SSH tunnel")
+                .AddText("SSH tunnel changed before the dashboard could open."));
+            return;
+        }
 
         try
         {
@@ -4268,17 +4278,17 @@ public partial class App : Application, OpenClawTray.Services.IAppCommands, IPer
 
     #endregion
 
-    private async Task<bool> EnsureDashboardSshForwardOwnedAsync()
+    private async Task<(bool Allowed, long? Generation, int LocalPort)> EnsureDashboardSshForwardOwnedAsync()
     {
         if (_settings == null)
         {
-            return false;
+            return (false, null, 0);
         }
 
         if (!_settings.UseSshTunnel)
         {
             _sshTunnelService?.Stop();
-            return true;
+            return (true, null, 0);
         }
 
         if (string.IsNullOrWhiteSpace(_settings.SshTunnelUser) ||
@@ -4288,7 +4298,7 @@ public partial class App : Application, OpenClawTray.Services.IAppCommands, IPer
         {
             Logger.Warn("SSH tunnel is enabled but settings are incomplete");
             UpdateTrayIcon();
-            return false;
+            return (false, null, 0);
         }
 
         try
@@ -4317,17 +4327,17 @@ public partial class App : Application, OpenClawTray.Services.IAppCommands, IPer
             if (!owned)
             {
                 UpdateTrayIcon();
-                return false;
+                return (false, null, 0);
             }
+
+            return (true, _sshTunnelService.OwnershipGeneration, _sshTunnelService.CurrentLocalPort);
         }
         catch (Exception ex)
         {
             Logger.Error($"Failed to start SSH tunnel: {ex.Message}");
             UpdateTrayIcon();
-            return false;
+            return (false, null, 0);
         }
-
-        return true;
     }
 
     private void OnSshTunnelExited(object? sender, SshTunnelExit tunnelExit) =>

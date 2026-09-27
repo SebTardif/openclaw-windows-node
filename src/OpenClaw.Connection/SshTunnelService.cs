@@ -616,6 +616,20 @@ public sealed class SshTunnelService : ISshTunnelManager
         }
         catch (Exception ex)
         {
+            var stillCurrent = false;
+            lock (_stateLock)
+            {
+                stillCurrent = process is null
+                    ? _process is null
+                    : generation == _lifecycleGeneration && ReferenceEquals(_process, process);
+            }
+
+            if (!stillCurrent)
+            {
+                _logger.Warn($"SSH dashboard forward wait lost ownership: {ex.Message}");
+                return false;
+            }
+
             if (process is not null)
                 StopIfCurrent(process, generation);
 
@@ -627,6 +641,17 @@ public sealed class SshTunnelService : ISshTunnelManager
 
             _logger.Warn($"SSH dashboard forward is not owned: {ex.Message}");
             return false;
+        }
+    }
+
+    public bool IsSettingsOwnedForwardCurrent(long generation, int localPort)
+    {
+        lock (_stateLock)
+        {
+            return generation == _lifecycleGeneration &&
+                IsRunningLocked() &&
+                _currentOwner == SshTunnelOwner.Settings &&
+                _currentConfig?.LocalPort == localPort;
         }
     }
 
