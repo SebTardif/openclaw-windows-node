@@ -3515,6 +3515,49 @@ public class SetupStepsTests : IDisposable
     }
 
     [Fact]
+    public async Task CreateWslInstance_UninstallSkipsUnregisterWhenListProvesAbsent()
+    {
+        var commands = new FakeCommandRunner(args =>
+            args.SequenceEqual(["--list", "--quiet"])
+                ? Ok("")
+                : Fail($"unexpected args: {string.Join(' ', args)}"));
+        var ctx = CreateContext(commands: commands);
+        ctx.IsUninstalling = true;
+
+        await new CreateWslInstanceStep().RollbackAsync(ctx, CancellationToken.None);
+
+        Assert.DoesNotContain(commands.Calls, call => call.Arguments.Contains("--unregister"));
+        Assert.DoesNotContain(commands.Calls, call => call.Arguments.Contains("--terminate"));
+    }
+
+    [Fact]
+    public async Task CreateWslInstance_KeepsMarkerWhenRefusedRegistrationSurvivesWithoutInstallPath()
+    {
+        var listCalls = 0;
+        var commands = new FakeCommandRunner(args =>
+        {
+            if (args.SequenceEqual(["--list", "--quiet"]))
+                return Ok(++listCalls == 1 ? "" : "OpenClawGateway\n");
+            if (args.Contains("--install"))
+                return Fail("download failed");
+            if (args.SequenceEqual(["--terminate", "OpenClawGateway"]) ||
+                args.SequenceEqual(["--unregister", "OpenClawGateway"]))
+                return Ok();
+            return Fail($"unexpected args: {string.Join(' ', args)}");
+        });
+        var ctx = CreateContext(commands: commands);
+        var step = new CreateWslInstanceStep(
+            FakeWslRegistrationInspector.Found(@"C:\other-distro"));
+
+        var result = await step.ExecuteAsync(ctx, CancellationToken.None);
+
+        Assert.Equal(StepOutcome.Failed, result.Outcome);
+        Assert.Contains("live WSL registration is not this install", result.Message);
+        Assert.DoesNotContain(commands.Calls, call => call.Arguments.Contains("--unregister"));
+        Assert.True(ManagedDistroOwnership.HasPathBoundMarkerEvidence(ctx.LocalDataDir, ctx.DistroName!));
+    }
+
+    [Fact]
     public async Task CreateWslInstance_UninstallUnregistersWhenDistroListFails()
     {
         var commands = new FakeCommandRunner(args =>

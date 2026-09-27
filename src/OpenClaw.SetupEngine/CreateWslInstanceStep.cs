@@ -216,7 +216,8 @@ public sealed class CreateWslInstanceStep : SetupStep
 
         if (ctx.IsUninstalling)
         {
-            canDeleteInstallPath = await TryUnregisterPartialInstall(ctx, distro, cleanupErrors, ct);
+            if (!(registrationStateKnown && !distroExists))
+                canDeleteInstallPath = await TryUnregisterPartialInstall(ctx, distro, cleanupErrors, ct);
         }
         else if (!registrationStateKnown)
         {
@@ -234,6 +235,8 @@ public sealed class CreateWslInstanceStep : SetupStep
             {
                 ctx.Logger.Warn(
                     $"Refusing to unregister '{distro}' because the live WSL registration is not this install: {registrationFailure}");
+                cleanupErrors.Add(
+                    $"refusing to unregister '{distro}' because the live WSL registration is not this install: {registrationFailure}");
             }
             else
             {
@@ -243,6 +246,7 @@ public sealed class CreateWslInstanceStep : SetupStep
         else if (distroExists)
         {
             ctx.Logger.Warn($"Refusing to unregister '{distro}' because this install did not create it");
+            cleanupErrors.Add($"refusing to unregister '{distro}' because this install did not create it");
         }
 
         if (!canDeleteInstallPath)
