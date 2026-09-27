@@ -45,6 +45,7 @@ public sealed partial class CanvasWindow : WindowEx
     private bool _isFullScreen;
     private string? _pendingUrl;
     private string? _pendingHtml;
+    private bool _nativeA2uiNavigationPending;
     private readonly TaskCompletionSource<bool> _webViewReadyTcs = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private TaskCompletionSource<bool>? _navigationTcs;
 
@@ -395,6 +396,7 @@ public sealed partial class CanvasWindow : WindowEx
                 // Re-validate URL before navigation (defense in depth)
                 if (IsUrlSafe(url))
                 {
+                    NoteNativeA2uiNavigation(url);
                     CanvasWebView.CoreWebView2.Navigate(url);
                 }
                 else
@@ -406,6 +408,7 @@ public sealed partial class CanvasWindow : WindowEx
             {
                 var html = _pendingHtml;
                 _pendingHtml = null;
+                _nativeA2uiNavigationPending = false;
                 CanvasWebView.CoreWebView2.NavigateToString(html);
             }
             else
@@ -486,7 +489,12 @@ public sealed partial class CanvasWindow : WindowEx
             return;
 
         var initiator = RequestHeader(args, "Referer");
-        if (CanvasGatewayAuth.ShouldAttachGatewayBearer(sender.Source, args.Request.Uri, trustedOrigin, initiator))
+        if (CanvasGatewayAuth.ShouldAttachGatewayBearer(
+                sender.Source,
+                args.Request.Uri,
+                trustedOrigin,
+                initiator,
+                _nativeA2uiNavigationPending))
         {
             args.Request.Headers.SetHeader("Authorization", $"Bearer {token}");
         }
@@ -502,6 +510,7 @@ public sealed partial class CanvasWindow : WindowEx
     
     private void OnNavigationCompleted(CoreWebView2 sender, CoreWebView2NavigationCompletedEventArgs args)
     {
+        _nativeA2uiNavigationPending = false;
         if (_navigationTcs != null)
         {
             var tcs = _navigationTcs;
@@ -593,6 +602,7 @@ public sealed partial class CanvasWindow : WindowEx
         
         if (_isWebViewInitialized)
         {
+            NoteNativeA2uiNavigation(url);
             CanvasWebView.CoreWebView2.Navigate(url);
         }
         else
@@ -613,6 +623,7 @@ public sealed partial class CanvasWindow : WindowEx
         
         if (_isWebViewInitialized)
         {
+            _nativeA2uiNavigationPending = false;
             CanvasWebView.CoreWebView2.NavigateToString(html);
         }
         else
@@ -782,8 +793,14 @@ public sealed partial class CanvasWindow : WindowEx
     {
         var tcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
         _navigationTcs = tcs;
+        NoteNativeA2uiNavigation(url);
         CanvasWebView.CoreWebView2.Navigate(url);
         return tcs.Task;
+    }
+
+    private void NoteNativeA2uiNavigation(string url)
+    {
+        _nativeA2uiNavigationPending = IsTrustedA2UIUrl(url);
     }
     
     private static bool IsTrustedA2UIUrl(string url)

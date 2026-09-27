@@ -46,10 +46,21 @@ public class CanvasGatewayAuthTests
     [Fact]
     public void ShouldAttach_WhenDocumentIsAboutBlankDuringFirstNavigation()
     {
-        Assert.True(CanvasGatewayAuth.ShouldAttachGatewayBearer(
+        Assert.False(CanvasGatewayAuth.ShouldAttachGatewayBearer(
             "about:blank",
             TrustedOrigin + "/__openclaw__/a2ui/index.html",
             TrustedOrigin));
+    }
+
+    [Fact]
+    public void ShouldAttach_WhenNativeA2uiNavigationIsPendingFromAboutBlank()
+    {
+        Assert.True(CanvasGatewayAuth.ShouldAttachGatewayBearer(
+            "about:blank",
+            TrustedOrigin + "/__openclaw__/a2ui/index.html",
+            TrustedOrigin,
+            initiatorUri: null,
+            nativeA2uiNavigationPending: true));
     }
 
     [Fact]

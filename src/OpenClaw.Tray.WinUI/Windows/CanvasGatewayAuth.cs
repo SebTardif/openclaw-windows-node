@@ -8,7 +8,8 @@ public static class CanvasGatewayAuth
         string? documentUri,
         string? requestUri,
         string? trustedGatewayOrigin,
-        string? initiatorUri = null)
+        string? initiatorUri = null,
+        bool nativeA2uiNavigationPending = false)
     {
         if (string.IsNullOrEmpty(requestUri) || string.IsNullOrEmpty(trustedGatewayOrigin))
             return false;
@@ -16,11 +17,16 @@ public static class CanvasGatewayAuth
         if (!IsOriginMatch(requestUri, trustedGatewayOrigin))
             return false;
 
-        // A missing Referer must not inherit the top-level document. The only
-        // request without an initiator that may carry the bearer is the first
-        // A2UI navigation, while the document is still about:blank.
+        // A missing Referer must not inherit the top-level document.
+        // NavigateToString also stays on about:blank, so that document is not
+        // enough. The bearer is attached only while this window is navigating
+        // to the native A2UI URL.
         if (string.IsNullOrEmpty(initiatorUri))
-            return IsAboutBlank(documentUri) && IsTrustedA2uiNavigation(requestUri);
+        {
+            return nativeA2uiNavigationPending &&
+                IsAboutBlank(documentUri) &&
+                IsTrustedA2uiNavigation(requestUri);
+        }
 
         if (IsAboutBlank(initiatorUri))
             return false;
