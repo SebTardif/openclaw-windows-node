@@ -4263,9 +4263,12 @@ public class SetupStepsTests : IDisposable
 
         var suspend = await new SetupWizardRunner(ctx).SuspendReloadModeAsync();
         var restore = await new SetupWizardRunner(ctx).RestoreReloadModeAsync();
+        var run = await new SetupWizardRunner(ctx).RunAsync(CancellationToken.None);
 
         Assert.Equal(StepOutcome.FailedTerminal, suspend.Outcome);
         Assert.Equal(StepOutcome.FailedTerminal, restore.Outcome);
+        Assert.Equal(StepOutcome.FailedTerminal, run.Outcome);
+        Assert.Contains("Invalid WSL user", run.Message);
         Assert.Contains("Invalid WSL user", suspend.Message);
         Assert.Contains("Invalid WSL user", restore.Message);
         Assert.Empty(commands.WslCalls);

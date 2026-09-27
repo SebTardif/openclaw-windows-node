@@ -142,6 +142,10 @@ public sealed class SetupWizardRunner
 
     private async Task<StepResult> RunCoreAsync(CancellationToken ct)
     {
+        var invalidUser = RejectInvalidLinuxUser();
+        if (invalidUser is not null)
+            return invalidUser;
+
         var registry = new GatewayRegistry(_ctx.DataDir, logger: new SetupOpenClawLogger(_ctx.Logger));
         registry.Load();
 
