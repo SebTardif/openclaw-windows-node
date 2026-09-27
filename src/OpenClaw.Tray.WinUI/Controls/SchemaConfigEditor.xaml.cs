@@ -406,7 +406,7 @@ public sealed partial class SchemaConfigEditor : UserControl
         {
             foreach (var item in config.EnumerateArray())
             {
-                AddArrayItem(itemsPanel, path, itemType, FormatScalar(item), onChanged);
+                AddArrayItem(itemsPanel, path, itemType, FormatScalar(item), onChanged, existingRow: true);
             }
         }
 
@@ -572,7 +572,7 @@ public sealed partial class SchemaConfigEditor : UserControl
         return panel;
     }
 
-    private void AddArrayItem(StackPanel itemsPanel, string path, string itemType, string value, Action<object?> onChanged)
+    private void AddArrayItem(StackPanel itemsPanel, string path, string itemType, string value, Action<object?> onChanged, bool existingRow = false)
     {
         var row = new Grid
         {
@@ -589,11 +589,11 @@ public sealed partial class SchemaConfigEditor : UserControl
             {
                 MinWidth = 250,
                 Height = 34,
-                PlaceholderText = string.IsNullOrEmpty(value)
-                    ? "Value"
-                    : "Leave blank to keep existing value"
+                PlaceholderText = existingRow
+                    ? "Leave blank to keep existing value"
+                    : "Value"
             };
-            if (!string.IsNullOrEmpty(value))
+            if (existingRow)
                 _keptArraySecrets[passwordBox] = value;
             passwordBox.PasswordChanged += (s, e) =>
             {
@@ -669,7 +669,7 @@ public sealed partial class SchemaConfigEditor : UserControl
             {
                 if (!string.IsNullOrEmpty(password.Password))
                     values.Add(password.Password);
-                else if (_keptArraySecrets.TryGetValue(password, out var existing) && existing.Length > 0)
+                else if (_keptArraySecrets.TryGetValue(password, out var existing))
                     values.Add(existing);
                 continue;
             }

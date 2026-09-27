@@ -39,7 +39,10 @@ public class ConfigPathSensitivityTests
             "src", "OpenClaw.Tray.WinUI", "Controls", "SchemaConfigEditor.xaml.cs"));
 
         Assert.Contains("itemType == \"string\" && IsSensitive(path)", source, StringComparison.Ordinal);
+        Assert.Contains("existingRow: true", source, StringComparison.Ordinal);
+        Assert.Contains("if (existingRow)", source, StringComparison.Ordinal);
         Assert.Contains("_keptArraySecrets[passwordBox] = value", source, StringComparison.Ordinal);
+        Assert.DoesNotContain("existing.Length > 0", source, StringComparison.Ordinal);
         Assert.DoesNotContain("passwordBox.Tag", source, StringComparison.Ordinal);
         Assert.DoesNotContain("Password = value", source, StringComparison.Ordinal);
         Assert.Contains("_keptArraySecrets.TryGetValue(password, out var existing)", source, StringComparison.Ordinal);
