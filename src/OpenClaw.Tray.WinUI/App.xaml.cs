@@ -3939,13 +3939,19 @@ public partial class App : Application, OpenClawTray.Services.IAppCommands, IPer
             token,
             !isBootstrapToken && credentialSource == CredentialResolver.SourceSharedGatewayToken);
 
-        if (sshGate.Generation is long generation &&
-            _sshTunnelService?.IsSettingsOwnedForwardCurrent(generation, sshGate.LocalPort) != true)
+        var handoff = false;
+        if (sshGate.Generation is long generation)
         {
-            _toastService?.ShowToast(new ToastContentBuilder()
-                .AddText("SSH tunnel")
-                .AddText("SSH tunnel changed before the dashboard could open."));
-            return;
+            if (!DashboardUrlUsesOwnedForward(url, sshGate.LocalPort) ||
+                _sshTunnelService?.TryEnterBrowserHandoff(generation, sshGate.LocalPort) != true)
+            {
+                _toastService?.ShowToast(new ToastContentBuilder()
+                    .AddText("SSH tunnel")
+                    .AddText("SSH tunnel changed before the dashboard could open."));
+                return;
+            }
+
+            handoff = true;
         }
 
         try
@@ -3956,6 +3962,20 @@ public partial class App : Application, OpenClawTray.Services.IAppCommands, IPer
         {
             Logger.Error($"Failed to open dashboard: {ex.Message}");
         }
+        finally
+        {
+            if (handoff)
+                _sshTunnelService?.ExitBrowserHandoff();
+        }
+    }
+
+    private static bool DashboardUrlUsesOwnedForward(string url, int localPort)
+    {
+        if (!Uri.TryCreate(url, UriKind.Absolute, out var uri))
+            return false;
+
+        var loopback = uri.Host is "127.0.0.1" or "localhost" or "::1";
+        return loopback && uri.Port == localPort;
     }
 
     // ── IAppCommands implementation ─────────────────────────────────────

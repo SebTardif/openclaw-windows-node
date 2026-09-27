@@ -476,13 +476,16 @@ public sealed class AppRefactorContractTests
         Assert.Contains("if (!sshGate.Allowed)", method);
         Assert.Contains("_toastService?.ShowToast", method);
         Assert.Contains("Check SSH tunnel settings and logs.", method);
-        Assert.Contains("IsSettingsOwnedForwardCurrent(generation, sshGate.LocalPort)", method);
+        Assert.Contains("DashboardUrlUsesOwnedForward(url, sshGate.LocalPort)", method);
+        Assert.Contains("TryEnterBrowserHandoff(generation, sshGate.LocalPort)", method);
+        Assert.Contains("ExitBrowserHandoff()", method);
         AssertInOrder(
             method,
             "await EnsureDashboardSshForwardOwnedAsync()",
             "GatewayDashboardUrlBuilder.Build(",
-            "IsSettingsOwnedForwardCurrent(generation, sshGate.LocalPort)",
-            "Process.Start(");
+            "TryEnterBrowserHandoff(generation, sshGate.LocalPort)",
+            "Process.Start(",
+            "ExitBrowserHandoff()");
         Assert.DoesNotContain("EnsureStarted(", method);
     }
 

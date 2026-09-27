@@ -19,6 +19,8 @@ public sealed class SshTunnelService : ISshTunnelManager
     private SshTunnelOwner _currentOwner;
     private string? _lastSpec;
     private long _lifecycleGeneration;
+    private int _browserHandoffLeases;
+    private bool _stopAfterBrowserHandoff;
 
     /// <summary>Raised when the SSH tunnel exits unexpectedly (not during shutdown).</summary>
     public event EventHandler<SshTunnelExit>? TunnelExited;
@@ -217,6 +219,12 @@ public sealed class SshTunnelService : ISshTunnelManager
         Process? process;
         lock (_stateLock)
         {
+            if (_browserHandoffLeases > 0)
+            {
+                _stopAfterBrowserHandoff = true;
+                return;
+            }
+
             // Claim and clear the current process before stopping it. Exit callbacks can
             // then only observe stale ownership and cannot overwrite a replacement.
             _lifecycleGeneration++;
@@ -622,22 +630,18 @@ public sealed class SshTunnelService : ISshTunnelManager
                 stillCurrent = process is null
                     ? _process is null
                     : generation == _lifecycleGeneration && ReferenceEquals(_process, process);
-            }
+                if (!stillCurrent)
+                {
+                    _logger.Warn($"SSH dashboard forward wait lost ownership: {ex.Message}");
+                    return false;
+                }
 
-            if (!stillCurrent)
-            {
-                _logger.Warn($"SSH dashboard forward wait lost ownership: {ex.Message}");
-                return false;
+                LastError = ex.Message;
+                Status = TunnelStatus.Failed;
             }
 
             if (process is not null)
                 StopIfCurrent(process, generation);
-
-            lock (_stateLock)
-            {
-                LastError = ex.Message;
-                Status = TunnelStatus.Failed;
-            }
 
             _logger.Warn($"SSH dashboard forward is not owned: {ex.Message}");
             return false;
@@ -648,11 +652,46 @@ public sealed class SshTunnelService : ISshTunnelManager
     {
         lock (_stateLock)
         {
-            return generation == _lifecycleGeneration &&
-                IsRunningLocked() &&
-                _currentOwner == SshTunnelOwner.Settings &&
-                _currentConfig?.LocalPort == localPort;
+            return IsForwardCurrentLocked(generation, localPort);
         }
+    }
+
+    public bool TryEnterBrowserHandoff(long generation, int localPort)
+    {
+        lock (_stateLock)
+        {
+            if (!IsForwardCurrentLocked(generation, localPort))
+                return false;
+
+            _browserHandoffLeases++;
+            return true;
+        }
+    }
+
+    public void ExitBrowserHandoff()
+    {
+        var stop = false;
+        lock (_stateLock)
+        {
+            if (_browserHandoffLeases > 0)
+                _browserHandoffLeases--;
+            if (_browserHandoffLeases == 0 && _stopAfterBrowserHandoff)
+            {
+                _stopAfterBrowserHandoff = false;
+                stop = true;
+            }
+        }
+
+        if (stop)
+            Stop();
+    }
+
+    private bool IsForwardCurrentLocked(long generation, int localPort)
+    {
+        return generation == _lifecycleGeneration &&
+            IsRunningLocked() &&
+            _currentOwner is SshTunnelOwner.Settings or SshTunnelOwner.GatewayConnectionManager &&
+            _currentConfig?.LocalPort == localPort;
     }
 
     private static void RejectOccupiedForwardPorts(SshTunnelConfig tunnel)
