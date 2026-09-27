@@ -29,6 +29,7 @@ public sealed partial class SchemaConfigEditor : UserControl
     private bool _loading;
     private readonly Dictionary<string, object?> _changes = new(StringComparer.Ordinal);
     private readonly Dictionary<string, string> _validationErrors = new(StringComparer.Ordinal);
+    private readonly Dictionary<PasswordBox, string> _keptArraySecrets = new();
     private static readonly TimeSpan PatternValidationTimeout = TimeSpan.FromMilliseconds(200);
 
     private static readonly Regex CamelCaseSplitPattern = new(
@@ -53,6 +54,7 @@ public sealed partial class SchemaConfigEditor : UserControl
         _config = config;
         _changes.Clear();
         _validationErrors.Clear();
+        _keptArraySecrets.Clear();
         FieldsPanel.Children.Clear();
 
         try
@@ -592,7 +594,7 @@ public sealed partial class SchemaConfigEditor : UserControl
                     : "Leave blank to keep existing value"
             };
             if (!string.IsNullOrEmpty(value))
-                passwordBox.Tag = value;
+                _keptArraySecrets[passwordBox] = value;
             passwordBox.PasswordChanged += (s, e) =>
             {
                 if (_loading) return;
@@ -633,6 +635,8 @@ public sealed partial class SchemaConfigEditor : UserControl
         ToolTipService.SetToolTip(removeBtn, "Remove item");
         removeBtn.Click += (s, e) =>
         {
+            if (row.Children[0] is PasswordBox removed)
+                _keptArraySecrets.Remove(removed);
             if (row.Parent is Border border)
                 itemsPanel.Children.Remove(border);
             UpdateArrayChanges(itemsPanel, path, itemType, onChanged);
@@ -665,7 +669,7 @@ public sealed partial class SchemaConfigEditor : UserControl
             {
                 if (!string.IsNullOrEmpty(password.Password))
                     values.Add(password.Password);
-                else if (password.Tag is string existing && existing.Length > 0)
+                else if (_keptArraySecrets.TryGetValue(password, out var existing) && existing.Length > 0)
                     values.Add(existing);
                 continue;
             }

@@ -12,7 +12,9 @@ public class ConfigPathSensitivityTests
     [InlineData("channels.nostr.PrivateKey", true)]
     [InlineData("privateKey", true)]
     [InlineData("channels.googlechat.webhookUrl", true)]
+    [InlineData("channels.googlechat.webhookUrlExtra", false)]
     [InlineData("channels.slack.webhookUrls", true)]
+    [InlineData("channels.slack.WebhookUrls", true)]
     [InlineData("channels.discord.token", true)]
     [InlineData("channels.slack.signingSecret", true)]
     [InlineData("channels.telegram.botToken", true)]
@@ -37,9 +39,10 @@ public class ConfigPathSensitivityTests
             "src", "OpenClaw.Tray.WinUI", "Controls", "SchemaConfigEditor.xaml.cs"));
 
         Assert.Contains("itemType == \"string\" && IsSensitive(path)", source, StringComparison.Ordinal);
-        Assert.Contains("passwordBox.Tag = value", source, StringComparison.Ordinal);
+        Assert.Contains("_keptArraySecrets[passwordBox] = value", source, StringComparison.Ordinal);
+        Assert.DoesNotContain("passwordBox.Tag", source, StringComparison.Ordinal);
         Assert.DoesNotContain("Password = value", source, StringComparison.Ordinal);
-        Assert.Contains("else if (password.Tag is string existing", source, StringComparison.Ordinal);
+        Assert.Contains("_keptArraySecrets.TryGetValue(password, out var existing)", source, StringComparison.Ordinal);
         Assert.Contains("if (IsSensitive(path))", source, StringComparison.Ordinal);
         Assert.Contains("if (IsSensitive(childPath))", source, StringComparison.Ordinal);
     }

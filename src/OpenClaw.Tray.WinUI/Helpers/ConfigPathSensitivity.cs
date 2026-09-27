@@ -9,8 +9,7 @@ internal static class ConfigPathSensitivity
             || normalizedPath.Contains("secret", StringComparison.Ordinal)
             || normalizedPath.Contains("password", StringComparison.Ordinal)
             || normalizedPath.Contains("apikey", StringComparison.Ordinal)
-            || normalizedPath.Contains("api_key", StringComparison.Ordinal)
-            || normalizedPath.Contains("webhookurl", StringComparison.Ordinal))
+            || normalizedPath.Contains("api_key", StringComparison.Ordinal))
         {
             return true;
         }
@@ -18,7 +17,9 @@ internal static class ConfigPathSensitivity
         foreach (var segment in path.Split('.'))
         {
             if (segment.Equals("nsec", StringComparison.OrdinalIgnoreCase)
-                || segment.Equals("privateKey", StringComparison.OrdinalIgnoreCase))
+                || segment.Equals("privateKey", StringComparison.OrdinalIgnoreCase)
+                || segment.Equals("webhookUrl", StringComparison.OrdinalIgnoreCase)
+                || segment.Equals("webhookUrls", StringComparison.OrdinalIgnoreCase))
                 return true;
         }
 
