@@ -16,22 +16,31 @@ public static class CanvasGatewayAuth
         if (!IsOriginMatch(requestUri, trustedGatewayOrigin))
             return false;
 
-        // The top-level document is not the request initiator. An untrusted
-        // frame on a trusted page must not receive the gateway bearer.
-        // about:blank is the document while the first A2UI navigation is in flight.
-        var principal = string.IsNullOrEmpty(initiatorUri) ? documentUri : initiatorUri;
-        if (string.IsNullOrEmpty(principal))
+        // A missing Referer must not inherit the top-level document. The only
+        // request without an initiator that may carry the bearer is the first
+        // A2UI navigation, while the document is still about:blank.
+        if (string.IsNullOrEmpty(initiatorUri))
+            return IsAboutBlank(documentUri) && IsTrustedA2uiNavigation(requestUri);
+
+        if (IsAboutBlank(initiatorUri))
             return false;
 
-        if (principal.Equals("about:blank", StringComparison.OrdinalIgnoreCase) ||
-            principal.StartsWith("about:blank?", StringComparison.OrdinalIgnoreCase) ||
-            principal.StartsWith("about:blank#", StringComparison.OrdinalIgnoreCase))
-        {
-            return true;
-        }
+        return IsOriginMatch(initiatorUri, trustedGatewayOrigin) ||
+            IsOriginMatch(initiatorUri, CanvasVirtualHostOrigin);
+    }
 
-        return IsOriginMatch(principal, trustedGatewayOrigin) ||
-            IsOriginMatch(principal, CanvasVirtualHostOrigin);
+    private static bool IsAboutBlank(string? uri) =>
+        !string.IsNullOrEmpty(uri) &&
+        (uri.Equals("about:blank", StringComparison.OrdinalIgnoreCase) ||
+         uri.StartsWith("about:blank?", StringComparison.OrdinalIgnoreCase) ||
+         uri.StartsWith("about:blank#", StringComparison.OrdinalIgnoreCase));
+
+    private static bool IsTrustedA2uiNavigation(string requestUri)
+    {
+        if (!Uri.TryCreate(requestUri, UriKind.Absolute, out var uri))
+            return false;
+
+        return uri.AbsolutePath.StartsWith("/__openclaw__/a2ui/", StringComparison.OrdinalIgnoreCase);
     }
 
     private static bool IsOriginMatch(string uri, string origin)

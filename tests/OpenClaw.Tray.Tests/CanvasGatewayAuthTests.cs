@@ -7,9 +7,9 @@ public class CanvasGatewayAuthTests
     private const string TrustedOrigin = "https://gateway.example";
 
     [Fact]
-    public void ShouldAttach_WhenDocumentAndRequestAreTrustedGatewayOrigin()
+    public void ShouldNotAttach_WhenRefererIsAbsentEvenIfDocumentIsTrusted()
     {
-        Assert.True(CanvasGatewayAuth.ShouldAttachGatewayBearer(
+        Assert.False(CanvasGatewayAuth.ShouldAttachGatewayBearer(
             TrustedOrigin,
             TrustedOrigin,
             TrustedOrigin));
@@ -19,9 +19,10 @@ public class CanvasGatewayAuthTests
     public void ShouldAttach_WhenDocumentIsCanvasVirtualHostAndRequestIsTrustedOrigin()
     {
         Assert.True(CanvasGatewayAuth.ShouldAttachGatewayBearer(
-            "https://openclaw-canvas.local/page",
+            "about:blank",
             TrustedOrigin,
-            TrustedOrigin));
+            TrustedOrigin,
+            "https://openclaw-canvas.local/page"));
     }
 
     [Fact]
@@ -47,7 +48,16 @@ public class CanvasGatewayAuthTests
     {
         Assert.True(CanvasGatewayAuth.ShouldAttachGatewayBearer(
             "about:blank",
-            TrustedOrigin + "/a2ui",
+            TrustedOrigin + "/__openclaw__/a2ui/index.html",
+            TrustedOrigin));
+    }
+
+    [Fact]
+    public void ShouldNotAttach_WhenAboutBlankRequestsAnythingOtherThanA2ui()
+    {
+        Assert.False(CanvasGatewayAuth.ShouldAttachGatewayBearer(
+            "about:blank",
+            TrustedOrigin + "/api",
             TrustedOrigin));
     }
 
