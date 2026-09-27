@@ -45,7 +45,7 @@ public sealed partial class CanvasWindow : WindowEx
     private bool _isFullScreen;
     private string? _pendingUrl;
     private string? _pendingHtml;
-    private bool _nativeA2uiNavigationPending;
+    private string? _pendingNativeNavigationUrl;
     private readonly TaskCompletionSource<bool> _webViewReadyTcs = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private TaskCompletionSource<bool>? _navigationTcs;
 
@@ -408,7 +408,7 @@ public sealed partial class CanvasWindow : WindowEx
             {
                 var html = _pendingHtml;
                 _pendingHtml = null;
-                _nativeA2uiNavigationPending = false;
+                _pendingNativeNavigationUrl = null;
                 CanvasWebView.CoreWebView2.NavigateToString(html);
             }
             else
@@ -494,7 +494,7 @@ public sealed partial class CanvasWindow : WindowEx
                 args.Request.Uri,
                 trustedOrigin,
                 initiator,
-                _nativeA2uiNavigationPending))
+                _pendingNativeNavigationUrl))
         {
             args.Request.Headers.SetHeader("Authorization", $"Bearer {token}");
         }
@@ -510,7 +510,7 @@ public sealed partial class CanvasWindow : WindowEx
     
     private void OnNavigationCompleted(CoreWebView2 sender, CoreWebView2NavigationCompletedEventArgs args)
     {
-        _nativeA2uiNavigationPending = false;
+        _pendingNativeNavigationUrl = null;
         if (_navigationTcs != null)
         {
             var tcs = _navigationTcs;
@@ -623,7 +623,7 @@ public sealed partial class CanvasWindow : WindowEx
         
         if (_isWebViewInitialized)
         {
-            _nativeA2uiNavigationPending = false;
+            _pendingNativeNavigationUrl = null;
             CanvasWebView.CoreWebView2.NavigateToString(html);
         }
         else
@@ -800,7 +800,7 @@ public sealed partial class CanvasWindow : WindowEx
 
     private void NoteNativeA2uiNavigation(string url)
     {
-        _nativeA2uiNavigationPending = IsTrustedA2UIUrl(url);
+        _pendingNativeNavigationUrl = url;
     }
     
     private static bool IsTrustedA2UIUrl(string url)

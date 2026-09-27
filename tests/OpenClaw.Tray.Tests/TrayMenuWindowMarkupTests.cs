@@ -31,7 +31,7 @@ public class TrayMenuWindowMarkupTests
         Assert.Contains("_gatewayToken = null", source);
         Assert.Contains("_trustedGatewayOrigin = null", source);
         Assert.Contains("CanvasGatewayAuth.ShouldAttachGatewayBearer(", source);
-        Assert.Contains("_nativeA2uiNavigationPending)", source);
+        Assert.Contains("_pendingNativeNavigationUrl)", source);
         Assert.DoesNotContain("WebResourceRequested += (", source);
     }
 

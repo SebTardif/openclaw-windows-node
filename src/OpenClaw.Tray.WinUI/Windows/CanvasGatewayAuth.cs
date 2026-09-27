@@ -9,7 +9,7 @@ public static class CanvasGatewayAuth
         string? requestUri,
         string? trustedGatewayOrigin,
         string? initiatorUri = null,
-        bool nativeA2uiNavigationPending = false)
+        string? pendingNativeNavigationUrl = null)
     {
         if (string.IsNullOrEmpty(requestUri) || string.IsNullOrEmpty(trustedGatewayOrigin))
             return false;
@@ -18,15 +18,11 @@ public static class CanvasGatewayAuth
             return false;
 
         // A missing Referer must not inherit the top-level document.
-        // NavigateToString also stays on about:blank, so that document is not
-        // enough. The bearer is attached only while this window is navigating
-        // to the native A2UI URL.
+        // The only no-Referer request that may carry the bearer is the exact
+        // URL this window is navigating to. HTML loaded with NavigateToString
+        // does not set that URL.
         if (string.IsNullOrEmpty(initiatorUri))
-        {
-            return nativeA2uiNavigationPending &&
-                IsAboutBlank(documentUri) &&
-                IsTrustedA2uiNavigation(requestUri);
-        }
+            return IsSameNavigationTarget(requestUri, pendingNativeNavigationUrl);
 
         if (IsAboutBlank(initiatorUri))
             return false;
@@ -41,12 +37,18 @@ public static class CanvasGatewayAuth
          uri.StartsWith("about:blank?", StringComparison.OrdinalIgnoreCase) ||
          uri.StartsWith("about:blank#", StringComparison.OrdinalIgnoreCase));
 
-    private static bool IsTrustedA2uiNavigation(string requestUri)
+    private static bool IsSameNavigationTarget(string requestUri, string? pendingNativeNavigationUrl)
     {
-        if (!Uri.TryCreate(requestUri, UriKind.Absolute, out var uri))
+        if (string.IsNullOrEmpty(pendingNativeNavigationUrl))
             return false;
 
-        return uri.AbsolutePath.StartsWith("/__openclaw__/a2ui/", StringComparison.OrdinalIgnoreCase);
+        if (!Uri.TryCreate(requestUri, UriKind.Absolute, out var request) ||
+            !Uri.TryCreate(pendingNativeNavigationUrl, UriKind.Absolute, out var pending))
+        {
+            return false;
+        }
+
+        return string.Equals(request.AbsoluteUri, pending.AbsoluteUri, StringComparison.OrdinalIgnoreCase);
     }
 
     private static bool IsOriginMatch(string uri, string origin)

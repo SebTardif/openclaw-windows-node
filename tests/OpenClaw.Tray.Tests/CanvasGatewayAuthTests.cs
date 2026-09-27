@@ -53,6 +53,24 @@ public class CanvasGatewayAuthTests
     }
 
     [Fact]
+    public void ShouldAttach_WhenNativeNavigationTargetsAnotherGatewayPage()
+    {
+        var page = TrustedOrigin + "/chat";
+        Assert.True(CanvasGatewayAuth.ShouldAttachGatewayBearer(
+            "about:blank",
+            page,
+            TrustedOrigin,
+            initiatorUri: null,
+            pendingNativeNavigationUrl: page));
+        Assert.False(CanvasGatewayAuth.ShouldAttachGatewayBearer(
+            "about:blank",
+            TrustedOrigin + "/api",
+            TrustedOrigin,
+            initiatorUri: null,
+            pendingNativeNavigationUrl: page));
+    }
+
+    [Fact]
     public void ShouldAttach_WhenNativeA2uiNavigationIsPendingFromAboutBlank()
     {
         Assert.True(CanvasGatewayAuth.ShouldAttachGatewayBearer(
@@ -60,7 +78,7 @@ public class CanvasGatewayAuthTests
             TrustedOrigin + "/__openclaw__/a2ui/index.html",
             TrustedOrigin,
             initiatorUri: null,
-            nativeA2uiNavigationPending: true));
+            pendingNativeNavigationUrl: TrustedOrigin + "/__openclaw__/a2ui/index.html"));
     }
 
     [Fact]
