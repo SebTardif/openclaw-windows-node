@@ -40,6 +40,10 @@ internal static class LegacyStartupDeviceToken
             return new(primary, perGatewayIdentityDirectory, Copied: false, CopyError: null);
         }
 
+        var legacy = resolveFromDirectory(legacySettingsDirectory);
+        if (!IsStoredDeviceCredential(legacy.Credential))
+            return new(primary, perGatewayIdentityDirectory, Copied: false, CopyError: null);
+
         var copyError = TryCopyLegacyIdentity(perGatewayIdentityDirectory, legacySettingsDirectory);
         if (copyError == null)
         {
@@ -50,11 +54,7 @@ internal static class LegacyStartupDeviceToken
                 CopyError: null);
         }
 
-        var legacy = resolveFromDirectory(legacySettingsDirectory);
-        if (IsStoredDeviceCredential(legacy.Credential) || primary.Credential is null)
-            return new(legacy, legacySettingsDirectory, Copied: false, CopyError: copyError);
-
-        return new(primary, perGatewayIdentityDirectory, Copied: false, CopyError: copyError);
+        return new(legacy, legacySettingsDirectory, Copied: false, CopyError: copyError);
     }
 
     private static bool UrlsMatch(string recordUrl, string? effectiveGatewayUrl) =>

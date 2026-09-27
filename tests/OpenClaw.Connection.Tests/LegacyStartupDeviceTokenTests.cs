@@ -131,6 +131,30 @@ public class LegacyStartupDeviceTokenTests : IDisposable
     }
 
     [Fact]
+    public void Prefer_CorruptLegacyIdentity_DoesNotCopyAndKeepsSharedToken()
+    {
+        File.WriteAllText(
+            Path.Combine(_legacyDir, LegacyStartupDeviceToken.IdentityFileName),
+            "{not-json");
+        var perGateway = DirectoryFor("gateway");
+        var record = RecordWithWeakerTokens();
+
+        var choice = LegacyStartupDeviceToken.Prefer(
+            _resolver.ResolveOperatorDetailed(record, perGateway),
+            record.Url,
+            record.Url,
+            perGateway,
+            _legacyDir,
+            dir => _resolver.ResolveOperatorDetailed(record, dir));
+
+        Assert.False(choice.Copied);
+        Assert.Null(choice.CopyError);
+        Assert.Equal(perGateway, choice.IdentityDirectory);
+        Assert.Equal("shared", choice.Resolution.Credential!.Token);
+        Assert.False(File.Exists(Path.Combine(perGateway, LegacyStartupDeviceToken.IdentityFileName)));
+    }
+
+    [Fact]
     public void Prefer_DoesNotCopy_WhenGatewayUrlDiffers()
     {
         WriteLegacyIdentity("paired-tok", null);

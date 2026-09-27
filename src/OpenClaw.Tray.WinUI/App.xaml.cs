@@ -1898,9 +1898,11 @@ public partial class App : Application, OpenClawTray.Services.IAppCommands, IPer
         var resolver = new CredentialResolver(DeviceIdentityFileReader.Instance);
         var identityDir = _gatewayRegistry.GetIdentityDirectory(record.Id);
         OpenClaw.Connection.GatewayCredential? credential;
+        OpenClaw.Connection.LegacyStartupCredentialChoice operatorChoice;
         try
         {
-            credential = ResolveStartupOperatorCredential(record, resolver, identityDir);
+            operatorChoice = ChooseStartupOperatorCredential(record, resolver, identityDir);
+            credential = ResolveStartupCredentialOrThrow(operatorChoice.Resolution, operatorChoice.IdentityDirectory);
         }
         catch (DeviceIdentityLoadException ex)
         {
@@ -1909,12 +1911,17 @@ public partial class App : Application, OpenClawTray.Services.IAppCommands, IPer
             return false;
         }
 
+        if (RefuseUncopiedLegacyDeviceCredential(operatorChoice, identityDir, context))
+            return false;
+
         if (credential == null)
         {
             OpenClaw.Connection.GatewayCredential? nodeCredential;
+            OpenClaw.Connection.LegacyStartupCredentialChoice nodeChoice;
             try
             {
-                nodeCredential = ResolveStartupNodeCredential(record, resolver, identityDir);
+                nodeChoice = ChooseStartupNodeCredential(record, resolver, identityDir);
+                nodeCredential = ResolveStartupCredentialOrThrow(nodeChoice.Resolution, nodeChoice.IdentityDirectory);
             }
             catch (DeviceIdentityLoadException ex)
             {
@@ -1922,6 +1929,9 @@ public partial class App : Application, OpenClawTray.Services.IAppCommands, IPer
                 ShowTransientConnectionError(ex.Message);
                 return false;
             }
+
+            if (RefuseUncopiedLegacyDeviceCredential(nodeChoice, identityDir, context))
+                return false;
 
             if (nodeCredential != null && IsGatewayNodeEnabled())
             {
@@ -2028,13 +2038,37 @@ public partial class App : Application, OpenClawTray.Services.IAppCommands, IPer
             connection.CurrentOptions == options;
     }
 
-    private OpenClaw.Connection.GatewayCredential? ResolveStartupOperatorCredential(
+    private bool RefuseUncopiedLegacyDeviceCredential(
+        OpenClaw.Connection.LegacyStartupCredentialChoice choice,
+        string perGatewayIdentityDirectory,
+        string context)
+    {
+        if (choice.CopyError == null ||
+            string.Equals(choice.IdentityDirectory, perGatewayIdentityDirectory, StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        Logger.Warn(
+            $"Refusing startup connect during {context} because the saved device identity could not be copied into this gateway: {choice.CopyError}");
+        ShowTransientConnectionError(
+            "Could not copy the saved device identity into this gateway. Startup did not connect with a weaker token.");
+        return true;
+    }
+
+    private OpenClaw.Connection.LegacyStartupCredentialChoice ChooseStartupOperatorCredential(
         GatewayRecord record,
         CredentialResolver resolver,
         string identityDir)
     {
         if (_gatewayRegistry == null)
-            return null;
+        {
+            return new(
+                new GatewayCredentialResolution(null, GatewayCredentialResolutionStatus.Missing),
+                identityDir,
+                Copied: false,
+                CopyError: null);
+        }
 
         var resolution = resolver.ResolveOperatorDetailed(record, identityDir);
         var choice = LegacyStartupDeviceToken.Prefer(
@@ -2045,10 +2079,10 @@ public partial class App : Application, OpenClawTray.Services.IAppCommands, IPer
             SettingsManager.SettingsDirectoryPath,
             dir => resolver.ResolveOperatorDetailed(record, dir));
         LogLegacyIdentityCopy(record.Id, choice);
-        return ResolveStartupCredentialOrThrow(choice.Resolution, choice.IdentityDirectory);
+        return choice;
     }
 
-    private OpenClaw.Connection.GatewayCredential? ResolveStartupNodeCredential(
+    private OpenClaw.Connection.LegacyStartupCredentialChoice ChooseStartupNodeCredential(
         GatewayRecord record,
         CredentialResolver resolver,
         string identityDir)
@@ -2062,7 +2096,7 @@ public partial class App : Application, OpenClawTray.Services.IAppCommands, IPer
             SettingsManager.SettingsDirectoryPath,
             dir => resolver.ResolveNodeDetailed(record, dir));
         LogLegacyIdentityCopy(record.Id, choice);
-        return ResolveStartupCredentialOrThrow(choice.Resolution, choice.IdentityDirectory);
+        return choice;
     }
 
     private static void LogLegacyIdentityCopy(string gatewayId, LegacyStartupCredentialChoice choice)
