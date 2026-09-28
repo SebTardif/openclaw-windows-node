@@ -48,7 +48,11 @@ public static class CanvasGatewayAuth
             return false;
         }
 
-        return string.Equals(request.AbsoluteUri, pending.AbsoluteUri, StringComparison.OrdinalIgnoreCase);
+        // Fragments are not sent on the WebView resource request.
+        return string.Equals(
+            request.GetLeftPart(UriPartial.Query),
+            pending.GetLeftPart(UriPartial.Query),
+            StringComparison.OrdinalIgnoreCase);
     }
 
     private static bool IsOriginMatch(string uri, string origin)

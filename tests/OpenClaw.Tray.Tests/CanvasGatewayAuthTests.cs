@@ -118,4 +118,28 @@ public class CanvasGatewayAuthTests
             "https://gateway.example.evil/",
             TrustedOrigin));
     }
+
+    [Fact]
+    public void ShouldAttach_WhenPendingNavigationDiffersOnlyByFragment()
+    {
+        var pending = "https://gateway.example/ui/canvas#section";
+        Assert.True(CanvasGatewayAuth.ShouldAttachGatewayBearer(
+            "about:blank",
+            "https://gateway.example/ui/canvas",
+            TrustedOrigin,
+            initiatorUri: null,
+            pendingNativeNavigationUrl: pending));
+        Assert.False(CanvasGatewayAuth.ShouldAttachGatewayBearer(
+            "about:blank",
+            "https://gateway.example/ui/other",
+            TrustedOrigin,
+            initiatorUri: null,
+            pendingNativeNavigationUrl: pending));
+        Assert.True(CanvasGatewayAuth.ShouldAttachGatewayBearer(
+            "about:blank",
+            "https://gateway.example/ui/canvas#other",
+            TrustedOrigin,
+            initiatorUri: null,
+            pendingNativeNavigationUrl: pending));
+    }
 }
