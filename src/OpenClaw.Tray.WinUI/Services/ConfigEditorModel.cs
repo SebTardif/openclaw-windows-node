@@ -207,6 +207,8 @@ internal static class ConfigEditorModel
             name.Contains("secret", StringComparison.OrdinalIgnoreCase) ||
             name.Contains("password", StringComparison.OrdinalIgnoreCase) ||
             name.Contains("webhook", StringComparison.OrdinalIgnoreCase) ||
+            name.Contains("apikey", StringComparison.OrdinalIgnoreCase) ||
+            name.Contains("api_key", StringComparison.OrdinalIgnoreCase) ||
             name.Equals("key", StringComparison.OrdinalIgnoreCase);
     }
 
