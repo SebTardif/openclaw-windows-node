@@ -3898,6 +3898,7 @@ public class SetupStepsTests : IDisposable
     [InlineData("BadUser")]
     [InlineData("bad user")]
     [InlineData("bad$user")]
+    [InlineData("openclaw\n")]
     public async Task ConfigureWsl_RejectsInvalidLinuxUserName(string user)
     {
         var ctx = CreateContext();
@@ -4249,15 +4250,17 @@ public class SetupStepsTests : IDisposable
     }
 
     [Theory]
+    [InlineData(null)]
     [InlineData("bad\"user")]
     [InlineData("bad$(id)")]
-    public async Task SetupWizard_RejectsInvalidLinuxUserBeforeAnyWslCommand(string user)
+    [InlineData("openclaw\n")]
+    public async Task SetupWizard_RejectsInvalidLinuxUserBeforeAnyWslCommand(string? user)
     {
         var commands = new FakeCommandRunner(
             _ => Ok(),
             (_, _, _) => Fail("WSL must not run for an invalid Linux user"));
         var ctx = CreateContext(
-            new SetupConfig { Wsl = new WslConfig { User = user } },
+            new SetupConfig { Wsl = new WslConfig { User = user! } },
             commands);
         ctx.DistroName = "test-distro";
 
