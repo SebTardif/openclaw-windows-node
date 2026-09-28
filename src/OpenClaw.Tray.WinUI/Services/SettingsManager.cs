@@ -35,7 +35,15 @@ public class SettingsManager
     private SettingsData _data = CreateDefaultData();
 
     // Connection
-    public string GatewayUrl { get => _data.GatewayUrl ?? AppIdentity.SetupGatewayUrl; set => _data = _data with { GatewayUrl = value }; }
+    public string GatewayUrl
+    {
+        get => _data.GatewayUrl ?? AppIdentity.SetupGatewayUrl;
+        set
+        {
+            _data = _data with { GatewayUrl = value };
+            HasPersistedGatewayUrl = !string.IsNullOrWhiteSpace(value);
+        }
+    }
     public bool UseSshTunnel { get => _data.UseSshTunnel; set => _data = _data with { UseSshTunnel = value }; }
     public string SshTunnelUser { get => _data.SshTunnelUser ?? ""; set => _data = _data with { SshTunnelUser = value }; }
     public string SshTunnelHost { get => _data.SshTunnelHost ?? ""; set => _data = _data with { SshTunnelHost = value }; }
@@ -329,7 +337,7 @@ public class SettingsManager
         var data = loaded with
         {
             SettingsSchemaVersion = CurrentSettingsSchemaVersion,
-            GatewayUrl = loaded.GatewayUrl ?? defaults.GatewayUrl,
+            GatewayUrl = loaded.GatewayUrl,
             SshTunnelUser = loaded.SshTunnelUser ?? defaults.SshTunnelUser,
             SshTunnelHost = loaded.SshTunnelHost ?? defaults.SshTunnelHost,
             SshTunnelSshPort = IsValidPort(loaded.SshTunnelSshPort) ? loaded.SshTunnelSshPort : defaults.SshTunnelSshPort,
@@ -430,7 +438,7 @@ public class SettingsManager
     /// </summary>
     public SettingsData ToSettingsData() => _data with
     {
-        GatewayUrl = GatewayUrl,
+        GatewayUrl = HasPersistedGatewayUrl ? _data.GatewayUrl : null,
         SshTunnelUser = SshTunnelUser,
         SshTunnelHost = SshTunnelHost,
         SshTunnelRemotePort = SshTunnelRemotePort,
@@ -603,4 +611,7 @@ public class SettingsManager
 
         return $"ws://127.0.0.1:{SshTunnelLocalPort}";
     }
+
+    public string? GetLegacyCredentialGatewayUrlOrNull() =>
+        HasPersistedGatewayUrl ? GetEffectiveGatewayUrl() : null;
 }

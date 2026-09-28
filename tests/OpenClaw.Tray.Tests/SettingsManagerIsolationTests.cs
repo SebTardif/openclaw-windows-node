@@ -79,8 +79,8 @@ public sealed class SettingsManagerIsolationTests
                 """
                 {
                   "GatewayUrl": "ws://legacy.example.invalid",
-                  "Token": "legacy-shared-token",
-                  "BootstrapToken": "legacy-bootstrap-token",
+                  "Token": "test-auth-token",
+                  "BootstrapToken": "test-token-placeholder",
                   "EnableMcpServer": true
                 }
                 """);
@@ -89,8 +89,8 @@ public sealed class SettingsManagerIsolationTests
 
             var settings = new SettingsManager();
 
-            Assert.Equal("legacy-shared-token", settings.LegacyToken);
-            Assert.Equal("legacy-bootstrap-token", settings.LegacyBootstrapToken);
+            Assert.Equal("test-auth-token", settings.LegacyToken);
+            Assert.Equal("test-token-placeholder", settings.LegacyBootstrapToken);
             Assert.True(settings.HasLegacyGatewayCredentials);
 
             settings.Save();
@@ -147,8 +147,8 @@ public sealed class SettingsManagerIsolationTests
                 Path.Combine(dir, "settings.json"),
                 """
                 {
-                  "Token": "leftover-shared-token",
-                  "BootstrapToken": "leftover-bootstrap-token",
+                  "Token": "test-auth-token",
+                  "BootstrapToken": "test-token-placeholder",
                   "EnableNodeMode": true
                 }
                 """);
@@ -160,6 +160,82 @@ public sealed class SettingsManagerIsolationTests
             Assert.False(settings.HasLegacyGatewayCredentials);
             Assert.Null(settings.LegacyToken);
             Assert.Null(settings.LegacyBootstrapToken);
+            Assert.Null(settings.GetLegacyCredentialGatewayUrlOrNull());
+            settings.SaveOrThrow();
+
+            var reloaded = new SettingsManager(dir);
+            Assert.Null(reloaded.GetLegacyCredentialGatewayUrlOrNull());
+            Assert.False(reloaded.HasPersistedGatewayUrl);
+            var savedJson = File.ReadAllText(Path.Combine(dir, "settings.json"));
+            using var savedDocument = JsonDocument.Parse(savedJson);
+            Assert.False(savedDocument.RootElement.TryGetProperty("GatewayUrl", out _));
+            Assert.False(savedDocument.RootElement.TryGetProperty("Token", out _));
+            Assert.False(savedDocument.RootElement.TryGetProperty("BootstrapToken", out _));
+        }
+        finally
+        {
+            if (Directory.Exists(dir))
+            {
+                // slopwatch-ignore: SW003 Test cleanup is best-effort and must not hide the assertion.
+                try { Directory.Delete(dir, recursive: true); } catch { }
+            }
+        }
+    }
+
+    [Fact]
+    public void ExplicitGatewayUrl_BecomesPersistedLegacyCredentialTarget()
+    {
+        var dir = Path.Combine(Path.GetTempPath(), "OpenClawTray.Tests", Guid.NewGuid().ToString("N"));
+
+        try
+        {
+            var settings = new SettingsManager(dir)
+            {
+                GatewayUrl = "wss://gateway.example.test",
+            };
+            settings.SaveOrThrow();
+
+            var reloaded = new SettingsManager(dir);
+
+            Assert.True(reloaded.HasPersistedGatewayUrl);
+            Assert.Equal(
+                "wss://gateway.example.test",
+                reloaded.GetLegacyCredentialGatewayUrlOrNull());
+        }
+        finally
+        {
+            if (Directory.Exists(dir))
+            {
+                // slopwatch-ignore: SW003 Test cleanup is best-effort and must not hide the assertion.
+                try { Directory.Delete(dir, recursive: true); } catch { }
+            }
+        }
+    }
+
+    [Fact]
+    public void PersistedSshGatewayUrl_UsesEffectiveTunnelEndpointForLegacyCredentialMigration()
+    {
+        var dir = Path.Combine(Path.GetTempPath(), "OpenClawTray.Tests", Guid.NewGuid().ToString("N"));
+
+        try
+        {
+            Directory.CreateDirectory(dir);
+            File.WriteAllText(
+                Path.Combine(dir, "settings.json"),
+                """
+                {
+                  "GatewayUrl": "wss://gateway.example.test",
+                  "UseSshTunnel": true,
+                  "SshTunnelLocalPort": 19876
+                }
+                """);
+
+            var settings = new SettingsManager(dir);
+
+            Assert.True(settings.HasPersistedGatewayUrl);
+            Assert.Equal(
+                "ws://127.0.0.1:19876",
+                settings.GetLegacyCredentialGatewayUrlOrNull());
         }
         finally
         {
@@ -183,8 +259,8 @@ public sealed class SettingsManagerIsolationTests
                 Path.Combine(dir, "settings.json"),
                 """
                 {
-                  "Token": "leftover-shared-token",
-                  "BootstrapToken": "leftover-bootstrap-token",
+                  "Token": "test-auth-token",
+                  "BootstrapToken": "test-token-placeholder",
                   "EnableNodeMode": true
                 }
                 """);
@@ -197,32 +273,32 @@ public sealed class SettingsManagerIsolationTests
             Assert.Null(clearedCredential);
             Assert.Null(ChatUrlFromResolvedCredential(clearedCredential));
 
-            Assert.True(ResolveInteractive(
+            Assert.False(ResolveInteractive(
                 dir,
                 cleared,
-                "leftover-shared-token",
-                "leftover-bootstrap-token",
+                "test-auth-token",
+                "test-token-placeholder",
                 out var rawCredential));
-            Assert.Equal("leftover-shared-token", rawCredential!.Token);
-            Assert.False(rawCredential.IsBootstrapToken);
-            var rawChatUrl = ChatUrlFromResolvedCredential(rawCredential);
-            Assert.NotNull(rawChatUrl);
-            Assert.Contains("leftover-shared-token", rawChatUrl, StringComparison.Ordinal);
+            Assert.Null(rawCredential);
+            Assert.Null(ChatUrlFromResolvedCredential(rawCredential));
 
             File.WriteAllText(
                 Path.Combine(dir, "settings.json"),
                 """
                 {
                   "GatewayUrl": "wss://saved.example.invalid",
-                  "Token": "saved-shared-token",
-                  "BootstrapToken": "saved-bootstrap-token"
+                  "Token": "test-auth-token",
+                  "BootstrapToken": "test-token-placeholder"
                 }
                 """);
             var saved = new SettingsManager(dir);
+            Assert.Equal(
+                "wss://saved.example.invalid",
+                saved.GetLegacyCredentialGatewayUrlOrNull());
             Assert.True(ResolveInteractive(dir, saved, saved.LegacyToken, saved.LegacyBootstrapToken, out var savedCredential));
-            Assert.Equal("saved-shared-token", savedCredential!.Token);
+            Assert.Equal("test-auth-token", savedCredential!.Token);
             Assert.Contains(
-                "saved-shared-token",
+                "test-auth-token",
                 ChatUrlFromResolvedCredential(savedCredential),
                 StringComparison.Ordinal);
 
@@ -248,7 +324,7 @@ public sealed class SettingsManagerIsolationTests
             registry: null,
             settingsDirectory,
             DeviceIdentityFileReader.Instance,
-            settings.GetEffectiveGatewayUrl(),
+            settings.GetLegacyCredentialGatewayUrlOrNull(),
             legacyToken,
             legacyBootstrapToken,
             out credential);
@@ -269,12 +345,15 @@ public sealed class SettingsManagerIsolationTests
 
         Assert.Contains("_settings.LegacyToken", appChat, StringComparison.Ordinal);
         Assert.Contains("_settings.LegacyBootstrapToken", appChat, StringComparison.Ordinal);
+        Assert.Contains("_settings.GetLegacyCredentialGatewayUrlOrNull()", appChat, StringComparison.Ordinal);
         Assert.Contains("InteractiveGatewayCredentialResolver.TryResolve", appChat, StringComparison.Ordinal);
         Assert.Contains("settings.LegacyToken", chatUrl, StringComparison.Ordinal);
         Assert.Contains("settings.LegacyBootstrapToken", chatUrl, StringComparison.Ordinal);
+        Assert.Contains("settings.GetLegacyCredentialGatewayUrlOrNull()", chatUrl, StringComparison.Ordinal);
         Assert.Contains("ChatSurfaceResolver.BuildChatUrl", chatUrl, StringComparison.Ordinal);
         Assert.Contains("settings.LegacyToken", chatWeb, StringComparison.Ordinal);
         Assert.Contains("settings.LegacyBootstrapToken", chatWeb, StringComparison.Ordinal);
+        Assert.Contains("settings.GetLegacyCredentialGatewayUrlOrNull()", chatWeb, StringComparison.Ordinal);
         Assert.Contains("InteractiveGatewayCredentialResolver.TryResolve", chatWeb, StringComparison.Ordinal);
     }
 

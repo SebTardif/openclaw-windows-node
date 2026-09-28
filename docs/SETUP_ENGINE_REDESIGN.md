@@ -353,6 +353,8 @@ Other preferences and external gateway records are preserved. The focused
 `UninstallOnboardingSettingsTests` execute only the production PowerShell
 reset and its JSON/logging helpers under Windows PowerShell 5.1 with temporary
 files; they do not prove the full signed-installer uninstall path.
+On a later launch, a URL-less legacy root identity is not migrated or used
+against the default loopback URL. The profile must be reconnected explicitly.
 
 ---
 

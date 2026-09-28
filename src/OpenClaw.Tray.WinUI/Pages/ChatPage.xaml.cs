@@ -212,7 +212,7 @@ public sealed partial class ChatPage : Page
             (App.Current as App)?.Registry,
             SettingsManager.SettingsDirectoryPath,
             DeviceIdentityFileReader.Instance,
-            settings.GetEffectiveGatewayUrl(),
+            settings.GetLegacyCredentialGatewayUrlOrNull(),
             settings.LegacyToken,
             settings.LegacyBootstrapToken,
             (record, candidate) =>
@@ -688,7 +688,7 @@ public sealed partial class ChatPage : Page
                 CurrentApp.Registry,
                 SettingsManager.SettingsDirectoryPath,
                 DeviceIdentityFileReader.Instance,
-                settings.GetEffectiveGatewayUrl(),
+                settings.GetLegacyCredentialGatewayUrlOrNull(),
                 settings.LegacyToken,
                 settings.LegacyBootstrapToken,
                 (record, candidate) =>
