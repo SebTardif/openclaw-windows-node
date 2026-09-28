@@ -240,7 +240,7 @@ public class ConfigEditorModelTests
     }
 
     [Fact]
-    public void FindUneditedRedactionSentinel_BlocksArraySentinelWhenEditUsedTheUnindexedPath()
+    public void FindUneditedRedactionSentinel_OmitsArrayTokenWhenEditUsedTheUnindexedPath()
     {
         using var document = JsonDocument.Parse("""
         {
@@ -250,12 +250,17 @@ public class ConfigEditorModelTests
         }
         """);
 
+        var edited = new[] { "channels.slack.accounts.token" };
         var blocked = ConfigEditorModel.FindUneditedRedactionSentinel(
             document.RootElement,
-            new[] { "channels.slack.accounts.token" },
+            edited,
             document.RootElement);
+        var sent = ConfigEditorModel.OmitUntouchedRedactionSentinels(
+            document.RootElement,
+            edited);
 
-        Assert.Equal("channels.slack.accounts[0].token", blocked);
+        Assert.Null(blocked);
+        Assert.False(sent.GetProperty("channels").GetProperty("slack").GetProperty("accounts")[0].TryGetProperty("token", out _));
     }
 
     [Fact]
@@ -319,24 +324,40 @@ public class ConfigEditorModelTests
     }
 
     [Fact]
-    public void FindUneditedRedactionSentinel_BlocksUntouchedArrayApiKeyButNotSiblingMask()
+    public void FindUneditedRedactionSentinel_OmitsUntouchedArrayApiKeyButKeepsSiblingMask()
     {
         using var document = JsonDocument.Parse("""
         {
           "channels": {
             "slack": {
-              "accounts": [ { "label": "<redacted>", "apiKey": "<redacted>", "api_key": "<redacted>" } ]
+              "enabled": false,
+              "accounts": [ { "label": "<redacted>", "token": "<redacted>", "apiKey": "<redacted>", "api_key": "<redacted>" } ]
             }
           }
         }
         """);
 
-        var blocked = ConfigEditorModel.FindUneditedRedactionSentinel(
+        var updated = ConfigEditorModel.ApplyChanges(
             document.RootElement,
-            Array.Empty<string>(),
-            document.RootElement);
+            new Dictionary<string, object?>
+            {
+                ["channels.slack.enabled"] = true,
+            });
+        var edited = new[] { "channels.slack.enabled" };
 
-        Assert.Equal("channels.slack.accounts[0].apiKey", blocked);
+        var blocked = ConfigEditorModel.FindUneditedRedactionSentinel(
+            updated,
+            edited,
+            document.RootElement);
+        var sent = ConfigEditorModel.OmitUntouchedRedactionSentinels(updated, edited);
+
+        Assert.Null(blocked);
+        Assert.True(sent.GetProperty("channels").GetProperty("slack").GetProperty("enabled").GetBoolean());
+        var account = sent.GetProperty("channels").GetProperty("slack").GetProperty("accounts")[0];
+        Assert.False(account.TryGetProperty("token", out _));
+        Assert.False(account.TryGetProperty("apiKey", out _));
+        Assert.False(account.TryGetProperty("api_key", out _));
+        Assert.Equal("<redacted>", account.GetProperty("label").GetString());
 
         using var siblingOnly = JsonDocument.Parse("""
         {
@@ -352,8 +373,14 @@ public class ConfigEditorModelTests
             siblingOnly.RootElement,
             Array.Empty<string>(),
             siblingOnly.RootElement);
+        var siblingSent = ConfigEditorModel.OmitUntouchedRedactionSentinels(
+            siblingOnly.RootElement,
+            Array.Empty<string>());
 
         Assert.Null(siblingBlocked);
+        Assert.Equal(
+            "<redacted>",
+            siblingSent.GetProperty("channels").GetProperty("slack").GetProperty("accounts")[0].GetProperty("label").GetString());
 
         using var snake = JsonDocument.Parse("""
         {
@@ -369,7 +396,93 @@ public class ConfigEditorModelTests
             snake.RootElement,
             Array.Empty<string>(),
             snake.RootElement);
+        var snakeSent = ConfigEditorModel.OmitUntouchedRedactionSentinels(
+            snake.RootElement,
+            Array.Empty<string>());
 
-        Assert.Equal("channels.slack.accounts[0].api_key", snakeBlocked);
+        Assert.Null(snakeBlocked);
+        var snakeAccount = snakeSent.GetProperty("channels").GetProperty("slack").GetProperty("accounts")[0];
+        Assert.False(snakeAccount.TryGetProperty("api_key", out _));
+        Assert.Equal("<redacted>", snakeAccount.GetProperty("note").GetString());
+    }
+
+    [Fact]
+    public void FindUneditedRedactionSentinel_OmitsUntouchedArrayPrivateKey()
+    {
+        using var document = JsonDocument.Parse("""
+        {
+          "channels": {
+            "slack": {
+              "enabled": false,
+              "accounts": [ { "label": "<redacted>", "privateKey": "<redacted>" } ]
+            }
+          }
+        }
+        """);
+
+        var updated = ConfigEditorModel.ApplyChanges(
+            document.RootElement,
+            new Dictionary<string, object?>
+            {
+                ["channels.slack.enabled"] = true,
+            });
+        var edited = new[] { "channels.slack.enabled" };
+
+        var blocked = ConfigEditorModel.FindUneditedRedactionSentinel(
+            updated,
+            edited,
+            document.RootElement);
+        var sent = ConfigEditorModel.OmitUntouchedRedactionSentinels(updated, edited);
+
+        Assert.Null(blocked);
+        Assert.True(sent.GetProperty("channels").GetProperty("slack").GetProperty("enabled").GetBoolean());
+        var account = sent.GetProperty("channels").GetProperty("slack").GetProperty("accounts")[0];
+        Assert.False(account.TryGetProperty("privateKey", out _));
+        Assert.Equal("<redacted>", account.GetProperty("label").GetString());
+
+        using var cased = JsonDocument.Parse("""
+        {
+          "accounts": [ { "PrivateKey": "<redacted>", "title": "<redacted>" } ]
+        }
+        """);
+
+        var casedBlocked = ConfigEditorModel.FindUneditedRedactionSentinel(
+            cased.RootElement,
+            Array.Empty<string>(),
+            cased.RootElement);
+        var casedSent = ConfigEditorModel.OmitUntouchedRedactionSentinels(
+            cased.RootElement,
+            Array.Empty<string>());
+
+        Assert.Null(casedBlocked);
+        Assert.False(casedSent.GetProperty("accounts")[0].TryGetProperty("PrivateKey", out _));
+        Assert.Equal("<redacted>", casedSent.GetProperty("accounts")[0].GetProperty("title").GetString());
+    }
+
+    [Fact]
+    public void FindUneditedRedactionSentinel_BlocksEditedArrayCredentialThatIsStillTheSentinel()
+    {
+        using var document = JsonDocument.Parse("""
+        {
+          "channels": {
+            "slack": {
+              "accounts": [ { "apiKey": "<redacted>", "privateKey": "<redacted>", "label": "desk" } ]
+            }
+          }
+        }
+        """);
+
+        var edited = new[] { "channels.slack.accounts[0].apiKey", "channels.slack.accounts[0].privateKey" };
+        var blocked = ConfigEditorModel.FindUneditedRedactionSentinel(
+            document.RootElement,
+            edited,
+            document.RootElement);
+        var sent = ConfigEditorModel.OmitUntouchedRedactionSentinels(document.RootElement, edited);
+
+        Assert.Equal("channels.slack.accounts[0].apiKey", blocked);
+        var account = sent.GetProperty("channels").GetProperty("slack").GetProperty("accounts")[0];
+        Assert.Equal("<redacted>", account.GetProperty("apiKey").GetString());
+        Assert.Equal("<redacted>", account.GetProperty("privateKey").GetString());
+        Assert.Equal("desk", account.GetProperty("label").GetString());
     }
 }

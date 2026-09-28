@@ -184,7 +184,13 @@ internal static class ConfigEditorModel
             if (edited.Contains(path))
                 return loadedSentinel ? path : null;
 
-            if (!path.Contains('[', StringComparison.Ordinal) || !loadedSentinel || !IsCredentialPath(path))
+            // Untouched masked credentials nested in arrays are left out of the
+            // patch below. They must not fail an unrelated save, and the editor
+            // cannot put the original secret back.
+            if (ShouldOmitUntouchedSentinel(path))
+                return null;
+
+            if (!loadedSentinel || !IsCredentialPath(path))
                 return null;
 
             return path;
@@ -209,7 +215,18 @@ internal static class ConfigEditorModel
             name.Contains("webhook", StringComparison.OrdinalIgnoreCase) ||
             name.Contains("apikey", StringComparison.OrdinalIgnoreCase) ||
             name.Contains("api_key", StringComparison.OrdinalIgnoreCase) ||
+            name.Equals("privateKey", StringComparison.OrdinalIgnoreCase) ||
             name.Equals("key", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool ShouldOmitUntouchedSentinel(string path)
+    {
+        if (!path.Contains('[', StringComparison.Ordinal))
+            return true;
+
+        // A masked array element is not a property we can drop. A credential
+        // field on an item inside the array is.
+        return IsCredentialPath(path) && !path.EndsWith(']');
     }
 
     private static void RemoveUntouchedRedactionSentinels(
@@ -227,7 +244,7 @@ internal static class ConfigEditorModel
                     value.TryGetValue<string>(out var text) &&
                     ChannelConfigPatchBuilder.IsRedactionSentinel(text) &&
                     !edited.Contains(childPath) &&
-                    !childPath.Contains('[', StringComparison.Ordinal))
+                    ShouldOmitUntouchedSentinel(childPath))
                 {
                     removals.Add(property.Key);
                     continue;
