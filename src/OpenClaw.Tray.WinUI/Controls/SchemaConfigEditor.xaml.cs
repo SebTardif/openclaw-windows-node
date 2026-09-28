@@ -439,17 +439,20 @@ public sealed partial class SchemaConfigEditor : UserControl
     private UIElement RenderJsonArrayField(string path, string label, string? description,
         JsonElement config, TextBlock errorBlock, Action<object?> onChanged)
     {
+        if (IsSensitive(path))
+        {
+            var existingCount = config.ValueKind == JsonValueKind.Array ? config.GetArrayLength() : 0;
+            return BuildSensitiveArrayEditor(path, label, existingCount, description, onChanged);
+        }
+
         var panel = new StackPanel { Spacing = 6 };
-        var hideStoredValues = IsSensitive(path);
         panel.Children.Add(new InfoBar
         {
             IsOpen = true,
             IsClosable = false,
             Severity = InfoBarSeverity.Informational,
             Title = label,
-            Message = hideStoredValues
-                ? "Stored values in this array stay hidden. They cannot be edited on this page."
-                : "This array uses complex items. Edit its JSON below; local validation will run before Save is enabled."
+            Message = "This array uses complex items. Edit its JSON below; local validation will run before Save is enabled."
         });
 
         if (!string.IsNullOrEmpty(description))
@@ -461,16 +464,6 @@ public sealed partial class SchemaConfigEditor : UserControl
                 Foreground = SecondaryBrush,
                 TextWrapping = TextWrapping.Wrap
             });
-        }
-
-        if (hideStoredValues)
-        {
-            panel.Children.Add(new PasswordBox
-            {
-                IsEnabled = false,
-                PlaceholderText = "Leave blank to keep existing value"
-            });
-            return panel;
         }
 
         var textBox = new TextBox
@@ -509,6 +502,150 @@ public sealed partial class SchemaConfigEditor : UserControl
             ConfigChanged?.Invoke(this, new SchemaConfigChangedEventArgs(GetChanges(), GetValidationErrors()));
         };
         panel.Children.Add(textBox);
+        return panel;
+    }
+
+    private UIElement BuildSensitiveArrayEditor(string path, string label, int existingCount,
+        string? description, Action<object?> onChanged)
+    {
+        var session = new SensitiveArrayEditSession(existingCount);
+        var panel = new StackPanel { Spacing = 6 };
+        var status = new TextBlock
+        {
+            FontSize = 12,
+            Foreground = SecondaryBrush,
+            TextWrapping = TextWrapping.Wrap
+        };
+        var errorBlock = CreateErrorBlock();
+        var editor = new TextBox
+        {
+            Text = "",
+            AcceptsReturn = true,
+            TextWrapping = TextWrapping.NoWrap,
+            FontFamily = new FontFamily("Consolas"),
+            MinHeight = 120,
+            HorizontalAlignment = HorizontalAlignment.Stretch,
+            PlaceholderText = "Enter a JSON array. This box starts empty."
+        };
+        var replacePanel = new StackPanel { Spacing = 6, Visibility = Visibility.Collapsed };
+        var confirmPanel = new StackPanel { Spacing = 6, Visibility = Visibility.Collapsed };
+
+        void ShowStatus(string text) => status.Text = text;
+
+        panel.Children.Add(new InfoBar
+        {
+            IsOpen = true,
+            IsClosable = false,
+            Severity = InfoBarSeverity.Informational,
+            Title = label,
+            Message = session.CountText
+        });
+        if (!string.IsNullOrEmpty(description))
+        {
+            panel.Children.Add(new TextBlock
+            {
+                Text = description,
+                FontSize = 11,
+                Foreground = SecondaryBrush,
+                TextWrapping = TextWrapping.Wrap
+            });
+        }
+
+        var replaceButton = new Button { Content = "Replace all", Margin = new Thickness(0, 4, 8, 0) };
+        var clearButton = new Button { Content = "Clear all" };
+        var actions = new StackPanel { Orientation = Orientation.Horizontal };
+        actions.Children.Add(replaceButton);
+        actions.Children.Add(clearButton);
+        panel.Children.Add(actions);
+
+        replaceButton.Click += (_, _) =>
+        {
+            if (_loading) return;
+            session.BeginReplace();
+            editor.Text = "";
+            replacePanel.Visibility = Visibility.Visible;
+            confirmPanel.Visibility = Visibility.Collapsed;
+            errorBlock.Visibility = Visibility.Collapsed;
+        };
+
+        var applyButton = new Button { Content = "Apply" };
+        var cancelReplaceButton = new Button { Content = "Cancel", Margin = new Thickness(8, 0, 0, 0) };
+        applyButton.Click += (_, _) =>
+        {
+            if (_loading) return;
+            session.SetDraft(editor.Text);
+            if (!session.TryApplyReplace() || session.Replacement is not JsonElement replacement)
+            {
+                SetValidationError(path, session.Error, errorBlock);
+                return;
+            }
+
+            editor.Text = "";
+            replacePanel.Visibility = Visibility.Collapsed;
+            SetValidationError(path, null, errorBlock);
+            ShowStatus("Replacement is ready to save.");
+            onChanged(replacement);
+        };
+        cancelReplaceButton.Click += (_, _) =>
+        {
+            if (_loading) return;
+            session.CancelReplace();
+            editor.Text = "";
+            replacePanel.Visibility = Visibility.Collapsed;
+            SetValidationError(path, null, errorBlock);
+            if (session.Decision == SensitiveArrayDecision.Preserve)
+            {
+                status.Text = "";
+                onChanged(RemovePendingValue);
+            }
+        };
+        var replaceActions = new StackPanel { Orientation = Orientation.Horizontal };
+        replaceActions.Children.Add(applyButton);
+        replaceActions.Children.Add(cancelReplaceButton);
+        replacePanel.Children.Add(editor);
+        replacePanel.Children.Add(errorBlock);
+        replacePanel.Children.Add(replaceActions);
+        panel.Children.Add(replacePanel);
+
+        confirmPanel.Children.Add(new TextBlock
+        {
+            Text = "Clear all stored entries? This removes every stored value in this array.",
+            TextWrapping = TextWrapping.Wrap
+        });
+        var confirmClearButton = new Button { Content = "Clear all" };
+        var cancelClearButton = new Button { Content = "Cancel", Margin = new Thickness(8, 0, 0, 0) };
+        confirmClearButton.Click += (_, _) =>
+        {
+            if (_loading) return;
+            session.ConfirmClear();
+            confirmPanel.Visibility = Visibility.Collapsed;
+            replacePanel.Visibility = Visibility.Collapsed;
+            editor.Text = "";
+            SetValidationError(path, null, errorBlock);
+            ShowStatus("This array will be cleared on save.");
+            onChanged(SensitiveArrayEditSession.EmptyArray());
+        };
+        cancelClearButton.Click += (_, _) =>
+        {
+            if (_loading) return;
+            session.CancelClear();
+            confirmPanel.Visibility = Visibility.Collapsed;
+        };
+        var confirmActions = new StackPanel { Orientation = Orientation.Horizontal };
+        confirmActions.Children.Add(confirmClearButton);
+        confirmActions.Children.Add(cancelClearButton);
+        confirmPanel.Children.Add(confirmActions);
+        panel.Children.Add(confirmPanel);
+        panel.Children.Add(status);
+
+        clearButton.Click += (_, _) =>
+        {
+            if (_loading) return;
+            session.BeginClear();
+            replacePanel.Visibility = Visibility.Collapsed;
+            confirmPanel.Visibility = Visibility.Visible;
+        };
+
         return panel;
     }
 
@@ -992,12 +1129,20 @@ public sealed partial class SchemaConfigEditor : UserControl
                 case JsonValueKind.Array:
                     if (IsSensitive(childPath))
                     {
-                        parent.Children.Add(new PasswordBox
-                        {
-                            Header = GetLabel(childPath, prop.Name),
-                            IsEnabled = false,
-                            PlaceholderText = "Leave blank to keep existing value"
-                        });
+                        parent.Children.Add(BuildSensitiveArrayEditor(
+                            childPath,
+                            GetLabel(childPath, prop.Name),
+                            value.GetArrayLength(),
+                            null,
+                            edited =>
+                            {
+                                if (_loading) return;
+                                if (ReferenceEquals(edited, RemovePendingValue))
+                                    _changes.Remove(childPath);
+                                else
+                                    _changes[childPath] = edited;
+                                ConfigChanged?.Invoke(this, new SchemaConfigChangedEventArgs(GetChanges(), GetValidationErrors()));
+                            }));
                         break;
                     }
 

@@ -141,3 +141,102 @@ internal static class ConfigEditorModel
             target[segments[^1]] = value;
     }
 }
+
+internal enum SensitiveArrayDecision
+{
+    Preserve,
+    Replace,
+    Clear
+}
+
+/// <summary>
+/// Edit session for a sensitive array whose current items must stay off the page.
+/// The session stores a count and the newly typed JSON. It never receives the stored secrets.
+/// </summary>
+internal sealed class SensitiveArrayEditSession
+{
+    public SensitiveArrayEditSession(int existingCount)
+    {
+        if (existingCount < 0)
+            throw new ArgumentOutOfRangeException(nameof(existingCount));
+        ExistingCount = existingCount;
+    }
+
+    public int ExistingCount { get; }
+    public bool ReplaceOpen { get; private set; }
+    public bool ClearConfirmOpen { get; private set; }
+    public string Draft { get; private set; } = "";
+    public string? Error { get; private set; }
+    public SensitiveArrayDecision Decision { get; private set; }
+    public JsonElement? Replacement { get; private set; }
+
+    public string CountText => ExistingCount == 1
+        ? "1 entry is configured. Stored values stay hidden."
+        : $"{ExistingCount} entries are configured. Stored values stay hidden.";
+
+    public static JsonElement EmptyArray()
+    {
+        using var document = JsonDocument.Parse("[]");
+        return document.RootElement.Clone();
+    }
+
+    public void BeginReplace()
+    {
+        ReplaceOpen = true;
+        ClearConfirmOpen = false;
+        Draft = "";
+        Error = null;
+    }
+
+    public void SetDraft(string? text) => Draft = text ?? "";
+
+    public bool TryApplyReplace()
+    {
+        try
+        {
+            using var document = JsonDocument.Parse(Draft);
+            if (document.RootElement.ValueKind != JsonValueKind.Array)
+            {
+                Error = "Must be a JSON array.";
+                return false;
+            }
+
+            Replacement = document.RootElement.Clone();
+            Decision = SensitiveArrayDecision.Replace;
+            Error = null;
+            ReplaceOpen = false;
+            Draft = "";
+            return true;
+        }
+        catch (JsonException ex)
+        {
+            Error = $"Invalid JSON: {ex.Message}";
+            return false;
+        }
+    }
+
+    public void CancelReplace()
+    {
+        ReplaceOpen = false;
+        Draft = "";
+        Error = null;
+    }
+
+    public void BeginClear()
+    {
+        ClearConfirmOpen = true;
+        ReplaceOpen = false;
+    }
+
+    public void ConfirmClear()
+    {
+        ClearConfirmOpen = false;
+        ReplaceOpen = false;
+        Draft = "";
+        Error = null;
+        Replacement = null;
+        Decision = SensitiveArrayDecision.Clear;
+    }
+
+    public void CancelClear() => ClearConfirmOpen = false;
+}

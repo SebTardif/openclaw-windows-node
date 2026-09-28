@@ -46,9 +46,29 @@ public class ConfigPathSensitivityTests
         Assert.DoesNotContain("passwordBox.Tag", source, StringComparison.Ordinal);
         Assert.DoesNotContain("Password = value", source, StringComparison.Ordinal);
         Assert.Contains("_keptArraySecrets.TryGetValue(password, out var existing)", source, StringComparison.Ordinal);
-        Assert.Contains("var hideStoredValues = IsSensitive(path)", source, StringComparison.Ordinal);
-        Assert.Contains("They cannot be edited on this page.", source, StringComparison.Ordinal);
+        Assert.DoesNotContain("They cannot be edited on this page.", source, StringComparison.Ordinal);
+        Assert.Contains("return BuildSensitiveArrayEditor(path, label, existingCount, description, onChanged);", source, StringComparison.Ordinal);
+        Assert.Contains("GetLabel(childPath, prop.Name)", source, StringComparison.Ordinal);
+        Assert.Contains("value.GetArrayLength()", source, StringComparison.Ordinal);
+        Assert.Contains("editor.Text = \"\"", source, StringComparison.Ordinal);
+        Assert.Contains("Content = \"Replace all\"", source, StringComparison.Ordinal);
+        Assert.Contains("Content = \"Clear all\"", source, StringComparison.Ordinal);
+        Assert.Contains("Clear all stored entries?", source, StringComparison.Ordinal);
+        Assert.Equal(2, CountOf(source, "JsonSerializer.Serialize(config, new JsonSerializerOptions { WriteIndented = true })"));
         Assert.Contains("if (IsSensitive(childPath))", source, StringComparison.Ordinal);
+    }
+
+    private static int CountOf(string source, string text)
+    {
+        var count = 0;
+        var index = 0;
+        while ((index = source.IndexOf(text, index, StringComparison.Ordinal)) >= 0)
+        {
+            count++;
+            index += text.Length;
+        }
+
+        return count;
     }
 
     private static string FindRepoRoot()

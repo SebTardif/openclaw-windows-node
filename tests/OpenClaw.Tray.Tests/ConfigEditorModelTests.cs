@@ -1,4 +1,5 @@
 using System.Text.Json;
+using OpenClawTray.Helpers;
 using OpenClawTray.Services;
 
 namespace OpenClaw.Tray.Tests;
@@ -132,5 +133,74 @@ public class ConfigEditorModelTests
 
         Assert.Equal("existing", updated.GetProperty("secret").GetString());
         Assert.Equal("manual", updated.GetProperty("mode").GetString());
+    }
+
+    [Fact]
+    public void SensitiveArray_UnrelatedEdit_PreservesStoredEntries()
+    {
+        var session = new SensitiveArrayEditSession(2);
+
+        Assert.Equal(SensitiveArrayDecision.Preserve, session.Decision);
+        Assert.Null(session.Replacement);
+        Assert.Equal("", session.Draft);
+        Assert.Equal("2 entries are configured. Stored values stay hidden.", session.CountText);
+        Assert.DoesNotContain("stored-secret", session.CountText, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void SensitiveArray_ReplaceAll_SendsOnlyTheNewArray()
+    {
+        var session = new SensitiveArrayEditSession(2);
+        session.BeginReplace();
+        Assert.Equal("", session.Draft);
+
+        session.SetDraft("""[{"url":"https://new.example/hook"}]""");
+        Assert.True(session.TryApplyReplace());
+
+        Assert.Equal(SensitiveArrayDecision.Replace, session.Decision);
+        var raw = session.Replacement!.Value.GetRawText();
+        Assert.Contains("https://new.example/hook", raw, StringComparison.Ordinal);
+        Assert.DoesNotContain("stored-secret", raw, StringComparison.Ordinal);
+        Assert.Equal("", session.Draft);
+    }
+
+    [Fact]
+    public void SensitiveArray_ClearAll_SendsAnEmptyArray()
+    {
+        var session = new SensitiveArrayEditSession(2);
+        session.BeginClear();
+        Assert.True(session.ClearConfirmOpen);
+        Assert.Equal(SensitiveArrayDecision.Preserve, session.Decision);
+
+        session.ConfirmClear();
+
+        Assert.Equal(SensitiveArrayDecision.Clear, session.Decision);
+        Assert.Null(session.Replacement);
+        Assert.Equal(0, SensitiveArrayEditSession.EmptyArray().GetArrayLength());
+    }
+
+    [Fact]
+    public void SensitiveArray_CancelReplaceOrClear_KeepsTheStoredArray()
+    {
+        var session = new SensitiveArrayEditSession(1);
+        session.BeginReplace();
+        session.SetDraft("""[{"token":"typed-then-cancelled"}]""");
+        session.CancelReplace();
+
+        Assert.Equal(SensitiveArrayDecision.Preserve, session.Decision);
+        Assert.Equal("", session.Draft);
+        Assert.Null(session.Replacement);
+
+        session.BeginClear();
+        session.CancelClear();
+        Assert.False(session.ClearConfirmOpen);
+        Assert.Equal(SensitiveArrayDecision.Preserve, session.Decision);
+    }
+
+    [Fact]
+    public void SensitiveArray_NearMatchObject_IsNotASecretArrayDecision()
+    {
+        Assert.False(ConfigPathSensitivity.IsSensitive("channels.googlechat.webhookUrlExtra"));
+        Assert.True(ConfigPathSensitivity.IsSensitive("channels.googlechat.webhookUrl"));
     }
 }
