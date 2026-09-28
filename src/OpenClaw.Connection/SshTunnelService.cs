@@ -20,6 +20,7 @@ public sealed class SshTunnelService : ISshTunnelManager
     private string? _lastSpec;
     private long _lifecycleGeneration;
     private int _browserHandoffLeases;
+    private DeferredTunnelStop _deferredStop;
 
     /// <summary>Raised when the SSH tunnel exits unexpectedly (not during shutdown).</summary>
     public event EventHandler<SshTunnelExit>? TunnelExited;
@@ -224,6 +225,7 @@ public sealed class SshTunnelService : ISshTunnelManager
     /// <summary>
     /// Stops the tracked tunnel. Returns false when a browser handoff lease
     /// defers the stop and leaves the process, spec, owner, and status unchanged.
+    /// The deferred stop completes on the last <see cref="ExitBrowserHandoff"/>.
     /// </summary>
     private bool StopLocked()
     {
@@ -231,9 +233,13 @@ public sealed class SshTunnelService : ISshTunnelManager
         lock (_stateLock)
         {
             if (_browserHandoffLeases > 0)
+            {
+                RememberDeferredStopLocked(DeferredTunnelStop.Stop);
                 return false;
+            }
 
             process = ClaimProcessForStopLocked();
+            _deferredStop = DeferredTunnelStop.None;
         }
 
         StopClaimedProcess(process);
@@ -292,12 +298,26 @@ public sealed class SshTunnelService : ISshTunnelManager
     {
         lock (_operationLock)
         {
-            StopLocked();
+            Process? process = null;
+            var deferred = false;
             lock (_stateLock)
             {
-                LastError = null;
-                Status = TunnelStatus.NotConfigured;
+                if (_browserHandoffLeases > 0)
+                {
+                    RememberDeferredStopLocked(DeferredTunnelStop.ResetNotConfigured);
+                    deferred = true;
+                }
+                else
+                {
+                    process = ClaimProcessForStopLocked();
+                    _deferredStop = DeferredTunnelStop.None;
+                    LastError = null;
+                    Status = TunnelStatus.NotConfigured;
+                }
             }
+
+            if (!deferred)
+                StopClaimedProcess(process);
         }
     }
 
@@ -694,11 +714,65 @@ public sealed class SshTunnelService : ISshTunnelManager
 
     public void ExitBrowserHandoff()
     {
-        lock (_stateLock)
+        // Same order as Stop: operation lock, then state lock. Claim under the
+        // state lock and kill only after releasing it. Do not take the operation
+        // lock again when the caller already holds it.
+        var enteredOperationLock = false;
+        if (!Monitor.IsEntered(_operationLock))
         {
-            if (_browserHandoffLeases > 0)
-                _browserHandoffLeases--;
+            Monitor.Enter(_operationLock);
+            enteredOperationLock = true;
         }
+
+        try
+        {
+            Process? process = null;
+            var completeStop = false;
+            lock (_stateLock)
+            {
+                if (_browserHandoffLeases > 0)
+                    _browserHandoffLeases--;
+
+                if (_browserHandoffLeases != 0 || _deferredStop == DeferredTunnelStop.None)
+                    return;
+
+                var reset = _deferredStop == DeferredTunnelStop.ResetNotConfigured;
+                process = ClaimProcessForStopLocked();
+                _deferredStop = DeferredTunnelStop.None;
+                if (reset)
+                {
+                    LastError = null;
+                    Status = TunnelStatus.NotConfigured;
+                }
+
+                completeStop = true;
+            }
+
+            if (completeStop)
+                StopClaimedProcess(process);
+        }
+        finally
+        {
+            if (enteredOperationLock)
+                Monitor.Exit(_operationLock);
+        }
+    }
+
+    /// <summary>
+    /// Caller holds <see cref="_stateLock"/>. A reset replaces a plain stop.
+    /// A later stop does not downgrade a reset.
+    /// </summary>
+    private void RememberDeferredStopLocked(DeferredTunnelStop kind)
+    {
+        if (_deferredStop != DeferredTunnelStop.ResetNotConfigured)
+            _deferredStop = kind;
+    }
+
+    private enum DeferredTunnelStop
+    {
+        None,
+        Stop,
+        ResetNotConfigured,
     }
 
     private bool IsForwardCurrentLocked(long generation, int localPort)

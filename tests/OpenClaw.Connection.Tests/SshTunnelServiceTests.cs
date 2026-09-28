@@ -463,6 +463,75 @@ public sealed class SshTunnelServiceTests
         }
     }
 
+    [Fact]
+    public void ResetNotConfigured_DuringBrowserHandoff_DoesNotReportNotConfiguredUntilLeaseEnds()
+    {
+        using var service = new SshTunnelService(NullLogger.Instance);
+        var config = new SshTunnelConfig("user", "host", 18789, 45678);
+        using var process = PlantRunningTunnel(
+            service,
+            config,
+            SshTunnelOwner.Settings,
+            generation: 4);
+        SetPrivate(service, "<LastError>k__BackingField", "tunnel still up");
+        Assert.True(service.TryEnterBrowserHandoff(4, config.LocalPort));
+        Assert.True(service.TryEnterBrowserHandoff(4, config.LocalPort));
+
+        service.ResetNotConfigured();
+
+        var held = Assert.Throws<InvalidOperationException>(
+            () => service.EnsureStarted("other", "host", 18789, 45679));
+        Assert.Equal("SSH tunnel is held for a dashboard launch.", held.Message);
+        Assert.Same(process, TrackedProcess(service));
+        Assert.False(process.HasExited);
+        Assert.Equal(TunnelStatus.Up, service.Status);
+        Assert.NotEqual(TunnelStatus.NotConfigured, service.Status);
+        Assert.Equal("tunnel still up", service.LastError);
+        Assert.True(service.IsRunning);
+
+        service.ExitBrowserHandoff();
+
+        Assert.Same(process, TrackedProcess(service));
+        Assert.False(process.HasExited);
+        Assert.Equal(TunnelStatus.Up, service.Status);
+        Assert.Equal("tunnel still up", service.LastError);
+
+        service.ExitBrowserHandoff();
+
+        Assert.Null(TrackedProcess(service));
+        Assert.Throws<InvalidOperationException>(() => process.HasExited);
+        Assert.Equal(TunnelStatus.NotConfigured, service.Status);
+        Assert.Null(service.LastError);
+        Assert.False(service.IsRunning);
+    }
+
+    [Fact]
+    public void Stop_DuringBrowserHandoff_KillsProcessWhenLeaseEnds()
+    {
+        using var service = new SshTunnelService(NullLogger.Instance);
+        var config = new SshTunnelConfig("user", "host", 18789, 45678);
+        using var process = PlantRunningTunnel(
+            service,
+            config,
+            SshTunnelOwner.Settings,
+            generation: 4);
+        Assert.True(service.TryEnterBrowserHandoff(4, config.LocalPort));
+
+        service.Stop();
+
+        Assert.Same(process, TrackedProcess(service));
+        Assert.False(process.HasExited);
+        Assert.Equal(TunnelStatus.Up, service.Status);
+        Assert.True(service.IsRunning);
+
+        service.ExitBrowserHandoff();
+
+        Assert.Null(TrackedProcess(service));
+        Assert.Throws<InvalidOperationException>(() => process.HasExited);
+        Assert.Equal(TunnelStatus.Stopped, service.Status);
+        Assert.False(service.IsRunning);
+    }
+
     private static Process PlantRunningTunnel(
         SshTunnelService service,
         SshTunnelConfig config,
