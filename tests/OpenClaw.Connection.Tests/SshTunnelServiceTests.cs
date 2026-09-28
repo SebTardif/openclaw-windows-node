@@ -1,6 +1,8 @@
 using OpenClaw.Shared;
+using System.Diagnostics;
 using System.Net;
 using System.Net.Sockets;
+using System.Reflection;
 
 namespace OpenClaw.Connection.Tests;
 
@@ -399,5 +401,116 @@ public sealed class SshTunnelServiceTests
                 45678,
                 4321,
                 DateTime.UtcNow));
+    }
+
+    [Fact]
+    public void EnsureStarted_WhileBrowserHandoffLeaseHeld_DoesNotReplaceTrackedProcess()
+    {
+        using var service = new SshTunnelService(NullLogger.Instance);
+        var config = new SshTunnelConfig("user", "host", 18789, 45678);
+        using var process = PlantRunningTunnel(
+            service,
+            config,
+            SshTunnelOwner.Settings,
+            generation: 4);
+        Assert.True(service.TryEnterBrowserHandoff(4, config.LocalPort));
+
+        try
+        {
+            var ex = Assert.Throws<InvalidOperationException>(
+                () => service.EnsureStarted("user", "host", 18789, 45679));
+
+            Assert.Equal("SSH tunnel is held for a dashboard launch.", ex.Message);
+            Assert.Same(process, TrackedProcess(service));
+            Assert.Equal(4, service.OwnershipGeneration);
+            Assert.True(service.IsRunning);
+            Assert.Equal(TunnelStatus.Up, service.Status);
+            Assert.Equal(config, service.ActiveConfig);
+        }
+        finally
+        {
+            service.ExitBrowserHandoff();
+        }
+    }
+
+    [Fact]
+    public async Task StopIfOwnedAsync_WhileBrowserHandoffLeaseHeld_ReturnsFalseAndKeepsProcess()
+    {
+        using var service = new SshTunnelService(NullLogger.Instance);
+        var config = new SshTunnelConfig("user", "host", 18789, 45678);
+        using var process = PlantRunningTunnel(
+            service,
+            config,
+            SshTunnelOwner.GatewayConnectionManager,
+            generation: 4);
+        Assert.True(service.TryEnterBrowserHandoff(4, config.LocalPort));
+
+        try
+        {
+            var stopped = await service.StopIfOwnedAsync(config, ownershipGeneration: 4, CancellationToken.None);
+
+            Assert.False(stopped);
+            Assert.Same(process, TrackedProcess(service));
+            Assert.Equal(4, service.OwnershipGeneration);
+            Assert.True(service.IsRunning);
+            Assert.Equal(TunnelStatus.Up, service.Status);
+            Assert.Equal(config, service.ActiveConfig);
+            Assert.Equal(SshTunnelOwner.GatewayConnectionManager, CurrentOwner(service));
+        }
+        finally
+        {
+            service.ExitBrowserHandoff();
+        }
+    }
+
+    private static Process PlantRunningTunnel(
+        SshTunnelService service,
+        SshTunnelConfig config,
+        SshTunnelOwner owner,
+        long generation)
+    {
+        var process = new Process
+        {
+            StartInfo = new ProcessStartInfo
+            {
+                FileName = "cmd.exe",
+                Arguments = "/d /c ping -n 30 127.0.0.1",
+                UseShellExecute = false,
+                CreateNoWindow = true,
+            },
+        };
+        Assert.True(process.Start());
+        SetPrivate(service, "_process", process);
+        SetPrivate(service, "_processStarted", true);
+        SetPrivate(service, "_currentConfig", config);
+        SetPrivate(service, "_currentOwner", owner);
+        SetPrivate(
+            service,
+            "_lastSpec",
+            $"{config.User}@{config.Host}:{config.SshPort}:{config.LocalPort}:{config.RemotePort}:browserProxy={config.IncludeBrowserProxyForward}");
+        SetPrivate(service, "_lifecycleGeneration", generation);
+        SetPrivate(service, "<Status>k__BackingField", TunnelStatus.Up);
+        return process;
+    }
+
+    private static Process? TrackedProcess(SshTunnelService service) =>
+        (Process?)GetPrivate(service, "_process");
+
+    private static SshTunnelOwner CurrentOwner(SshTunnelService service) =>
+        (SshTunnelOwner)GetPrivate(service, "_currentOwner")!;
+
+    private static void SetPrivate(object target, string name, object? value) =>
+        PrivateField(name).SetValue(target, value);
+
+    private static object? GetPrivate(object target, string name) =>
+        PrivateField(name).GetValue(target);
+
+    private static FieldInfo PrivateField(string name)
+    {
+        var field = typeof(SshTunnelService).GetField(
+            name,
+            BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(field);
+        return field;
     }
 }

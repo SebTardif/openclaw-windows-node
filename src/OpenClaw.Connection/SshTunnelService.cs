@@ -185,6 +185,7 @@ public sealed class SshTunnelService : ISshTunnelManager
                 tunnel.IncludeBrowserProxyForward,
                 tunnel.SshPort);
 
+            Process? claimedProcess;
             lock (_stateLock)
             {
                 if (IsRunningLocked() && string.Equals(_lastSpec, spec, StringComparison.Ordinal))
@@ -196,9 +197,13 @@ public sealed class SshTunnelService : ISshTunnelManager
 
                 if (_browserHandoffLeases > 0)
                     throw new InvalidOperationException("SSH tunnel is held for a dashboard launch.");
+
+                // Lease check and claim share this hold. A later handoff cannot
+                // make the stop defer after this caller has decided to replace.
+                claimedProcess = ClaimProcessForStopLocked();
             }
 
-            StopLocked();
+            StopClaimedProcess(claimedProcess);
             beforeStart?.Invoke(tunnel);
             lock (_stateLock)
             {
@@ -216,30 +221,50 @@ public sealed class SshTunnelService : ISshTunnelManager
         }
     }
 
-    private void StopLocked()
+    /// <summary>
+    /// Stops the tracked tunnel. Returns false when a browser handoff lease
+    /// defers the stop and leaves the process, spec, owner, and status unchanged.
+    /// </summary>
+    private bool StopLocked()
     {
         Process? process;
         lock (_stateLock)
         {
             if (_browserHandoffLeases > 0)
-                return;
+                return false;
 
-            // Claim and clear the current process before stopping it. Exit callbacks can
-            // then only observe stale ownership and cannot overwrite a replacement.
-            _lifecycleGeneration++;
-            process = _process;
-            _process = null;
-            _processStarted = false;
-            _currentConfig = null;
-            _currentOwner = SshTunnelOwner.Unspecified;
-            _lastSpec = null;
-            CurrentBrowserProxyLocalPort = 0;
-            CurrentBrowserProxyRemotePort = 0;
-            StartedAtUtc = null;
-            if (Status != TunnelStatus.NotConfigured)
-                Status = TunnelStatus.Stopped;
+            process = ClaimProcessForStopLocked();
         }
 
+        StopClaimedProcess(process);
+        return true;
+    }
+
+    /// <summary>
+    /// Caller holds <see cref="_stateLock"/> and has already decided the lease
+    /// does not defer this stop. Does not consult the lease again.
+    /// </summary>
+    private Process? ClaimProcessForStopLocked()
+    {
+        // Claim and clear the current process before stopping it. Exit callbacks can
+        // then only observe stale ownership and cannot overwrite a replacement.
+        _lifecycleGeneration++;
+        var process = _process;
+        _process = null;
+        _processStarted = false;
+        _currentConfig = null;
+        _currentOwner = SshTunnelOwner.Unspecified;
+        _lastSpec = null;
+        CurrentBrowserProxyLocalPort = 0;
+        CurrentBrowserProxyRemotePort = 0;
+        StartedAtUtc = null;
+        if (Status != TunnelStatus.NotConfigured)
+            Status = TunnelStatus.Stopped;
+        return process;
+    }
+
+    private void StopClaimedProcess(Process? process)
+    {
         if (process == null)
             return;
 
@@ -773,8 +798,10 @@ public sealed class SshTunnelService : ISshTunnelManager
         try
         {
             ct.ThrowIfCancellationRequested();
+            Process? process;
             lock (_stateLock)
             {
+                ct.ThrowIfCancellationRequested();
                 var normalizedConfig = config with
                 {
                     User = config.User.Trim(),
@@ -782,14 +809,16 @@ public sealed class SshTunnelService : ISshTunnelManager
                 };
                 if (_lifecycleGeneration != ownershipGeneration ||
                     !Equals(_currentConfig, normalizedConfig) ||
-                    _currentOwner != SshTunnelOwner.GatewayConnectionManager)
+                    _currentOwner != SshTunnelOwner.GatewayConnectionManager ||
+                    _browserHandoffLeases > 0)
                 {
                     return Task.FromResult(false);
                 }
+
+                process = ClaimProcessForStopLocked();
             }
 
-            ct.ThrowIfCancellationRequested();
-            StopLocked();
+            StopClaimedProcess(process);
             return Task.FromResult(true);
         }
         finally
@@ -840,16 +869,20 @@ public sealed class SshTunnelService : ISshTunnelManager
     {
         lock (_operationLock)
         {
+            Process? claimed;
             lock (_stateLock)
             {
                 if (generation != _lifecycleGeneration ||
-                    !ReferenceEquals(_process, process))
+                    !ReferenceEquals(_process, process) ||
+                    _browserHandoffLeases > 0)
                 {
                     return;
                 }
+
+                claimed = ClaimProcessForStopLocked();
             }
 
-            StopLocked();
+            StopClaimedProcess(claimed);
         }
     }
 
