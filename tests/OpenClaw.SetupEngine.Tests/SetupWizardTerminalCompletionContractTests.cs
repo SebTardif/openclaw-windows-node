@@ -48,7 +48,12 @@ public sealed class SetupWizardTerminalCompletionContractTests
             apply,
             StringComparison.Ordinal);
         Assert.Contains("_finalStepTracker.AnsweredFinalStep", apply, StringComparison.Ordinal);
-        Assert.Contains("decision.MarksWizardCompleted", apply, StringComparison.Ordinal);
+        Assert.Contains("if (!decision.MarksWizardCompleted)", apply, StringComparison.Ordinal);
+        AssertInOrder(
+            apply,
+            "if (!decision.MarksWizardCompleted)",
+            "ShowError(error);",
+            "return;");
         Assert.DoesNotContain("this.prompt is not a function", apply, StringComparison.Ordinal);
         AssertInOrder(
             apply,
@@ -56,6 +61,13 @@ public sealed class SetupWizardTerminalCompletionContractTests
             "SendWizardRequestAsync(");
         Assert.Contains("_finalStepTracker.ResetForNewSession();", start, StringComparison.Ordinal);
         AssertRecordsAnswerBeforeNext(sendAnswer);
+        AssertInOrder(
+            sendAnswer,
+            "if (skip)",
+            "_finalStepTracker.RecordProgressAcknowledgement();",
+            "else",
+            "_finalStepTracker.RecordAnsweredStep(",
+            "SendWizardRequestAsync(");
         AssertRecordsAnswerBeforeNext(sendOption);
         AssertRecordsAnswerBeforeNext(expandMore);
     }

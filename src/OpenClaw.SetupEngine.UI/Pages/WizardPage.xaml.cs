@@ -870,13 +870,20 @@ public sealed partial class WizardPage : Page
                 parameters = new { sessionId = _sessionId, answer = new { stepId = _stepId, value = answerValue } };
             }
 
-            _finalStepTracker.RecordAnsweredStep(
-                _stepType,
-                _stepId,
-                _currentTitle,
-                _stepHasOptions,
-                _stepIndex,
-                _totalSteps);
+            if (skip)
+            {
+                _finalStepTracker.RecordProgressAcknowledgement();
+            }
+            else
+            {
+                _finalStepTracker.RecordAnsweredStep(
+                    _stepType,
+                    _stepId,
+                    _currentTitle,
+                    _stepHasOptions,
+                    _stepIndex,
+                    _totalSteps);
+            }
             _expectedTerminalRestart =
                 !skip &&
                 _hostAccessPlan.CanControlWslGateway &&
