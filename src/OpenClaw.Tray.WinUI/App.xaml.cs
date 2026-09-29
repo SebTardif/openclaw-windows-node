@@ -542,7 +542,7 @@ public partial class App : Application, OpenClawTray.Services.IAppCommands, IPer
             return; // Environment.Exit called inside; defensive return
         }
 
-        if (StoreMigrationStartupGuard.ShouldStopLaunch())
+        if (await StoreMigrationStartupGuard.ShouldStopLaunchAsync(DeepLinkPipeName))
         {
             Exit();
             return;
@@ -593,7 +593,8 @@ public partial class App : Application, OpenClawTray.Services.IAppCommands, IPer
             return;
         }
 
-        _activationRouter = new ActivationRouter(AppIdentity.ProtocolScheme, DeepLinkPipeName);
+        _activationRouter = new ActivationRouter(AppIdentity.ProtocolScheme, DeepLinkPipeName,
+            InnoMigrationHandoff.CreateShutdownHandler(_dispatcherQueue!, ExitApplication));
 
         if (!ownsMutex)
         {
