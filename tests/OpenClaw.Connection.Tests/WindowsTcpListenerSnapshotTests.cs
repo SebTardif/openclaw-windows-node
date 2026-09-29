@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Net;
 
 namespace OpenClaw.Connection.Tests;
 
@@ -9,6 +10,42 @@ public sealed class WindowsTcpListenerSnapshotTests
     {
         Assert.Null(WindowsTcpListenerSnapshot.GetProcessCommandLine(0));
         Assert.Null(WindowsTcpListenerSnapshot.GetProcessCommandLine(-1));
+    }
+
+    [Fact]
+    public void IsEstablishedLoopbackForwardUse_MatchesBrowserOrAcceptedRowOnly()
+    {
+        var loopback = IPAddress.Loopback;
+        var remote = IPAddress.Parse("203.0.113.5");
+
+        Assert.False(WindowsTcpListenerSnapshot.IsEstablishedLoopbackForwardUse(
+            state: 2,
+            loopback,
+            localPort: 18789,
+            remote,
+            remotePort: 40000,
+            forwardPort: 18789));
+        Assert.True(WindowsTcpListenerSnapshot.IsEstablishedLoopbackForwardUse(
+            WindowsTcpListenerSnapshot.TcpStateEstablished,
+            loopback,
+            localPort: 18789,
+            remote,
+            remotePort: 40000,
+            forwardPort: 18789));
+        Assert.True(WindowsTcpListenerSnapshot.IsEstablishedLoopbackForwardUse(
+            WindowsTcpListenerSnapshot.TcpStateEstablished,
+            remote,
+            localPort: 40000,
+            loopback,
+            remotePort: 18789,
+            forwardPort: 18789));
+        Assert.False(WindowsTcpListenerSnapshot.IsEstablishedLoopbackForwardUse(
+            WindowsTcpListenerSnapshot.TcpStateEstablished,
+            remote,
+            localPort: 18789,
+            remote,
+            remotePort: 40000,
+            forwardPort: 18789));
     }
 
     [Fact]

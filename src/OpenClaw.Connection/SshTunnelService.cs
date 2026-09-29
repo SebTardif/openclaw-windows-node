@@ -52,6 +52,29 @@ public sealed class SshTunnelService : ISshTunnelManager
             }
         }
     }
+
+    public bool HasDeferredStop
+    {
+        get
+        {
+            lock (_stateLock)
+            {
+                return _deferredStop != DeferredTunnelStop.None;
+            }
+        }
+    }
+
+    public int BrowserHandoffLeaseCount
+    {
+        get
+        {
+            lock (_stateLock)
+            {
+                return _browserHandoffLeases;
+            }
+        }
+    }
+
     public SshTunnelConfig? ActiveConfig
     {
         get
@@ -755,6 +778,74 @@ public sealed class SshTunnelService : ISshTunnelManager
         {
             if (enteredOperationLock)
                 Monitor.Exit(_operationLock);
+        }
+    }
+
+    /// <summary>
+    /// Releases one browser-handoff lease for <paramref name="localPort"/>.
+    /// A deferred stop or reset then runs. Returns false when that port is not leased.
+    /// </summary>
+    public bool TryCompleteDeferredBrowserHandoff(int localPort)
+    {
+        var enteredOperationLock = false;
+        if (!Monitor.IsEntered(_operationLock))
+        {
+            Monitor.Enter(_operationLock);
+            enteredOperationLock = true;
+        }
+
+        try
+        {
+            lock (_stateLock)
+            {
+                if (_browserHandoffLeases <= 0 || _currentConfig?.LocalPort != localPort)
+                    return false;
+            }
+
+            ExitBrowserHandoff();
+            return true;
+        }
+        finally
+        {
+            if (enteredOperationLock)
+                Monitor.Exit(_operationLock);
+        }
+    }
+
+    /// <summary>
+    /// Waits until the browser uses <paramref name="localPort"/>, or the SSH process is gone.
+    /// A timeout leaves the lease and listener in place and returns false.
+    /// </summary>
+    public async Task<bool> WatchBrowserHandoffConsumptionAsync(
+        int localPort,
+        TimeSpan timeout,
+        Func<int, bool>? consumptionProbe,
+        CancellationToken cancellationToken = default)
+    {
+        var deadline = DateTime.UtcNow + timeout;
+        while (true)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (BrowserHandoffLeaseCount <= 0)
+                return true;
+
+            var consumed = consumptionProbe != null
+                ? consumptionProbe(localPort)
+                : WindowsTcpListenerSnapshot.HasEstablishedLoopbackConnection(localPort);
+            if ((consumed || !IsRunning) &&
+                (TryCompleteDeferredBrowserHandoff(localPort) || BrowserHandoffLeaseCount <= 0))
+            {
+                return true;
+            }
+
+            if (DateTime.UtcNow >= deadline)
+            {
+                _logger.Warn(
+                    "Dashboard SSH forward stayed owned because the browser has not connected; the listener was not stopped.");
+                return false;
+            }
+
+            await Task.Delay(TimeSpan.FromMilliseconds(200), cancellationToken).ConfigureAwait(false);
         }
     }
 
