@@ -127,14 +127,24 @@ internal static class ConfigEditorModel
 
     public static JsonElement OmitUntouchedRedactionSentinels(
         JsonElement document,
-        IEnumerable<string> editedPaths)
+        IEnumerable<string> editedPaths) =>
+        OmitUntouchedRedactionSentinels(document, editedPaths, document);
+
+    public static JsonElement OmitUntouchedRedactionSentinels(
+        JsonElement document,
+        IEnumerable<string> editedPaths,
+        JsonElement baseDocument)
     {
         var node = JsonNode.Parse(document.GetRawText());
         if (node is null)
             return document.Clone();
 
         var edited = new HashSet<string>(editedPaths, StringComparer.OrdinalIgnoreCase);
-        RemoveUntouchedRedactionSentinels(node, "", edited);
+        var arraysToDrop = new HashSet<string>(StringComparer.Ordinal);
+        RemoveUntouchedRedactionSentinels(node, "", edited, baseDocument, arraysToDrop);
+        foreach (var arrayPath in arraysToDrop.OrderBy(static path => path.Length))
+            RemovePropertyAtPath(node, arrayPath);
+
         using var rewritten = JsonDocument.Parse(node.ToJsonString());
         return rewritten.RootElement.Clone();
     }
@@ -143,7 +153,15 @@ internal static class ConfigEditorModel
         JsonElement updated,
         JsonElement baseDocument,
         string path,
-        HashSet<string> edited)
+        HashSet<string> edited) =>
+        FindBlockedRedactionSentinel(updated, baseDocument, path, edited, baseDocument);
+
+    private static string? FindBlockedRedactionSentinel(
+        JsonElement updated,
+        JsonElement baseDocument,
+        string path,
+        HashSet<string> edited,
+        JsonElement baseRoot)
     {
         if (updated.ValueKind == JsonValueKind.Object)
         {
@@ -156,7 +174,7 @@ internal static class ConfigEditorModel
                 var childBase = default(JsonElement);
                 if (baseObject.ValueKind == JsonValueKind.Object)
                     baseObject.TryGetProperty(property.Name, out childBase);
-                var hit = FindBlockedRedactionSentinel(property.Value, childBase, childPath, edited);
+                var hit = FindBlockedRedactionSentinel(property.Value, childBase, childPath, edited, baseRoot);
                 if (hit != null)
                     return hit;
             }
@@ -171,7 +189,7 @@ internal static class ConfigEditorModel
                 if (baseDocument.ValueKind == JsonValueKind.Array && index < baseDocument.GetArrayLength())
                     childBase = baseDocument[index];
                 index++;
-                var hit = FindBlockedRedactionSentinel(item, childBase, childPath, edited);
+                var hit = FindBlockedRedactionSentinel(item, childBase, childPath, edited, baseRoot);
                 if (hit != null)
                     return hit;
             }
@@ -184,11 +202,18 @@ internal static class ConfigEditorModel
             if (edited.Contains(path))
                 return loadedSentinel ? path : null;
 
-            // Untouched masked credentials nested in arrays are left out of the
-            // patch below. They must not fail an unrelated save, and the editor
-            // cannot put the original secret back.
+            // Object fields and id-keyed array fields can be left out of the
+            // patch. Gateway keeps the stored secret for an absent key. An array
+            // whose entries lack stable ids is replaced wholesale, so an indexed
+            // edit inside that array cannot drop the masked credential safely.
             if (ShouldOmitUntouchedSentinel(path))
+            {
+                var arrayPath = OutermostNonIdArrayPath(baseRoot, path);
+                if (arrayPath != null && EditedPathInsideArray(edited, arrayPath))
+                    return path;
+
                 return null;
+            }
 
             if (!loadedSentinel || !IsCredentialPath(path))
                 return null;
@@ -232,7 +257,9 @@ internal static class ConfigEditorModel
     private static void RemoveUntouchedRedactionSentinels(
         JsonNode node,
         string path,
-        HashSet<string> edited)
+        HashSet<string> edited,
+        JsonElement baseRoot,
+        HashSet<string> arraysToDrop)
     {
         if (node is JsonObject obj)
         {
@@ -246,12 +273,17 @@ internal static class ConfigEditorModel
                     !edited.Contains(childPath) &&
                     ShouldOmitUntouchedSentinel(childPath))
                 {
-                    removals.Add(property.Key);
+                    var arrayPath = OutermostNonIdArrayPath(baseRoot, childPath);
+                    if (arrayPath == null)
+                        removals.Add(property.Key);
+                    else if (!EditedPathInsideArray(edited, arrayPath))
+                        arraysToDrop.Add(arrayPath);
+
                     continue;
                 }
 
                 if (property.Value is not null)
-                    RemoveUntouchedRedactionSentinels(property.Value, childPath, edited);
+                    RemoveUntouchedRedactionSentinels(property.Value, childPath, edited, baseRoot, arraysToDrop);
             }
 
             foreach (var key in removals)
@@ -262,8 +294,149 @@ internal static class ConfigEditorModel
             for (var index = 0; index < array.Count; index++)
             {
                 if (array[index] is JsonNode item)
-                    RemoveUntouchedRedactionSentinels(item, $"{path}[{index}]", edited);
+                    RemoveUntouchedRedactionSentinels(item, $"{path}[{index}]", edited, baseRoot, arraysToDrop);
             }
+        }
+    }
+
+    private readonly record struct ConfigPathSegment(string Name, int? Index);
+
+    private static List<ConfigPathSegment> ParsePath(string path)
+    {
+        var segments = new List<ConfigPathSegment>();
+        var index = 0;
+        while (index < path.Length)
+        {
+            if (path[index] == '.')
+            {
+                index++;
+                continue;
+            }
+
+            var start = index;
+            while (index < path.Length && path[index] != '.' && path[index] != '[')
+                index++;
+
+            var name = path[start..index];
+            int? arrayIndex = null;
+            if (index < path.Length && path[index] == '[')
+            {
+                index++;
+                var numberStart = index;
+                while (index < path.Length && path[index] != ']')
+                    index++;
+                if (int.TryParse(path[numberStart..index], NumberStyles.None, CultureInfo.InvariantCulture, out var parsed))
+                    arrayIndex = parsed;
+                if (index < path.Length && path[index] == ']')
+                    index++;
+            }
+
+            if (name.Length > 0)
+                segments.Add(new ConfigPathSegment(name, arrayIndex));
+        }
+
+        return segments;
+    }
+
+    private static bool ArrayIsIdKeyed(JsonElement array)
+    {
+        if (array.ValueKind != JsonValueKind.Array)
+            return false;
+
+        foreach (var item in array.EnumerateArray())
+        {
+            if (item.ValueKind != JsonValueKind.Object ||
+                !item.TryGetProperty("id", out var id) ||
+                id.ValueKind != JsonValueKind.String ||
+                string.IsNullOrEmpty(id.GetString()))
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    private static string? OutermostNonIdArrayPath(JsonElement root, string credentialPath)
+    {
+        if (!credentialPath.Contains('[', StringComparison.Ordinal) ||
+            root.ValueKind != JsonValueKind.Object)
+        {
+            return null;
+        }
+
+        var current = root;
+        var walked = "";
+        foreach (var segment in ParsePath(credentialPath))
+        {
+            if (current.ValueKind != JsonValueKind.Object ||
+                !current.TryGetProperty(segment.Name, out var child))
+            {
+                return null;
+            }
+
+            walked = walked.Length == 0 ? segment.Name : $"{walked}.{segment.Name}";
+            if (segment.Index is not int arrayIndex)
+            {
+                current = child;
+                continue;
+            }
+
+            if (child.ValueKind != JsonValueKind.Array)
+                return null;
+            if (!ArrayIsIdKeyed(child))
+                return walked;
+            if ((uint)arrayIndex >= (uint)child.GetArrayLength())
+                return null;
+
+            walked = $"{walked}[{arrayIndex.ToString(CultureInfo.InvariantCulture)}]";
+            current = child[arrayIndex];
+        }
+
+        return null;
+    }
+
+    private static bool EditedPathInsideArray(HashSet<string> edited, string arrayPath)
+    {
+        foreach (var path in edited)
+        {
+            if (path.Equals(arrayPath, StringComparison.OrdinalIgnoreCase))
+                return true;
+            if (path.StartsWith(arrayPath + "[", StringComparison.OrdinalIgnoreCase))
+                return true;
+        }
+
+        return false;
+    }
+
+    private static void RemovePropertyAtPath(JsonNode root, string propertyPath)
+    {
+        JsonNode? current = root;
+        var segments = ParsePath(propertyPath);
+        for (var index = 0; index < segments.Count; index++)
+        {
+            if (current is not JsonObject obj)
+                return;
+
+            var segment = segments[index];
+            if (obj[segment.Name] is not JsonNode child)
+                return;
+
+            if (index == segments.Count - 1)
+            {
+                obj.Remove(segment.Name);
+                return;
+            }
+
+            if (segment.Index is int arrayIndex)
+            {
+                if (child is not JsonArray array || (uint)arrayIndex >= (uint)array.Count)
+                    return;
+                current = array[arrayIndex];
+                continue;
+            }
+
+            current = child;
         }
     }
 

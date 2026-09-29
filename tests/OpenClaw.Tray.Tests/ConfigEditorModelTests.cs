@@ -240,7 +240,7 @@ public class ConfigEditorModelTests
     }
 
     [Fact]
-    public void FindUneditedRedactionSentinel_OmitsArrayTokenWhenEditUsedTheUnindexedPath()
+    public void FindUneditedRedactionSentinel_OmitsNoIdArrayWhenEditUsedTheUnindexedPath()
     {
         using var document = JsonDocument.Parse("""
         {
@@ -260,7 +260,7 @@ public class ConfigEditorModelTests
             edited);
 
         Assert.Null(blocked);
-        Assert.False(sent.GetProperty("channels").GetProperty("slack").GetProperty("accounts")[0].TryGetProperty("token", out _));
+        Assert.False(sent.GetProperty("channels").GetProperty("slack").TryGetProperty("accounts", out _));
     }
 
     [Fact]
@@ -353,11 +353,7 @@ public class ConfigEditorModelTests
 
         Assert.Null(blocked);
         Assert.True(sent.GetProperty("channels").GetProperty("slack").GetProperty("enabled").GetBoolean());
-        var account = sent.GetProperty("channels").GetProperty("slack").GetProperty("accounts")[0];
-        Assert.False(account.TryGetProperty("token", out _));
-        Assert.False(account.TryGetProperty("apiKey", out _));
-        Assert.False(account.TryGetProperty("api_key", out _));
-        Assert.Equal("<redacted>", account.GetProperty("label").GetString());
+        Assert.False(sent.GetProperty("channels").GetProperty("slack").TryGetProperty("accounts", out _));
 
         using var siblingOnly = JsonDocument.Parse("""
         {
@@ -401,9 +397,7 @@ public class ConfigEditorModelTests
             Array.Empty<string>());
 
         Assert.Null(snakeBlocked);
-        var snakeAccount = snakeSent.GetProperty("channels").GetProperty("slack").GetProperty("accounts")[0];
-        Assert.False(snakeAccount.TryGetProperty("api_key", out _));
-        Assert.Equal("<redacted>", snakeAccount.GetProperty("note").GetString());
+        Assert.False(snakeSent.GetProperty("channels").GetProperty("slack").TryGetProperty("accounts", out _));
     }
 
     [Fact]
@@ -436,9 +430,7 @@ public class ConfigEditorModelTests
 
         Assert.Null(blocked);
         Assert.True(sent.GetProperty("channels").GetProperty("slack").GetProperty("enabled").GetBoolean());
-        var account = sent.GetProperty("channels").GetProperty("slack").GetProperty("accounts")[0];
-        Assert.False(account.TryGetProperty("privateKey", out _));
-        Assert.Equal("<redacted>", account.GetProperty("label").GetString());
+        Assert.False(sent.GetProperty("channels").GetProperty("slack").TryGetProperty("accounts", out _));
 
         using var cased = JsonDocument.Parse("""
         {
@@ -455,8 +447,7 @@ public class ConfigEditorModelTests
             Array.Empty<string>());
 
         Assert.Null(casedBlocked);
-        Assert.False(casedSent.GetProperty("accounts")[0].TryGetProperty("PrivateKey", out _));
-        Assert.Equal("<redacted>", casedSent.GetProperty("accounts")[0].GetProperty("title").GetString());
+        Assert.False(casedSent.TryGetProperty("accounts", out _));
     }
 
     [Fact]
@@ -484,5 +475,413 @@ public class ConfigEditorModelTests
         Assert.Equal("<redacted>", account.GetProperty("apiKey").GetString());
         Assert.Equal("<redacted>", account.GetProperty("privateKey").GetString());
         Assert.Equal("desk", account.GetProperty("label").GetString());
+    }
+
+    [Fact]
+    public void FindUneditedRedactionSentinel_BlocksIndexedEditInsideNoIdArray()
+    {
+        using var document = JsonDocument.Parse("""
+        {
+          "channels": {
+            "slack": {
+              "accounts": [ { "token": "<redacted>", "label": "renamed" } ]
+            }
+          }
+        }
+        """);
+
+        var edited = new[] { "channels.slack.accounts[0].label" };
+        var blocked = ConfigEditorModel.FindUneditedRedactionSentinel(
+            document.RootElement,
+            edited,
+            document.RootElement);
+        var sent = ConfigEditorModel.OmitUntouchedRedactionSentinels(document.RootElement, edited);
+
+        Assert.Equal("channels.slack.accounts[0].token", blocked);
+        var account = sent.GetProperty("channels").GetProperty("slack").GetProperty("accounts")[0];
+        Assert.Equal("<redacted>", account.GetProperty("token").GetString());
+        Assert.Equal("renamed", account.GetProperty("label").GetString());
+
+        var cased = ConfigEditorModel.FindUneditedRedactionSentinel(
+            document.RootElement,
+            new[] { "Channels.Slack.Accounts[0].Label" },
+            document.RootElement);
+        Assert.Equal("channels.slack.accounts[0].token", cased);
+    }
+
+    [Fact]
+    public void FindUneditedRedactionSentinel_OmitsOutermostNoIdArrayAndKeepsIdKeyedFields()
+    {
+        using var outer = JsonDocument.Parse("""
+        {
+          "enabled": true,
+          "groups": [ { "accounts": [ { "id": "acct-1", "token": "<redacted>" } ] } ]
+        }
+        """);
+        var outerEdited = new[] { "enabled" };
+        var outerBlocked = ConfigEditorModel.FindUneditedRedactionSentinel(
+            outer.RootElement,
+            outerEdited,
+            outer.RootElement);
+        var outerSent = ConfigEditorModel.OmitUntouchedRedactionSentinels(outer.RootElement, outerEdited);
+
+        Assert.Null(outerBlocked);
+        Assert.True(outerSent.GetProperty("enabled").GetBoolean());
+        Assert.False(outerSent.TryGetProperty("groups", out _));
+
+        using var inner = JsonDocument.Parse("""
+        {
+          "groups": [ {
+            "id": "g1",
+            "name": "new",
+            "accounts": [ { "token": "<redacted>", "label": "desk" } ]
+          } ]
+        }
+        """);
+        var innerEdited = new[] { "groups[0].name" };
+        var innerBlocked = ConfigEditorModel.FindUneditedRedactionSentinel(
+            inner.RootElement,
+            innerEdited,
+            inner.RootElement);
+        var innerSent = ConfigEditorModel.OmitUntouchedRedactionSentinels(inner.RootElement, innerEdited);
+
+        Assert.Null(innerBlocked);
+        var group = innerSent.GetProperty("groups")[0];
+        Assert.Equal("g1", group.GetProperty("id").GetString());
+        Assert.Equal("new", group.GetProperty("name").GetString());
+        Assert.False(group.TryGetProperty("accounts", out _));
+
+        using var mixed = JsonDocument.Parse("""
+        {
+          "enabled": true,
+          "accounts": [
+            { "id": "acct-1", "token": "<redacted>" },
+            { "token": "<redacted>" }
+          ]
+        }
+        """);
+        var mixedSent = ConfigEditorModel.OmitUntouchedRedactionSentinels(
+            mixed.RootElement,
+            new[] { "enabled" });
+        Assert.False(mixedSent.TryGetProperty("accounts", out _));
+    }
+
+    [Fact]
+    public void NoIdArray_RefusesIndexedEditAndAcceptsUnrelatedSave()
+    {
+        using var stored = JsonDocument.Parse("""
+        {
+          "channels": {
+            "slack": {
+              "enabled": false,
+              "accounts": [ { "token": "stored-secret", "label": "desk" } ]
+            }
+          }
+        }
+        """);
+        using var unrelated = JsonDocument.Parse("""
+        {
+          "channels": {
+            "slack": {
+              "enabled": true,
+              "accounts": [ { "token": "<redacted>", "label": "desk" } ]
+            }
+          }
+        }
+        """);
+        var unrelatedEdited = new[] { "channels.slack.enabled" };
+        var unrelatedBlocked = ConfigEditorModel.FindUneditedRedactionSentinel(
+            unrelated.RootElement,
+            unrelatedEdited,
+            stored.RootElement);
+        var sent = ConfigEditorModel.OmitUntouchedRedactionSentinels(
+            unrelated.RootElement,
+            unrelatedEdited,
+            stored.RootElement);
+
+        Assert.Null(unrelatedBlocked);
+        Assert.False(sent.GetProperty("channels").GetProperty("slack").TryGetProperty("accounts", out _));
+        var accepted = GatewayArrayPatch.Apply(stored.RootElement, sent);
+        Assert.Null(accepted.Error);
+        Assert.Equal(
+            "stored-secret",
+            accepted.Merged["channels"]!["slack"]!["accounts"]![0]!["token"]!.GetValue<string>());
+        Assert.True(accepted.Merged["channels"]!["slack"]!["enabled"]!.GetValue<bool>());
+
+        using var indexed = JsonDocument.Parse("""
+        {
+          "channels": {
+            "slack": {
+              "enabled": false,
+              "accounts": [ { "token": "<redacted>", "label": "renamed" } ]
+            }
+          }
+        }
+        """);
+        var indexedEdited = new[] { "channels.slack.accounts[0].label" };
+        var blocked = ConfigEditorModel.FindUneditedRedactionSentinel(
+            indexed.RootElement,
+            indexedEdited,
+            stored.RootElement);
+        Assert.Equal("channels.slack.accounts[0].token", blocked);
+
+        using var stripped = JsonDocument.Parse("""
+        {
+          "channels": {
+            "slack": {
+              "enabled": false,
+              "accounts": [ { "label": "renamed" } ]
+            }
+          }
+        }
+        """);
+        var rejected = GatewayArrayPatch.Apply(stored.RootElement, stripped.RootElement);
+        Assert.NotNull(rejected.Error);
+        Assert.Contains(
+            "config.patch would remove entries from array path(s): channels.slack.accounts",
+            rejected.Error,
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void IdKeyedArray_OmitsCredentialFieldAndGatewayKeepsStoredSecret()
+    {
+        using var stored = JsonDocument.Parse("""
+        {
+          "enabled": false,
+          "accounts": [ { "id": "acct-1", "token": "stored-secret", "label": "desk" } ]
+        }
+        """);
+        using var editor = JsonDocument.Parse("""
+        {
+          "enabled": true,
+          "accounts": [ { "id": "acct-1", "token": "<redacted>", "label": "desk" } ]
+        }
+        """);
+        var edited = new[] { "enabled" };
+        var blocked = ConfigEditorModel.FindUneditedRedactionSentinel(
+            editor.RootElement,
+            edited,
+            stored.RootElement);
+        var sent = ConfigEditorModel.OmitUntouchedRedactionSentinels(
+            editor.RootElement,
+            edited,
+            stored.RootElement);
+
+        Assert.Null(blocked);
+        var sentAccount = sent.GetProperty("accounts")[0];
+        Assert.Equal("acct-1", sentAccount.GetProperty("id").GetString());
+        Assert.Equal("desk", sentAccount.GetProperty("label").GetString());
+        Assert.False(sentAccount.TryGetProperty("token", out _));
+
+        var accepted = GatewayArrayPatch.Apply(stored.RootElement, sent);
+        Assert.Null(accepted.Error);
+        Assert.Equal("stored-secret", accepted.Merged["accounts"]![0]!["token"]!.GetValue<string>());
+        Assert.Equal("desk", accepted.Merged["accounts"]![0]!["label"]!.GetValue<string>());
+        Assert.True(accepted.Merged["enabled"]!.GetValue<bool>());
+    }
+
+    /// <summary>
+    /// Models the Gateway config.patch array merge used by these saves:
+    /// id-keyed arrays keep omitted keys, other arrays replace, and a
+    /// replacement that drops a stored entry is rejected.
+    /// </summary>
+    private static class GatewayArrayPatch
+    {
+        public readonly record struct Result(JsonNode Merged, string? Error);
+
+        public static Result Apply(JsonElement stored, JsonElement patch)
+        {
+            var storedNode = JsonNode.Parse(stored.GetRawText()) ?? new JsonObject();
+            var patchNode = JsonNode.Parse(patch.GetRawText()) ?? new JsonObject();
+            var merged = MergeObjects(storedNode as JsonObject, patchNode as JsonObject ?? new JsonObject());
+            var paths = new List<string>();
+            CollectDestructive(storedNode, patchNode, merged, "", paths);
+            if (paths.Count == 0)
+                return new Result(merged, null);
+
+            return new Result(
+                merged,
+                "config.patch would remove entries from array path(s): " + string.Join(", ", paths) +
+                ". Pass replacePaths with the exact path(s) when this is intentional, or use config.apply for full-config replacement.");
+        }
+
+        private static JsonObject MergeObjects(JsonObject? baseObject, JsonObject patch)
+        {
+            var result = baseObject?.DeepClone().AsObject() ?? new JsonObject();
+            foreach (var property in patch)
+            {
+                if (property.Value is null)
+                {
+                    result.Remove(property.Key);
+                    continue;
+                }
+
+                if (result[property.Key] is JsonArray baseArray && property.Value is JsonArray patchArray)
+                {
+                    result[property.Key] = IsIdKeyed(baseArray)
+                        ? MergeIdArray(baseArray, patchArray)
+                        : patchArray.DeepClone();
+                    continue;
+                }
+
+                if (property.Value is JsonObject childPatch)
+                {
+                    result[property.Key] = MergeObjects(result[property.Key] as JsonObject, childPatch);
+                    continue;
+                }
+
+                result[property.Key] = property.Value.DeepClone();
+            }
+
+            return result;
+        }
+
+        private static JsonArray MergeIdArray(JsonArray baseArray, JsonArray patchArray)
+        {
+            var merged = baseArray.DeepClone().AsArray();
+            foreach (var patchEntry in patchArray)
+            {
+                if (patchEntry is not JsonObject patchObject || !TryGetStringId(patchObject, out var id))
+                {
+                    merged.Add(patchEntry?.DeepClone());
+                    continue;
+                }
+
+                var index = IndexOfId(merged, id);
+                if (index < 0)
+                {
+                    merged.Add(patchObject.DeepClone());
+                    continue;
+                }
+
+                merged[index] = MergeObjects(merged[index] as JsonObject, patchObject);
+            }
+
+            return merged;
+        }
+
+        private static void CollectDestructive(
+            JsonNode? baseNode,
+            JsonNode? patch,
+            JsonNode? merged,
+            string path,
+            List<string> paths)
+        {
+            if (patch is not JsonObject patchObject || baseNode is not JsonObject baseObject)
+                return;
+
+            var mergedObject = merged as JsonObject;
+            foreach (var property in patchObject)
+            {
+                var childPath = path.Length == 0 ? property.Key : $"{path}.{property.Key}";
+                var baseValue = baseObject[property.Key];
+                var mergedValue = mergedObject?[property.Key];
+                if (baseValue is JsonArray baseArray)
+                {
+                    if (property.Value is not JsonArray)
+                    {
+                        paths.Add(childPath);
+                        continue;
+                    }
+
+                    if (mergedValue is JsonArray mergedArray)
+                    {
+                        if (IsIdKeyed(baseArray))
+                        {
+                            if (!PreservesIds(baseArray, mergedArray))
+                            {
+                                paths.Add(childPath);
+                                continue;
+                            }
+                        }
+                        else if (!PreservesEntries(baseArray, mergedArray))
+                        {
+                            paths.Add(childPath);
+                            continue;
+                        }
+                    }
+                }
+                else if (property.Value is JsonObject childPatch)
+                {
+                    CollectDestructive(baseValue, childPatch, mergedValue, childPath, paths);
+                }
+            }
+        }
+
+        private static bool IsIdKeyed(JsonArray array)
+        {
+            foreach (var item in array)
+            {
+                if (item is not JsonObject obj || !TryGetStringId(obj, out _))
+                    return false;
+            }
+
+            return true;
+        }
+
+        private static bool PreservesIds(JsonArray baseArray, JsonArray merged)
+        {
+            var ids = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var item in merged)
+            {
+                if (item is JsonObject obj && TryGetStringId(obj, out var id))
+                    ids.Add(id);
+            }
+
+            foreach (var item in baseArray)
+            {
+                if (item is not JsonObject obj || !TryGetStringId(obj, out var id) || !ids.Contains(id))
+                    return false;
+            }
+
+            return true;
+        }
+
+        private static bool PreservesEntries(JsonArray baseArray, JsonArray merged)
+        {
+            var unused = new List<JsonNode?>();
+            foreach (var item in merged)
+                unused.Add(item);
+
+            foreach (var baseEntry in baseArray)
+            {
+                var match = unused.FindIndex(item => JsonNode.DeepEquals(item, baseEntry));
+                if (match < 0)
+                    return false;
+                unused.RemoveAt(match);
+            }
+
+            return true;
+        }
+
+        private static bool TryGetStringId(JsonObject obj, out string id)
+        {
+            id = "";
+            if (obj["id"] is not JsonValue value ||
+                !value.TryGetValue<string>(out var text) ||
+                string.IsNullOrEmpty(text))
+            {
+                return false;
+            }
+
+            id = text;
+            return true;
+        }
+
+        private static int IndexOfId(JsonArray array, string id)
+        {
+            for (var index = 0; index < array.Count; index++)
+            {
+                if (array[index] is JsonObject obj &&
+                    TryGetStringId(obj, out var existing) &&
+                    existing == id)
+                {
+                    return index;
+                }
+            }
+
+            return -1;
+        }
     }
 }

@@ -563,7 +563,10 @@ public sealed partial class ConfigPage : Page
                 return;
             }
 
-            updated = ConfigEditorModel.OmitUntouchedRedactionSentinels(updated, _pendingChanges.Keys);
+            updated = ConfigEditorModel.OmitUntouchedRedactionSentinels(
+                updated,
+                _pendingChanges.Keys,
+                saveBase.Root);
 
             var result = await client.PatchConfigDetailedAsync(updated, saveBase.BaseHash);
             if (!result.Ok)
