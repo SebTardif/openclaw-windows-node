@@ -203,4 +203,111 @@ public class ConfigEditorModelTests
         Assert.False(ConfigPathSensitivity.IsSensitive("channels.googlechat.webhookUrlExtra"));
         Assert.True(ConfigPathSensitivity.IsSensitive("channels.googlechat.webhookUrl"));
     }
+
+    [Fact]
+    public void SensitiveObject_UnrelatedEditAndCancel_PreserveStoredObject()
+    {
+        using var document = JsonDocument.Parse("""
+        {
+          "channels": {
+            "webhookUrl": {
+              "id": "stored-dummy",
+              "material": "stored-secret"
+            }
+          },
+          "mode": "hybrid"
+        }
+        """);
+
+        var session = new SensitiveArrayEditSession(2, JsonValueKind.Object);
+        Assert.Equal(SensitiveArrayDecision.Preserve, session.Decision);
+        Assert.Equal("", session.Draft);
+        Assert.DoesNotContain("stored-dummy", session.CountText, StringComparison.Ordinal);
+        Assert.DoesNotContain("stored-secret", session.CountText, StringComparison.Ordinal);
+
+        session.BeginReplace();
+        session.SetDraft("""{"id":"typed-then-cancelled"}""");
+        session.CancelReplace();
+        Assert.Equal(SensitiveArrayDecision.Preserve, session.Decision);
+        Assert.Null(session.Replacement);
+
+        var updated = ConfigEditorModel.ApplyChanges(
+            document.RootElement,
+            new Dictionary<string, object?>
+            {
+                ["channels.webhookUrl"] = new object(),
+                ["mode"] = "manual",
+            });
+
+        Assert.Equal("stored-dummy", updated.GetProperty("channels").GetProperty("webhookUrl").GetProperty("id").GetString());
+        Assert.Equal("stored-secret", updated.GetProperty("channels").GetProperty("webhookUrl").GetProperty("material").GetString());
+        Assert.Equal("manual", updated.GetProperty("mode").GetString());
+    }
+
+    [Fact]
+    public void SensitiveObject_ReplaceSendsOnlyTheNewObject_ClearSendsEmptyObject()
+    {
+        using var document = JsonDocument.Parse("""
+        {
+          "channels": {
+            "webhookUrl": {
+              "id": "stored-dummy"
+            }
+          }
+        }
+        """);
+
+        var session = new SensitiveArrayEditSession(1, JsonValueKind.Object);
+        session.BeginReplace();
+        session.SetDraft("""["not-an-object"]""");
+        Assert.False(session.TryApplyReplace());
+        Assert.Equal(SensitiveArrayDecision.Preserve, session.Decision);
+
+        session.SetDraft("""{"id":"replacement-dummy"}""");
+        Assert.True(session.TryApplyReplace());
+        Assert.Equal(JsonValueKind.Object, session.Replacement!.Value.ValueKind);
+        Assert.Contains("replacement-dummy", session.Replacement.Value.GetRawText(), StringComparison.Ordinal);
+        Assert.DoesNotContain("stored-dummy", session.Replacement.Value.GetRawText(), StringComparison.Ordinal);
+
+        var replaced = ConfigEditorModel.ApplyChanges(
+            document.RootElement,
+            new Dictionary<string, object?>
+            {
+                ["channels.webhookUrl"] = session.Replacement,
+            });
+        Assert.Equal("replacement-dummy", replaced.GetProperty("channels").GetProperty("webhookUrl").GetProperty("id").GetString());
+        Assert.False(replaced.GetProperty("channels").GetProperty("webhookUrl").TryGetProperty("material", out _));
+
+        var cleared = ConfigEditorModel.ApplyChanges(
+            document.RootElement,
+            new Dictionary<string, object?>
+            {
+                ["channels.webhookUrl"] = SensitiveArrayEditSession.EmptyObject(),
+            });
+        Assert.Equal(JsonValueKind.Object, cleared.GetProperty("channels").GetProperty("webhookUrl").ValueKind);
+        Assert.Empty(cleared.GetProperty("channels").GetProperty("webhookUrl").EnumerateObject());
+    }
+
+    [Theory]
+    [InlineData("""{"type":"object"}""", """["not-an-object"]""", "Item 1: Must be a JSON object.")]
+    [InlineData("""{"type":"object"}""", """[{}, "not-an-object"]""", "Item 2: Must be a JSON object.")]
+    [InlineData("""{"type":"string"}""", """[{"url":"https://example.invalid/hook"}]""", "Item 1: Must be a JSON string.")]
+    public void ArrayItemKinds_RejectsTheWrongJsonKind(string itemSchema, string arrayJson, string expected)
+    {
+        using var schema = JsonDocument.Parse(itemSchema);
+        using var value = JsonDocument.Parse(arrayJson);
+        Assert.Equal(expected, ConfigEditorModel.FirstArrayItemKindError(value.RootElement, schema.RootElement));
+    }
+
+    [Fact]
+    public void ArrayItemKinds_AcceptsObjectAndStringReplacements()
+    {
+        using var objects = JsonDocument.Parse("""{"type":"object"}""");
+        using var strings = JsonDocument.Parse("""{"type":"string"}""");
+        using var objectValue = JsonDocument.Parse("""[{"url":"https://example.invalid/hook"}]""");
+        using var stringValue = JsonDocument.Parse("""["https://example.invalid/hook"]""");
+
+        Assert.Null(ConfigEditorModel.FirstArrayItemKindError(objectValue.RootElement, objects.RootElement));
+        Assert.Null(ConfigEditorModel.FirstArrayItemKindError(stringValue.RootElement, strings.RootElement));
+    }
 }

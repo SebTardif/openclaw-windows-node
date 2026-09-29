@@ -47,7 +47,7 @@ public class ConfigPathSensitivityTests
         Assert.DoesNotContain("Password = value", source, StringComparison.Ordinal);
         Assert.Contains("_keptArraySecrets.TryGetValue(password, out var existing)", source, StringComparison.Ordinal);
         Assert.DoesNotContain("They cannot be edited on this page.", source, StringComparison.Ordinal);
-        Assert.Contains("return BuildSensitiveArrayEditor(path, label, existingCount, description, onChanged);", source, StringComparison.Ordinal);
+        Assert.Contains("valueSchema: valueSchema", source, StringComparison.Ordinal);
         Assert.Contains("GetLabel(childPath, prop.Name)", source, StringComparison.Ordinal);
         Assert.Contains("value.GetArrayLength()", source, StringComparison.Ordinal);
         Assert.Contains("editor.Text = \"\"", source, StringComparison.Ordinal);
@@ -56,6 +56,14 @@ public class ConfigPathSensitivityTests
         Assert.Contains("Clear all stored entries?", source, StringComparison.Ordinal);
         Assert.Equal(2, CountOf(source, "JsonSerializer.Serialize(config, new JsonSerializerOptions { WriteIndented = true })"));
         Assert.Contains("if (IsSensitive(childPath))", source, StringComparison.Ordinal);
+        Assert.Contains("type == \"object\" && isSensitive", source, StringComparison.Ordinal);
+        Assert.Contains("case JsonValueKind.Object when IsSensitive(childPath):", source, StringComparison.Ordinal);
+        Assert.Equal(2, CountOf(source, "expectedKind: JsonValueKind.Object"));
+        Assert.Contains("ConfigEditorModel.JsonKindMismatch(kindElement, expectedType)", source, StringComparison.Ordinal);
+        Assert.Contains("ConfigEditorModel.FirstArrayItemKindError(jsonArray, itemSchema)", source, StringComparison.Ordinal);
+        Assert.Contains("RejectSensitiveDraft(path, session.Error, errorBlock);", source, StringComparison.Ordinal);
+        Assert.Contains("RejectSensitiveDraft(path, schemaError, errorBlock);", source, StringComparison.Ordinal);
+        Assert.Contains("AbandonSensitiveDraft(path, errorBlock);", source, StringComparison.Ordinal);
     }
 
     private static int CountOf(string source, string text)
