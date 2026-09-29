@@ -56,7 +56,11 @@ public class ConfigPathSensitivityTests
         Assert.Contains("Clear all stored entries?", source, StringComparison.Ordinal);
         Assert.Equal(2, CountOf(source, "JsonSerializer.Serialize(config, new JsonSerializerOptions { WriteIndented = true })"));
         Assert.Contains("if (IsSensitive(childPath))", source, StringComparison.Ordinal);
-        Assert.Contains("type == \"object\" && isSensitive", source, StringComparison.Ordinal);
+        Assert.Contains("ConfigEditorModel.UseHiddenObjectEditor(childPath, childSchema)", source, StringComparison.Ordinal);
+        Assert.Contains("ConfigEditorModel.UseHiddenObjectEditor(path, schema)", source, StringComparison.Ordinal);
+        var hiddenObject = source.IndexOf("UseHiddenObjectEditor(childPath, childSchema)", StringComparison.Ordinal);
+        var expandObject = source.IndexOf("RenderObjectSection(childPath,", StringComparison.Ordinal);
+        Assert.True(hiddenObject >= 0 && hiddenObject < expandObject);
         Assert.Contains("case JsonValueKind.Object when IsSensitive(childPath):", source, StringComparison.Ordinal);
         Assert.Equal(2, CountOf(source, "expectedKind: JsonValueKind.Object"));
         Assert.Contains("ConfigEditorModel.JsonKindMismatch(kindElement, expectedType)", source, StringComparison.Ordinal);

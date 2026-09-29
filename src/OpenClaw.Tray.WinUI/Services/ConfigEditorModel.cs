@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using OpenClawTray.Helpers;
 
 namespace OpenClawTray.Services;
 
@@ -141,6 +142,9 @@ internal static class ConfigEditorModel
 
         return null;
     }
+
+    public static bool UseHiddenObjectEditor(string path, JsonElement schema) =>
+        ConfigPathSensitivity.IsSensitive(path) && ReadSchemaType(schema) == "object";
 
     private static string? ReadSchemaType(JsonElement schemaNode)
     {

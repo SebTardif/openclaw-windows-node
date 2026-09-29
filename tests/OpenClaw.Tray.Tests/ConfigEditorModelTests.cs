@@ -310,4 +310,47 @@ public class ConfigEditorModelTests
         Assert.Null(ConfigEditorModel.FirstArrayItemKindError(objectValue.RootElement, objects.RootElement));
         Assert.Null(ConfigEditorModel.FirstArrayItemKindError(stringValue.RootElement, strings.RootElement));
     }
+
+    [Fact]
+    public void UseHiddenObjectEditor_SensitiveObjectWithProperties_StaysHidden()
+    {
+        using var document = JsonDocument.Parse("""
+        {
+          "type": "object",
+          "properties": {
+            "signingSecret": {
+              "type": "object",
+              "properties": {
+                "value": { "type": "string" }
+              }
+            },
+            "token": { "type": "string" },
+            "displayName": { "type": "string" },
+            "webhookUrl": {
+              "type": ["object", "null"],
+              "properties": {
+                "id": { "type": "string" }
+              }
+            }
+          }
+        }
+        """);
+
+        var properties = document.RootElement.GetProperty("properties");
+        Assert.True(ConfigEditorModel.UseHiddenObjectEditor(
+            "channels.slack.signingSecret",
+            properties.GetProperty("signingSecret")));
+        Assert.True(ConfigEditorModel.UseHiddenObjectEditor(
+            "channels.googlechat.webhookUrl",
+            properties.GetProperty("webhookUrl")));
+        Assert.False(ConfigEditorModel.UseHiddenObjectEditor(
+            "channels.discord.token",
+            properties.GetProperty("token")));
+        Assert.False(ConfigEditorModel.UseHiddenObjectEditor(
+            "channels.slack.displayName",
+            properties.GetProperty("displayName")));
+        Assert.False(ConfigEditorModel.UseHiddenObjectEditor(
+            "channels.slack",
+            document.RootElement));
+    }
 }

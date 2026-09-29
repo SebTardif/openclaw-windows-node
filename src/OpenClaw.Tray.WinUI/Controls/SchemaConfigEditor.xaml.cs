@@ -121,7 +121,12 @@ public sealed partial class SchemaConfigEditor : UserControl
 
                 var childType = ExtractSchemaType(childSchema);
 
-                if (childType == "object" && childSchema.TryGetProperty("properties", out _))
+                if (ConfigEditorModel.UseHiddenObjectEditor(childPath, childSchema))
+                {
+                    var required = IsRequired(schema, prop.Name);
+                    RenderField(childPath, prop.Name, childSchema, childConfig, parent, required);
+                }
+                else if (childType == "object" && childSchema.TryGetProperty("properties", out _))
                 {
                     RenderObjectSection(childPath, prop.Name, childSchema, childConfig, parent, depth);
                 }
@@ -230,7 +235,7 @@ public sealed partial class SchemaConfigEditor : UserControl
             control = RenderArrayField(path, headerText, description, schema, itemsSchema, effectiveConfig, errorBlock,
                 value => StageValue(path, value, schema, required, errorBlock));
         }
-        else if (type == "object" && isSensitive)
+        else if (ConfigEditorModel.UseHiddenObjectEditor(path, schema))
         {
             control = BuildSensitiveArrayEditor(
                 path,
