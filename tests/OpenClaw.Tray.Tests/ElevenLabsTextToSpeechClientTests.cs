@@ -1,5 +1,7 @@
 using System.Net;
 using System.Net.Http;
+using System.Net.Sockets;
+using System.Text;
 using System.Text.Json;
 using OpenClawTray.Services;
 
@@ -132,6 +134,75 @@ public class ElevenLabsTextToSpeechClientTests
         using var client = new ElevenLabsTextToSpeechClient(handler, "https://example.test");
 
         Assert.Equal(ElevenLabsTextToSpeechClient.DefaultTimeout, client.Timeout);
+    }
+
+    [Fact]
+    public void CreateSocketsHandler_does_not_follow_redirects()
+    {
+        using var handler = ElevenLabsTextToSpeechClient.CreateSocketsHandler();
+        Assert.False(handler.AllowAutoRedirect);
+    }
+
+    [Fact]
+    public async Task SynthesizeAsync_RedirectDoesNotReachTheOtherHost()
+    {
+        using var origin = new TcpListener(IPAddress.Loopback, 0);
+        using var other = new TcpListener(IPAddress.Loopback, 0);
+        origin.Start();
+        other.Start();
+        var originPort = ((IPEndPoint)origin.LocalEndpoint).Port;
+        var otherPort = ((IPEndPoint)other.LocalEndpoint).Port;
+
+        var originTask = Task.Run(async () =>
+        {
+            using var tcp = await origin.AcceptTcpClientAsync();
+            var head = await ReadHeadAsync(tcp);
+            Assert.Contains("xi-api-key:", head, StringComparison.Ordinal);
+            var reply = Encoding.ASCII.GetBytes(
+                "HTTP/1.1 302 Found\r\n" +
+                $"Location: http://127.0.0.1:{otherPort}/stolen\r\n" +
+                "Content-Length: 0\r\n" +
+                "Connection: close\r\n\r\n");
+            await tcp.GetStream().WriteAsync(reply);
+        });
+
+        using var client = new ElevenLabsTextToSpeechClient(
+            ElevenLabsTextToSpeechClient.CreateSocketsHandler(),
+            $"http://127.0.0.1:{originPort}");
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(() => client.SynthesizeAsync(
+            new ElevenLabsSynthesisRequest
+            {
+                ApiKey = "probe-key",
+                VoiceId = "voice-1",
+                Text = "Hello"
+            }));
+
+        Assert.Contains("302", ex.Message, StringComparison.Ordinal);
+        await originTask;
+
+        using var cancel = new CancellationTokenSource(TimeSpan.FromMilliseconds(400));
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(
+            () => other.AcceptTcpClientAsync(cancel.Token).AsTask());
+    }
+
+    private static async Task<string> ReadHeadAsync(TcpClient client)
+    {
+        var stream = client.GetStream();
+        var buffer = new List<byte>();
+        var chunk = new byte[512];
+        while (buffer.Count < 4096)
+        {
+            var read = await stream.ReadAsync(chunk);
+            if (read == 0)
+                break;
+            for (var i = 0; i < read; i++)
+                buffer.Add(chunk[i]);
+            var text = Encoding.ASCII.GetString(buffer.ToArray());
+            if (text.Contains("\r\n\r\n", StringComparison.Ordinal))
+                return text;
+        }
+
+        return Encoding.ASCII.GetString(buffer.ToArray());
     }
 
     private sealed class CapturingHandler : HttpMessageHandler
