@@ -211,6 +211,11 @@ Node credential precedence follows the same invariant with a distinct stored tok
 
 **`InteractiveGatewayCredentialResolver`** resolves credentials for HTTP surfaces (chat URL `?token=` auth). It **prefers SharedGatewayToken** over DeviceToken because HTTP endpoints expect the shared token, not the per-device WebSocket token. Browser proxy diagnostics should treat the missing shared token as a browser-control caveat, not as proof that the operator or node gateway connection is disconnected.
 
+The legacy web-chat readiness probe bypasses the process proxy only for loopback
+URLs; remote HTTPS gateways retain proxy support. It accepts the original
+200-399 response without following redirects, so a readiness check never
+contacts a `Location` destination. Browser navigation remains a separate step.
+
 ## Self-recovery and automatic local-gateway repair
 
 Two orthogonal self-healing behaviors keep the connection reliable without dead-ending the user:
