@@ -857,7 +857,7 @@ public sealed partial class ChatPage : Page
                     HttpCompletionOption.ResponseHeadersRead,
                     cancellationToken).ConfigureAwait(true);
 
-                if ((int)response.StatusCode is >= 200 and < 400)
+                if (ChatReadinessClient.IsReadyStatusCode(response.StatusCode))
                     return true;
 
                 Logger.Warn($"[ChatPage] Chat readiness probe attempt {attempts} returned {(int)response.StatusCode}");

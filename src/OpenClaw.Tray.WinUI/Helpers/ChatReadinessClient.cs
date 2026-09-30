@@ -1,4 +1,5 @@
 using System;
+using System.Net;
 using System.Net.Http;
 
 namespace OpenClawTray.Helpers;
@@ -13,8 +14,13 @@ internal static class ChatReadinessClient
         return new SocketsHttpHandler
         {
             UseProxy = !url.IsLoopback,
+            // Readiness accepts the original 3xx response without contacting its Location.
+            AllowAutoRedirect = false,
         };
     }
+
+    internal static bool IsReadyStatusCode(HttpStatusCode statusCode) =>
+        (int)statusCode is >= 200 and < 400;
 
     internal static HttpClient Create(string url)
     {
