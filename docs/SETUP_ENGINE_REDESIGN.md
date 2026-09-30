@@ -363,6 +363,21 @@ name such as `node` or `openclaw` alone is insufficient. Conflicts retain the
 port-in-use error and include owning process names when available. Missing
 listener ownership or a failed listener inspection does not bypass the check.
 
+Setup operator and node sockets share the gateway record's full device identity.
+Before the first operator or node pairing attempt, setup snapshots the pending
+request IDs and retains that baseline across step retries. A gateway may refresh
+the same request ID when the socket reconnects, so a fresh baseline on retry
+would incorrectly classify setup's request as pre-existing. Finalization and
+wizard sockets still take their own pre-connect snapshots. If a socket omits a
+pairing request ID, setup selects exactly one request absent from its baseline
+and matching the full identity, not a request already pending before setup, the
+shortened display ID, or the only request in the queue. Missing identity, a
+failed baseline on that attempt, no new match, or multiple new matches fail
+closed. If the first baseline capture fails, retries take a new snapshot that
+excludes any requests already pending, including requests from earlier setup
+attempts. Later cleanup excludes requests that predate the retained successful
+baseline. A socket-provided request ID still uses the exact device-approval path.
+
 ### Local AI GPU admission
 
 Local AI uses the CUDA driver's `cuMemGetInfo` total and free memory directly
