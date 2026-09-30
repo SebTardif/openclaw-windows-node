@@ -569,6 +569,57 @@ public sealed class SshTunnelServiceTests
     }
 
     [Fact]
+    public void ReleaseBrowserHandoff_KeepsLeaseWhenStopIsAlreadyDeferred()
+    {
+        using var service = new SshTunnelService(NullLogger.Instance);
+        var config = new SshTunnelConfig("user", "host", 18789, 45678);
+        using var process = PlantRunningTunnel(
+            service,
+            config,
+            SshTunnelOwner.Settings,
+            generation: 4);
+        Assert.True(service.TryEnterBrowserHandoff(4, config.LocalPort));
+        service.Stop();
+
+        try
+        {
+            Assert.True(service.TryReleaseBrowserHandoffUnlessDeferred(config.LocalPort, out var watch));
+            Assert.True(watch);
+            Assert.Equal(1, service.BrowserHandoffLeaseCount);
+            Assert.True(service.HasDeferredStop);
+            Assert.False(process.HasExited);
+            Assert.True(service.IsRunning);
+        }
+        finally
+        {
+            if (service.BrowserHandoffLeaseCount > 0)
+                service.ExitBrowserHandoff();
+        }
+    }
+
+    [Fact]
+    public void ReleaseBrowserHandoff_DropsLeaseWhenNoStopIsPending()
+    {
+        using var service = new SshTunnelService(NullLogger.Instance);
+        var config = new SshTunnelConfig("user", "host", 18789, 45678);
+        using var process = PlantRunningTunnel(
+            service,
+            config,
+            SshTunnelOwner.Settings,
+            generation: 4);
+        Assert.True(service.TryEnterBrowserHandoff(4, config.LocalPort));
+
+        Assert.True(service.TryReleaseBrowserHandoffUnlessDeferred(config.LocalPort, out var watch));
+
+        Assert.False(watch);
+        Assert.Equal(0, service.BrowserHandoffLeaseCount);
+        Assert.False(service.HasDeferredStop);
+        Assert.False(process.HasExited);
+        Assert.True(service.IsRunning);
+        process.Kill(entireProcessTree: true);
+    }
+
+    [Fact]
     public async Task WatchBrowserHandoff_TimesOutWithoutReleasingOwnedListener()
     {
         using var service = new SshTunnelService(NullLogger.Instance);

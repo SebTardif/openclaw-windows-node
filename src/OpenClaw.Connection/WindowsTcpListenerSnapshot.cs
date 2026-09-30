@@ -74,6 +74,127 @@ public static class WindowsTcpListenerSnapshot
         return false;
     }
 
+    public static string EstablishedForwardKey(
+        IPAddress localAddress,
+        int localPort,
+        IPAddress remoteAddress,
+        int remotePort,
+        int processId) =>
+        $"{localAddress}|{localPort}|{remoteAddress}|{remotePort}|{processId}";
+
+    public static bool IsUnseenEstablishedForwardUse(
+        uint state,
+        IPAddress localAddress,
+        int localPort,
+        IPAddress remoteAddress,
+        int remotePort,
+        int processId,
+        int forwardPort,
+        int? forwardProcessId,
+        IReadOnlySet<string> seen)
+    {
+        if (!IsEstablishedLoopbackForwardUse(
+                state,
+                localAddress,
+                localPort,
+                remoteAddress,
+                remotePort,
+                forwardPort))
+        {
+            return false;
+        }
+
+        if (localPort == forwardPort &&
+            forwardProcessId is int owner &&
+            owner > 0 &&
+            processId != owner)
+        {
+            return false;
+        }
+
+        var key = EstablishedForwardKey(localAddress, localPort, remoteAddress, remotePort, processId);
+        return !seen.Contains(key);
+    }
+
+    public static bool TryCollectEstablishedForwardKeys(int port, out HashSet<string> keys)
+    {
+        var collected = new HashSet<string>(StringComparer.Ordinal);
+        keys = collected;
+        if (!OperatingSystem.IsWindows() || port is < 1 or > 65535)
+            return false;
+
+        var complete = true;
+        VisitEstablished(AfInet, ipv6: false, row =>
+        {
+            if (RowMatchesForward(row, port))
+                collected.Add(row.Key);
+            return false;
+        }, ref complete);
+        VisitEstablished(AfInet6, ipv6: true, row =>
+        {
+            if (RowMatchesForward(row, port))
+                collected.Add(row.Key);
+            return false;
+        }, ref complete);
+        return complete;
+    }
+
+    public static bool HasUnseenEstablishedForwardUse(
+        int port,
+        int? forwardProcessId,
+        IReadOnlySet<string> seen)
+    {
+        if (!OperatingSystem.IsWindows() || port is < 1 or > 65535 || seen is null)
+            return false;
+
+        var found = false;
+        var complete = true;
+        bool Visit(EstablishedTcpRow row)
+        {
+            if (IsUnseenEstablishedForwardUse(
+                    row.State,
+                    row.LocalAddress,
+                    row.LocalPort,
+                    row.RemoteAddress,
+                    row.RemotePort,
+                    row.ProcessId,
+                    port,
+                    forwardProcessId,
+                    seen))
+            {
+                found = true;
+                return true;
+            }
+
+            return false;
+        }
+
+        VisitEstablished(AfInet, ipv6: false, Visit, ref complete);
+        if (!found)
+            VisitEstablished(AfInet6, ipv6: true, Visit, ref complete);
+        return found;
+    }
+
+    private readonly record struct EstablishedTcpRow(
+        uint State,
+        IPAddress LocalAddress,
+        int LocalPort,
+        IPAddress RemoteAddress,
+        int RemotePort,
+        int ProcessId)
+    {
+        public string Key => EstablishedForwardKey(LocalAddress, LocalPort, RemoteAddress, RemotePort, ProcessId);
+    }
+
+    private static bool RowMatchesForward(EstablishedTcpRow row, int port) =>
+        IsEstablishedLoopbackForwardUse(
+            row.State,
+            row.LocalAddress,
+            row.LocalPort,
+            row.RemoteAddress,
+            row.RemotePort,
+            port);
+
     public static string? GetProcessCommandLine(int processId)
     {
         if (processId <= 0)
@@ -254,6 +375,93 @@ public static class WindowsTcpListenerSnapshot
             }
         }
         return false;
+    }
+
+    private static void VisitEstablished(
+        int addressFamily,
+        bool ipv6,
+        Func<EstablishedTcpRow, bool> visit,
+        ref bool complete)
+    {
+        var rowSize = ipv6
+            ? Marshal.SizeOf<MibTcp6RowOwnerPid>()
+            : Marshal.SizeOf<MibTcpRowOwnerPid>();
+        for (var attempt = 0; attempt < 3; attempt++)
+        {
+            var bufferLength = 0;
+            var status = GetExtendedTcpTable(
+                IntPtr.Zero,
+                ref bufferLength,
+                sort: true,
+                ipVersion: addressFamily,
+                tableClass: TcpTableOwnerPidAll,
+                reserved: 0);
+            if (status != ErrorInsufficientBuffer || bufferLength <= 0)
+            {
+                complete = false;
+                return;
+            }
+
+            var tablePtr = Marshal.AllocHGlobal(bufferLength);
+            try
+            {
+                status = GetExtendedTcpTable(
+                    tablePtr,
+                    ref bufferLength,
+                    sort: true,
+                    ipVersion: addressFamily,
+                    tableClass: TcpTableOwnerPidAll,
+                    reserved: 0);
+                if (status == ErrorInsufficientBuffer)
+                    continue;
+                if (status != ErrorSuccess)
+                {
+                    complete = false;
+                    return;
+                }
+
+                var rowCount = Marshal.ReadInt32(tablePtr);
+                var rowPtr = IntPtr.Add(tablePtr, sizeof(int));
+                for (var index = 0; index < rowCount; index++)
+                {
+                    if (visit(ReadEstablishedRow(rowPtr, ipv6)))
+                        return;
+                    rowPtr = IntPtr.Add(rowPtr, rowSize);
+                }
+
+                return;
+            }
+            finally
+            {
+                Marshal.FreeHGlobal(tablePtr);
+            }
+        }
+
+        complete = false;
+    }
+
+    private static EstablishedTcpRow ReadEstablishedRow(IntPtr rowPtr, bool ipv6)
+    {
+        if (ipv6)
+        {
+            var row = Marshal.PtrToStructure<MibTcp6RowOwnerPid>(rowPtr);
+            return new EstablishedTcpRow(
+                row.State,
+                new IPAddress(row.LocalAddress, row.LocalScopeId),
+                ReadPort(row.LocalPort),
+                new IPAddress(row.RemoteAddress, row.RemoteScopeId),
+                ReadPort(row.RemotePort),
+                unchecked((int)row.OwningProcessId));
+        }
+
+        var ipv4 = Marshal.PtrToStructure<MibTcpRowOwnerPid>(rowPtr);
+        return new EstablishedTcpRow(
+            ipv4.State,
+            new IPAddress(BitConverter.GetBytes(ipv4.LocalAddress)),
+            ReadPort(ipv4.LocalPort),
+            new IPAddress(BitConverter.GetBytes(ipv4.RemoteAddress)),
+            ReadPort(ipv4.RemotePort),
+            unchecked((int)ipv4.OwningProcessId));
     }
 
     private static bool ScanEstablished(int addressFamily, int port, bool ipv6)

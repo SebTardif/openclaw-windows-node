@@ -49,6 +49,48 @@ public sealed class WindowsTcpListenerSnapshotTests
     }
 
     [Fact]
+    public void IsUnseenEstablishedForwardUse_IgnoresExistingGatewayTrafficAndForeignOwners()
+    {
+        var loopback = IPAddress.Loopback;
+        var client = IPAddress.Parse("203.0.113.8");
+        var seen = new HashSet<string>(StringComparer.Ordinal)
+        {
+            WindowsTcpListenerSnapshot.EstablishedForwardKey(client, 40000, loopback, 18789, 10),
+        };
+
+        Assert.False(WindowsTcpListenerSnapshot.IsUnseenEstablishedForwardUse(
+            WindowsTcpListenerSnapshot.TcpStateEstablished,
+            client,
+            localPort: 40000,
+            loopback,
+            remotePort: 18789,
+            processId: 10,
+            forwardPort: 18789,
+            forwardProcessId: 77,
+            seen));
+        Assert.True(WindowsTcpListenerSnapshot.IsUnseenEstablishedForwardUse(
+            WindowsTcpListenerSnapshot.TcpStateEstablished,
+            client,
+            localPort: 40001,
+            loopback,
+            remotePort: 18789,
+            processId: 88,
+            forwardPort: 18789,
+            forwardProcessId: 77,
+            seen));
+        Assert.False(WindowsTcpListenerSnapshot.IsUnseenEstablishedForwardUse(
+            WindowsTcpListenerSnapshot.TcpStateEstablished,
+            loopback,
+            localPort: 18789,
+            client,
+            remotePort: 40002,
+            processId: 10,
+            forwardPort: 18789,
+            forwardProcessId: 77,
+            seen));
+    }
+
+    [Fact]
     public async Task AwaitRedirectedOutput_ReturnsNullWhenStdoutNeverCloses()
     {
         using var process = Process.Start(new ProcessStartInfo

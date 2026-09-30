@@ -79,7 +79,8 @@ public static class InteractiveGatewayCredentialResolver
                     active.Url,
                     active.SharedGatewayToken!,
                     false,
-                    CredentialResolver.SourceSharedGatewayToken);
+                    CredentialResolver.SourceSharedGatewayToken,
+                    active.Id);
                 return true;
             }
 
@@ -98,7 +99,8 @@ public static class InteractiveGatewayCredentialResolver
                     active.Url,
                     resolved.Token,
                     resolved.IsBootstrapToken,
-                    resolved.Source);
+                    resolved.Source,
+                    active.Id);
                 return true;
             }
 
@@ -142,7 +144,8 @@ public static class InteractiveGatewayCredentialResolver
             gatewayUrl,
             legacyCredential.Token,
             legacyCredential.IsBootstrapToken,
-            legacyCredential.Source);
+            legacyCredential.Source,
+            legacyRecord.Id);
         return true;
     }
 }
@@ -151,4 +154,5 @@ public sealed record InteractiveGatewayCredential(
     string GatewayUrl,
     string Token,
     bool IsBootstrapToken,
-    string Source);
+    string Source,
+    string? GatewayId = null);

@@ -3871,12 +3871,26 @@ public partial class App : Application, OpenClawTray.Services.IAppCommands, IPer
         out string gatewayUrl,
         out string token,
         out string credentialSource,
-        out bool isBootstrapToken)
+        out bool isBootstrapToken) =>
+        TryResolveChatCredentials(
+            out gatewayUrl,
+            out token,
+            out credentialSource,
+            out isBootstrapToken,
+            out _);
+
+    private bool TryResolveChatCredentials(
+        out string gatewayUrl,
+        out string token,
+        out string credentialSource,
+        out bool isBootstrapToken,
+        out string? gatewayId)
     {
         gatewayUrl = string.Empty;
         token = string.Empty;
         credentialSource = "none";
         isBootstrapToken = false;
+        gatewayId = null;
 
         if (_settings == null)
             return false;
@@ -3900,6 +3914,7 @@ public partial class App : Application, OpenClawTray.Services.IAppCommands, IPer
         token = credential.Token;
         credentialSource = credential.Source;
         isBootstrapToken = credential.IsBootstrapToken;
+        gatewayId = credential.GatewayId;
         return true;
     }
 
@@ -4003,9 +4018,12 @@ public partial class App : Application, OpenClawTray.Services.IAppCommands, IPer
             return;
         }
 
-        // Process.Start returns before the browser connects. A stop that arrived
-        // during launch stays deferred until that connection is established.
-        if (_sshTunnelService is { HasDeferredStop: true } service)
+        // Process.Start returns before the browser connects. Decide the lease
+        // and a deferred stop under one lock so a stop during launch cannot
+        // complete before the browser connects.
+        if (_sshTunnelService is { } service &&
+            service.TryReleaseBrowserHandoffUnlessDeferred(sshGate.LocalPort, out var watchDeferredStop) &&
+            watchDeferredStop)
         {
             var localPort = sshGate.LocalPort;
             _ = Task.Run(async () =>
@@ -4024,10 +4042,7 @@ public partial class App : Application, OpenClawTray.Services.IAppCommands, IPer
                     Logger.Warn($"Dashboard browser handoff watch failed: {ex.Message}");
                 }
             });
-            return;
         }
-
-        _sshTunnelService?.ExitBrowserHandoff();
     }
 
     private SshTunnelConfig? CreateDashboardSshTunnelOrNull()
@@ -4063,13 +4078,13 @@ public partial class App : Application, OpenClawTray.Services.IAppCommands, IPer
                 out var gatewayUrl,
                 out var token,
                 out var credentialSource,
-                out var isBootstrapToken))
+                out var isBootstrapToken,
+                out var gatewayId))
         {
             return false;
         }
 
-        var activeId = _gatewayRegistry?.GetActive()?.Id;
-        var identity = string.IsNullOrWhiteSpace(activeId) ? gatewayUrl : activeId;
+        var identity = string.IsNullOrWhiteSpace(gatewayId) ? gatewayUrl : gatewayId;
         snapshot = new DashboardGatewayTunnelSnapshot(
             identity,
             gatewayUrl,

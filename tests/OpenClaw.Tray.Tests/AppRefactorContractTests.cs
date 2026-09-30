@@ -479,8 +479,10 @@ public sealed class AppRefactorContractTests
         Assert.Contains("DashboardBrowserHandoff.UrlUsesCapturedForward(url, after)", method);
         Assert.Contains("TryEnterBrowserHandoff(generation, sshGate.LocalPort)", method);
         Assert.Contains("HasDeferredStop", method);
+        Assert.Contains("TryReleaseBrowserHandoffUnlessDeferred(", method);
         Assert.Contains("WatchBrowserHandoffConsumptionAsync(", method);
         Assert.Contains("ExitBrowserHandoff()", method);
+        Assert.DoesNotContain("_gatewayRegistry?.GetActive()", method);
         AssertInOrder(
             method,
             "TryCaptureDashboardGatewaySnapshot(",
@@ -491,8 +493,8 @@ public sealed class AppRefactorContractTests
             "TryEnterBrowserHandoff(generation, sshGate.LocalPort)",
             "HasDeferredStop",
             "Process.Start(",
-            "WatchBrowserHandoffConsumptionAsync(",
-            "ExitBrowserHandoff()");
+            "TryReleaseBrowserHandoffUnlessDeferred(",
+            "WatchBrowserHandoffConsumptionAsync(");
         Assert.DoesNotContain("EnsureStarted(", method);
         Assert.DoesNotContain("DashboardUrlUsesOwnedForward(", method);
     }

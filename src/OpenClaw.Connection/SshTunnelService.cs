@@ -1,5 +1,6 @@
 using OpenClaw.Shared;
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.Net;
 
@@ -20,6 +21,8 @@ public sealed class SshTunnelService : ISshTunnelManager
     private string? _lastSpec;
     private long _lifecycleGeneration;
     private int _browserHandoffLeases;
+    private int? _handoffForwardProcessId;
+    private HashSet<string>? _handoffSeenConnections;
     private DeferredTunnelStop _deferredStop;
 
     /// <summary>Raised when the SSH tunnel exits unexpectedly (not during shutdown).</summary>
@@ -731,6 +734,33 @@ public sealed class SshTunnelService : ISshTunnelManager
                 return false;
 
             _browserHandoffLeases++;
+            _handoffForwardProcessId = _process?.Id;
+            _handoffSeenConnections = WindowsTcpListenerSnapshot.TryCollectEstablishedForwardKeys(localPort, out var seen)
+                ? seen
+                : null;
+            return true;
+        }
+    }
+
+    /// <summary>
+    /// Drops one browser-handoff lease when no stop is waiting.
+    /// A stop that arrived while the lease was held stays deferred and the lease stays.
+    /// </summary>
+    public bool TryReleaseBrowserHandoffUnlessDeferred(int localPort, out bool watchDeferredStop)
+    {
+        lock (_stateLock)
+        {
+            watchDeferredStop = false;
+            if (_browserHandoffLeases <= 0 || _currentConfig?.LocalPort != localPort)
+                return false;
+
+            if (_deferredStop != DeferredTunnelStop.None)
+            {
+                watchDeferredStop = true;
+                return true;
+            }
+
+            _browserHandoffLeases--;
             return true;
         }
     }
@@ -831,7 +861,7 @@ public sealed class SshTunnelService : ISshTunnelManager
 
             var consumed = consumptionProbe != null
                 ? consumptionProbe(localPort)
-                : WindowsTcpListenerSnapshot.HasEstablishedLoopbackConnection(localPort);
+                : BrowserHandoffHasUnseenForwardUse(localPort);
             if ((consumed || !IsRunning) &&
                 (TryCompleteDeferredBrowserHandoff(localPort) || BrowserHandoffLeaseCount <= 0))
             {
@@ -864,6 +894,22 @@ public sealed class SshTunnelService : ISshTunnelManager
         None,
         Stop,
         ResetNotConfigured,
+    }
+
+    private bool BrowserHandoffHasUnseenForwardUse(int localPort)
+    {
+        int? processId;
+        IReadOnlySet<string>? seen;
+        lock (_stateLock)
+        {
+            processId = _handoffForwardProcessId;
+            seen = _handoffSeenConnections;
+        }
+
+        if (seen is null)
+            return false;
+
+        return WindowsTcpListenerSnapshot.HasUnseenEstablishedForwardUse(localPort, processId, seen);
     }
 
     private bool IsForwardCurrentLocked(long generation, int localPort)
