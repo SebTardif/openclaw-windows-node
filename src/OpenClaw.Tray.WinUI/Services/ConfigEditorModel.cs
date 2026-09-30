@@ -322,4 +322,16 @@ internal sealed class SensitiveArrayEditSession
     }
 
     public void CancelClear() => ClearConfirmOpen = false;
+
+    public bool TryRestoreCommittedReplacement(out JsonElement value)
+    {
+        if (Replacement is JsonElement previous)
+        {
+            value = previous;
+            return true;
+        }
+
+        value = default;
+        return false;
+    }
 }

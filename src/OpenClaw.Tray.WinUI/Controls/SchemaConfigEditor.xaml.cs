@@ -668,7 +668,10 @@ public sealed partial class SchemaConfigEditor : UserControl
             if (_loading) return;
             session.CancelClear();
             confirmPanel.Visibility = Visibility.Collapsed;
-            AbandonSensitiveDraft(path, errorBlock);
+            if (session.TryRestoreCommittedReplacement(out var previous))
+                onChanged(previous);
+            else
+                AbandonSensitiveDraft(path, errorBlock);
         };
         var confirmActions = new StackPanel { Orientation = Orientation.Horizontal };
         confirmActions.Children.Add(confirmClearButton);

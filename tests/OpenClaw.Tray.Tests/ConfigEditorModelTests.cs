@@ -198,6 +198,25 @@ public class ConfigEditorModelTests
     }
 
     [Fact]
+    public void SensitiveArray_RejectedRetryThenCanceledClear_RestoresCommittedReplacement()
+    {
+        var session = new SensitiveArrayEditSession(1);
+        using var committed = JsonDocument.Parse("""[{"url":"https://example.invalid/hook-dummy"}]""");
+        session.CommitReplace(committed.RootElement.Clone());
+
+        session.BeginReplace();
+        session.SetDraft("not-json");
+        Assert.False(session.TryReadDraft(out _));
+
+        session.BeginClear();
+        session.CancelClear();
+
+        Assert.True(session.TryRestoreCommittedReplacement(out var restored));
+        Assert.Equal(SensitiveArrayDecision.Replace, session.Decision);
+        Assert.Contains("hook-dummy", restored.GetRawText(), StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void SensitiveArray_NearMatchObject_IsNotASecretArrayDecision()
     {
         Assert.False(ConfigPathSensitivity.IsSensitive("channels.googlechat.webhookUrlExtra"));

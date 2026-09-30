@@ -68,6 +68,7 @@ public class ConfigPathSensitivityTests
         Assert.Contains("RejectSensitiveDraft(path, session.Error, errorBlock);", source, StringComparison.Ordinal);
         Assert.Contains("RejectSensitiveDraft(path, schemaError, errorBlock);", source, StringComparison.Ordinal);
         Assert.Contains("AbandonSensitiveDraft(path, errorBlock);", source, StringComparison.Ordinal);
+        Assert.Contains("TryRestoreCommittedReplacement(out var previous)", source, StringComparison.Ordinal);
     }
 
     private static int CountOf(string source, string text)
