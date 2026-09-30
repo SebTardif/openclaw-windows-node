@@ -20,6 +20,21 @@ internal static class ExecShellWrapperNormalizer
     private static readonly HashSet<string> s_powerShellInlineFlags =
         new(StringComparer.OrdinalIgnoreCase) { "-c", "-command", "--command", "/c", "/command" };
 
+    private static readonly HashSet<string> s_powerShellValueOptions =
+        new(StringComparer.OrdinalIgnoreCase)
+        {
+            "-WorkingDirectory", "/WorkingDirectory",
+            "-ExecutionPolicy", "/ExecutionPolicy",
+            "-InputFormat", "/InputFormat",
+            "-OutputFormat", "/OutputFormat",
+            "-ConfigurationName", "/ConfigurationName",
+            "-CustomPipeName", "/CustomPipeName",
+            "-SettingsFile", "/SettingsFile",
+            "-PSConsoleFile", "/PSConsoleFile",
+            "-WindowStyle", "/WindowStyle",
+            "-Version", "/Version",
+        };
+
     private static readonly WrapperSpec[] s_specs =
     [
         new(WrapperKind.Posix,      new HashSet<string>(StringComparer.OrdinalIgnoreCase)
@@ -78,12 +93,13 @@ internal static class ExecShellWrapperNormalizer
 
     private static string? ExtractPosixPayload(IReadOnlyList<string> command)
     {
+        var fish = IsFishShell(command[0]);
         for (var i = 1; i < command.Count; i++)
         {
             var flag = command[i].Trim();
             if (flag.Length == 0) continue;
             if (flag == "--") return null;
-            if (s_posixInlineFlags.Contains(flag) || IsPosixInlineCluster(flag))
+            if (s_posixInlineFlags.Contains(flag) || IsPosixInlineCluster(flag) || (fish && IsFishInitCommand(flag)))
             {
                 if (i + 1 >= command.Count) return null;
                 var payload = command[i + 1].Trim();
@@ -116,6 +132,12 @@ internal static class ExecShellWrapperNormalizer
             var t = command[i].Trim();
             if (t.Length == 0) continue;
             if (t == "--") return null;
+            if (IsPowerShellValueOption(t))
+            {
+                i++;
+                continue;
+            }
+
             if (IsPowerShellFileSwitch(t))
                 return null;
             if (TryReadPowerShellColonPayload(t, out var inline))
@@ -126,8 +148,26 @@ internal static class ExecShellWrapperNormalizer
                 var payload = command[i + 1].Trim();
                 return payload.Length == 0 ? null : payload;
             }
+
+            if (!t.StartsWith('-') && !t.StartsWith('/'))
+                return null;
         }
         return null;
+    }
+
+    private static bool IsFishShell(string token)
+        => ExecCommandToken.NormalizedBasename(token).Equals("fish", StringComparison.OrdinalIgnoreCase);
+
+    private static bool IsFishInitCommand(string flag)
+        => flag == "-C" || flag.Equals("--init-command", StringComparison.Ordinal);
+
+    private static bool IsPowerShellValueOption(string token)
+    {
+        var colon = token.IndexOf(':');
+        if (colon > 0)
+            return false;
+
+        return s_powerShellValueOptions.Contains(token);
     }
 
     private static bool IsPosixInlineCluster(string flag)

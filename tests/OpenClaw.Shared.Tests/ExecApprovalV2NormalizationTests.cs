@@ -101,6 +101,53 @@ public class ExecApprovalV2NormalizationTests
     }
 
     [Fact]
+    public void Normalizer_PowerShellWorkingDirectoryOperand_DoesNotHideInlineCommand()
+    {
+        AssertWrapper(
+            ["pwsh", "-WorkingDirectory", "-File", "-c", "Get-Date"],
+            "Get-Date");
+        AssertWrapper(
+            ["powershell.exe", "-WorkingDirectory", "C:\\temp", "-c", "Get-Date"],
+            "Get-Date");
+        Assert.Null(ExecReusableCommandBinder.TryBind(
+            ["pwsh", "-WorkingDirectory", "-File", "-c", "Get-Date"],
+            cwd: null,
+            env: null,
+            out var failure));
+        Assert.Equal(ExecReusableCommandBinder.BindFailure.ShellWrapper, failure);
+    }
+
+    [Fact]
+    public void Normalizer_PowerShellPositionalScript_KeepsLaterSwitchAsScriptArgument()
+    {
+        Assert.False(ExecShellWrapperNormalizer.Extract(
+            ["pwsh", "script.ps1", "/c", "value"]).IsWrapper);
+        Assert.False(ExecShellWrapperNormalizer.Extract(
+            ["pwsh", "-NoProfile", "script.ps1", "/c", "value"]).IsWrapper);
+        var bound = ExecReusableCommandBinder.TryBind(
+            ["pwsh", "script.ps1", "/c", "value"],
+            cwd: null,
+            env: null,
+            out var failure);
+        Assert.Equal(ExecReusableCommandBinder.BindFailure.None, failure);
+        Assert.NotNull(bound);
+    }
+
+    [Fact]
+    public void Normalizer_FishInitCommand_IsWrapper()
+    {
+        AssertWrapper(["fish", "-C", "echo hello"], "echo hello");
+        AssertWrapper(["fish", "--init-command", "echo hello"], "echo hello");
+        Assert.False(ExecShellWrapperNormalizer.Extract(["bash", "-C", "echo hello"]).IsWrapper);
+        Assert.Null(ExecReusableCommandBinder.TryBind(
+            ["fish", "-C", "echo hello"],
+            cwd: null,
+            env: null,
+            out var failure));
+        Assert.Equal(ExecReusableCommandBinder.BindFailure.ShellWrapper, failure);
+    }
+
+    [Fact]
     public void Normalizer_EmptyInlinePayload_IsNotWrapper()
     {
         Assert.False(ExecShellWrapperNormalizer.Extract(["powershell.exe", "/c"]).IsWrapper);
