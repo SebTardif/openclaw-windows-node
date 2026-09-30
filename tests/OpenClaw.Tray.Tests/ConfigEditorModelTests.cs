@@ -294,6 +294,68 @@ public class ConfigEditorModelTests
     }
 
     [Fact]
+    public void FindUneditedRedactionSentinel_KeepsLiteralMaskStagedThroughParentObject()
+    {
+        using var stored = JsonDocument.Parse("""
+        {
+          "metadata": { "label": "before", "token": "<redacted>" }
+        }
+        """);
+        using var updated = JsonDocument.Parse("""
+        {
+          "metadata": { "label": "***", "token": "<redacted>" }
+        }
+        """);
+        var edited = new[] { "metadata" };
+
+        var blocked = ConfigEditorModel.FindUneditedRedactionSentinel(
+            updated.RootElement,
+            edited,
+            stored.RootElement);
+        var sent = ConfigEditorModel.OmitUntouchedRedactionSentinels(
+            updated.RootElement,
+            edited,
+            stored.RootElement);
+
+        Assert.Null(blocked);
+        Assert.Equal("***", sent.GetProperty("metadata").GetProperty("label").GetString());
+        Assert.False(sent.GetProperty("metadata").TryGetProperty("token", out _));
+    }
+
+    [Fact]
+    public void FindUneditedRedactionSentinel_RefusesParentEditInsideNoIdArray()
+    {
+        using var stored = JsonDocument.Parse("""
+        {
+          "profiles": {
+            "accounts": [ { "label": "old", "token": "<redacted>" } ]
+          }
+        }
+        """);
+        using var updated = JsonDocument.Parse("""
+        {
+          "profiles": {
+            "accounts": [ { "label": "new", "token": "<redacted>" } ]
+          }
+        }
+        """);
+        var edited = new[] { "profiles" };
+
+        var blocked = ConfigEditorModel.FindUneditedRedactionSentinel(
+            updated.RootElement,
+            edited,
+            stored.RootElement);
+        var sent = ConfigEditorModel.OmitUntouchedRedactionSentinels(
+            updated.RootElement,
+            edited,
+            stored.RootElement);
+
+        Assert.Equal("profiles.accounts[0].token", blocked);
+        Assert.Equal("new", sent.GetProperty("profiles").GetProperty("accounts")[0].GetProperty("label").GetString());
+        Assert.True(sent.GetProperty("profiles").GetProperty("accounts")[0].TryGetProperty("token", out _));
+    }
+
+    [Fact]
     public void FindUneditedRedactionSentinel_AllowsLiteralMaskInANonSecretField()
     {
         using var document = JsonDocument.Parse("""

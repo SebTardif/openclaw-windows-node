@@ -273,6 +273,12 @@ internal static class ConfigEditorModel
                     !edited.Contains(childPath) &&
                     ShouldOmitUntouchedSentinel(childPath))
                 {
+                    if (!IsCredentialPath(childPath) &&
+                        !LoadedStringIsRedactionSentinel(baseRoot, childPath))
+                    {
+                        continue;
+                    }
+
                     var arrayPath = OutermostNonIdArrayPath(baseRoot, childPath);
                     if (arrayPath == null)
                         removals.Add(property.Key);
@@ -404,9 +410,59 @@ internal static class ConfigEditorModel
                 return true;
             if (path.StartsWith(arrayPath + "[", StringComparison.OrdinalIgnoreCase))
                 return true;
+            if (IsAncestorEdit(path, arrayPath))
+                return true;
         }
 
         return false;
+    }
+
+    private static bool IsAncestorEdit(string editedPath, string arrayPath)
+    {
+        if (editedPath.Length == 0 || editedPath.Length >= arrayPath.Length)
+            return false;
+        if (!arrayPath.StartsWith(editedPath, StringComparison.OrdinalIgnoreCase))
+            return false;
+
+        var boundary = arrayPath[editedPath.Length];
+        return boundary is '.' or '[';
+    }
+
+    private static bool LoadedStringIsRedactionSentinel(JsonElement root, string path)
+    {
+        if (!TryReadPath(root, path, out var element) ||
+            element.ValueKind != JsonValueKind.String)
+        {
+            return false;
+        }
+
+        return ChannelConfigPatchBuilder.IsRedactionSentinel(element.GetString());
+    }
+
+    private static bool TryReadPath(JsonElement root, string path, out JsonElement element)
+    {
+        element = root;
+        foreach (var segment in ParsePath(path))
+        {
+            if (element.ValueKind != JsonValueKind.Object ||
+                !element.TryGetProperty(segment.Name, out element))
+            {
+                return false;
+            }
+
+            if (segment.Index is not int arrayIndex)
+                continue;
+
+            if (element.ValueKind != JsonValueKind.Array ||
+                (uint)arrayIndex >= (uint)element.GetArrayLength())
+            {
+                return false;
+            }
+
+            element = element[arrayIndex];
+        }
+
+        return true;
     }
 
     private static void RemovePropertyAtPath(JsonNode root, string propertyPath)
