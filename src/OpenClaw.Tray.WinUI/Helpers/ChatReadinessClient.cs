@@ -3,19 +3,27 @@ using System.Net.Http;
 
 namespace OpenClawTray.Helpers;
 
-// The legacy web-chat readiness URL carries the gateway token in the query.
-// UseProxy stays false so HTTP_PROXY and ALL_PROXY cannot receive that URL.
+// A loopback readiness URL carries the gateway token in the query, so that
+// host skips the process proxy. A remote URL keeps the proxy.
 internal static class ChatReadinessClient
 {
-    internal static SocketsHttpHandler CreateHandler()
-        => new()
+    internal static SocketsHttpHandler CreateHandler(Uri url)
+    {
+        ArgumentNullException.ThrowIfNull(url);
+        return new SocketsHttpHandler
         {
-            UseProxy = false,
+            UseProxy = !url.IsLoopback,
         };
+    }
 
-    internal static HttpClient Create()
-        => new(CreateHandler(), disposeHandler: true)
+    internal static HttpClient Create(string url)
+    {
+        var parsed = Uri.TryCreate(url, UriKind.Absolute, out var uri)
+            ? uri
+            : new Uri("http://127.0.0.1/");
+        return new HttpClient(CreateHandler(parsed), disposeHandler: true)
         {
             Timeout = TimeSpan.FromSeconds(3),
         };
+    }
 }

@@ -46,7 +46,6 @@ public sealed partial class ChatPage : Page
     private IChatPagePanelHost? _panelHost;
     private IChatPagePanelHost PanelHost => _panelHost ??= new ChatPagePanelHost(this);
     private string? _pendingWebViewSessionKey;
-    private static readonly HttpClient s_httpClient = ChatReadinessClient.Create();
 
     public ChatPage()
     {
@@ -845,6 +844,7 @@ public sealed partial class ChatPage : Page
     {
         var deadline = DateTimeOffset.UtcNow + timeout;
         var attempts = 0;
+        using var http = ChatReadinessClient.Create(chatUrl);
         while (DateTimeOffset.UtcNow < deadline)
         {
             cancellationToken.ThrowIfCancellationRequested();
@@ -852,7 +852,7 @@ public sealed partial class ChatPage : Page
             try
             {
                 using var request = new HttpRequestMessage(HttpMethod.Get, chatUrl);
-                using var response = await s_httpClient.SendAsync(
+                using var response = await http.SendAsync(
                     request,
                     HttpCompletionOption.ResponseHeadersRead,
                     cancellationToken).ConfigureAwait(true);
