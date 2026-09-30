@@ -3424,6 +3424,97 @@ public class SetupStepsTests : IDisposable
     }
 
     [Fact]
+    public async Task SetupPipeline_PreservesFreshDistroWhenPostInstallListFailsAndRollbackRuns()
+    {
+        var quietLists = 0;
+        var installPath = "";
+        var commands = new FakeCommandRunner(args =>
+        {
+            if (args.SequenceEqual(["--list", "--quiet"]))
+            {
+                quietLists++;
+                return quietLists switch
+                {
+                    1 => Ok(""),
+                    2 => new CommandResult(-1, "", "", TimeSpan.FromSeconds(15), TimedOut: true),
+                    3 => new CommandResult(-1, "", "", TimeSpan.FromSeconds(15), TimedOut: false),
+                    4 => Fail("list failed"),
+                    _ => Ok("OpenClawGateway\n"),
+                };
+            }
+
+            if (args.Contains("--install"))
+            {
+                Directory.CreateDirectory(installPath);
+                File.WriteAllText(Path.Combine(installPath, "ext4.vhdx"), "partial");
+                return Ok("Installing Ubuntu-24.04\n");
+            }
+
+            if (args.SequenceEqual(["--status"]))
+                return Ok("Default Version: 2\n");
+            if (args.SequenceEqual(["--terminate", "OpenClawGateway"]) ||
+                args.SequenceEqual(["--unregister", "OpenClawGateway"]))
+                return Ok();
+
+            return Fail($"unexpected args: {string.Join(' ', args)}");
+        });
+        var ctx = CreateContext(
+            new SetupConfig { RollbackOnFailure = true },
+            commands);
+        installPath = Path.Combine(ctx.LocalDataDir, "wsl", "OpenClawGateway");
+        var pipeline = new SetupPipeline([new CreateWslInstanceStep()]);
+
+        var result = await pipeline.RunAsync(ctx);
+
+        Assert.Equal(PipelineOutcome.Failed, result.Outcome);
+        Assert.Equal("wsl-create", result.FailedStepId);
+        Assert.Contains("could not list distros after installing 'OpenClawGateway'", result.Message);
+        Assert.Contains("left distro 'OpenClawGateway' registered", result.Message);
+        Assert.True(File.Exists(Path.Combine(installPath, "ext4.vhdx")));
+        Assert.Equal(6, quietLists);
+        Assert.DoesNotContain(commands.Calls, call => call.Arguments.Contains("--unregister"));
+        Assert.DoesNotContain(commands.Calls, call => call.Arguments.Contains("--terminate"));
+    }
+
+    [Fact]
+    public async Task SetupPipeline_UnregistersDistroOnRollbackWhenPostInstallListCompleted()
+    {
+        var quietLists = 0;
+        var commands = new FakeCommandRunner(args =>
+        {
+            if (args.SequenceEqual(["--list", "--quiet"]))
+            {
+                quietLists++;
+                return quietLists == 4
+                    ? Ok("OpenClawGateway\n")
+                    : Ok("");
+            }
+
+            if (args.Contains("--install"))
+                return Ok("Installing Ubuntu-24.04\n");
+            if (args.SequenceEqual(["--status"]))
+                return Ok("Default Version: 2\n");
+            if (args.SequenceEqual(["--terminate", "OpenClawGateway"]) ||
+                args.SequenceEqual(["--unregister", "OpenClawGateway"]))
+                return Ok();
+
+            return Fail($"unexpected args: {string.Join(' ', args)}");
+        });
+        var ctx = CreateContext(
+            new SetupConfig { RollbackOnFailure = true },
+            commands);
+        var pipeline = new SetupPipeline([new CreateWslInstanceStep()]);
+
+        var result = await pipeline.RunAsync(ctx);
+
+        Assert.Equal(PipelineOutcome.Failed, result.Outcome);
+        Assert.Equal("wsl-create", result.FailedStepId);
+        Assert.Contains("did not register expected distro 'OpenClawGateway'", result.Message);
+        Assert.Contains(commands.Calls, call => call.Arguments.SequenceEqual(["--unregister", "OpenClawGateway"]));
+        Assert.Contains(commands.Calls, call => call.Arguments.SequenceEqual(["--terminate", "OpenClawGateway"]));
+    }
+
+    [Fact]
     public async Task CreateWslInstance_ReportsMissingDistroWhenFreshListOmitsIt()
     {
         var quietLists = 0;

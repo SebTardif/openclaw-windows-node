@@ -32,12 +32,15 @@ public sealed class CreateWslInstanceStep : SetupStep
 
     private readonly record struct FreshDistroVerification(StepResult Result, bool PreserveRegistration);
 
+    private bool _preserveRegistrationOnRollback;
+
     public override string Id => "wsl-create";
     public override string DisplayName => "Create WSL instance";
     public override bool CanRetry => false;
 
     public override async Task<StepResult> ExecuteAsync(SetupContext ctx, CancellationToken ct)
     {
+        _preserveRegistrationOnRollback = false;
         var distro = ctx.DistroName!;
         var baseDistro = ctx.Config.BaseDistro.Trim();
 
@@ -102,6 +105,7 @@ public sealed class CreateWslInstanceStep : SetupStep
         var verify = await VerifyFreshDistro(ctx, distro, installPath, ct);
         if (!verify.Result.IsSuccess)
         {
+            _preserveRegistrationOnRollback = verify.PreserveRegistration;
             var cleanupError = await CleanupPartialInstall(
                 ctx,
                 distro,
@@ -348,7 +352,9 @@ public sealed class CreateWslInstanceStep : SetupStep
         if (!DistroInstallPathPolicy.TryGetManagedInstallPath(ctx.LocalDataDir, distro, out var vhdDir, out var pathError))
             throw new IOException($"[Uninstall] Refusing WSL rollback filesystem cleanup: {pathError}");
 
-        var cleanupError = await CleanupPartialInstall(ctx, distro, vhdDir, ct);
+        var preserveRegistration = _preserveRegistrationOnRollback;
+        _preserveRegistrationOnRollback = false;
+        var cleanupError = await CleanupPartialInstall(ctx, distro, vhdDir, ct, preserveRegistration);
         if (cleanupError.Length > 0)
             throw new IOException($"[Uninstall] Refusing unsafe WSL rollback cleanup.{cleanupError}");
 
