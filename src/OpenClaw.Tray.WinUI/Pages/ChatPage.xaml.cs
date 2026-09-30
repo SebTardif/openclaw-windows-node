@@ -46,10 +46,7 @@ public sealed partial class ChatPage : Page
     private IChatPagePanelHost? _panelHost;
     private IChatPagePanelHost PanelHost => _panelHost ??= new ChatPagePanelHost(this);
     private string? _pendingWebViewSessionKey;
-    private static readonly HttpClient s_httpClient = new()
-    {
-        Timeout = TimeSpan.FromSeconds(3)
-    };
+    private static readonly HttpClient s_httpClient = ChatReadinessClient.Create();
 
     public ChatPage()
     {

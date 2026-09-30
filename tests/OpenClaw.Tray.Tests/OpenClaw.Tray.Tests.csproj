@@ -163,6 +163,7 @@
     <Compile Include="..\..\src\OpenClaw.Tray.WinUI\Helpers\TrayTooltipFormatter.cs" Link="Helpers\TrayTooltipFormatter.cs" />
     <Compile Include="..\..\src\OpenClaw.Tray.WinUI\Helpers\GatewayDashboardUrlBuilder.cs" Link="Helpers\GatewayDashboardUrlBuilder.cs" />
     <Compile Include="..\..\src\OpenClaw.Tray.WinUI\Helpers\CommandCenterTextHelper.cs" Link="Helpers\CommandCenterTextHelper.cs" />
+    <Compile Include="..\..\src\OpenClaw.Tray.WinUI\Helpers\ChatReadinessClient.cs" Link="Helpers\ChatReadinessClient.cs" />
     <Compile Include="..\..\src\OpenClaw.Tray.WinUI\Helpers\StatusBadgeIconFactory.cs" Link="Helpers\StatusBadgeIconFactory.cs" />
     <Compile Include="..\..\src\OpenClaw.Tray.WinUI\Helpers\Win32FilePickerHelper.cs" Link="Helpers\Win32FilePickerHelper.cs" />
     <Compile Include="..\..\src\OpenClaw.Tray.WinUI\AppIdentity.cs" Link="AppIdentity.cs" />
