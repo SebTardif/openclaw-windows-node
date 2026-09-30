@@ -14,6 +14,103 @@ public sealed class NativeGatewaySetupTests
     private const string Family = "OpenClaw.Gateway_123456789abcd";
 
     [Fact]
+    public async Task IncompatibleUnpublishedDraft_RequiresExplicitDiscardBeforeCreatingIsolatedProfile()
+    {
+        using var fixture = new Fixture();
+        var legacy = await fixture.Service.CreateDraftAsync(default);
+        var stateDirectory = NativeGatewayPaths.GetStateDirectory(fixture.Registry, legacy.GatewayId);
+        Directory.CreateDirectory(stateDirectory);
+        File.WriteAllText(Path.Combine(stateDirectory, "credential-marker.txt"), "legacy-credential");
+
+        fixture.Host.Contract = NativeGatewayContract.IsolatedSessionV1;
+
+        await Assert.ThrowsAsync<NativeGatewaySetupService.NativeGatewayDraftRecoveryRequiredException>(
+            () => fixture.Service.CreateDraftAsync(default));
+        Assert.True(File.Exists(Path.Combine(stateDirectory, "credential-marker.txt")));
+
+        await fixture.Service.DiscardIncompatibleDraftAsync(default);
+        var isolated = await fixture.Service.CreateDraftAsync(default);
+
+        Assert.NotEqual(legacy.GatewayId, isolated.GatewayId);
+        Assert.Equal(NativeGatewayContract.IsolatedSessionV1, isolated.Contract);
+        Assert.Equal("legacy-credential", File.ReadAllText(Path.Combine(stateDirectory, "credential-marker.txt")));
+        Assert.Equal(isolated, JsonSerializer.Deserialize<NativeGatewaySetupDraft>(
+            File.ReadAllText(NativeGatewaySetupService.GetDraftPath(fixture.Registry))));
+        Assert.Empty(fixture.Registry.GetAll());
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task DraftRecovery_PreservesProfileDataAfterRemovingPublishedRegistration(bool published)
+    {
+        using var fixture = new Fixture();
+        var draft = await fixture.Service.CreateDraftAsync(default);
+        await using (var session = await fixture.Service.PrepareAsync(draft, default))
+        {
+            if (published)
+            {
+                session.MarkWizardCompleted();
+                await session.CompleteAsync(default);
+            }
+        }
+        var identityDirectory = fixture.Registry.GetIdentityDirectory(draft.GatewayId);
+        var configPath = NativeGatewayPaths.GetConfigPath(fixture.Registry, draft.GatewayId);
+        var workspace = JsonNode.Parse(File.ReadAllText(configPath))!["agents"]!["defaults"]!["workspace"]!.GetValue<string>();
+        Directory.CreateDirectory(workspace);
+        File.WriteAllText(Path.Combine(workspace, "user-work.txt"), "retained work");
+        var identity = new DeviceIdentity(identityDirectory);
+        identity.Initialize();
+        var before = Directory.GetFiles(identityDirectory, "*", SearchOption.AllDirectories)
+            .ToDictionary(path => path, File.ReadAllBytes);
+        fixture.Registry.Remove(draft.GatewayId);
+        fixture.Registry.Save();
+
+        // Descriptors written before runtime contracts were introduced omit Contract.
+        File.WriteAllText(NativeGatewaySetupService.GetDraftPath(fixture.Registry),
+            JsonSerializer.Serialize(new { draft.GatewayId, draft.Port, draft.PackageFamilyName }));
+        fixture.Host.Contract = NativeGatewayContract.IsolatedSessionV1;
+        await Assert.ThrowsAsync<NativeGatewaySetupService.NativeGatewayDraftRecoveryRequiredException>(
+            () => fixture.Service.CreateDraftAsync(default));
+
+        await fixture.Service.DiscardIncompatibleDraftAsync(default);
+        var replacement = await fixture.Service.CreateDraftAsync(default);
+
+        Assert.NotEqual(draft.GatewayId, replacement.GatewayId);
+        Assert.Equal(NativeGatewayContract.IsolatedSessionV1, replacement.Contract);
+        Assert.Equal(before.Count, Directory.GetFiles(identityDirectory, "*", SearchOption.AllDirectories).Length);
+        foreach (var (path, bytes) in before)
+            Assert.Equal(bytes, File.ReadAllBytes(path));
+        Assert.Empty(fixture.Registry.GetAll());
+    }
+
+    [Fact]
+    public async Task PublishedNativeProfileCannotBeDiscardedByDraftRecovery()
+    {
+        using var fixture = new Fixture();
+        var draft = await fixture.Service.CreateDraftAsync(default);
+        var stateDirectory = NativeGatewayPaths.GetStateDirectory(fixture.Registry, draft.GatewayId);
+        Directory.CreateDirectory(stateDirectory);
+        var credentialPath = Path.Combine(stateDirectory, "credential-marker.txt");
+        File.WriteAllText(credentialPath, "preserved-credential");
+        fixture.Registry.AddOrUpdate(new GatewayRecord
+        {
+            Id = draft.GatewayId,
+            Url = $"ws://127.0.0.1:{draft.Port}",
+            IsLocal = true,
+            NativePackageFamilyName = draft.PackageFamilyName
+        });
+        fixture.Registry.Save();
+
+        await Assert.ThrowsAsync<InvalidOperationException>(
+            () => fixture.Service.DiscardIncompatibleDraftAsync(default));
+
+        Assert.True(File.Exists(credentialPath));
+        Assert.True(File.Exists(NativeGatewaySetupService.GetDraftPath(fixture.Registry)));
+        Assert.NotNull(fixture.Registry.GetById(draft.GatewayId));
+    }
+
+    [Fact]
     public async Task Draft_OccupiedPortRotatesWithoutReplacingProfileOrCredentials()
     {
         using var fixture = new Fixture();
@@ -349,6 +446,23 @@ public sealed class NativeGatewaySetupTests
         Assert.Equal(session.Record.SharedGatewayToken, fixture.Host.PairingEnvironment["OPENCLAW_GATEWAY_TOKEN"]);
         Assert.Empty(fixture.Registry.GetAll());
         await Assert.ThrowsAsync<InvalidOperationException>(() => session.CompleteAsync(CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task IsolatedWizardPairingKeepsAgentCredentialsOutOfHostOverrides()
+    {
+        using var fixture = new Fixture();
+        fixture.Host.Contract = NativeGatewayContract.IsolatedSessionV1;
+        NativeGatewaySetupDraft draft = await fixture.Service.CreateDraftAsync(CancellationToken.None);
+        fixture.Host.IsolatedConfiguration = new(draft.Port, "agent-only-token");
+        await using var session = await fixture.Service.PrepareAsync(draft, CancellationToken.None);
+        fixture.Host.PendingRequests = PairingRequests(session);
+
+        await session.ApproveWizardPairingAsync("request-1", CancellationToken.None);
+
+        Assert.Equal("request-1", fixture.Host.ApprovedId);
+        Assert.Empty(fixture.Host.PairingEnvironment!);
+        Assert.Empty(fixture.Registry.GetAll());
     }
 
     [Theory]
@@ -754,6 +868,108 @@ public sealed class NativeGatewaySetupTests
         Assert.DoesNotContain("TOKEN", string.Join(",", environment.Keys));
     }
 
+    [Fact]
+    public async Task IsolatedSetupUsesAgentConfigurationAndPublishesOnlyAfterHealthyWizard()
+    {
+        using var fixture = new Fixture();
+        fixture.Host.Contract = NativeGatewayContract.IsolatedSessionV1;
+        NativeGatewaySetupDraft draft = await fixture.Service.CreateDraftAsync(CancellationToken.None);
+        fixture.Host.IsolatedConfiguration = new(20123, "preserved-agent-token");
+
+        await using var session = await fixture.Service.PrepareAsync(draft, CancellationToken.None);
+
+        Assert.True(session.IsIsolated);
+        Assert.Equal("ws://127.0.0.1:20123", session.Record.Url);
+        Assert.Equal("preserved-agent-token", session.Record.SharedGatewayToken);
+        Assert.Equal(NativeGatewayPackageClient.IsolatedContract, session.Record.NativeRuntimeContract);
+        Assert.False(File.Exists(NativeGatewayPaths.GetConfigPath(fixture.Registry, draft.GatewayId)));
+        Assert.Empty(fixture.Host.LastPreparationEnvironment!);
+        Assert.Empty(fixture.Registry.GetAll());
+        Assert.Equal(20123, JsonSerializer.Deserialize<NativeGatewaySetupDraft>(
+            File.ReadAllText(NativeGatewaySetupService.GetDraftPath(fixture.Registry)))!.Port);
+
+        var capabilities = new CapabilitiesConfig { System = true, Screen = true };
+        session.MarkWizardCompleted();
+        GatewayRecord published = await session.CompleteAsync(CancellationToken.None, capabilities);
+
+        Assert.Equal(capabilities.GetEnabledCommandIds(), fixture.Host.AppliedCommands);
+        Assert.Equal(published, fixture.Registry.GetById(draft.GatewayId));
+        Assert.Contains("health", fixture.Events);
+        Assert.False(File.Exists(NativeGatewayPaths.GetConfigPath(fixture.Registry, draft.GatewayId)));
+    }
+
+    [Fact]
+    public async Task IsolatedSetupRetriesCancelledDraftWithoutReplacingAgentCredentials()
+    {
+        using var fixture = new Fixture();
+        fixture.Host.Contract = NativeGatewayContract.IsolatedSessionV1;
+        NativeGatewaySetupDraft draft = await fixture.Service.CreateDraftAsync(CancellationToken.None);
+        fixture.Host.IsolatedConfiguration = new(draft.Port, "agent-token");
+        await using (var first = await fixture.Service.PrepareAsync(draft, CancellationToken.None)) { }
+
+        NativeGatewaySetupDraft resumed = await fixture.Service.CreateDraftAsync(CancellationToken.None);
+        await using var retry = await fixture.Service.PrepareAsync(resumed, CancellationToken.None);
+
+        Assert.Equal(draft, resumed);
+        Assert.Equal("agent-token", retry.Record.SharedGatewayToken);
+        Assert.Empty(fixture.Registry.GetAll());
+    }
+
+    [Fact]
+    public async Task IsolatedSetupRejectsChangedPortAndTokenBeforePublicationWithoutRepairingConfiguration()
+    {
+        using var fixture = new Fixture();
+        fixture.Host.Contract = NativeGatewayContract.IsolatedSessionV1;
+        NativeGatewaySetupDraft draft = await fixture.Service.CreateDraftAsync(CancellationToken.None);
+        fixture.Host.IsolatedConfiguration = new(draft.Port, "first-token");
+        await using var session = await fixture.Service.PrepareAsync(draft, CancellationToken.None);
+        session.MarkWizardCompleted();
+        fixture.Events.Clear();
+        fixture.Host.IsolatedConfiguration = new(draft.Port + 1, "different-token");
+
+        await Assert.ThrowsAsync<InvalidOperationException>(
+            () => session.CompleteAsync(CancellationToken.None));
+        Assert.Empty(fixture.Registry.GetAll());
+        Assert.Contains("agent-check", fixture.Events);
+        Assert.DoesNotContain("agent-config", fixture.Events);
+        Assert.Equal(new IsolatedGatewayConfiguration(draft.Port + 1, "different-token"),
+            fixture.Host.IsolatedConfiguration);
+    }
+
+    [Fact]
+    public async Task CancellingAfterIsolatedPackageSetupDoesNotConfigureTheAgent()
+    {
+        using var fixture = new Fixture();
+        fixture.Host.Contract = NativeGatewayContract.IsolatedSessionV1;
+        NativeGatewaySetupDraft draft = await fixture.Service.CreateDraftAsync(CancellationToken.None);
+        using var cancellation = new CancellationTokenSource();
+        fixture.Host.Prepare = cancellation.Cancel;
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(
+            () => fixture.Service.PrepareAsync(draft, cancellation.Token));
+
+        Assert.DoesNotContain("agent-config", fixture.Events);
+        Assert.Empty(fixture.Registry.GetAll());
+    }
+
+    [Fact]
+    public async Task IsolatedWizardPreparationDoesNotRestartUntilExplicitlyRequested()
+    {
+        using var fixture = new Fixture();
+        fixture.Host.Contract = NativeGatewayContract.IsolatedSessionV1;
+        var draft = await fixture.Service.CreateDraftAsync(default);
+        await using var session = await fixture.Service.PrepareAsync(draft, default);
+        fixture.Events.Clear();
+
+        await session.PrepareWizardAsync(default);
+        Assert.DoesNotContain("restart", fixture.Events);
+        Assert.DoesNotContain("stop", fixture.Events);
+
+        fixture.Events.Clear();
+        await session.RestartAsync(default);
+        Assert.Equal(["validate", "restart", "start", "inspect"], fixture.Events);
+    }
+
     private sealed class Fixture : IDisposable
     {
         public TempDirectory Temp { get; } = new();
@@ -788,6 +1004,36 @@ public sealed class NativeGatewaySetupTests
 
     private sealed class Host(List<string> events) : INativeGatewaySetupHost
     {
+        public NativeGatewayContract Contract { get; set; } = NativeGatewayContract.Legacy;
+        public IsolatedGatewayConfiguration IsolatedConfiguration { get; set; } =
+            new(18789, "fixture-agent-token");
+        public IReadOnlyDictionary<string, string>? LastPreparationEnvironment { get; private set; }
+        public IReadOnlyList<string>? AppliedCommands { get; private set; }
+        public Task<NativeGatewayContract> DetectContractAsync(
+            NativeGatewayPackage package, CancellationToken cancellationToken) =>
+            Task.FromResult(Contract);
+        public Task<IsolatedGatewayConfiguration> PrepareIsolatedConfigurationAsync(
+            NativeGatewayPackage package, int port, CancellationToken cancellationToken)
+        {
+            events.Add("agent-config");
+            return Task.FromResult(IsolatedConfiguration);
+        }
+        public Task ApplyIsolatedCapabilitiesAsync(
+            NativeGatewayPackage package, IReadOnlyList<string> commandIds, CancellationToken cancellationToken)
+        {
+            events.Add("agent-capabilities");
+            AppliedCommands = commandIds;
+            return Task.CompletedTask;
+        }
+
+        public Task<IsolatedGatewayConfiguration> CheckIsolatedPairingConfigurationAsync(
+            NativeGatewayPackage package, CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            events.Add("agent-check");
+            return Task.FromResult(IsolatedConfiguration);
+        }
+
         public string PendingRequests { get; set; } = "{\"pending\":[]}";
         public Action OnList { get; set; } = () => { };
         public string? ApprovedId { get; private set; }
@@ -822,6 +1068,7 @@ public sealed class NativeGatewaySetupTests
             CancellationToken cancellationToken)
         {
             events.Add("prepare");
+            LastPreparationEnvironment = environment;
             Prepare();
             return Task.CompletedTask;
         }
@@ -843,6 +1090,12 @@ public sealed class NativeGatewaySetupTests
 
     private sealed class Runtime(List<string> events) : INativeGatewayRuntime
     {
+        public Task RestartAsync(GatewayRecord record, CancellationToken cancellationToken)
+        {
+            events.Add("restart");
+            return Task.CompletedTask;
+        }
+
         public GatewayEndpointProvenance Inspect(GatewayRecord record) =>
             new(Provenance, new Uri(record.Url).Port);
 

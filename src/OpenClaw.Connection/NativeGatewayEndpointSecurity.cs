@@ -31,7 +31,7 @@ internal static class NativeGatewayEndpointSecurity
             }
 
             return new(false,
-                provenance.Kind == GatewayEndpointProvenanceKind.NoListener
+                provenance.Kind == GatewayEndpointProvenanceKind.NoListener || IsInspectionUnavailable(provenance)
                     ? GatewayErrorKind.Network
                     : GatewayErrorKind.LocalPortConflict,
                 provenance.Detail ?? "Native Gateway endpoint ownership could not be verified. Credentials were not sent.");
@@ -42,13 +42,25 @@ internal static class NativeGatewayEndpointSecurity
         }
         catch (NativeGatewayListenerException ex)
         {
-            return new(false, GatewayErrorKind.LocalPortConflict,
+            return new(false,
+                IsInspectionUnavailable(ex.Provenance)
+                    ? GatewayErrorKind.Network
+                    : GatewayErrorKind.LocalPortConflict,
                 ex.Provenance.Detail ?? ex.Message);
+        }
+        catch (NativeGatewayContractException ex)
+        {
+            return new(false, GatewayErrorKind.Network, ex.Message);
         }
         catch (Exception)
         {
             return new(false, GatewayErrorKind.Network,
                 "The native Gateway could not start or verify its owned endpoint. Check the manually installed MSIX and retry. Credentials were not sent.");
         }
+
     }
+
+    internal static bool IsInspectionUnavailable(GatewayEndpointProvenance provenance) =>
+        provenance.FailureReason is GatewayEndpointProvenanceFailureReason.ProcessIdentityUnavailable
+            or GatewayEndpointProvenanceFailureReason.InspectionUnavailable;
 }

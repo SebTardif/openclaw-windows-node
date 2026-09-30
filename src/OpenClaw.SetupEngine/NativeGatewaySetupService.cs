@@ -15,6 +15,19 @@ public interface INativeGatewaySetupHost
 {
     void ReportProgress(NativeGatewaySetupStage stage) { }
 
+    Task<NativeGatewayContract> DetectContractAsync(
+        NativeGatewayPackage package, CancellationToken cancellationToken);
+
+    Task<IsolatedGatewayConfiguration> PrepareIsolatedConfigurationAsync(
+        NativeGatewayPackage package, int port, CancellationToken cancellationToken);
+
+    Task ApplyIsolatedCapabilitiesAsync(
+        NativeGatewayPackage package, IReadOnlyList<string> commandIds,
+        CancellationToken cancellationToken);
+
+    Task<IsolatedGatewayConfiguration> CheckIsolatedPairingConfigurationAsync(
+        NativeGatewayPackage package, CancellationToken cancellationToken);
+
     Task<string> ListDevicePairingRequestsAsync(
         NativeGatewayPackage package,
         IReadOnlyDictionary<string, string> environment, CancellationToken cancellationToken);
@@ -47,6 +60,7 @@ public sealed record NativeGatewaySetupDraft(string GatewayId, int Port, string 
 {
     // Durable intent makes a port-only config/descriptor update recoverable across a crash.
     public int? PreviousPort { get; init; }
+    public NativeGatewayContract Contract { get; init; } = NativeGatewayContract.Legacy;
 }
 
 /// <summary>
@@ -62,6 +76,7 @@ public sealed class NativeGatewaySetupService(
     public async Task<NativeGatewaySetupDraft> CreateDraftAsync(CancellationToken cancellationToken)
     {
         var package = await packageResolver.ResolveAsync(cancellationToken);
+        var contract = await host.DetectContractAsync(package, cancellationToken);
         var draftPath = GetDraftPath(registry);
         if (File.Exists(draftPath))
         {
@@ -76,14 +91,46 @@ public sealed class NativeGatewaySetupService(
             {
                 if (saved.PackageFamilyName != package.PackageFamilyName)
                     throw new InvalidOperationException("The installed Gateway package does not match the saved setup profile.");
-                return ResumeDraft(saved, draftPath);
+                if (saved.Contract != contract)
+                    throw new NativeGatewayDraftRecoveryRequiredException(
+                        "The saved native setup draft belongs to a different Gateway runtime. " +
+                        "Discard the unpublished draft to create a new isolated Gateway profile.");
+                return contract == NativeGatewayContract.IsolatedSessionV1
+                    ? saved
+                    : ResumeDraft(saved, draftPath);
             }
         }
         var port = SelectAvailablePort();
-        var draft = new NativeGatewaySetupDraft(Guid.NewGuid().ToString("N"), port, package.PackageFamilyName);
+        var draft = new NativeGatewaySetupDraft(Guid.NewGuid().ToString("N"), port, package.PackageFamilyName)
+        {
+            Contract = contract
+        };
         Directory.CreateDirectory(Path.GetDirectoryName(draftPath)!);
         AtomicFile.WriteAllText(draftPath, JsonSerializer.Serialize(draft));
         return draft;
+    }
+
+    /// <summary>
+    /// Discards only the setup descriptor after explicit runtime replacement consent.
+    /// A removed registry entry does not prove its profile was never published.
+    /// </summary>
+    public async Task DiscardIncompatibleDraftAsync(CancellationToken cancellationToken)
+    {
+        var draftPath = GetDraftPath(registry);
+        if (!File.Exists(draftPath))
+            return;
+
+        var saved = JsonSerializer.Deserialize<NativeGatewaySetupDraft>(
+            await File.ReadAllTextAsync(draftPath, cancellationToken).ConfigureAwait(false))
+            ?? throw new InvalidOperationException("The saved native setup draft is invalid.");
+        _ = NativeGatewayPaths.GetStateDirectory(registry, saved.GatewayId);
+        registry.Load();
+        if (registry.GetById(saved.GatewayId) is not null)
+            throw new InvalidOperationException("The saved native Gateway profile has already been published and cannot be discarded from setup.");
+
+        cancellationToken.ThrowIfCancellationRequested();
+        // As with Store migration recovery, discard intent, never the data it describes.
+        File.Delete(draftPath);
     }
 
     private NativeGatewaySetupDraft ResumeDraft(NativeGatewaySetupDraft draft, string draftPath)
@@ -101,6 +148,9 @@ public sealed class NativeGatewaySetupService(
         System.Diagnostics.Trace.TraceInformation("Native setup is replacing an unavailable draft port.");
         return FinishPortChange(pending, draftPath);
     }
+
+    /// <summary>Signals that an unpublished same-user draft requires explicit replacement after a package upgrade.</summary>
+    public sealed class NativeGatewayDraftRecoveryRequiredException(string message) : InvalidOperationException(message);
 
     private NativeGatewaySetupDraft FinishPortChange(NativeGatewaySetupDraft draft, string draftPath)
     {
@@ -172,6 +222,47 @@ public sealed class NativeGatewaySetupService(
         var package = await packageResolver.ResolveAsync(cancellationToken);
         if (!string.Equals(package.PackageFamilyName, draft.PackageFamilyName, StringComparison.Ordinal))
             throw new InvalidOperationException("The installed Gateway package changed. Return to setup and check it again.");
+        var contract = await host.DetectContractAsync(package, cancellationToken);
+        if (contract != draft.Contract)
+            throw new InvalidOperationException(
+                "The installed Gateway runtime changed during setup. Retry after checking the package.");
+        package = package with { Contract = contract };
+
+        if (contract == NativeGatewayContract.IsolatedSessionV1)
+        {
+            await host.PreparePackageAsync(package, new Dictionary<string, string>(), cancellationToken);
+            cancellationToken.ThrowIfCancellationRequested();
+            IsolatedGatewayConfiguration configured = await host.PrepareIsolatedConfigurationAsync(
+                package, draft.Port, cancellationToken);
+            cancellationToken.ThrowIfCancellationRequested();
+            var selected = draft with { Port = configured.Port };
+            if (selected.Port != draft.Port)
+                AtomicFile.WriteAllText(GetDraftPath(registry), JsonSerializer.Serialize(selected));
+            var isolatedRecord = new GatewayRecord
+            {
+                Id = selected.GatewayId,
+                Url = $"ws://127.0.0.1:{selected.Port}",
+                FriendlyName = "Native Gateway",
+                IsLocal = true,
+                RequiresV2Signature = true,
+                SharedGatewayToken = configured.Token,
+                NativePackageFamilyName = package.PackageFamilyName,
+                NativeRuntimeContract = NativeGatewayPackageClient.IsolatedContract
+            };
+            var isolatedSession = new NativeGatewaySetupSession(
+                registry, selected, isolatedRecord, package,
+                new Dictionary<string, string>(), host, runtimeFactory());
+            try
+            {
+                await isolatedSession.PrepareAsync(cancellationToken);
+                return isolatedSession;
+            }
+            catch
+            {
+                await isolatedSession.DisposeAsync();
+                throw;
+            }
+        }
 
         var stateDirectory = NativeGatewayPaths.GetStateDirectory(registry, draft.GatewayId);
         var configPath = NativeGatewayPaths.GetConfigPath(registry, draft.GatewayId);

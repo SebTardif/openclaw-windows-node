@@ -2401,6 +2401,12 @@ Use uma destas opções:
   <data name="Onboarding_Wizard_ErrorGatewayDisconnected" xml:space="preserve">
     <value>Gateway desconectado</value>
   </data>
+  <data name="Onboarding_Wizard_GatewayConsoleGap" xml:space="preserve">
+    <value>Algumas mensagens do console do Gateway foram ignoradas. Abra o terminal do Gateway para ver as instruções de entrada ausentes.</value>
+  </data>
+  <data name="Onboarding_Wizard_GatewayConsoleUnavailable" xml:space="preserve">
+    <value>As atualizações do console do Gateway não estão disponíveis. Abra o terminal do Gateway para ver as instruções de entrada no provedor.</value>
+  </data>
   <data name="Onboarding_Wizard_ErrorGatewayDisconnectedDetail" xml:space="preserve">
     <value>Conexão com o Gateway perdida. Clique em Avançar para pular o assistente, ou aguarde a reconexão.</value>
   </data>
@@ -7401,7 +7407,7 @@ Suas configurações, gateway, arquivos e modelos permanecem onde estão.</value
   <data name="Chat_Composer_Effort_Faster" xml:space="preserve"><value>Mais rápido</value></data>
   <data name="Chat_Composer_Effort_Smarter" xml:space="preserve"><value>Mais detalhado</value></data>
   <data name="Onboarding_Native_Title.Text" xml:space="preserve"><value>Instalar um Gateway nativo local</value></data>
-  <data name="Onboarding_Native_Description.Text" xml:space="preserve"><value>Instalar um Gateway OpenClaw local, contido pelo MXC</value></data>
+  <data name="Onboarding_Native_Description.Text" xml:space="preserve"><value>Instalar e configurar um Gateway OpenClaw neste dispositivo</value></data>
   <data name="Onboarding_Wsl_Title.Text" xml:space="preserve"><value>Instalar um Gateway WSL local</value></data>
   <data name="Onboarding_Native_CheckingSupport" xml:space="preserve"><value>Verificando o suporte ao Gateway nativo...</value></data>
   <data name="Onboarding_Native_SupportAvailable" xml:space="preserve"><value>O suporte ao Gateway nativo está disponível neste dispositivo.</value></data>
@@ -7437,4 +7443,8 @@ Suas configurações, gateway, arquivos e modelos permanecem onde estão.</value
   <data name="Onboarding_Native_InProgress" xml:space="preserve"><value>Preparando o Gateway nativo para o assistente compartilhado. As perguntas sobre provedor e modelo aparecerão aqui no Companion.</value></data>
   <data name="Onboarding_Native_Cancelled" xml:space="preserve"><value>Configuração cancelada. A solicitação do WinGet foi cancelada, mas o Windows ainda pode concluir a implantação. Os dados já inseridos são mantidos no perfil nativo dedicado. Nenhum pacote Gateway foi removido.</value></data>
   <data name="Onboarding_Native_Configured" xml:space="preserve"><value>Configuração e integridade autenticada verificadas em {0}. Abra o Companion para iniciar o Gateway e concluir o pareamento nas configurações de conexão. Os recursos do Windows que você selecionou foram salvos.</value></data>
+  <data name="Onboarding_Native_ReplaceDraftTitle" xml:space="preserve"><value>Substituir a configuração inacabada do Gateway?</value></data>
+  <data name="Onboarding_Native_ReplaceDraftContent" xml:space="preserve"><value>Isso limpa apenas o rascunho de configuração do Companion. Os arquivos do espaço de trabalho, a configuração e as credenciais existentes são mantidos. A nova configuração usa um novo perfil e não importa nem altera os dados antigos do Gateway, a configuração do WSL ou o perfil gerenciado pelo pacote.</value></data>
+  <data name="Onboarding_Native_ReplaceDraftPrimary" xml:space="preserve"><value>Descartar e configurar novamente</value></data>
+  <data name="Onboarding_Native_ReplaceDraftClose" xml:space="preserve"><value>Manter rascunho</value></data>
 </root>

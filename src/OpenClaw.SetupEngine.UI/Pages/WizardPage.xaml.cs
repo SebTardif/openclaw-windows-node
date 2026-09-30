@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Text.Json;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Automation;
@@ -44,12 +45,14 @@ public sealed partial class WizardPage : Page
     private Button? _moreOptionsButton;
     // wizard.payload frames do not include plugin console output, so tail the gateway log inline.
     private WizardConsoleTail? _consoleTail;
+    private GatewayLogTailIssue? _consoleIssue;
     // Captured on connect for "Open terminal" / "Restart gateway" recovery actions.
     private GatewayHostAccessPlan _hostAccessPlan = GatewayHostAccessPlan.None();
 
     public WizardPage()
     {
         InitializeComponent();
+        ConsoleRecoveryTerminalButton.Content = SetupLocalization.GetString("GatewayHostAccess_OpenTerminalLabel");
         TextInput.TextChanged += (_, _) => UpdateContinueState();
         SecretInput.PasswordChanged += (_, _) => UpdateContinueState();
     }
@@ -160,7 +163,14 @@ public sealed partial class WizardPage : Page
             _client = client;
             _client.StatusChanged += OnWizardClientStatusChanged;
             SetBusy("Starting wizard...");
-            StartConsoleTail();
+            var tail = await StartConsoleTailAsync(client);
+            if (generation != _operationGeneration)
+            {
+                if (ReferenceEquals(_consoleTail, tail))
+                    StopConsoleTail();
+                await DisconnectAndDisposeClientAsync(client);
+                return;
+            }
             _nativeSession?.BeginWizard();
             JsonElement payload;
             try
@@ -1350,16 +1360,23 @@ public sealed partial class WizardPage : Page
         }
     }
 
-    private void StartConsoleTail()
+    private async Task<WizardConsoleTail> StartConsoleTailAsync(OpenClawGatewayClient client)
     {
         StopConsoleTail();
+        ConsoleRecovery.Visibility = Visibility.Collapsed;
+        ConsoleIssueText.Text = "";
+        _consoleIssue = null;
+        bool isolated = _nativeSession?.IsIsolated == true;
         var tail = new WizardConsoleTail(
             logger: NullLogger.Instance,
             distroNameOverride: _config.DistroName,
-            nativeLogPath: _nativeSession?.ConsoleLogPath);
+            nativeLogPath: isolated ? null : _nativeSession?.ConsoleLogPath,
+            gatewayLogTail: isolated
+                ? WizardConsoleTail.CreateGatewayLogReader(client.SendWizardRequestAsync)
+                : null);
         _consoleTail = tail;
         var dispatcher = DispatcherQueue;
-        tail.Start(message =>
+        void AppendMessage(string message)
         {
             try
             {
@@ -1374,7 +1391,49 @@ public sealed partial class WizardPage : Page
             catch
             {
             }
+        }
+        void ReportIssue(GatewayLogTailIssue issue) => dispatcher?.TryEnqueue(() =>
+        {
+            if (ReferenceEquals(_consoleTail, tail))
+                ShowConsoleIssue(issue);
         });
+        if (!isolated)
+        {
+            tail.Start(AppendMessage);
+            return tail;
+        }
+        try
+        {
+            await tail.StartGatewayAsync(AppendMessage, ReportIssue, _nativeSession!.LifetimeToken);
+        }
+        catch (OperationCanceledException) when (_nativeSession?.LifetimeToken.IsCancellationRequested == true)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            Trace.TraceWarning($"Isolated Gateway console output could not start ({ex.GetType().Name}).");
+            if (ReferenceEquals(_consoleTail, tail))
+            {
+                tail.Stop();
+                ShowConsoleIssue(GatewayLogTailIssue.Unavailable);
+            }
+        }
+        return tail;
+    }
+
+    private void ShowConsoleIssue(GatewayLogTailIssue issue)
+    {
+        if (_consoleIssue == GatewayLogTailIssue.Skipped)
+            return;
+        _consoleIssue = issue;
+        ConsoleIssueText.Text = SetupLocalization.GetString(issue switch
+        {
+            GatewayLogTailIssue.Skipped => "Onboarding_Wizard_GatewayConsoleGap",
+            GatewayLogTailIssue.Unavailable => "Onboarding_Wizard_GatewayConsoleUnavailable",
+            _ => throw new ArgumentOutOfRangeException(nameof(issue))
+        });
+        ConsoleRecovery.Visibility = Visibility.Visible;
     }
 
     private void StopConsoleTail()

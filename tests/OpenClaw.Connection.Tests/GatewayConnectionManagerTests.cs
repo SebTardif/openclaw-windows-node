@@ -1,4 +1,6 @@
 using System.Diagnostics;
+using System.Net;
+using System.Runtime.InteropServices;
 using System.Text.Json;
 using OpenClaw.Shared;
 using OpenClaw.Shared.Telemetry;
@@ -150,6 +152,113 @@ public class GatewayConnectionManagerTests : IDisposable
         Assert.Equal(1, node.ConnectCount);
         Assert.Equal(1, runtime.StartCount);
         Assert.Empty(_factory.CreatedCredentials);
+    }
+
+    [Fact]
+    public async Task NativeGateway_UnavailableInspectionIsNetworkFailureNotPortConflict()
+    {
+        SetupNativeGateway();
+        var runtime = new FakeNativeGatewayRuntime
+        {
+            Kind = GatewayEndpointProvenanceKind.UnknownListener,
+            FailureReason = GatewayEndpointProvenanceFailureReason.InspectionUnavailable
+        };
+        await using var manager = new GatewayConnectionManager(
+            _resolver, _factory, _registry, NullLogger.Instance, nativeGatewayRuntime: runtime);
+        await manager.ConnectAsync();
+        Assert.Empty(_factory.CreatedCredentials);
+        Assert.Equal(GatewayErrorKind.Network, manager.CurrentSnapshot.OperatorErrorKind);
+    }
+
+    [Theory]
+    [InlineData(GatewayEndpointProvenanceFailureReason.InspectionUnavailable)]
+    [InlineData(GatewayEndpointProvenanceFailureReason.ProcessIdentityUnavailable)]
+    public async Task NativeGateway_AuthRecoveryCompletesWithNetworkErrorWhenInspectionUnavailable(
+        GatewayEndpointProvenanceFailureReason reason)
+    {
+        SetupNativeGateway();
+        var runtime = new FakeNativeGatewayRuntime();
+        await using var manager = new GatewayConnectionManager(
+            _resolver, _factory, _registry, NullLogger.Instance, nativeGatewayRuntime: runtime);
+        await manager.ConnectAsync();
+        runtime.Kind = GatewayEndpointProvenanceKind.UnknownListener;
+        runtime.FailureReason = reason;
+
+        _factory.CreatedClients[0].SimulateConnectionFailure(GatewayErrorKind.DeviceTokenMismatch);
+        _factory.CreatedClients[0].SimulateAuthFailed("AUTH_DEVICE_TOKEN_MISMATCH");
+
+        await WaitUntilAsync(() => manager.CurrentSnapshot.OperatorState == RoleConnectionState.Error);
+        Assert.Equal(GatewayErrorKind.Network, manager.CurrentSnapshot.OperatorErrorKind);
+        Assert.Single(_factory.CreatedClients);
+        await manager.DisconnectAsync().WaitAsync(TimeSpan.FromSeconds(5));
+    }
+
+    [Fact]
+    public async Task NativeGateway_AuthRecoveryHandlesWinRtResolverFailure()
+    {
+        await VerifyNativeInspectionFailureRecoveryAsync(resolverFailure: true);
+    }
+
+    [Fact]
+    public async Task NativeGateway_AuthRecoveryHandlesSerializedUnknownPackageStatus()
+    {
+        await VerifyNativeInspectionFailureRecoveryAsync(resolverFailure: false);
+    }
+
+    private async Task VerifyNativeInspectionFailureRecoveryAsync(bool resolverFailure)
+    {
+        SetupNativeGateway();
+        const string family = "OpenClaw.Gateway_123456789abcd";
+        var record = _registry.GetById("native")! with
+        {
+            NativePackageFamilyName = family,
+            NativeRuntimeContract = NativeGatewayPackageClient.IsolatedContract
+        };
+        _registry.AddOrUpdate(record);
+        string aliases = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            "Microsoft", "WindowsApps", family);
+        var package = new NativeGatewayPackage(family, "2026.9.5.5",
+            Path.Combine(aliases, "openclaw.exe"), Path.Combine(aliases, "clawctl.exe"));
+        bool failInspection = false;
+        var packageResolver = new CallbackNativePackageResolver(() =>
+            failInspection && resolverFailure ? throw new COMException("registration unavailable") : package);
+        var client = new NativeGatewayPackageClient((_, args, _) =>
+        {
+            Assert.Equal(["gateway-service", "status", "--json"], args);
+            return Task.FromResult(failInspection
+                ? new NativeGatewayCommandResult(1,
+                    """{"ok":false,"schemaVersion":1,"command":"gateway-service status","integration":{"kind":"isolated-session","version":1},"gateway":{"state":"unknown","readiness":{"state":"ready"}},"error":{"code":"cli_error","message":"session inspection unavailable"}}""")
+                : new NativeGatewayCommandResult(0,
+                    """{"ok":true,"schemaVersion":1,"command":"gateway-service status","integration":{"kind":"isolated-session","version":1},"gateway":{"state":"running","port":18789,"ownership":{"sandboxId":"iso:fixture","agentUserSid":"S-1-5-21-fixture","listeners":[{"port":18789,"processId":4321,"processStartTimeUtc":"2026-09-29T12:00:00Z","sequenceNumber":77}]}}}"""));
+        });
+        await using var runtime = new IsolatedGatewayRuntime(packageResolver, client,
+            () => new WindowsTcpListenerSnapshotResult(
+                [new(IPAddress.Loopback, 18789, 4321, "fixture", null)], true, true),
+            () => new Dictionary<int, ulong> { [4321] = 77 }, _ => true);
+        await using var manager = new GatewayConnectionManager(
+            _resolver, _factory, _registry, NullLogger.Instance, nativeGatewayRuntime: runtime);
+        await manager.ConnectAsync();
+        Assert.Single(_factory.CreatedClients);
+        failInspection = true;
+
+        _factory.CreatedClients[0].SimulateConnectionFailure(GatewayErrorKind.DeviceTokenMismatch);
+        _factory.CreatedClients[0].SimulateAuthFailed("AUTH_DEVICE_TOKEN_MISMATCH");
+
+        await WaitUntilAsync(() => manager.CurrentSnapshot.OperatorErrorKind == GatewayErrorKind.Network);
+        Assert.Equal(RoleConnectionState.Error, manager.CurrentSnapshot.OperatorState);
+        Assert.Single(_factory.CreatedCredentials);
+        var provenance = await runtime.InspectAsync(record, default);
+        Assert.Equal(GatewayEndpointProvenanceFailureReason.InspectionUnavailable, provenance.FailureReason);
+        Assert.Equal(GatewayEndpointProvenanceKind.UnknownListener, runtime.Inspect(record).Kind);
+        await manager.DisconnectAsync().WaitAsync(TimeSpan.FromSeconds(5));
+    }
+
+    private sealed class CallbackNativePackageResolver(Func<NativeGatewayPackage> resolve) : INativeGatewayPackageResolver
+    {
+        public Task<NativeGatewayPackage> ResolveAsync(CancellationToken cancellationToken) =>
+            Task.FromResult(resolve());
+        public Task<NativeGatewayPackage> ResolveAsync(string expectedFamily, CancellationToken cancellationToken) =>
+            Task.FromResult(resolve());
     }
 
     [Fact]
@@ -5447,8 +5556,9 @@ public class GatewayConnectionManagerTests : IDisposable
     private sealed class FakeNativeGatewayRuntime : INativeGatewayRuntime
     {
         public GatewayEndpointProvenance Inspect(GatewayRecord record) =>
-            new(Kind, new Uri(record.Url).Port);
+            new(Kind, new Uri(record.Url).Port, FailureReason: FailureReason);
 
+        public GatewayEndpointProvenanceFailureReason FailureReason { get; set; }
         public Action? BeforeEnsure { get; init; }
         public Action? BeforeInspect { get; init; }
         public Exception? StartException { get; init; }
@@ -5480,7 +5590,8 @@ public class GatewayConnectionManagerTests : IDisposable
             BeforeInspect?.Invoke();
             InspectCount++;
             return Task.FromResult(new GatewayEndpointProvenance(Kind, 18789,
-                ProcessId: StartCount, ProcessStartTimeUtc: DateTime.UnixEpoch.AddSeconds(StartCount)));
+                ProcessId: StartCount, ProcessStartTimeUtc: DateTime.UnixEpoch.AddSeconds(StartCount),
+                FailureReason: FailureReason));
         }
 
         public Task StopAsync(CancellationToken cancellationToken)
