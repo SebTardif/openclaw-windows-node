@@ -70,6 +70,7 @@ internal static class ExecShellWrapperNormalizer
             "-ec", "/ec",
             "-if", "/if",
             "-config", "/config",
+            "-of", "/of",
         };
 
     private static readonly WrapperSpec[] s_specs =
