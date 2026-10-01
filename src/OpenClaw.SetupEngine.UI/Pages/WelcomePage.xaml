@@ -151,16 +151,17 @@
                 </StackPanel>
             </Border>
             <tk:SettingsCard x:Name="LocalAiAvailabilityPanel" Visibility="Collapsed"
+                             Background="Transparent" BorderThickness="0" Padding="16,8"
                              AutomationProperties.AutomationId="WelcomeLocalAiAvailable"
                              AutomationProperties.LiveSetting="Polite">
                 <tk:SettingsCard.HeaderIcon>
-                    <FontIcon Glyph="{x:Bind icons:FluentIconCatalog.StatusOk}"
+                    <FontIcon Glyph="{x:Bind icons:FluentIconCatalog.StatusOk}" FontSize="16"
                               Foreground="{ThemeResource SystemFillColorSuccessBrush}" />
                 </tk:SettingsCard.HeaderIcon>
                 <tk:SettingsCard.Header>
                     <TextBlock x:Uid="Onboarding_Welcome_LocalAiAvailableBadge"
                                Text="Your PC supports Local AI" TextWrapping="Wrap"
-                               Style="{StaticResource BodyStrongTextBlockStyle}" />
+                               Style="{StaticResource BodyTextBlockStyle}" />
                 </tk:SettingsCard.Header>
                 <tk:SettingsCard.Description>
                     <TextBlock x:Name="LocalAiAvailabilityText" TextWrapping="Wrap"

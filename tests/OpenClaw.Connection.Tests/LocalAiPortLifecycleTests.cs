@@ -281,8 +281,10 @@ public sealed class LocalAiPortLifecycleTests
         Assert.NotNull(host.LastSpec);
     }
 
-    [Fact]
-    public async Task AutomaticPort_IsBoundByChildAndPersistedOnlyAfterOwnedHealth()
+    [Theory]
+    [InlineData(null)]
+    [InlineData("local-api-test-credential")]
+    public async Task AutomaticPort_IsBoundByChildAndPersistedOnlyAfterOwnedHealth(string? apiKey)
     {
         using var temp = new TempDirectory("local-ai-port-");
         LocalAiPaths paths = await PrepareInstallAsync(temp);
@@ -291,18 +293,49 @@ public sealed class LocalAiPortLifecycleTests
         var host = new FakeProcessHost(platform, events, selectedPort: 28_765);
         var client = new FakeClient(events);
         var lifecycle = new FakeLifecycle(events);
-        await using var runtime = CreateRuntime(paths, host, platform, client, lifecycle);
+        await using var runtime = CreateRuntime(paths, host, platform, client, lifecycle,
+            getApiKey: apiKey is null ? null : () => apiKey);
 
         LocalAiRuntimeSnapshot snapshot = await runtime.EnsureStartedAsync();
 
         Assert.Equal(LocalAiRuntimeState.Healthy, snapshot.State);
         Assert.Equal(28_765, snapshot.Endpoint.Port);
         Assert.Equal("0", ArgumentAfter(host.LastSpec!.Arguments, "--port"));
+        if (apiKey is not null)
+        {
+            Assert.Equal(apiKey, host.LastSpec.Environment["LLAMA_API_KEY"]);
+            Assert.DoesNotContain(host.LastSpec.Arguments, argument => argument.Contains(apiKey, StringComparison.Ordinal));
+            Assert.DoesNotContain(apiKey, await File.ReadAllTextAsync(paths.RouterPresetPath));
+            Assert.DoesNotContain(apiKey, await File.ReadAllTextAsync(paths.ManifestPath));
+        }
         Assert.Equal(["quiesce:EndpointCycle", "start", "probe:28765", "publish:28765"], events);
         Assert.Equal([28_765], client.ProbedPorts);
         LocalAiResolvedInstall? saved = await new LocalAiManifestStore(paths).LoadAsync();
         Assert.Equal(0, saved!.Manifest.RequestedPort);
         Assert.Equal(28_765, saved.Endpoint!.Port);
+    }
+
+    [Fact]
+    public async Task RecoveryPort_ReusesVerifiedEndpointWithoutChangingAutomaticPortPreference()
+    {
+        using var temp = new TempDirectory("local-ai-port-");
+        LocalAiPaths paths = await PrepareInstallAsync(temp);
+        var store = new LocalAiManifestStore(paths);
+        var install = (await store.LoadAsync())!;
+        await store.SaveAsync(install.Manifest with { Endpoint = "http://127.0.0.1:28765/v1" });
+        var events = new SynchronizedEventLog();
+        var platform = new FakePlatform();
+        var host = new FakeProcessHost(platform, events, selectedPort: 28_765);
+        await using var runtime = CreateRuntime(paths, host, platform,
+            new FakeClient(events), new FakeLifecycle(events),
+            getRecoveryPort: current => current.Endpoint?.Port);
+
+        var snapshot = await runtime.EnsureStartedAsync();
+
+        Assert.Equal(LocalAiRuntimeState.Healthy, snapshot.State);
+        Assert.Equal("28765", ArgumentAfter(host.LastSpec!.Arguments, "--port"));
+        Assert.Equal(0, (await store.LoadAsync())!.Manifest.RequestedPort);
+        Assert.Equal(28_765, snapshot.Endpoint.Port);
     }
 
     [Fact]
@@ -1804,6 +1837,67 @@ public sealed class LocalAiPortLifecycleTests
     }
 
     [Fact]
+    public async Task Resume_RenewsTheBoundedRestartBudgetAfterRecovery()
+    {
+        using var temp = new TempDirectory("local-ai-resume-budget-");
+        var paths = await PrepareInstallAsync(temp);
+        var events = new SynchronizedEventLog();
+        var platform = new FakePlatform();
+        var host = new FakeProcessHost(platform, events, selectedPort: 28_769);
+        await using var runtime = CreateRuntime(paths, host, platform,
+            new FakeClient(events), new FakeLifecycle(events), maxRestartAttempts: 1);
+        Assert.Equal(LocalAiRuntimeState.Healthy, (await runtime.EnsureStartedAsync()).State);
+        await TriggerExitAndWaitForStateAsync(runtime, host,
+            snapshot => snapshot.State == LocalAiRuntimeState.Healthy);
+        await TriggerExitAndWaitForStateAsync(runtime, host,
+            snapshot => snapshot.State == LocalAiRuntimeState.Failed);
+        Assert.Equal(LocalAiRuntimeState.Healthy, (await runtime.ResumeAsync()).State);
+        var recovered = await TriggerExitAndWaitForStateAsync(runtime, host,
+            snapshot => snapshot.State == LocalAiRuntimeState.Healthy);
+        Assert.Equal(LocalAiRuntimeState.Healthy, recovered.State);
+    }
+
+    [Fact]
+    public async Task Stop_QueuedAutomaticResumeCannotOverrideStopButExplicitStartCan()
+    {
+        using var temp = new TempDirectory("local-ai-stop-intent-");
+        var paths = await PrepareInstallAsync(temp);
+        var events = new SynchronizedEventLog();
+        var platform = new FakePlatform();
+        var withdrawing = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var lifecycle = new FakeLifecycle(events)
+        {
+            QuiesceHandler = async (call, _, ct) =>
+            {
+                if (call == 2)
+                {
+                    withdrawing.SetResult();
+                    await release.Task.WaitAsync(ct);
+                }
+                return LocalAiEndpointLifecycleResult.Ok();
+            }
+        };
+        await using var runtime = CreateRuntime(paths,
+            new FakeProcessHost(platform, events, selectedPort: 28_769),
+            platform, new FakeClient(events), lifecycle);
+        Assert.Equal(LocalAiRuntimeState.Healthy, (await runtime.EnsureStartedAsync()).State);
+        var stopping = runtime.StopAsync();
+        await withdrawing.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.Equal([true, false], lifecycle.RecoveryIntents);
+        var resume = runtime.ResumeAsync();
+        Assert.False(resume.IsCompleted);
+        release.SetResult();
+        await stopping;
+        Assert.Equal(LocalAiRuntimeState.Stopped, (await resume).State);
+        Assert.Equal(LocalAiRuntimeState.Stopped, (await runtime.ResumeAsync()).State);
+        Assert.Equal(1, events.Count(value => value == "start"));
+        Assert.Equal(LocalAiRuntimeState.Healthy, (await runtime.EnsureStartedAsync()).State);
+        Assert.Equal([true, false, true], lifecycle.RecoveryIntents);
+        Assert.Equal(2, events.Count(value => value == "start"));
+    }
+
+    [Fact]
     public async Task Stop_QuiescesEndpointConsumerBeforeListenerDisappears()
     {
         using var temp = new TempDirectory("local-ai-port-");
@@ -2396,11 +2490,15 @@ public sealed class LocalAiPortLifecycleTests
         TimeSpan? startupTimeout = null,
         int maxRestartAttempts = 2,
         TimeSpan? shutdownTimeout = null,
-        ILocalAiModelFileVerifier? modelFileVerifier = null) => new(
+        ILocalAiModelFileVerifier? modelFileVerifier = null,
+        Func<string>? getApiKey = null,
+        Func<LocalAiResolvedInstall, int?>? getRecoveryPort = null) => new(
             new LlamaServerRuntimeOptions
             {
                 Paths = paths,
                 EndpointLifecycle = lifecycle,
+                GetApiKey = getApiKey,
+                GetRecoveryPort = getRecoveryPort,
                 HealthPollInterval = TimeSpan.FromMilliseconds(1),
                 StartupTimeout = startupTimeout ?? TimeSpan.FromSeconds(1),
                 ShutdownTimeout = shutdownTimeout ?? TimeSpan.FromSeconds(10),
@@ -2910,6 +3008,14 @@ public sealed class LocalAiPortLifecycleTests
 
     private sealed class FakeLifecycle(SynchronizedEventLog events) : ILocalAiEndpointLifecycle
     {
+        public List<bool> RecoveryIntents { get; } = [];
+        public Task SetAutomaticRecoveryEnabledAsync(bool enabled, CancellationToken cancellationToken = default)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            RecoveryIntents.Add(enabled);
+            return Task.CompletedTask;
+        }
+
         public bool FailPublish { get; set; }
         public bool FailQuiesce { get; set; }
         public Exception? PublishException { get; set; }

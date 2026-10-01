@@ -36,7 +36,8 @@ internal sealed record WindowManagerCallbacks(
     Action<Window?> ApplyTheme,
     Func<SetupNativeCompletion, CancellationToken, Task>? PublishNativeCompletion = null,
     Func<bool, CancellationToken, Task>? ApplyNativeStartup = null,
-    Func<ISettingsStore?>? GetSettingsStore = null);
+    Func<ISettingsStore?>? GetSettingsStore = null,
+    Func<LocalAiGatewayLifecycle?>? GetLocalAiGatewayLifecycle = null);
 
 internal sealed class WindowManager : IWindowManager
 {
@@ -623,8 +624,24 @@ internal sealed class WindowManager : IWindowManager
             localAiRecoveryTarget: null);
     }
 
+    public Task ShowLocalAiModelSetupAsync() =>
+        _callbacks.GetGatewayRegistry()?.GetActive() is
+            { NativePackageFamilyName: not null,
+              NativeRuntimeContract: OpenClaw.Connection.NativeGateway.NativeGatewayPackageClient.IsolatedContract }
+                ? ShowLocalAiSetupAsync() : ShowOnboardingAsync();
+
     public async Task ShowLocalAiSetupAsync()
     {
+        if (_callbacks.GetGatewayRegistry()?.GetActive() is
+            { NativePackageFamilyName: not null,
+              NativeRuntimeContract: OpenClaw.Connection.NativeGateway.NativeGatewayPackageClient.IsolatedContract } native)
+        {
+            var (window, created) = await EnsureSetupWindowAsync(
+                startAtGatewayInstalledMilestone: true, localAiRecoveryTarget: null);
+            if (created && window is { IsClosed: false })
+                window.TryNavigateToExistingNativeLocalAi(native);
+            return;
+        }
         var resolution = await ResolveLocalAiSetupRouteAsync();
         if (resolution.Route == LocalAiSetupRoute.Provision)
         {
@@ -675,7 +692,8 @@ internal sealed class WindowManager : IWindowManager
         ct => Task.Run(() => new OpenClaw.Shared.Inference.CudaHostHardwareProbe().Probe(), ct).WaitAsync(ct),
         () => new LocalAiGatewayProviderCoordinator(new WslExeCommandRunner(new AppLogger()),
             new LocalAiGatewayDistroResolver(_callbacks.GetGatewayRegistry()), new AppLogger()),
-          ReconcileSetupConnectionAsync, NotifySetupRegistryRecovery);
+          ReconcileSetupConnectionAsync, NotifySetupRegistryRecovery,
+          _callbacks.GetLocalAiGatewayLifecycle?.Invoke());
 
     private async Task ReconcileSetupConnectionAsync(GatewayRecord? before, GatewayRecord? after)
     {

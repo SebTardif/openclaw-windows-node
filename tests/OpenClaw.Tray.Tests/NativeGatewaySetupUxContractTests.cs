@@ -5,6 +5,37 @@ namespace OpenClaw.Tray.Tests;
 
 public sealed class NativeGatewaySetupUxContractTests
 {
+    [Fact]
+    public void FocusedLocalAiShowsActualPhasesAndFencesLateProgress()
+    {
+        var root = TestRepositoryPaths.GetRepositoryRoot();
+        var pages = Path.Combine(root, "src", "OpenClaw.SetupEngine.UI", "Pages");
+        var source = File.ReadAllText(Path.Combine(pages, "AiSetupPage.xaml.cs"));
+        Assert.Contains("await _localUse!.UseAsync(selected, ct, CreateLocalProgress(ct))", source);
+        Assert.Contains("_localObservation.RefreshAsync(CreateLocalProgress(ct))", source);
+        Assert.Contains("generation == _generation && scope == _progressScope", source);
+        Assert.Contains("if (DispatcherQueue.HasThreadAccess) Apply();", source);
+        Assert.Contains("finally { ++_progressScope; }", source);
+        Assert.Contains("_submittingAnswer = submittingAnswer;", source);
+        Assert.Contains("_submittingAnswer = false;", source);
+        Assert.Contains("GatewayAiSetupPresentation.ShowProviderDialog", source);
+        Assert.Contains("ProviderActivity.Visibility = Visible(inlineProvider);", source);
+        Assert.Contains("if (_localObservation is not null && _localExpectedModel is null)", source);
+        Assert.Contains("SetActivity(\"LocalProgress_Verifying\")", source);
+        Assert.Contains("SetActivity(\"LocalProgress_Detecting\")", source);
+        var document = XDocument.Load(Path.Combine(pages, "AiSetupPage.xaml"));
+        Assert.Contains(document.Descendants(), element =>
+            (string?)element.Attribute("AutomationProperties.AutomationId") == "OnboardingAiProgress");
+        foreach (var directory in Directory.GetDirectories(Path.Combine(root, "src", "OpenClaw.Tray.WinUI", "Strings")))
+        {
+            var resources = XDocument.Load(Path.Combine(directory, "Resources.resw"));
+            foreach (var stage in new[] { "CheckingHardware", "CheckingFiles", "PreparingGateway",
+                         "StartingRuntime", "PublishingProvider", "Verifying", "Detecting", "Console" })
+                Assert.Contains(resources.Descendants("data"), element =>
+                    (string?)element.Attribute("name") == "Onboarding_AiSetup_LocalProgress_" + stage);
+        }
+    }
+
     [Theory]
     [InlineData("NativeGatewaySetupPage.xaml", "ProgressMascot")]
     [InlineData("WizardPage.xaml", "MascotHero")]
@@ -385,6 +416,19 @@ public sealed class NativeGatewaySetupUxContractTests
     }
 
     [Fact]
+    public void LocalAiChangeModel_PreservesNativeGatewayAndExistingWslSetupRoute()
+    {
+        var root = TestRepositoryPaths.GetRepositoryRoot();
+        var manager = File.ReadAllText(Path.Combine(root, "src", "OpenClaw.Tray.WinUI", "Services", "WindowManager.cs"));
+        var start = manager.IndexOf("public Task ShowLocalAiModelSetupAsync()", StringComparison.Ordinal);
+        var route = manager[start..manager.IndexOf("public async Task ShowLocalAiSetupAsync()", start, StringComparison.Ordinal)];
+        Assert.Contains("NativeGatewayPackageClient.IsolatedContract", route);
+        Assert.Contains("? ShowLocalAiSetupAsync() : ShowOnboardingAsync()", route);
+        var model = File.ReadAllText(Path.Combine(root, "src", "OpenClaw.Tray.WinUI", "Presentation", "LocalAiPageViewModel.cs"));
+        Assert.Contains("RunCommand(CanChangeModel, _appCommands.ShowLocalAiModelSetup)", model);
+    }
+
+    [Fact]
     public void NativeFocusedFlow_UsesOwnedTransportAndFreshVerificationWithoutForgedWizardCompletion()
     {
         var root = TestRepositoryPaths.GetRepositoryRoot();
@@ -399,7 +443,9 @@ public sealed class NativeGatewaySetupUxContractTests
         Assert.Contains("NativeGatewaySetupConnection.ConnectAsync(native, ct)", ai);
         Assert.Contains("await native.RestartAsync(token)", ai);
         Assert.Contains("native.VerifyAsync(proof, ct)", window);
-        Assert.Contains("native.CompleteVerifiedAsync(proof, _config.Capabilities, ct)", window);
+        Assert.Contains("native.CompleteVerifiedAsync(proof, _config.Capabilities, ct,", window);
+        Assert.Contains("ReconcileNativeAsync", window);
+        Assert.Contains("await afterVerification(connection, linked.Token)", session);
         Assert.DoesNotContain("MarkWizardCompleted", ai);
         Assert.DoesNotContain("MarkWizardCompleted", window);
         Assert.Contains("ConnectForFinalizationAsync", session);

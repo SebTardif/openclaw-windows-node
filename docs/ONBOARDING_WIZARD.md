@@ -3,12 +3,26 @@
 The onboarding wizard can install an app-owned WSL gateway, acquire a native
 Gateway MSIX through Microsoft Store and configure it, or connect to an existing gateway.
 
+Native Local AI setup displays the current phase and completed steps while checking
+GPU readiness, verifying cached runtime/model files, starting the model, publishing
+the provider, reconnecting and testing real Gateway inference. File verification
+can take a minute or more for large models; it is not a download. Artifact acquisition
+retains the installation progress page and its actual download progress.
+
+After setup restarts Companion, destination handoff waits for native connection
+startup and any already-admitted Local AI recovery before fresh model verification.
+The attempt is bounded to four and a half minutes, still subject to the original
+five-minute receipt expiry. A failed attempt remains available for explicit Retry,
+but automatic reactivation does not show the same failure dialog again. Successful
+runtime checks alone do not prove that a full, potentially longer chat turn has finished.
+
 Native installation keeps Back at the left and Cancel setup (or Retry setup) at
 the right, using the same content-sized, 100 px minimum buttons as earlier setup
 screens. Progress stays centered on its own row and action labels can wrap.
 
-The Gateway chooser shows Local AI availability in a separate informational card
-below the choices, not inside the WSL choice. Its GPU details and accessible
+The Gateway chooser shows Local AI availability in a subtle, transparent status row
+below all three choices and above "Remote, local MCP or set up later", not inside
+the WSL choice. Its GPU details and accessible
 announcement describe the PC; existing hardware and WSL eligibility checks still
 apply. A successful native-support check enables the native choice without a
 redundant success line. The accent icon tile follows native availability: native
@@ -73,6 +87,34 @@ that entry or its value. The bundled configuration leaves setup mode and search
 provider unspecified so policy can choose among the actual offered values.
 
 ### Native Gateway MSIX (isolated or legacy)
+
+For an authenticated isolated native Gateway, **Install and use Local AI** captures
+one in-memory consent for the reviewed Gateway, endpoint binding, model and port.
+The Windows-only artifact pipeline then continues directly into startup, provider
+publication and exact-model verification under **Setting up Local AI**, without
+returning to provider discovery or requiring a second Use click. Acquisition itself
+still never starts inference or changes the primary; the continuation uses the same
+guarded Use owner. Changed targets or files fail closed, and an uncertain mutation
+can only be reconciled, not replayed. Consent is not persisted across app restarts.
+Confirmed startup failures retain their runtime diagnostics and immediately restore
+repair/provider choices with the normal **Connect your AI** heading. Failure before
+mutation admission drops automatic continuation, so recovering the connection or
+permissions requires a new explicit Use action. Ordinary WSL setup keeps its
+read-only Local AI check independent of Gateway connection availability.
+Existing installations retain the explicit **Start and use** action. Both paths
+require operator administration scope; legacy same-user native Gateways remain unsupported.
+
+Use starts the human-owned authenticated loopback server, publishes only to the
+selected Gateway, then verifies inference from that isolated Gateway with the
+exact primary model. The setup record remains staged until normal verified
+completion. Settings uses the same flow for an existing native Gateway.
+That Settings entry binds the existing Gateway ID and endpoint before opening AI
+setup. Its completion does not run WSL workspace finalization or rewrite existing
+permissions, sharing choices, or startup preferences.
+Native installation and recovery never create a WSL distro, change WSL
+networking, or run WSL configuration commands. Stop an existing owned runtime
+before repairing its files. Unconfirmed writes or external provider changes
+require reconciliation with the original Gateway, not an automatic overwrite.
 
 Isolated Gateway console reads retry transient I/O and timeout failures twice,
 including the initial cursor anchor before `wizard.start`. Polling retries use

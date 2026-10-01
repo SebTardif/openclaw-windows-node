@@ -78,8 +78,17 @@ public sealed class LocalAiSetupUxContractTests
             xaml,
             "</ListView>",
             "x:Name=\"LocalAiAvailabilityPanel\"",
-            "x:Name=\"LocalAiAvailabilityText\"");
+            "x:Name=\"LocalAiAvailabilityText\"",
+            "x:Uid=\"Onboarding_V2_AlternativeRoutes\"");
         Assert.Contains("<tk:SettingsCard x:Name=\"LocalAiAvailabilityPanel\"", xaml);
+        System.Xml.Linq.XNamespace names = "http://schemas.microsoft.com/winfx/2006/xaml";
+        var availability = System.Xml.Linq.XDocument.Parse(xaml).Descendants()
+            .Single(element => (string?)element.Attribute(names + "Name") == "LocalAiAvailabilityPanel");
+        Assert.Equal("Transparent", (string?)availability.Attribute("Background"));
+        Assert.Equal("0", (string?)availability.Attribute("BorderThickness"));
+        var heading = availability.Descendants()
+            .Single(element => (string?)element.Attribute(names + "Uid") == "Onboarding_Welcome_LocalAiAvailableBadge");
+        Assert.Equal("{StaticResource BodyTextBlockStyle}", (string?)heading.Attribute("Style"));
         Assert.DoesNotContain("LocalAiAvailabilityBadge", xaml);
         Assert.Contains("SetupLocalization.Format(", source);
         Assert.Contains("\"Onboarding_Welcome_LocalAiAvailabilityDetail\"", source);
