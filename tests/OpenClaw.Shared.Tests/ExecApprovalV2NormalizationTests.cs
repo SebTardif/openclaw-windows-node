@@ -118,6 +118,32 @@ public class ExecApprovalV2NormalizationTests
     }
 
     [Fact]
+    public void Normalizer_PowerShellWorkingDirectoryAlias_DoesNotHideInlineCommand()
+    {
+        AssertWrapper(["pwsh", "-wd", "-File", "-c", "Get-Date"], "Get-Date");
+        AssertWrapper(["pwsh", "-wo", "-File", "-c", "Get-Date"], "Get-Date");
+        AssertWrapper(["pwsh", "-wor", "-File", "-c", "Get-Date"], "Get-Date");
+        AssertWrapper(["powershell.exe", "/wd", "-File", "-c", "Get-Date"], "Get-Date");
+        AssertWrapper(["pwsh", "-w", "Hidden", "-c", "Get-Date"], "Get-Date");
+        AssertWrapper(["pwsh", "-ep", "Bypass", "-c", "Get-Date"], "Get-Date");
+        Assert.False(ExecShellWrapperNormalizer.Extract(
+            ["pwsh", "-wd", "C:\\temp", "-File", "script.ps1"]).IsWrapper);
+
+        Assert.Null(ExecReusableCommandBinder.TryBind(
+            ["pwsh", "-wd", "-File", "-c", "Get-Date"],
+            cwd: null,
+            env: null,
+            out var failure));
+        Assert.Equal(ExecReusableCommandBinder.BindFailure.ShellWrapper, failure);
+
+        var outcome = ExecApprovalV2Normalizer.Normalize(
+            Req(["pwsh", "-wd", "-File", "-c", "Get-Date"]));
+        Assert.True(outcome.IsResolved);
+        Assert.Null(outcome.Identity!.ReusableCommand);
+        Assert.Empty(outcome.Identity.AllowAlwaysPatterns);
+    }
+
+    [Fact]
     public void Normalizer_PowerShellPositionalScript_KeepsLaterSwitchAsScriptArgument()
     {
         Assert.False(ExecShellWrapperNormalizer.Extract(

@@ -20,19 +20,36 @@ internal static class ExecShellWrapperNormalizer
     private static readonly HashSet<string> s_powerShellInlineFlags =
         new(StringComparer.OrdinalIgnoreCase) { "-c", "-command", "--command", "/c", "/command" };
 
-    private static readonly HashSet<string> s_powerShellValueOptions =
+    // Canonical pwsh parameters that take one following argument. A unique
+    // prefix binds the same way (-wo and -wor are -WorkingDirectory).
+    private static readonly string[] s_powerShellValueOptionNames =
+    [
+        "WorkingDirectory",
+        "ExecutionPolicy",
+        "InputFormat",
+        "OutputFormat",
+        "ConfigurationName",
+        "ConfigurationFile",
+        "CustomPipeName",
+        "SettingsFile",
+        "PSConsoleFile",
+        "WindowStyle",
+        "Version",
+    ];
+
+    // Forms that are not a unique prefix of one canonical name. -wd is the
+    // WorkingDirectory alias. -w is WindowStyle, which also prefixes
+    // WorkingDirectory. -ep and -if are the short ExecutionPolicy and
+    // InputFormat aliases. -config matches both ConfigurationName and
+    // ConfigurationFile.
+    private static readonly HashSet<string> s_powerShellValueAliases =
         new(StringComparer.OrdinalIgnoreCase)
         {
-            "-WorkingDirectory", "/WorkingDirectory",
-            "-ExecutionPolicy", "/ExecutionPolicy",
-            "-InputFormat", "/InputFormat",
-            "-OutputFormat", "/OutputFormat",
-            "-ConfigurationName", "/ConfigurationName",
-            "-CustomPipeName", "/CustomPipeName",
-            "-SettingsFile", "/SettingsFile",
-            "-PSConsoleFile", "/PSConsoleFile",
-            "-WindowStyle", "/WindowStyle",
-            "-Version", "/Version",
+            "-wd", "/wd",
+            "-w", "/w",
+            "-ep", "/ep",
+            "-if", "/if",
+            "-config", "/config",
         };
 
     private static readonly WrapperSpec[] s_specs =
@@ -142,7 +159,7 @@ internal static class ExecShellWrapperNormalizer
                 return null;
             if (TryReadPowerShellColonPayload(t, out var inline))
                 return inline.Length == 0 ? null : inline;
-            if (s_powerShellInlineFlags.Contains(t))
+            if (IsPowerShellInlineFlag(t))
             {
                 if (i + 1 >= command.Count) return null;
                 var payload = command[i + 1].Trim();
@@ -163,11 +180,43 @@ internal static class ExecShellWrapperNormalizer
 
     private static bool IsPowerShellValueOption(string token)
     {
-        var colon = token.IndexOf(':');
-        if (colon > 0)
+        if (token.IndexOf(':') > 0)
+            return false;
+        if (s_powerShellValueAliases.Contains(token))
+            return true;
+        if (!TryGetPowerShellSwitchBody(token, out var body))
             return false;
 
-        return s_powerShellValueOptions.Contains(token);
+        var matches = 0;
+        foreach (var name in s_powerShellValueOptionNames)
+        {
+            if (name.StartsWith(body, StringComparison.OrdinalIgnoreCase))
+                matches++;
+        }
+
+        return matches == 1;
+    }
+
+    private static bool IsPowerShellInlineFlag(string token)
+    {
+        if (s_powerShellInlineFlags.Contains(token))
+            return true;
+        if (!TryGetPowerShellSwitchBody(token, out var body) || body.Length < 2)
+            return false;
+
+        return "command".StartsWith(body, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool TryGetPowerShellSwitchBody(string token, out string body)
+    {
+        body = "";
+        if (token.Length < 2 || (token[0] != '-' && token[0] != '/'))
+            return false;
+        if (token[1] == '-')
+            return false;
+
+        body = token[1..];
+        return body.Length > 0;
     }
 
     private static bool IsPosixInlineCluster(string flag)
