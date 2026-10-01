@@ -356,6 +356,44 @@ public class ConfigEditorModelTests
     }
 
     [Fact]
+    public void ApplyChanges_ParentObjectEdit_KeepsAccountRenameOrRefusesIt()
+    {
+        using var stored = JsonDocument.Parse("""
+        {"profiles":{"accounts":[{"token":"<redacted>","label":"desk"}]}}
+        """);
+        using var staged = JsonDocument.Parse("""
+        {"accounts":[{"token":"<redacted>","label":"renamed"}]}
+        """);
+        var updated = ConfigEditorModel.ApplyChanges(
+            stored.RootElement,
+            new Dictionary<string, object?> { ["profiles"] = staged.RootElement.Clone() });
+        var edited = new[] { "profiles" };
+        var blocked = ConfigEditorModel.FindUneditedRedactionSentinel(updated, edited, stored.RootElement);
+        var sent = ConfigEditorModel.OmitUntouchedRedactionSentinels(updated, edited, stored.RootElement);
+
+        Assert.Equal("profiles.accounts[0].token", blocked);
+        Assert.True(sent.GetProperty("profiles").TryGetProperty("accounts", out var accounts));
+        Assert.Equal("renamed", accounts[0].GetProperty("label").GetString());
+        Assert.Equal("<redacted>", accounts[0].GetProperty("token").GetString());
+    }
+
+    [Fact]
+    public void ApplyChanges_ParentObjectEdit_KeepsNewlyEnteredOrdinaryMask()
+    {
+        using var stored = JsonDocument.Parse("""{"metadata":{"label":"before"}}""");
+        using var staged = JsonDocument.Parse("""{"label":"***"}""");
+        var updated = ConfigEditorModel.ApplyChanges(
+            stored.RootElement,
+            new Dictionary<string, object?> { ["metadata"] = staged.RootElement.Clone() });
+        var edited = new[] { "metadata" };
+        var blocked = ConfigEditorModel.FindUneditedRedactionSentinel(updated, edited, stored.RootElement);
+        var sent = ConfigEditorModel.OmitUntouchedRedactionSentinels(updated, edited, stored.RootElement);
+
+        Assert.Null(blocked);
+        Assert.Equal("***", sent.GetProperty("metadata").GetProperty("label").GetString());
+    }
+
+    [Fact]
     public void FindUneditedRedactionSentinel_AllowsLiteralMaskInANonSecretField()
     {
         using var document = JsonDocument.Parse("""
