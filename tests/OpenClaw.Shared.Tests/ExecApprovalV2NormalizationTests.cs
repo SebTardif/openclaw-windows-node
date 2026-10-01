@@ -178,6 +178,15 @@ public class ExecApprovalV2NormalizationTests
             "Write-Output marker; #");
         Assert.False(ExecShellWrapperNormalizer.Extract(
             ["pwsh", "-NoProfile", "Write-Output marker; #", "-c", "Get-Date"]).IsWrapper);
+        AssertWrapper(["powershell.exe", "Get-Date"], "Get-Date");
+        AssertWrapper(["powershell.exe", "Write-Output marker"], "Write-Output marker");
+        Assert.False(ExecShellWrapperNormalizer.Extract(["powershell", "script.ps1"]).IsWrapper);
+        Assert.Null(ExecReusableCommandBinder.TryBind(
+            ["powershell.exe", "Get-Date"],
+            cwd: null,
+            env: null,
+            out var loneCommandFailure));
+        Assert.Equal(ExecReusableCommandBinder.BindFailure.ShellWrapper, loneCommandFailure);
         AssertWrapper(["pwsh", "--wd", "-File", "-c", "Get-Date"], "Get-Date");
         AssertWrapper(["pwsh", "-of", "Text", "-c", "Get-Date"], "Get-Date");
         AssertWrapper(["pwsh", "--of", "Text", "-c", "Get-Date"], "Get-Date");
