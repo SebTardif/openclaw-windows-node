@@ -142,7 +142,7 @@ internal static class ConfigEditorModel
         var edited = new HashSet<string>(editedPaths, StringComparer.OrdinalIgnoreCase);
         var arraysToDrop = new HashSet<string>(StringComparer.Ordinal);
         RemoveUntouchedRedactionSentinels(
-            node, "", edited, baseDocument, document, baseDocument, arraysToDrop);
+            node, "", edited, baseDocument, document, baseDocument, null, arraysToDrop);
         foreach (var arrayPath in arraysToDrop.OrderBy(static path => path.Length))
             RemovePropertyAtPath(node, arrayPath);
 
@@ -155,7 +155,7 @@ internal static class ConfigEditorModel
         JsonElement baseDocument,
         string path,
         HashSet<string> edited) =>
-        FindBlockedRedactionSentinel(updated, baseDocument, path, edited, baseDocument, updated);
+        FindBlockedRedactionSentinel(updated, baseDocument, path, edited, baseDocument, updated, null);
 
     private static string? FindBlockedRedactionSentinel(
         JsonElement updated,
@@ -163,7 +163,8 @@ internal static class ConfigEditorModel
         string path,
         HashSet<string> edited,
         JsonElement baseRoot,
-        JsonElement submittedRoot)
+        JsonElement submittedRoot,
+        string? outermostNonIdArray)
     {
         if (updated.ValueKind == JsonValueKind.Object)
         {
@@ -177,7 +178,7 @@ internal static class ConfigEditorModel
                 if (baseObject.ValueKind == JsonValueKind.Object)
                     baseObject.TryGetProperty(property.Name, out childBase);
                 var hit = FindBlockedRedactionSentinel(
-                    property.Value, childBase, childPath, edited, baseRoot, submittedRoot);
+                    property.Value, childBase, childPath, edited, baseRoot, submittedRoot, outermostNonIdArray);
                 if (hit != null)
                     return hit;
             }
@@ -185,6 +186,9 @@ internal static class ConfigEditorModel
         else if (updated.ValueKind == JsonValueKind.Array)
         {
             var idKeyed = baseDocument.ValueKind == JsonValueKind.Array && ArrayIsIdKeyed(baseDocument);
+            var nextOuter = outermostNonIdArray;
+            if (nextOuter is null && baseDocument.ValueKind == JsonValueKind.Array && !idKeyed && path.Length > 0)
+                nextOuter = path;
             var index = 0;
             foreach (var item in updated.EnumerateArray())
             {
@@ -204,7 +208,7 @@ internal static class ConfigEditorModel
 
                 index++;
                 var hit = FindBlockedRedactionSentinel(
-                    item, childBase, childPath, edited, baseRoot, submittedRoot);
+                    item, childBase, childPath, edited, baseRoot, submittedRoot, nextOuter);
                 if (hit != null)
                     return hit;
             }
@@ -230,8 +234,7 @@ internal static class ConfigEditorModel
             // edit inside that array cannot drop the masked credential safely.
             if (ShouldOmitUntouchedSentinel(path))
             {
-                var arrayPath = OutermostNonIdArrayPath(baseRoot, submittedRoot, path);
-                if (arrayPath != null && EditedPathInsideArray(edited, arrayPath))
+                if (outermostNonIdArray != null && EditedPathInsideArray(edited, outermostNonIdArray))
                     return path;
 
                 return null;
@@ -283,6 +286,7 @@ internal static class ConfigEditorModel
         JsonElement baseRoot,
         JsonElement submittedRoot,
         JsonElement loadedNode,
+        string? outermostNonIdArray,
         HashSet<string> arraysToDrop)
     {
         if (node is JsonObject obj)
@@ -308,18 +312,24 @@ internal static class ConfigEditorModel
                     if (HasAncestorEdit(edited, childPath) && !SameSentinel(loadedChild, text))
                         continue;
 
-                    var arrayPath = OutermostNonIdArrayPath(baseRoot, submittedRoot, childPath);
-                    if (arrayPath == null)
+                    if (outermostNonIdArray == null)
                         removals.Add(property.Key);
-                    else if (!EditedPathInsideArray(edited, arrayPath))
-                        arraysToDrop.Add(arrayPath);
+                    else if (!EditedPathInsideArray(edited, outermostNonIdArray))
+                        arraysToDrop.Add(outermostNonIdArray);
 
                     continue;
                 }
 
                 if (property.Value is not null)
                     RemoveUntouchedRedactionSentinels(
-                        property.Value, childPath, edited, baseRoot, submittedRoot, loadedChild, arraysToDrop);
+                        property.Value,
+                        childPath,
+                        edited,
+                        baseRoot,
+                        submittedRoot,
+                        loadedChild,
+                        outermostNonIdArray,
+                        arraysToDrop);
             }
 
             foreach (var key in removals)
@@ -329,6 +339,9 @@ internal static class ConfigEditorModel
         {
             var loadedArray = loadedNode.ValueKind == JsonValueKind.Array ? loadedNode : default;
             var idKeyed = loadedArray.ValueKind == JsonValueKind.Array && ArrayIsIdKeyed(loadedArray);
+            var nextOuter = outermostNonIdArray;
+            if (nextOuter is null && loadedArray.ValueKind == JsonValueKind.Array && !idKeyed && path.Length > 0)
+                nextOuter = path;
             for (var index = 0; index < array.Count; index++)
             {
                 if (array[index] is not JsonNode item)
@@ -351,7 +364,14 @@ internal static class ConfigEditorModel
                 }
 
                 RemoveUntouchedRedactionSentinels(
-                    item, $"{path}[{index}]", edited, baseRoot, submittedRoot, loadedItem, arraysToDrop);
+                    item,
+                    $"{path}[{index}]",
+                    edited,
+                    baseRoot,
+                    submittedRoot,
+                    loadedItem,
+                    nextOuter,
+                    arraysToDrop);
             }
         }
     }

@@ -952,6 +952,27 @@ public class ConfigEditorModelTests
     }
 
     [Fact]
+    public void DottedProviderKey_NonIdAccountsArray_RefusesAndKeepsTheMask()
+    {
+        using var stored = JsonDocument.Parse("""
+        { "custom.openai": { "accounts": [ { "token": "***", "label": "desk" } ] } }
+        """);
+        using var editor = JsonDocument.Parse("""
+        { "custom.openai": { "accounts": [ { "token": "***", "label": "renamed" } ] } }
+        """);
+        var edited = new[] { "custom.openai" };
+        var blocked = ConfigEditorModel.FindUneditedRedactionSentinel(
+            editor.RootElement, edited, stored.RootElement);
+        var sent = ConfigEditorModel.OmitUntouchedRedactionSentinels(
+            editor.RootElement, edited, stored.RootElement);
+
+        Assert.Equal("custom.openai.accounts[0].token", blocked);
+        var account = sent.GetProperty("custom.openai").GetProperty("accounts")[0];
+        Assert.Equal("***", account.GetProperty("token").GetString());
+        Assert.Equal("renamed", account.GetProperty("label").GetString());
+    }
+
+    [Fact]
     public void NestedArray_ReorderedOuterIds_DoNotTreatTheOtherRowsArrayAsIdKeyed()
     {
         using var stored = JsonDocument.Parse("""
