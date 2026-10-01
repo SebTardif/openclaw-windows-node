@@ -202,8 +202,12 @@ internal static class ConfigEditorModel
             if (edited.Contains(path))
                 return loadedSentinel ? path : null;
 
-            if (HasAncestorEdit(edited, path) && !loadedSentinel && IsCredentialPath(path))
+            if (HasAncestorEdit(edited, path) &&
+                IsCredentialPath(path) &&
+                !SameSentinel(baseDocument, updated.GetString()))
+            {
                 return path;
+            }
 
             // Object fields and id-keyed array fields can be left out of the
             // patch. Gateway keeps the stored secret for an absent key. An array
@@ -283,7 +287,7 @@ internal static class ConfigEditorModel
                     }
 
                     if (HasAncestorEdit(edited, childPath) &&
-                        !LoadedStringIsRedactionSentinel(baseRoot, childPath))
+                        !UnchangedLoadedSentinel(baseRoot, childPath, text))
                     {
                         continue;
                     }
@@ -446,6 +450,20 @@ internal static class ConfigEditorModel
 
         var boundary = arrayPath[editedPath.Length];
         return boundary is '.' or '[';
+    }
+
+    private static bool SameSentinel(JsonElement loaded, string? submitted) =>
+        loaded.ValueKind == JsonValueKind.String &&
+        ChannelConfigPatchBuilder.IsRedactionSentinel(loaded.GetString()) &&
+        ChannelConfigPatchBuilder.IsRedactionSentinel(submitted) &&
+        string.Equals(loaded.GetString()?.Trim(), submitted?.Trim(), StringComparison.OrdinalIgnoreCase);
+
+    private static bool UnchangedLoadedSentinel(JsonElement root, string path, string submitted)
+    {
+        if (!TryReadPath(root, path, out var element))
+            return false;
+
+        return SameSentinel(element, submitted);
     }
 
     private static bool LoadedStringIsRedactionSentinel(JsonElement root, string path)

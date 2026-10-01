@@ -410,6 +410,38 @@ public class ConfigEditorModelTests
     }
 
     [Fact]
+    public void ApplyChanges_ParentObjectEdit_KeepsChangedMaskLiteral()
+    {
+        using var stored = JsonDocument.Parse("""{"metadata":{"label":"***"}}""");
+        using var staged = JsonDocument.Parse("""{"label":"*****"}""");
+        var updated = ConfigEditorModel.ApplyChanges(
+            stored.RootElement,
+            new Dictionary<string, object?> { ["metadata"] = staged.RootElement.Clone() });
+        var edited = new[] { "metadata" };
+        var blocked = ConfigEditorModel.FindUneditedRedactionSentinel(updated, edited, stored.RootElement);
+        var sent = ConfigEditorModel.OmitUntouchedRedactionSentinels(updated, edited, stored.RootElement);
+
+        Assert.Null(blocked);
+        Assert.Equal("*****", sent.GetProperty("metadata").GetProperty("label").GetString());
+    }
+
+    [Fact]
+    public void ApplyChanges_ParentObjectEdit_RefusesChangedCredentialMask()
+    {
+        using var stored = JsonDocument.Parse("""{"metadata":{"token":"***"}}""");
+        using var staged = JsonDocument.Parse("""{"token":"*****"}""");
+        var updated = ConfigEditorModel.ApplyChanges(
+            stored.RootElement,
+            new Dictionary<string, object?> { ["metadata"] = staged.RootElement.Clone() });
+        var edited = new[] { "metadata" };
+        var blocked = ConfigEditorModel.FindUneditedRedactionSentinel(updated, edited, stored.RootElement);
+        var sent = ConfigEditorModel.OmitUntouchedRedactionSentinels(updated, edited, stored.RootElement);
+
+        Assert.Equal("metadata.token", blocked);
+        Assert.Equal("*****", sent.GetProperty("metadata").GetProperty("token").GetString());
+    }
+
+    [Fact]
     public void FindUneditedRedactionSentinel_AllowsLiteralMaskInANonSecretField()
     {
         using var document = JsonDocument.Parse("""
