@@ -882,6 +882,71 @@ public class ConfigEditorModelTests
         Assert.True(accepted.Merged["enabled"]!.GetValue<bool>());
     }
 
+    [Fact]
+    public void IdKeyedArray_ReorderUnderParentEdit_KeepsEachStoredSecret()
+    {
+        using var stored = JsonDocument.Parse("""
+        {
+          "accounts": [
+            { "id": "acct-a", "token": "secret-a", "label": "one" },
+            { "id": "acct-b", "token": "secret-b", "label": "two" }
+          ]
+        }
+        """);
+        using var editor = JsonDocument.Parse("""
+        {
+          "accounts": [
+            { "id": "acct-b", "token": "<redacted>", "label": "two" },
+            { "id": "acct-a", "token": "<redacted>", "label": "renamed" }
+          ]
+        }
+        """);
+        var edited = new[] { "accounts" };
+        var blocked = ConfigEditorModel.FindUneditedRedactionSentinel(
+            editor.RootElement, edited, stored.RootElement);
+        var sent = ConfigEditorModel.OmitUntouchedRedactionSentinels(
+            editor.RootElement, edited, stored.RootElement);
+        Assert.Null(blocked);
+        Assert.False(sent.GetProperty("accounts")[0].TryGetProperty("token", out _));
+        Assert.False(sent.GetProperty("accounts")[1].TryGetProperty("token", out _));
+        Assert.Equal("renamed", sent.GetProperty("accounts")[1].GetProperty("label").GetString());
+
+        var accepted = GatewayArrayPatch.Apply(stored.RootElement, sent);
+        Assert.Null(accepted.Error);
+        var mergedAccounts = accepted.Merged["accounts"]!.AsArray();
+        var mergedA = mergedAccounts.Single(item => item!["id"]!.GetValue<string>() == "acct-a")!;
+        var mergedB = mergedAccounts.Single(item => item!["id"]!.GetValue<string>() == "acct-b")!;
+        Assert.Equal("secret-a", mergedA["token"]!.GetValue<string>());
+        Assert.Equal("renamed", mergedA["label"]!.GetValue<string>());
+        Assert.Equal("secret-b", mergedB["token"]!.GetValue<string>());
+        Assert.Equal("two", mergedB["label"]!.GetValue<string>());
+    }
+
+    [Fact]
+    public void IdKeyedArray_NewRowWithMask_IsRefusedAndKeepsTheDraft()
+    {
+        using var stored = JsonDocument.Parse("""
+        { "accounts": [ { "id": "acct-1", "token": "secret-a", "label": "desk" } ] }
+        """);
+        using var editor = JsonDocument.Parse("""
+        {
+          "accounts": [
+            { "id": "acct-1", "token": "<redacted>", "label": "desk" },
+            { "id": "acct-2", "token": "<redacted>", "label": "new" }
+          ]
+        }
+        """);
+        var edited = new[] { "accounts" };
+        var blocked = ConfigEditorModel.FindUneditedRedactionSentinel(
+            editor.RootElement, edited, stored.RootElement);
+        var sent = ConfigEditorModel.OmitUntouchedRedactionSentinels(
+            editor.RootElement, edited, stored.RootElement);
+
+        Assert.Equal("accounts[1].token", blocked);
+        Assert.Equal("<redacted>", sent.GetProperty("accounts")[1].GetProperty("token").GetString());
+        Assert.False(sent.GetProperty("accounts")[0].TryGetProperty("token", out _));
+    }
+
     /// <summary>
     /// Models the Gateway config.patch array merge used by these saves:
     /// id-keyed arrays keep omitted keys, other arrays replace, and a

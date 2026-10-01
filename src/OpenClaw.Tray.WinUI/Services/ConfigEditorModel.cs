@@ -141,7 +141,7 @@ internal static class ConfigEditorModel
 
         var edited = new HashSet<string>(editedPaths, StringComparer.OrdinalIgnoreCase);
         var arraysToDrop = new HashSet<string>(StringComparer.Ordinal);
-        RemoveUntouchedRedactionSentinels(node, "", edited, baseDocument, arraysToDrop);
+        RemoveUntouchedRedactionSentinels(node, "", edited, baseDocument, document, arraysToDrop);
         foreach (var arrayPath in arraysToDrop.OrderBy(static path => path.Length))
             RemovePropertyAtPath(node, arrayPath);
 
@@ -181,13 +181,24 @@ internal static class ConfigEditorModel
         }
         else if (updated.ValueKind == JsonValueKind.Array)
         {
+            var idKeyed = baseDocument.ValueKind == JsonValueKind.Array && ArrayIsIdKeyed(baseDocument);
             var index = 0;
             foreach (var item in updated.EnumerateArray())
             {
                 var childPath = $"{path}[{index}]";
                 var childBase = default(JsonElement);
-                if (baseDocument.ValueKind == JsonValueKind.Array && index < baseDocument.GetArrayLength())
+                if (idKeyed && TryGetObjectId(item, out var id) &&
+                    TryFindArrayItemById(baseDocument, id, out var matched))
+                {
+                    childBase = matched;
+                }
+                else if (!idKeyed &&
+                    baseDocument.ValueKind == JsonValueKind.Array &&
+                    index < baseDocument.GetArrayLength())
+                {
                     childBase = baseDocument[index];
+                }
+
                 index++;
                 var hit = FindBlockedRedactionSentinel(item, childBase, childPath, edited, baseRoot);
                 if (hit != null)
@@ -204,7 +215,9 @@ internal static class ConfigEditorModel
 
             if (HasAncestorEdit(edited, path) &&
                 IsCredentialPath(path) &&
-                !SameSentinel(baseDocument, updated.GetString()))
+                !SameSentinel(baseDocument, updated.GetString()) &&
+                !(LoadedValueIsRealSecret(baseDocument) &&
+                  CredentialArrayIsIdKeyed(baseRoot, path)))
             {
                 return path;
             }
@@ -266,6 +279,7 @@ internal static class ConfigEditorModel
         string path,
         HashSet<string> edited,
         JsonElement baseRoot,
+        JsonElement submittedRoot,
         HashSet<string> arraysToDrop)
     {
         if (node is JsonObject obj)
@@ -281,13 +295,15 @@ internal static class ConfigEditorModel
                     ShouldOmitUntouchedSentinel(childPath))
                 {
                     if (!IsCredentialPath(childPath) &&
-                        !LoadedStringIsRedactionSentinel(baseRoot, childPath))
+                        !LoadedStringIsRedactionSentinel(baseRoot, submittedRoot, childPath))
                     {
                         continue;
                     }
 
                     if (HasAncestorEdit(edited, childPath) &&
-                        !UnchangedLoadedSentinel(baseRoot, childPath, text))
+                        !UnchangedLoadedSentinel(baseRoot, submittedRoot, childPath, text) &&
+                        !(LoadedValueIsRealSecret(baseRoot, submittedRoot, childPath) &&
+                          CredentialArrayIsIdKeyed(baseRoot, childPath)))
                     {
                         continue;
                     }
@@ -302,7 +318,8 @@ internal static class ConfigEditorModel
                 }
 
                 if (property.Value is not null)
-                    RemoveUntouchedRedactionSentinels(property.Value, childPath, edited, baseRoot, arraysToDrop);
+                    RemoveUntouchedRedactionSentinels(
+                        property.Value, childPath, edited, baseRoot, submittedRoot, arraysToDrop);
             }
 
             foreach (var key in removals)
@@ -313,7 +330,8 @@ internal static class ConfigEditorModel
             for (var index = 0; index < array.Count; index++)
             {
                 if (array[index] is JsonNode item)
-                    RemoveUntouchedRedactionSentinels(item, $"{path}[{index}]", edited, baseRoot, arraysToDrop);
+                    RemoveUntouchedRedactionSentinels(
+                        item, $"{path}[{index}]", edited, baseRoot, submittedRoot, arraysToDrop);
             }
         }
     }
@@ -456,23 +474,139 @@ internal static class ConfigEditorModel
         loaded.ValueKind == JsonValueKind.String &&
         string.Equals(loaded.GetString(), submitted, StringComparison.Ordinal);
 
-    private static bool UnchangedLoadedSentinel(JsonElement root, string path, string submitted)
+    private static bool CredentialArrayIsIdKeyed(JsonElement baseRoot, string propertyPath)
     {
-        if (!TryReadPath(root, path, out var element))
+        var bracket = propertyPath.LastIndexOf('[');
+        if (bracket < 0)
+            return false;
+
+        var arrayPath = propertyPath[..bracket];
+        if (!TryReadPath(baseRoot, arrayPath, out var array))
+            return false;
+
+        return ArrayIsIdKeyed(array);
+    }
+
+    private static bool LoadedValueIsRealSecret(JsonElement loaded) =>
+        loaded.ValueKind == JsonValueKind.String &&
+        !ChannelConfigPatchBuilder.IsRedactionSentinel(loaded.GetString());
+
+    private static bool LoadedValueIsRealSecret(JsonElement baseRoot, JsonElement submittedRoot, string path) =>
+        TryReadIdAware(baseRoot, submittedRoot, path, out var loaded) &&
+        LoadedValueIsRealSecret(loaded);
+
+    private static bool UnchangedLoadedSentinel(
+        JsonElement baseRoot,
+        JsonElement submittedRoot,
+        string path,
+        string submitted)
+    {
+        if (!TryReadIdAware(baseRoot, submittedRoot, path, out var element))
             return false;
 
         return SameSentinel(element, submitted);
     }
 
-    private static bool LoadedStringIsRedactionSentinel(JsonElement root, string path)
+    private static bool LoadedStringIsRedactionSentinel(
+        JsonElement baseRoot,
+        JsonElement submittedRoot,
+        string path)
     {
-        if (!TryReadPath(root, path, out var element) ||
+        if (!TryReadIdAware(baseRoot, submittedRoot, path, out var element) ||
             element.ValueKind != JsonValueKind.String)
         {
             return false;
         }
 
         return ChannelConfigPatchBuilder.IsRedactionSentinel(element.GetString());
+    }
+
+    private static bool TryReadIdAware(
+        JsonElement baseRoot,
+        JsonElement submittedRoot,
+        string path,
+        out JsonElement value)
+    {
+        value = default;
+        var baseCurrent = baseRoot;
+        var submittedCurrent = submittedRoot;
+        foreach (var segment in ParsePath(path))
+        {
+            if (baseCurrent.ValueKind != JsonValueKind.Object ||
+                submittedCurrent.ValueKind != JsonValueKind.Object ||
+                !baseCurrent.TryGetProperty(segment.Name, out var baseChild) ||
+                !submittedCurrent.TryGetProperty(segment.Name, out var submittedChild))
+            {
+                return false;
+            }
+
+            if (segment.Index is not int index)
+            {
+                baseCurrent = baseChild;
+                submittedCurrent = submittedChild;
+                continue;
+            }
+
+            if (submittedChild.ValueKind != JsonValueKind.Array ||
+                (uint)index >= (uint)submittedChild.GetArrayLength())
+            {
+                return false;
+            }
+
+            var submittedItem = submittedChild[index];
+            if (baseChild.ValueKind == JsonValueKind.Array &&
+                ArrayIsIdKeyed(baseChild) &&
+                TryGetObjectId(submittedItem, out var id) &&
+                TryFindArrayItemById(baseChild, id, out var matched))
+            {
+                baseCurrent = matched;
+            }
+            else if (baseChild.ValueKind == JsonValueKind.Array &&
+                !ArrayIsIdKeyed(baseChild) &&
+                index < baseChild.GetArrayLength())
+            {
+                baseCurrent = baseChild[index];
+            }
+            else
+            {
+                return false;
+            }
+
+            submittedCurrent = submittedItem;
+        }
+
+        value = baseCurrent;
+        return true;
+    }
+
+    private static bool TryGetObjectId(JsonElement item, out string id)
+    {
+        id = "";
+        if (item.ValueKind != JsonValueKind.Object ||
+            !item.TryGetProperty("id", out var idElement) ||
+            idElement.ValueKind != JsonValueKind.String)
+        {
+            return false;
+        }
+
+        id = idElement.GetString() ?? "";
+        return id.Length > 0;
+    }
+
+    private static bool TryFindArrayItemById(JsonElement array, string id, out JsonElement item)
+    {
+        foreach (var candidate in array.EnumerateArray())
+        {
+            if (TryGetObjectId(candidate, out var candidateId) &&
+                string.Equals(candidateId, id, StringComparison.Ordinal))
+            {
+                item = candidate;
+                return true;
+            }
+        }
+
+        item = default;
+        return false;
     }
 
     private static bool TryReadPath(JsonElement root, string path, out JsonElement element)
