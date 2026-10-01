@@ -190,13 +190,9 @@ internal static class ExecShellWrapperNormalizer
 
             if (!t.StartsWith('-') && !t.StartsWith('/'))
             {
-                // Windows PowerShell defaults to -Command. A lone script path
-                // stays a script. Any other positional text is command code.
-                if (!windowsPowerShell)
-                    return null;
-                if (i + 1 >= command.Count && LooksLikeScriptPath(t))
-                    return null;
-                return t;
+                // Windows PowerShell defaults to -Command for positional text,
+                // including a lone script name. Explicit -File stays a script.
+                return windowsPowerShell ? t : null;
             }
         }
         return null;
@@ -204,18 +200,6 @@ internal static class ExecShellWrapperNormalizer
 
     private static bool IsWindowsPowerShellHost(string executable) =>
         ExecCommandToken.NormalizedBasename(executable).Equals("powershell", StringComparison.Ordinal);
-
-    private static bool LooksLikeScriptPath(string token)
-    {
-        if (token.IndexOfAny([' ', ';', '|', '&', '\n', '\r']) >= 0)
-            return false;
-
-        return token.EndsWith(".ps1", StringComparison.OrdinalIgnoreCase) ||
-            token.EndsWith(".psm1", StringComparison.OrdinalIgnoreCase) ||
-            token.EndsWith(".psd1", StringComparison.OrdinalIgnoreCase) ||
-            token.Contains('\\', StringComparison.Ordinal) ||
-            token.Contains('/', StringComparison.Ordinal);
-    }
 
     private static bool IsFishShell(string token)
         => ExecCommandToken.NormalizedBasename(token).Equals("fish", StringComparison.OrdinalIgnoreCase);

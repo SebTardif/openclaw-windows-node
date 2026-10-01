@@ -180,7 +180,7 @@ public class ExecApprovalV2NormalizationTests
             ["pwsh", "-NoProfile", "Write-Output marker; #", "-c", "Get-Date"]).IsWrapper);
         AssertWrapper(["powershell.exe", "Get-Date"], "Get-Date");
         AssertWrapper(["powershell.exe", "Write-Output marker"], "Write-Output marker");
-        Assert.False(ExecShellWrapperNormalizer.Extract(["powershell", "script.ps1"]).IsWrapper);
+        AssertWrapper(["powershell", "script.ps1"], "script.ps1");
         Assert.Null(ExecReusableCommandBinder.TryBind(
             ["powershell.exe", "Get-Date"],
             cwd: null,
@@ -1087,15 +1087,23 @@ public class ExecApprovalV2NormalizationTests
     }
 
     [Fact]
-    public void ResolveForAllowlist_DirectPowerShellScriptFile_NotFailClosed()
+    public void ResolveForAllowlist_PositionalPowerShellScriptName_IsImplicitCommand()
     {
-        // Direct exec path: ["powershell", "script.ps1"] — no inline flag, no -EncodedCommand.
-        // DirectExecUsesEncodedCommand must not trigger; must resolve as a single resolution.
-        var resolutions = ExecCommandResolver.ResolveForAllowlist(
+        // Windows PowerShell runs a lone positional name as -Command.
+        // Explicit -File remains the reusable script form.
+        Assert.True(ExecShellWrapperNormalizer.Extract(["powershell", "script.ps1"]).IsWrapper);
+        Assert.Null(ExecReusableCommandBinder.TryBind(
             ["powershell", "script.ps1"],
-            evaluationRawCommand: null, cwd: null, env: null);
-        Assert.Single(resolutions);
-        Assert.Contains("powershell", resolutions[0].ExecutableName, StringComparison.OrdinalIgnoreCase);
+            cwd: null,
+            env: null,
+            out var failure));
+        Assert.Equal(ExecReusableCommandBinder.BindFailure.ShellWrapper, failure);
+        Assert.NotNull(ExecReusableCommandBinder.TryBind(
+            ["powershell", "-File", "script.ps1"],
+            cwd: null,
+            env: null,
+            out var fileFailure));
+        Assert.Equal(ExecReusableCommandBinder.BindFailure.None, fileFailure);
     }
 
     [Fact]
