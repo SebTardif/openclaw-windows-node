@@ -20,8 +20,25 @@ internal static class ExecShellWrapperNormalizer
     private static readonly HashSet<string> s_powerShellInlineFlags =
         new(StringComparer.OrdinalIgnoreCase) { "-c", "-command", "--command", "/c", "/command" };
 
+    // Switches that take no argument. A prefix that also matches one of these
+    // is that switch: -i and -in are Interactive, not InputFormat.
+    private static readonly string[] s_powerShellSwitchNames =
+    [
+        "Interactive",
+        "Login",
+        "MTA",
+        "NoExit",
+        "NoLogo",
+        "NonInteractive",
+        "NoProfile",
+        "NoProfileLoadTime",
+        "SSHServerMode",
+        "STA",
+    ];
+
     // Canonical pwsh parameters that take one following argument. A unique
-    // prefix binds the same way (-wo and -wor are -WorkingDirectory).
+    // prefix binds the same way (-wo and -wor are -WorkingDirectory), unless
+    // that prefix also matches a switch above.
     private static readonly string[] s_powerShellValueOptionNames =
     [
         "WorkingDirectory",
@@ -186,15 +203,22 @@ internal static class ExecShellWrapperNormalizer
             return true;
         if (!TryGetPowerShellSwitchBody(token, out var body))
             return false;
+        if (CountPrefixMatches(body, s_powerShellSwitchNames) > 0)
+            return false;
 
+        return CountPrefixMatches(body, s_powerShellValueOptionNames) == 1;
+    }
+
+    private static int CountPrefixMatches(string body, string[] names)
+    {
         var matches = 0;
-        foreach (var name in s_powerShellValueOptionNames)
+        foreach (var name in names)
         {
             if (name.StartsWith(body, StringComparison.OrdinalIgnoreCase))
                 matches++;
         }
 
-        return matches == 1;
+        return matches;
     }
 
     private static bool IsPowerShellInlineFlag(string token)

@@ -144,6 +144,29 @@ public class ExecApprovalV2NormalizationTests
     }
 
     [Fact]
+    public void Normalizer_PowerShellInteractivePrefix_DoesNotHideInlineCommand()
+    {
+        AssertWrapper(["pwsh", "-i", "-c", "Get-Date"], "Get-Date");
+        AssertWrapper(["pwsh", "-in", "-c", "Get-Date"], "Get-Date");
+        AssertWrapper(["pwsh", "-int", "-c", "Get-Date"], "Get-Date");
+        AssertWrapper(["pwsh", "-inp", "Text", "-c", "Get-Date"], "Get-Date");
+        Assert.False(ExecShellWrapperNormalizer.Extract(
+            ["pwsh", "-in", "script.ps1", "-c", "Get-Date"]).IsWrapper);
+
+        Assert.Null(ExecReusableCommandBinder.TryBind(
+            ["pwsh", "-i", "-c", "Get-Date"],
+            cwd: null,
+            env: null,
+            out var failure));
+        Assert.Equal(ExecReusableCommandBinder.BindFailure.ShellWrapper, failure);
+
+        var outcome = ExecApprovalV2Normalizer.Normalize(Req(["pwsh", "-in", "-c", "Get-Date"]));
+        Assert.True(outcome.IsResolved);
+        Assert.Null(outcome.Identity!.ReusableCommand);
+        Assert.Empty(outcome.Identity.AllowAlwaysPatterns);
+    }
+
+    [Fact]
     public void Normalizer_PowerShellPositionalScript_KeepsLaterSwitchAsScriptArgument()
     {
         Assert.False(ExecShellWrapperNormalizer.Extract(
