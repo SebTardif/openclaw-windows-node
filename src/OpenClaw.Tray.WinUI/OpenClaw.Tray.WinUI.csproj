@@ -58,6 +58,8 @@
     <RuntimeIdentifier>win-arm64</RuntimeIdentifier>
   </PropertyGroup>
 
+  <Import Project="Migration.Build.props" />
+
   <!-- Unpackaged (default): traditional EXE distribution via Inno Setup -->
   <PropertyGroup Condition="'$(PackageMsix)' != 'true'">
     <WindowsPackageType>None</WindowsPackageType>
