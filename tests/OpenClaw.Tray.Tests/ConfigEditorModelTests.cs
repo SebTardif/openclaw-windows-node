@@ -973,6 +973,26 @@ public class ConfigEditorModelTests
     }
 
     [Fact]
+    public void DottedProviderKey_UnrelatedEdit_RemovesTheNonIdAccountsArray()
+    {
+        using var stored = JsonDocument.Parse("""
+        { "enabled": false, "custom.openai": { "accounts": [ { "token": "***" } ] } }
+        """);
+        using var editor = JsonDocument.Parse("""
+        { "enabled": true, "custom.openai": { "accounts": [ { "token": "***" } ] } }
+        """);
+        var edited = new[] { "enabled" };
+        var blocked = ConfigEditorModel.FindUneditedRedactionSentinel(
+            editor.RootElement, edited, stored.RootElement);
+        var sent = ConfigEditorModel.OmitUntouchedRedactionSentinels(
+            editor.RootElement, edited, stored.RootElement);
+
+        Assert.Null(blocked);
+        Assert.True(sent.GetProperty("enabled").GetBoolean());
+        Assert.False(sent.GetProperty("custom.openai").TryGetProperty("accounts", out _));
+    }
+
+    [Fact]
     public void NestedArray_ReorderedOuterIds_DoNotTreatTheOtherRowsArrayAsIdKeyed()
     {
         using var stored = JsonDocument.Parse("""

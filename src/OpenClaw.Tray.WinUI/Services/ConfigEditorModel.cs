@@ -140,11 +140,11 @@ internal static class ConfigEditorModel
             return document.Clone();
 
         var edited = new HashSet<string>(editedPaths, StringComparer.OrdinalIgnoreCase);
-        var arraysToDrop = new HashSet<string>(StringComparer.Ordinal);
+        var arraysToDrop = new List<ArrayLocation>();
         RemoveUntouchedRedactionSentinels(
-            node, "", edited, baseDocument, document, baseDocument, null, arraysToDrop);
-        foreach (var arrayPath in arraysToDrop.OrderBy(static path => path.Length))
-            RemovePropertyAtPath(node, arrayPath);
+            node, "", edited, baseDocument, document, baseDocument, null, null, arraysToDrop);
+        foreach (var array in arraysToDrop)
+            array.Parent.Remove(array.Key);
 
         using var rewritten = JsonDocument.Parse(node.ToJsonString());
         return rewritten.RootElement.Clone();
@@ -287,7 +287,8 @@ internal static class ConfigEditorModel
         JsonElement submittedRoot,
         JsonElement loadedNode,
         string? outermostNonIdArray,
-        HashSet<string> arraysToDrop)
+        ArrayLocation? outermostArray,
+        List<ArrayLocation> arraysToDrop)
     {
         if (node is JsonObject obj)
         {
@@ -312,12 +313,26 @@ internal static class ConfigEditorModel
                     if (HasAncestorEdit(edited, childPath) && !SameSentinel(loadedChild, text))
                         continue;
 
-                    if (outermostNonIdArray == null)
+                    if (outermostArray is null)
                         removals.Add(property.Key);
-                    else if (!EditedPathInsideArray(edited, outermostNonIdArray))
-                        arraysToDrop.Add(outermostNonIdArray);
+                    else if (outermostNonIdArray is null ||
+                        !EditedPathInsideArray(edited, outermostNonIdArray))
+                    {
+                        arraysToDrop.Add(outermostArray.Value);
+                    }
 
                     continue;
+                }
+
+                var childOuter = outermostNonIdArray;
+                var childArray = outermostArray;
+                if (childArray is null &&
+                    property.Value is JsonArray &&
+                    loadedChild.ValueKind == JsonValueKind.Array &&
+                    !ArrayIsIdKeyed(loadedChild))
+                {
+                    childOuter = childPath;
+                    childArray = new ArrayLocation(obj, property.Key);
                 }
 
                 if (property.Value is not null)
@@ -328,7 +343,8 @@ internal static class ConfigEditorModel
                         baseRoot,
                         submittedRoot,
                         loadedChild,
-                        outermostNonIdArray,
+                        childOuter,
+                        childArray,
                         arraysToDrop);
             }
 
@@ -371,10 +387,13 @@ internal static class ConfigEditorModel
                     submittedRoot,
                     loadedItem,
                     nextOuter,
+                    outermostArray,
                     arraysToDrop);
             }
         }
     }
+
+    private readonly record struct ArrayLocation(JsonObject Parent, string Key);
 
     private readonly record struct ConfigPathSegment(string Name, int? Index);
 
