@@ -216,6 +216,8 @@ internal static class ExecShellWrapperNormalizer
             return true;
         if (!TryGetPowerShellSwitchBody(token, out var body))
             return false;
+        if (IsPowerShellValueAliasBody(body))
+            return true;
 
         var switchMatches = CountPrefixMatches(body, s_powerShellSwitchNames);
         var valueMatches = CountPrefixMatches(body, s_powerShellValueOptionNames);
@@ -230,6 +232,19 @@ internal static class ExecShellWrapperNormalizer
 
     private static bool IsInteractivePrefix(string body) =>
         "interactive".StartsWith(body, StringComparison.OrdinalIgnoreCase);
+
+    private static bool IsPowerShellValueAliasBody(string body)
+    {
+        foreach (var alias in s_powerShellValueAliases)
+        {
+            if (!TryGetPowerShellSwitchBody(alias, out var aliasBody))
+                continue;
+            if (aliasBody.Equals(body, StringComparison.OrdinalIgnoreCase))
+                return true;
+        }
+
+        return false;
+    }
 
     private static int CountPrefixMatches(string body, string[] names)
     {
@@ -295,10 +310,11 @@ internal static class ExecShellWrapperNormalizer
         var colon = token.IndexOf(':');
         if (colon > 0)
             name = token[..colon];
-        return name.Equals("-File", StringComparison.OrdinalIgnoreCase)
-            || name.Equals("-f", StringComparison.OrdinalIgnoreCase)
-            || name.Equals("/File", StringComparison.OrdinalIgnoreCase)
-            || name.Equals("/f", StringComparison.OrdinalIgnoreCase);
+        if (!TryGetPowerShellSwitchBody(name, out var body))
+            return false;
+
+        return body.Length > 0 &&
+            "file".StartsWith(body, StringComparison.OrdinalIgnoreCase);
     }
 
     private static bool TryReadPowerShellColonPayload(string token, out string payload)
