@@ -107,4 +107,75 @@ public sealed class GatewayDashboardUrlBuilderTests
 
         Assert.Equal("http://localhost:4317/ui/config?tab=one&x=1", url);
     }
+
+    [Theory]
+    [InlineData("ws://gateway.example", "chat#session=agent%3Amain%3Areview", "http://gateway.example/chat#session=agent%3Amain%3Areview")]
+    [InlineData("ws://gateway.example#session=agent%3Amain%3Areview", null, "http://gateway.example#session=agent%3Amain%3Areview")]
+    [InlineData("ws://gateway.example#session=base", "chat#ses%73ion=route%26one%2Btwo+three", "http://gateway.example/chat#session=route%26one%2Btwo+three")]
+    [InlineData("ws://gateway.example#session=base", "chat#session=first&session=second", "http://gateway.example/chat#session=first")]
+    [InlineData("ws://gateway.example#session=base", "chat#session=&session=second", "http://gateway.example/chat#session=")]
+    [InlineData("ws://gateway.example#session=base", "chat#session", "http://gateway.example/chat#session=")]
+    public void Build_PreservesOnlyTheFirstFragmentSession(
+        string gatewayUrl, string? path, string expected)
+    {
+        Assert.Equal(expected, GatewayDashboardUrlBuilder.Build(
+            gatewayUrl, path, "test-auth-token", appendSharedGatewayToken: false));
+        Assert.Equal(expected + "&token=test-auth-token", GatewayDashboardUrlBuilder.Build(
+            gatewayUrl, path, "test-auth-token", appendSharedGatewayToken: true));
+    }
+
+    [Theory]
+    [InlineData("ws://gateway.example", "chat?session=query#session=fragment", "http://gateway.example/chat?session=query")]
+    [InlineData("ws://gateway.example?session=base-query", "chat#session=fragment", "http://gateway.example/chat?session=base-query")]
+    [InlineData("ws://gateway.example?session=base-query", "chat?session=route-query#session=fragment", "http://gateway.example/chat?session=route-query&session=base-query")]
+    [InlineData("ws://gateway.example", "chat?ses%73ion=encoded%3Aquery#session=fragment", "http://gateway.example/chat?ses%73ion=encoded%3Aquery")]
+    [InlineData("ws://gateway.example", "chat?session=&session=second#session=fragment", "http://gateway.example/chat?session=&session=second")]
+    [InlineData("ws://gateway.example", "chat?session#session=fragment", "http://gateway.example/chat?session")]
+    public void Build_PreservesQuerySessionPrecedenceIncludingEmptySelection(
+        string gatewayUrl, string path, string expected)
+    {
+        Assert.Equal(expected, GatewayDashboardUrlBuilder.Build(
+            gatewayUrl, path, "test-auth-token", appendSharedGatewayToken: false));
+        Assert.Equal(expected + "#token=test-auth-token", GatewayDashboardUrlBuilder.Build(
+            gatewayUrl, path, "test-auth-token", appendSharedGatewayToken: true));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void Build_SessionAllowlistDoesNotRestoreFragmentAuthOrEndpointOverrides(bool appendToken)
+    {
+        var url = GatewayDashboardUrlBuilder.Build(
+            "ws://gateway.example?token=old&x=1#gatewayUrl=wss%3A%2F%2Fother.example&password=old&token=old&session=base",
+            "chat?to%6ben=old-route#token=old-route&session=agent%3Amain%3Areview&token=duplicate&gatewayUrl=wss%3A%2F%2Fother.example&password=old-route",
+            "test-auth-token",
+            appendToken);
+
+        Assert.Equal(
+            "http://gateway.example/chat?x=1#session=agent%3Amain%3Areview" +
+            (appendToken ? "&token=test-auth-token" : string.Empty),
+            url);
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    public void Build_PreservesSessionWithoutAnAvailableSharedToken(string? sharedToken)
+    {
+        Assert.Equal("http://gateway.example/chat#session=agent%3Amain%3Areview",
+            GatewayDashboardUrlBuilder.Build(
+                "ws://gateway.example", "chat#session=agent%3Amain%3Areview",
+                sharedToken, appendSharedGatewayToken: true));
+    }
+
+    [Theory]
+    [InlineData("chat#old")]
+    [InlineData("chat#SESSION=ignored")]
+    [InlineData("chat#token=old&password=old&gatewayUrl=wss%3A%2F%2Fother.example")]
+    public void Build_DoesNotInventMissingSessionSelection(string path)
+    {
+        Assert.Equal("http://gateway.example/chat#token=test-auth-token",
+            GatewayDashboardUrlBuilder.Build(
+                "ws://gateway.example", path, "test-auth-token", appendSharedGatewayToken: true));
+    }
 }

@@ -18,6 +18,7 @@ public static class GatewayDashboardUrlBuilder
 
         var route = path?.Trim() ?? string.Empty;
         var fragmentStart = route.IndexOf('#');
+        var routeFragment = fragmentStart >= 0 ? route[fragmentStart..] : string.Empty;
         if (fragmentStart >= 0)
             route = route[..fragmentStart];
 
@@ -32,10 +33,17 @@ public static class GatewayDashboardUrlBuilder
         var scheme = ToHttpScheme(uri.Scheme);
         var url = $"{scheme}://{FormatHost(uri)}{FormatPort(scheme, uri.Port)}{JoinPath(uri.AbsolutePath, routePath)}{query}";
 
+        // The SPA prefers the first query session, even when empty, over a fragment session.
+        var session = FindSessionParameter(query) is null
+            ? FindSessionParameter(routeFragment) ?? FindSessionParameter(uri.Fragment)
+            : null;
+        var fragment = new List<string>();
+        if (session is not null)
+            fragment.Add(session);
         if (appendSharedGatewayToken && !string.IsNullOrEmpty(sharedGatewayToken))
-            url += $"#token={Uri.EscapeDataString(sharedGatewayToken)}";
+            fragment.Add($"token={Uri.EscapeDataString(sharedGatewayToken)}");
 
-        return url;
+        return fragment.Count == 0 ? url : $"{url}#{string.Join('&', fragment)}";
     }
 
     public static bool TryBuild(
@@ -65,6 +73,23 @@ public static class GatewayDashboardUrlBuilder
         scheme.Equals("https", StringComparison.OrdinalIgnoreCase) ||
         scheme.Equals("ws", StringComparison.OrdinalIgnoreCase) ||
         scheme.Equals("wss", StringComparison.OrdinalIgnoreCase);
+
+    private static string? FindSessionParameter(string parameters)
+    {
+        if (string.IsNullOrEmpty(parameters))
+            return null;
+
+        var body = parameters[0] is '?' or '#' ? parameters[1..] : parameters;
+        foreach (var part in body.Split('&', StringSplitOptions.RemoveEmptyEntries))
+        {
+            var nameEnd = part.IndexOf('=');
+            var name = nameEnd >= 0 ? part[..nameEnd] : part;
+            if (Uri.UnescapeDataString(name).Equals("session", StringComparison.Ordinal))
+                return nameEnd >= 0 ? $"session{part[nameEnd..]}" : "session=";
+        }
+
+        return null;
+    }
 
     private static string ToHttpScheme(string scheme)
     {
