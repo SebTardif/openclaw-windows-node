@@ -48,6 +48,7 @@ internal static class ExecShellWrapperNormalizer
         "ConfigurationName",
         "ConfigurationFile",
         "CustomPipeName",
+        "EncodedCommand",
         "SettingsFile",
         "PSConsoleFile",
         "WindowStyle",
@@ -65,6 +66,8 @@ internal static class ExecShellWrapperNormalizer
             "-wd", "/wd",
             "-w", "/w",
             "-ep", "/ep",
+            "-e", "/e",
+            "-ec", "/ec",
             "-if", "/if",
             "-config", "/config",
         };
@@ -161,12 +164,13 @@ internal static class ExecShellWrapperNormalizer
 
     private static string? ExtractPowerShellPayload(IReadOnlyList<string> command)
     {
+        var windowsPowerShell = IsWindowsPowerShellHost(command[0]);
         for (var i = 1; i < command.Count; i++)
         {
             var t = command[i].Trim();
             if (t.Length == 0) continue;
             if (t == "--") return null;
-            if (IsPowerShellValueOption(t))
+            if (IsPowerShellValueOption(t, windowsPowerShell))
             {
                 i++;
                 continue;
@@ -184,10 +188,19 @@ internal static class ExecShellWrapperNormalizer
             }
 
             if (!t.StartsWith('-') && !t.StartsWith('/'))
+            {
+                // Windows PowerShell joins a positional token and everything
+                // after it into command text. A lone positional stays a script.
+                if (windowsPowerShell && i + 1 < command.Count)
+                    return t;
                 return null;
+            }
         }
         return null;
     }
+
+    private static bool IsWindowsPowerShellHost(string executable) =>
+        ExecCommandToken.NormalizedBasename(executable).Equals("powershell", StringComparison.Ordinal);
 
     private static bool IsFishShell(string token)
         => ExecCommandToken.NormalizedBasename(token).Equals("fish", StringComparison.OrdinalIgnoreCase);
@@ -195,7 +208,7 @@ internal static class ExecShellWrapperNormalizer
     private static bool IsFishInitCommand(string flag)
         => flag == "-C" || flag.Equals("--init-command", StringComparison.Ordinal);
 
-    private static bool IsPowerShellValueOption(string token)
+    private static bool IsPowerShellValueOption(string token, bool windowsPowerShell)
     {
         if (token.IndexOf(':') > 0)
             return false;
@@ -203,11 +216,20 @@ internal static class ExecShellWrapperNormalizer
             return true;
         if (!TryGetPowerShellSwitchBody(token, out var body))
             return false;
-        if (CountPrefixMatches(body, s_powerShellSwitchNames) > 0)
-            return false;
 
-        return CountPrefixMatches(body, s_powerShellValueOptionNames) == 1;
+        var switchMatches = CountPrefixMatches(body, s_powerShellSwitchNames);
+        var valueMatches = CountPrefixMatches(body, s_powerShellValueOptionNames);
+        if (switchMatches > 0 &&
+            !(windowsPowerShell && IsInteractivePrefix(body) && valueMatches == 1))
+        {
+            return false;
+        }
+
+        return valueMatches == 1;
     }
+
+    private static bool IsInteractivePrefix(string body) =>
+        "interactive".StartsWith(body, StringComparison.OrdinalIgnoreCase);
 
     private static int CountPrefixMatches(string body, string[] names)
     {
@@ -225,7 +247,11 @@ internal static class ExecShellWrapperNormalizer
     {
         if (s_powerShellInlineFlags.Contains(token))
             return true;
-        if (!TryGetPowerShellSwitchBody(token, out var body) || body.Length < 2)
+        if (!TryGetPowerShellSwitchBody(token, out var body))
+            return false;
+        if (body.Equals("c", StringComparison.OrdinalIgnoreCase))
+            return true;
+        if (body.Length < 2)
             return false;
 
         return "command".StartsWith(body, StringComparison.OrdinalIgnoreCase);
@@ -234,9 +260,13 @@ internal static class ExecShellWrapperNormalizer
     private static bool TryGetPowerShellSwitchBody(string token, out string body)
     {
         body = "";
+        if (token.StartsWith("--", StringComparison.Ordinal))
+        {
+            body = token[2..];
+            return body.Length > 0;
+        }
+
         if (token.Length < 2 || (token[0] != '-' && token[0] != '/'))
-            return false;
-        if (token[1] == '-')
             return false;
 
         body = token[1..];
