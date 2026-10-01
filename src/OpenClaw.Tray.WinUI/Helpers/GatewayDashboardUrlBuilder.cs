@@ -40,8 +40,17 @@ public static class GatewayDashboardUrlBuilder
         var fragment = new List<string>();
         if (session is not null)
             fragment.Add(session);
+        AppendPreservedFragmentFields(fragment, routeFragment);
+        AppendPreservedFragmentFields(fragment, uri.Fragment);
         if (appendSharedGatewayToken && !string.IsNullOrEmpty(sharedGatewayToken))
             fragment.Add($"token={Uri.EscapeDataString(sharedGatewayToken)}");
+        else if (appendSharedGatewayToken)
+        {
+            var existingToken = FindNamedParameter(routeFragment, "token")
+                ?? FindNamedParameter(uri.Fragment, "token");
+            if (existingToken is not null)
+                fragment.Add(existingToken);
+        }
 
         return fragment.Count == 0 ? url : $"{url}#{string.Join('&', fragment)}";
     }
@@ -86,6 +95,43 @@ public static class GatewayDashboardUrlBuilder
             var name = nameEnd >= 0 ? part[..nameEnd] : part;
             if (Uri.UnescapeDataString(name).Equals("session", StringComparison.Ordinal))
                 return nameEnd >= 0 ? $"session{part[nameEnd..]}" : "session=";
+        }
+
+        return null;
+    }
+
+    private static void AppendPreservedFragmentFields(List<string> fragment, string parameters)
+    {
+        if (string.IsNullOrEmpty(parameters))
+            return;
+
+        var body = parameters[0] is '?' or '#' ? parameters[1..] : parameters;
+        foreach (var part in body.Split('&', StringSplitOptions.RemoveEmptyEntries))
+        {
+            var nameEnd = part.IndexOf('=');
+            if (nameEnd < 0)
+                continue;
+
+            var name = Uri.UnescapeDataString(part[..nameEnd]);
+            if (!name.Equals("view", StringComparison.OrdinalIgnoreCase))
+                continue;
+
+            fragment.Add(part);
+        }
+    }
+
+    private static string? FindNamedParameter(string parameters, string parameterName)
+    {
+        if (string.IsNullOrEmpty(parameters))
+            return null;
+
+        var body = parameters[0] is '?' or '#' ? parameters[1..] : parameters;
+        foreach (var part in body.Split('&', StringSplitOptions.RemoveEmptyEntries))
+        {
+            var nameEnd = part.IndexOf('=');
+            var name = nameEnd >= 0 ? part[..nameEnd] : part;
+            if (Uri.UnescapeDataString(name).Equals(parameterName, StringComparison.OrdinalIgnoreCase))
+                return part;
         }
 
         return null;
