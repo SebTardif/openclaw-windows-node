@@ -111,6 +111,9 @@ public sealed record LocalAiRuntimeSnapshot(
     KvCachePrecision? DraftKeyCachePrecision = null,
     KvCachePrecision? DraftValueCachePrecision = null)
 {
+    /// <summary>False only when the runtime confirmed publication or terminal route cleanup.</summary>
+    public bool GatewayRouteRequiresResolution { get; init; } = true;
+
     public static LocalAiRuntimeSnapshot Initial(Uri endpoint, DateTimeOffset now) =>
         new(
             LocalAiRuntimeState.Stopped,
@@ -135,6 +138,7 @@ public interface ILocalAiRuntime : IAsyncDisposable
     LocalAiRuntimeSnapshot Snapshot { get; }
     event EventHandler<LocalAiRuntimeSnapshotChangedEventArgs>? StateChanged;
     Task<LocalAiRuntimeSnapshot> EnsureStartedAsync(CancellationToken cancellationToken = default);
+    Task<LocalAiRuntimeSnapshot> ResumeAsync(CancellationToken cancellationToken = default);
     Task<LocalAiRuntimeSnapshot> StopAsync(CancellationToken cancellationToken = default);
     Task<LocalAiRuntimeSnapshot> RestartAsync(CancellationToken cancellationToken = default);
     Task<LocalAiRuntimeSnapshot> RefreshAsync(CancellationToken cancellationToken = default);

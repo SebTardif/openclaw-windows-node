@@ -22,6 +22,8 @@ public sealed record LlamaServerRuntimeOptions
     public required LocalAiPaths Paths { get; init; }
     public Uri InitialEndpoint { get; init; } = new("http://127.0.0.1:18803/v1");
     public ILocalAiEndpointLifecycle EndpointLifecycle { get; init; } = NullLocalAiEndpointLifecycle.Instance;
+    public Func<string?>? GetApiKey { get; init; }
+    public Func<LocalAiResolvedInstall, int?>? GetRecoveryPort { get; init; }
     public TimeSpan StartupTimeout { get; init; } = TimeSpan.FromSeconds(15);
     public TimeSpan HealthPollInterval { get; init; } = TimeSpan.FromMilliseconds(250);
     public TimeSpan ShutdownTimeout { get; init; } = TimeSpan.FromSeconds(10);
@@ -118,12 +120,14 @@ public sealed class LlamaServerRuntimeService : ILocalAiRuntime
     private LocalAiRuntimeSnapshot _snapshot;
     private ILocalAiManagedProcess? _managedProcess;
     private LocalAiVerifiedModelLease? _verifiedModel;
+    private readonly List<LocalAiVerifiedModelLease> _verifiedAdditionalAssets = [];
     private string? _runtimeModelPath;
     private LocalAiResolvedInstall? _install;
     private long _generation;
     private int _restartAttempts;
     private bool _stopping;
     private bool _explicitStopRequested;
+    private bool _automaticResumeSuppressed;
     private bool _gatewayRouteRequiresResolution;
     private bool _disposed;
     private bool _acceptExitTasks = true;
@@ -135,7 +139,7 @@ public sealed class LlamaServerRuntimeService : ILocalAiRuntime
             logger ?? NullLogger.Instance,
             new WindowsLocalAiManagedProcessHost(logger ?? NullLogger.Instance),
             new SystemLlamaServerRuntimePlatform(),
-            new LlamaServerClient(),
+            new LlamaServerClient(options?.GetApiKey),
             new HuggingFaceLocalAiModelFileVerifier())
     {
     }
@@ -171,6 +175,8 @@ public sealed class LlamaServerRuntimeService : ILocalAiRuntime
         try
         {
             ThrowIfDisposed();
+            await _options.EndpointLifecycle.SetAutomaticRecoveryEnabledAsync(true, cancellationToken).ConfigureAwait(false);
+            _automaticResumeSuppressed = false;
             _explicitStopRequested = false;
             _restartAttempts = 0;
             return await EnsureStartedCoreAsync(cancellationToken).ConfigureAwait(false);
@@ -179,6 +185,20 @@ public sealed class LlamaServerRuntimeService : ILocalAiRuntime
         {
             _operationGate.Release();
         }
+    }
+
+    public async Task<LocalAiRuntimeSnapshot> ResumeAsync(CancellationToken cancellationToken = default)
+    {
+        await _operationGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            ThrowIfDisposed();
+            if (_automaticResumeSuppressed)
+                return Snapshot;
+            _restartAttempts = 0;
+            return await EnsureStartedCoreAsync(cancellationToken).ConfigureAwait(false);
+        }
+        finally { _operationGate.Release(); }
     }
 
     public async Task<LocalAiRuntimeSnapshot> RefreshAsync(CancellationToken cancellationToken = default)
@@ -201,6 +221,8 @@ public sealed class LlamaServerRuntimeService : ILocalAiRuntime
         try
         {
             ThrowIfDisposed();
+            _automaticResumeSuppressed = true;
+            await _options.EndpointLifecycle.SetAutomaticRecoveryEnabledAsync(false, cancellationToken).ConfigureAwait(false);
             _explicitStopRequested = true;
             LocalAiRuntimeSnapshot stopped = await StopCoreAsync(
                     LocalAiQuiesceReason.Teardown,
@@ -241,6 +263,8 @@ public sealed class LlamaServerRuntimeService : ILocalAiRuntime
         try
         {
             ThrowIfDisposed();
+            await _options.EndpointLifecycle.SetAutomaticRecoveryEnabledAsync(true, cancellationToken).ConfigureAwait(false);
+            _automaticResumeSuppressed = false;
             _explicitStopRequested = false;
             LocalAiResolvedInstall? restartInstall = _install;
             try
@@ -323,13 +347,18 @@ public sealed class LlamaServerRuntimeService : ILocalAiRuntime
                 .ConfigureAwait(false);
         }
 
-        int requestedPort = install.Manifest.RequestedPort;
+        int? recoveryPort = _options.GetRecoveryPort?.Invoke(install);
+        int requestedPort = recoveryPort ?? install.Manifest.RequestedPort;
+        if (!LocalAiPortPolicy.TryValidate(requestedPort, out var recoveryPortError))
+            throw new InvalidDataException(recoveryPortError);
         if (requestedPort != LocalAiPortPolicy.Automatic &&
             FindEndpointListeners(beforeStart, requestedPort).Count > 0)
         {
             return await FailStartupAsync(
                     LocalAiRuntimeState.Conflict,
-                    "The configured llama-server port is already in use.",
+                    recoveryPort is not null
+                        ? "The previous Local AI port is in use. Free that port before recovering the unconfirmed Gateway route."
+                        : "The configured llama-server port is already in use.",
                     install)
                 .ConfigureAwait(false);
         }
@@ -378,7 +407,14 @@ public sealed class LlamaServerRuntimeService : ILocalAiRuntime
                 _options.Paths,
                 install,
                 GetRuntimeModelPath(install),
+                GetRuntimeDraftModelPath(),
                 requestedPort);
+            if (_options.GetApiKey?.Invoke() is { } apiKey)
+                launchPlan = launchPlan with
+                {
+                    Environment = launchPlan.Environment.SetItem(
+                        "LLAMA_API_KEY", LocalAiApiCredentialStore.RequireApiKey(apiKey)),
+                };
             await WritePresetAtomicallyAsync(launchPlan, cancellationToken).ConfigureAwait(false);
         }
         catch (OperationCanceledException)
@@ -386,7 +422,8 @@ public sealed class LlamaServerRuntimeService : ILocalAiRuntime
             await CancelStartupAsync(install, terminalTeardownRequired: true).ConfigureAwait(false);
             throw;
         }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidDataException)
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidDataException or
+            System.Security.Cryptography.CryptographicException)
         {
             _logger.Error("Could not prepare the managed llama-server router.", ex);
             return await FailStartupAsync(
@@ -862,7 +899,7 @@ public sealed class LlamaServerRuntimeService : ILocalAiRuntime
         DisposeVerifiedModelHandle();
         ValidateInstalledFilesForStatus(install);
 
-        if (install.Manifest.SchemaVersion != LocalAiInstallManifest.HubCacheReceiptSchemaVersion)
+        if (!install.Manifest.UsesHubCache)
         {
             _runtimeModelPath = install.ModelPath;
             return;
@@ -883,6 +920,33 @@ public sealed class LlamaServerRuntimeService : ILocalAiRuntime
                 "The shared Hugging Face cache model is unsafe or no longer matches its receipt.");
         }
 
+        // Schema-5 extra assets (a DFlash draft checkpoint) are loaded natively
+        // by llama-server exactly like the primary weights, and they
+        // live in the same shared, user-writable hub cache. Rehash them here and hold
+        // the handles for the process lifetime, so a file swapped after setup cannot
+        // reach the loader with only a structural path check behind it.
+        foreach ((LocalAiAssetReceipt receipt, string cachedPath) in
+                 install.Manifest.AdditionalModelAssetsOrEmpty
+                     .Zip(install.Manifest.AdditionalModelPathsOrEmpty))
+        {
+            LocalAiVerifiedModelLease? verifiedAsset =
+                await _modelFileVerifier.TryOpenAsync(
+                        install.Manifest.ModelCacheRoot!,
+                        cachedPath,
+                        receipt.SizeBytes,
+                        new Sha256Digest(receipt.Sha256),
+                        cancellationToken)
+                    .ConfigureAwait(false);
+            if (verifiedAsset is null)
+            {
+                DisposeVerifiedModelHandle();
+                throw new InvalidDataException(
+                    $"The shared Hugging Face cache asset '{receipt.FileName}' is unsafe or no longer matches its receipt.");
+            }
+
+            _verifiedAdditionalAssets.Add(verifiedAsset);
+        }
+
         _runtimeModelPath = _verifiedModel.ResolvedPath;
     }
 
@@ -890,7 +954,7 @@ public sealed class LlamaServerRuntimeService : ILocalAiRuntime
     {
         if (!File.Exists(install.ExecutablePath))
             throw new InvalidDataException("The managed llama-server executable is missing.");
-        if (install.Manifest.SchemaVersion == LocalAiInstallManifest.HubCacheReceiptSchemaVersion)
+        if (install.Manifest.UsesHubCache)
         {
             if (!File.Exists(install.ModelPath))
                 throw new InvalidDataException("The managed GGUF model is missing.");
@@ -1569,7 +1633,10 @@ public sealed class LlamaServerRuntimeService : ILocalAiRuntime
             _install?.Manifest.KeyCachePrecision,
             _install?.Manifest.ValueCachePrecision,
             _install?.Manifest.DraftKeyCachePrecision,
-            _install?.Manifest.DraftValueCachePrecision);
+            _install?.Manifest.DraftValueCachePrecision)
+        {
+            GatewayRouteRequiresResolution = _gatewayRouteRequiresResolution,
+        };
         lock (_snapshotGate)
             _snapshot = value;
 
@@ -1666,14 +1733,26 @@ public sealed class LlamaServerRuntimeService : ILocalAiRuntime
     {
         _verifiedModel?.Dispose();
         _verifiedModel = null;
+        foreach (LocalAiVerifiedModelLease lease in _verifiedAdditionalAssets)
+            lease.Dispose();
+        _verifiedAdditionalAssets.Clear();
         _runtimeModelPath = null;
     }
+
+    /// <summary>
+    /// The handle-resolved path of the draft checkpoint this process verified and still
+    /// holds open, or null when the recipe has no additional assets. Additional assets are
+    /// verified in catalog order and the draft checkpoint is always last, matching
+    /// <see cref="LocalModelCatalog.AdditionalArtifacts"/>.
+    /// </summary>
+    private string? GetRuntimeDraftModelPath() =>
+        _verifiedAdditionalAssets.Count == 0 ? null : _verifiedAdditionalAssets[^1].ResolvedPath;
 
     private string GetRuntimeModelPath(LocalAiResolvedInstall install)
     {
         if (_runtimeModelPath is not null)
             return _runtimeModelPath;
-        if (install.Manifest.SchemaVersion == LocalAiInstallManifest.HubCacheReceiptSchemaVersion)
+        if (install.Manifest.UsesHubCache)
             throw new InvalidOperationException("The verified shared-cache model identity is unavailable.");
         return install.ModelPath;
     }
