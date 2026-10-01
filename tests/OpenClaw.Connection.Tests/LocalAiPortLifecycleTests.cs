@@ -1884,7 +1884,7 @@ public sealed class LocalAiPortLifecycleTests
         Assert.Equal(LocalAiRuntimeState.Healthy, (await runtime.EnsureStartedAsync()).State);
         var stopping = runtime.StopAsync();
         await withdrawing.Task.WaitAsync(TimeSpan.FromSeconds(5));
-        Assert.Equal([true, false], lifecycle.RecoveryIntents);
+        Assert.Equal([false, true, false], lifecycle.RecoveryIntents);
         var resume = runtime.ResumeAsync();
         Assert.False(resume.IsCompleted);
         release.SetResult();
@@ -1893,7 +1893,7 @@ public sealed class LocalAiPortLifecycleTests
         Assert.Equal(LocalAiRuntimeState.Stopped, (await runtime.ResumeAsync()).State);
         Assert.Equal(1, events.Count(value => value == "start"));
         Assert.Equal(LocalAiRuntimeState.Healthy, (await runtime.EnsureStartedAsync()).State);
-        Assert.Equal([true, false, true], lifecycle.RecoveryIntents);
+        Assert.Equal([false, true, false, false, true], lifecycle.RecoveryIntents);
         Assert.Equal(2, events.Count(value => value == "start"));
     }
 
@@ -2481,6 +2481,349 @@ public sealed class LocalAiPortLifecycleTests
         Assert.Equal(28_768, recovered.Endpoint.Port);
     }
 
+    [Fact]
+    public async Task FailedFirstStartCannotBePublishedByReconnect()
+    {
+        using var temp = new TempDirectory("local-ai-failed-use-");
+        var paths = await PrepareInstallAsync(temp);
+        var events = new SynchronizedEventLog();
+        var platform = new FakePlatform();
+        var lifecycle = new FakeLifecycle(events) { FailPublish = true };
+        var host = new FakeProcessHost(platform, events, selectedPort: 28_767);
+        await using var runtime = CreateRuntime(paths, host, platform, new FakeClient(events), lifecycle);
+        Assert.Equal(LocalAiRuntimeState.Failed, (await runtime.EnsureStartedAsync()).State);
+        Assert.False(lifecycle.AutomaticRecoveryEnabled);
+        lifecycle.FailPublish = false;
+        events.Clear();
+        await runtime.ResumeAsync();
+        Assert.Empty(events);
+        await runtime.ReconcileStoppedAsync();
+        Assert.Equal(["quiesce:Teardown"], events);
+    }
+
+    [Fact]
+    public async Task StoppedReconciliationNeverStartsAndCannotUndoNewExplicitStart()
+    {
+        using var temp = new TempDirectory("local-ai-stopped-recovery-");
+        var paths = await PrepareInstallAsync(temp);
+        var events = new SynchronizedEventLog();
+        var platform = new FakePlatform();
+        var lifecycle = new FakeLifecycle(events);
+        await lifecycle.SetAutomaticRecoveryEnabledAsync(false);
+        await using var runtime = CreateRuntime(paths,
+            new FakeProcessHost(platform, events, selectedPort: 28_767), platform, new FakeClient(events), lifecycle);
+        Assert.Equal(LocalAiRuntimeState.Stopped, (await runtime.ReconcileStoppedAsync()).State);
+        Assert.Equal(["quiesce:Teardown"], events);
+        Assert.Equal(LocalAiRuntimeState.Healthy, (await runtime.EnsureStartedAsync()).State);
+        events.Clear();
+        Assert.Equal(LocalAiRuntimeState.Healthy, (await runtime.ReconcileStoppedAsync()).State);
+        Assert.Empty(events);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ShutdownWithdrawsBeforeStopping(bool fail)
+    {
+        using var temp = new TempDirectory("local-ai-shutdown-");
+        var paths = await PrepareInstallAsync(temp);
+        var events = new SynchronizedEventLog();
+        var platform = new FakePlatform();
+        var lifecycle = new FakeLifecycle(events);
+        var runtime = CreateRuntime(paths, new FakeProcessHost(platform, events, selectedPort: 28_767),
+            platform, new FakeClient(events), lifecycle);
+        Assert.Equal(LocalAiRuntimeState.Healthy, (await runtime.EnsureStartedAsync()).State);
+        lifecycle.FailQuiesce = fail;
+        events.Clear();
+        await runtime.DisposeAsync();
+        Assert.Equal(["quiesce:Teardown", "stop"], events);
+        Assert.True(lifecycle.AutomaticRecoveryEnabled);
+    }
+
+    [Fact]
+    public async Task HealthyStartCompletesPublicationInsideGateBeforeQueuedStop()
+    {
+        using var temp = new TempDirectory("local-ai-publication-gate-");
+        var paths = await PrepareInstallAsync(temp);
+        var events = new SynchronizedEventLog();
+        var platform = new FakePlatform();
+        var lifecycle = new FakeLifecycle(events);
+        await using var runtime = CreateRuntime(paths,
+            new FakeProcessHost(platform, events, selectedPort: 28_767), platform, new FakeClient(events), lifecycle);
+        await runtime.EnsureStartedAsync();
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        lifecycle.CompleteStartHandler = async ct =>
+        {
+            entered.SetResult();
+            await release.Task.WaitAsync(ct);
+            return LocalAiEndpointLifecycleResult.Ok();
+        };
+        var usingHealthy = runtime.EnsureStartedAsync();
+        await entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        var stopping = runtime.StopAsync();
+        Assert.False(stopping.IsCompleted);
+        Assert.False(lifecycle.AutomaticRecoveryEnabled);
+        release.SetResult();
+        Assert.Equal(LocalAiRuntimeState.Healthy, (await usingHealthy).State);
+        Assert.Equal(LocalAiRuntimeState.Stopped, (await stopping).State);
+        Assert.False(lifecycle.AutomaticRecoveryEnabled);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task FailedStartAdmissionPreservesPreviouslyRunningIntent(bool restart)
+    {
+        using var temp = new TempDirectory("local-ai-start-admission-");
+        var paths = await PrepareInstallAsync(temp);
+        var events = new SynchronizedEventLog();
+        var platform = new FakePlatform();
+        var lifecycle = new FakeLifecycle(events);
+        await using var runtime = CreateRuntime(paths,
+            new FakeProcessHost(platform, events, selectedPort: 28_767), platform, new FakeClient(events), lifecycle);
+        await runtime.EnsureStartedAsync();
+        lifecycle.PrepareStartHandler = _ => throw new InvalidOperationException("Gateway temporarily offline.");
+        events.Clear();
+        await Assert.ThrowsAsync<InvalidOperationException>(() => restart ? runtime.RestartAsync() : runtime.EnsureStartedAsync());
+        Assert.True(lifecycle.AutomaticRecoveryEnabled);
+        Assert.Equal(LocalAiRuntimeState.Healthy, runtime.Snapshot.State);
+        Assert.Empty(events);
+        Assert.Equal(LocalAiRuntimeState.Healthy, (await runtime.ReconcileStoppedAsync()).State);
+        Assert.Empty(events);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task FailedStartCompletionRequiresExplicitRetryRatherThanRefresh(bool restart)
+    {
+        using var temp = new TempDirectory("local-ai-port-");
+        var paths = await PrepareInstallAsync(temp);
+        var events = new SynchronizedEventLog();
+        var platform = new FakePlatform();
+        var lifecycle = new FakeLifecycle(events);
+        await using var runtime = CreateRuntime(paths,
+            new FakeProcessHost(platform, events, selectedPort: 28_767), platform, new FakeClient(events), lifecycle);
+        await runtime.EnsureStartedAsync();
+        lifecycle.CompleteStartHandler = _ => Task.FromResult(
+            LocalAiEndpointLifecycleResult.Failed("Publication outcome needs reconciliation."));
+
+        var failed = await (restart ? runtime.RestartAsync() : runtime.EnsureStartedAsync());
+        Assert.Equal(LocalAiRuntimeState.Failed, failed.State);
+        Assert.True(failed.GatewayRouteRequiresResolution);
+        Assert.False(lifecycle.AutomaticRecoveryEnabled);
+        events.Clear();
+        Assert.Equal(failed, await runtime.RefreshAsync());
+        Assert.Equal(failed, await runtime.ResumeAsync());
+        Assert.Empty(events);
+
+        lifecycle.CompleteStartHandler = null;
+        Assert.Equal(LocalAiRuntimeState.Healthy, (await runtime.EnsureStartedAsync()).State);
+        Assert.True(lifecycle.AutomaticRecoveryEnabled);
+    }
+
+    [Theory]
+    [InlineData("start-publication")]
+    [InlineData("restart-publication")]
+    [InlineData("restart-withdrawal")]
+    [InlineData("restart-cancellation")]
+    [InlineData("restart-exception")]
+    public async Task AdmittedStartFailureWithRetainedListenerCannotRepublishThroughRefresh(string failure)
+    {
+        using var temp = new TempDirectory("local-ai-failed-intent-");
+        var paths = await PrepareInstallAsync(temp);
+        var events = new SynchronizedEventLog();
+        var platform = new FakePlatform();
+        var lifecycle = new FakeLifecycle(events);
+        var host = new FakeProcessHost(platform, events, selectedPort: 28_767);
+        await using var runtime = CreateRuntime(paths, host, platform, new FakeClient(events), lifecycle);
+        if (failure != "start-publication")
+            Assert.Equal(LocalAiRuntimeState.Healthy, (await runtime.EnsureStartedAsync()).State);
+        if (failure.EndsWith("publication", StringComparison.Ordinal))
+            lifecycle.PublishHandler = (_, _) =>
+            {
+                lifecycle.FailQuiesce = true;
+                return Task.FromResult(LocalAiEndpointLifecycleResult.Failed("Publication failed."));
+            };
+        else if (failure == "restart-withdrawal")
+            lifecycle.FailQuiesce = true;
+        else
+            lifecycle.CompleteStartHandler = _ =>
+            {
+                lifecycle.FailQuiesce = true;
+                return Task.FromException<LocalAiEndpointLifecycleResult>(
+                    failure == "restart-cancellation" ? new OperationCanceledException() : new IOException("Completion failed."));
+            };
+
+        if (failure is "restart-cancellation" or "restart-exception")
+            await Assert.ThrowsAnyAsync<Exception>(() => runtime.RestartAsync());
+        else
+            Assert.Equal(LocalAiRuntimeState.Failed,
+                (await (failure == "start-publication" ? runtime.EnsureStartedAsync() : runtime.RestartAsync())).State);
+        Assert.False(host.Process!.HasExited);
+        Assert.False(lifecycle.AutomaticRecoveryEnabled);
+        Assert.True(runtime.Snapshot.GatewayRouteRequiresResolution);
+        lifecycle.FailQuiesce = false;
+        lifecycle.PublishHandler = null;
+        lifecycle.CompleteStartHandler = null;
+        var failed = runtime.Snapshot;
+        events.Clear();
+        Assert.Equal(failed, await runtime.RefreshAsync());
+        Assert.Equal(failed, await runtime.ResumeAsync());
+        Assert.Empty(events);
+        Assert.False(lifecycle.AutomaticRecoveryEnabled);
+        var teardown = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        lifecycle.QuiesceHandler = (_, reason, _) =>
+        {
+            if (reason == LocalAiQuiesceReason.Teardown) teardown.TrySetResult();
+            return Task.FromResult(LocalAiEndpointLifecycleResult.Ok());
+        };
+        var process = host.Process!;
+        process.MarkExited();
+        platform.Listeners.Clear();
+        host.LastExitCallback!(new LocalAiManagedProcessExit(process.ProcessId, process.StartedAtUtc, 1));
+        await teardown.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        await runtime.RefreshAsync();
+        Assert.DoesNotContain("start", events);
+        Assert.DoesNotContain(events, item => item.StartsWith("publish:", StringComparison.Ordinal));
+        Assert.False(lifecycle.AutomaticRecoveryEnabled);
+        Assert.Equal(LocalAiRuntimeState.Stopped, (await runtime.ReconcileStoppedAsync()).State);
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task ExistingNativeStartCompletionInterruptionRetainsDisabledReceiptAndExplicitRecovery(bool cancel)
+    {
+        using var temp = new TempDirectory("local-ai-completion-interrupted-");
+        var paths = await PrepareInstallAsync(temp);
+        var store = new LocalAiNativeBindingStore(paths);
+        store.Save(new("native", "endpoint", "identity", "llamacpp/model", "cloud/model", "hash", false));
+        var events = new SynchronizedEventLog();
+        var platform = new FakePlatform();
+        var lifecycle = new FakeLifecycle(events) { BindingStore = store };
+        var host = new FakeProcessHost(platform, events, selectedPort: 28_767);
+        await using var runtime = CreateRuntime(paths, host, platform, new FakeClient(events), lifecycle);
+        Assert.Equal(LocalAiRuntimeState.Healthy, (await runtime.EnsureStartedAsync()).State);
+        using var cancellation = new CancellationTokenSource();
+        lifecycle.CompleteStartHandler = ct =>
+        {
+            Assert.False(store.Load()!.AutomaticRecoveryEnabled);
+            if (cancel)
+            {
+                cancellation.Cancel();
+                ct.ThrowIfCancellationRequested();
+            }
+            throw new IOException("Completion connection dropped.");
+        };
+        await Assert.ThrowsAnyAsync<Exception>(() => runtime.EnsureStartedAsync(cancellation.Token));
+        Assert.Equal(LocalAiRuntimeState.Failed, runtime.Snapshot.State);
+        Assert.Equal(LocalAiOwnership.CompanionManaged, runtime.Snapshot.Ownership);
+        Assert.True(runtime.Snapshot.GatewayRouteRequiresResolution);
+        Assert.False(host.Process!.HasExited);
+        Assert.False(store.Load()!.AutomaticRecoveryEnabled);
+        var failed = runtime.Snapshot;
+        events.Clear();
+        Assert.Equal(failed, await runtime.RefreshAsync());
+        Assert.Equal(failed, await runtime.ResumeAsync());
+        Assert.Empty(events);
+        lifecycle.CompleteStartHandler = null;
+        Assert.Equal(LocalAiRuntimeState.Healthy, (await runtime.EnsureStartedAsync()).State);
+        Assert.True(store.Load()!.AutomaticRecoveryEnabled);
+    }
+
+    [Fact]
+    public async Task AdmittedStartWithUnreadyRetainedListenerSettlesAsRetryableFailure()
+    {
+        using var temp = new TempDirectory("local-ai-unready-intent-");
+        var paths = await PrepareInstallAsync(temp);
+        var events = new SynchronizedEventLog();
+        var platform = new FakePlatform();
+        var lifecycle = new FakeLifecycle(events);
+        var client = new FakeClient(events, (path, count) => count == 2
+            ? new(false, LocalAiModelAvailabilityState.Unknown, null, "Temporarily unready.")
+            : new(true, LocalAiModelAvailabilityState.Verified, path, null));
+        await using var runtime = CreateRuntime(paths,
+            new FakeProcessHost(platform, events, selectedPort: 28_767), platform, client, lifecycle);
+        Assert.Equal(LocalAiRuntimeState.Healthy, (await runtime.EnsureStartedAsync()).State);
+        var failed = await runtime.EnsureStartedAsync();
+        Assert.Equal(LocalAiRuntimeState.Failed, failed.State);
+        Assert.Equal(runtime.Snapshot, failed);
+        Assert.True(failed.GatewayRouteRequiresResolution);
+        Assert.False(lifecycle.AutomaticRecoveryEnabled);
+        events.Clear();
+        Assert.Equal(failed, await runtime.RefreshAsync());
+        Assert.Empty(events);
+        Assert.Equal(LocalAiRuntimeState.Healthy, (await runtime.EnsureStartedAsync()).State);
+        Assert.True(lifecycle.AutomaticRecoveryEnabled);
+    }
+
+    [Fact]
+    public async Task CleanNotInstalledStartStillAllowsReadOnlyRefreshAfterInstallation()
+    {
+        using var temp = new TempDirectory("local-ai-clean-failure-");
+        var paths = new LocalAiPaths(temp.Path);
+        var events = new SynchronizedEventLog();
+        var platform = new FakePlatform();
+        var lifecycle = new FakeLifecycle(events);
+        await using var runtime = CreateRuntime(paths,
+            new FakeProcessHost(platform, events, selectedPort: 28_767), platform, new FakeClient(events), lifecycle);
+        Assert.Equal(LocalAiRuntimeState.NotInstalled, (await runtime.EnsureStartedAsync()).State);
+        await PrepareInstallAsync(temp);
+        events.Clear();
+        Assert.Equal(LocalAiRuntimeState.Stopped, (await runtime.RefreshAsync()).State);
+        Assert.Equal(LocalAiRuntimeState.Stopped, (await runtime.ResumeAsync()).State);
+        Assert.Empty(events);
+        Assert.False(lifecycle.AutomaticRecoveryEnabled);
+    }
+
+    [Fact]
+    public async Task QueuedCrashAfterIncompleteStartDoesNotScheduleRecovery()
+    {
+        using var temp = new TempDirectory("local-ai-queued-crash-");
+        var paths = await PrepareInstallAsync(temp);
+        var manifest = await File.ReadAllTextAsync(paths.ManifestPath);
+        var events = new SynchronizedEventLog();
+        var delayCalls = 0;
+        var platform = new FakePlatform
+        {
+            AfterDelay = () =>
+            {
+                Interlocked.Increment(ref delayCalls);
+                File.WriteAllText(paths.ManifestPath, manifest);
+            },
+        };
+        var lifecycle = new FakeLifecycle(events);
+        var host = new FakeProcessHost(platform, events, selectedPort: 28_767);
+        await using var runtime = CreateRuntime(paths, host, platform, new FakeClient(events), lifecycle);
+        await runtime.EnsureStartedAsync();
+        var crashObserved = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        runtime.StateChanged += (_, args) =>
+        {
+            if (args.Snapshot.State == LocalAiRuntimeState.Failed &&
+                args.Snapshot.Ownership == LocalAiOwnership.None)
+                crashObserved.TrySetResult();
+        };
+        lifecycle.PrepareStartHandler = _ =>
+        {
+            File.Delete(paths.ManifestPath);
+            var process = host.Process!;
+            process.MarkExited();
+            platform.Listeners.Clear();
+            host.LastExitCallback!(new LocalAiManagedProcessExit(process.ProcessId, process.StartedAtUtc, 1));
+            return Task.CompletedTask;
+        };
+        events.Clear();
+        Assert.Equal(LocalAiRuntimeState.NotInstalled, (await runtime.EnsureStartedAsync()).State);
+        await crashObserved.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        await runtime.DisposeAsync();
+        Assert.Equal(0, delayCalls);
+        Assert.DoesNotContain("start", events);
+        Assert.DoesNotContain(events, item => item.StartsWith("publish:", StringComparison.Ordinal));
+        Assert.False(lifecycle.AutomaticRecoveryEnabled);
+    }
+
     private static LlamaServerRuntimeService CreateRuntime(
         LocalAiPaths paths,
         FakeProcessHost host,
@@ -3008,11 +3351,22 @@ public sealed class LocalAiPortLifecycleTests
 
     private sealed class FakeLifecycle(SynchronizedEventLog events) : ILocalAiEndpointLifecycle
     {
+        public LocalAiNativeBindingStore? BindingStore { get; init; }
+        public Func<CancellationToken, Task>? PrepareStartHandler { get; set; }
+        public Task PrepareStartAsync(LocalAiResolvedInstall install, CancellationToken ct) =>
+            PrepareStartHandler?.Invoke(ct) ?? Task.CompletedTask;
+        public Func<CancellationToken, Task<LocalAiEndpointLifecycleResult>>? CompleteStartHandler { get; set; }
+        public Task<LocalAiEndpointLifecycleResult> CompleteStartAsync(LocalAiResolvedInstall install, CancellationToken ct) =>
+            CompleteStartHandler?.Invoke(ct) ?? Task.FromResult(LocalAiEndpointLifecycleResult.Ok());
+        public bool AutomaticRecoveryEnabled { get; private set; } = true;
         public List<bool> RecoveryIntents { get; } = [];
         public Task SetAutomaticRecoveryEnabledAsync(bool enabled, CancellationToken cancellationToken = default)
         {
             cancellationToken.ThrowIfCancellationRequested();
             RecoveryIntents.Add(enabled);
+            AutomaticRecoveryEnabled = enabled;
+            if (BindingStore?.Load() is { } binding)
+                BindingStore.Save(binding with { AutomaticRecoveryEnabled = enabled });
             return Task.CompletedTask;
         }
 
