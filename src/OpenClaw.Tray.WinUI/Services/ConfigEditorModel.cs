@@ -202,6 +202,9 @@ internal static class ConfigEditorModel
             if (edited.Contains(path))
                 return loadedSentinel ? path : null;
 
+            if (HasAncestorEdit(edited, path) && !loadedSentinel && IsCredentialPath(path))
+                return path;
+
             // Object fields and id-keyed array fields can be left out of the
             // patch. Gateway keeps the stored secret for an absent key. An array
             // whose entries lack stable ids is replaced wholesale, so an indexed
@@ -274,6 +277,12 @@ internal static class ConfigEditorModel
                     ShouldOmitUntouchedSentinel(childPath))
                 {
                     if (!IsCredentialPath(childPath) &&
+                        !LoadedStringIsRedactionSentinel(baseRoot, childPath))
+                    {
+                        continue;
+                    }
+
+                    if (HasAncestorEdit(edited, childPath) &&
                         !LoadedStringIsRedactionSentinel(baseRoot, childPath))
                     {
                         continue;
@@ -411,6 +420,17 @@ internal static class ConfigEditorModel
             if (path.StartsWith(arrayPath + "[", StringComparison.OrdinalIgnoreCase))
                 return true;
             if (IsAncestorEdit(path, arrayPath))
+                return true;
+        }
+
+        return false;
+    }
+
+    private static bool HasAncestorEdit(HashSet<string> edited, string path)
+    {
+        foreach (var editedPath in edited)
+        {
+            if (IsAncestorEdit(editedPath, path))
                 return true;
         }
 

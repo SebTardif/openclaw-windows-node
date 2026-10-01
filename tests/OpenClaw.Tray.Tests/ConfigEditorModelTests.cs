@@ -394,6 +394,22 @@ public class ConfigEditorModelTests
     }
 
     [Fact]
+    public void ApplyChanges_ParentObjectEdit_RefusesNewlyEnteredCredentialMask()
+    {
+        using var stored = JsonDocument.Parse("""{"metadata":{"token":"before"}}""");
+        using var staged = JsonDocument.Parse("""{"token":"***"}""");
+        var updated = ConfigEditorModel.ApplyChanges(
+            stored.RootElement,
+            new Dictionary<string, object?> { ["metadata"] = staged.RootElement.Clone() });
+        var edited = new[] { "metadata" };
+        var blocked = ConfigEditorModel.FindUneditedRedactionSentinel(updated, edited, stored.RootElement);
+        var sent = ConfigEditorModel.OmitUntouchedRedactionSentinels(updated, edited, stored.RootElement);
+
+        Assert.Equal("metadata.token", blocked);
+        Assert.Equal("***", sent.GetProperty("metadata").GetProperty("token").GetString());
+    }
+
+    [Fact]
     public void FindUneditedRedactionSentinel_AllowsLiteralMaskInANonSecretField()
     {
         using var document = JsonDocument.Parse("""
