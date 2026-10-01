@@ -906,27 +906,85 @@ public class ConfigEditorModelTests
             editor.RootElement, edited, stored.RootElement);
         var sent = ConfigEditorModel.OmitUntouchedRedactionSentinels(
             editor.RootElement, edited, stored.RootElement);
-        Assert.Null(blocked);
-        Assert.False(sent.GetProperty("accounts")[0].TryGetProperty("token", out _));
-        Assert.False(sent.GetProperty("accounts")[1].TryGetProperty("token", out _));
+        Assert.Equal("accounts[0].token", blocked);
+        Assert.Equal("<redacted>", sent.GetProperty("accounts")[0].GetProperty("token").GetString());
         Assert.Equal("renamed", sent.GetProperty("accounts")[1].GetProperty("label").GetString());
+    }
 
-        var accepted = GatewayArrayPatch.Apply(stored.RootElement, sent);
-        Assert.Null(accepted.Error);
-        var mergedAccounts = accepted.Merged["accounts"]!.AsArray();
-        var mergedA = mergedAccounts.Single(item => item!["id"]!.GetValue<string>() == "acct-a")!;
-        var mergedB = mergedAccounts.Single(item => item!["id"]!.GetValue<string>() == "acct-b")!;
-        Assert.Equal("secret-a", mergedA["token"]!.GetValue<string>());
-        Assert.Equal("renamed", mergedA["label"]!.GetValue<string>());
-        Assert.Equal("secret-b", mergedB["token"]!.GetValue<string>());
-        Assert.Equal("two", mergedB["label"]!.GetValue<string>());
+    [Fact]
+    public void IdKeyedArray_ChangedTokenToMask_IsRefusedAndKeepsTheDraft()
+    {
+        using var stored = JsonDocument.Parse("""
+        { "accounts": [ { "id": "desk", "token": "before" } ] }
+        """);
+        using var editor = JsonDocument.Parse("""
+        { "accounts": [ { "id": "desk", "token": "***" } ] }
+        """);
+        var edited = new[] { "accounts" };
+        var blocked = ConfigEditorModel.FindUneditedRedactionSentinel(
+            editor.RootElement, edited, stored.RootElement);
+        var sent = ConfigEditorModel.OmitUntouchedRedactionSentinels(
+            editor.RootElement, edited, stored.RootElement);
+
+        Assert.Equal("accounts[0].token", blocked);
+        Assert.Equal("***", sent.GetProperty("accounts")[0].GetProperty("token").GetString());
+    }
+
+    [Fact]
+    public void DottedProviderKey_OmitsUnchangedMaskWithoutSplittingTheKey()
+    {
+        using var stored = JsonDocument.Parse("""
+        { "models": { "providers": { "custom.openai": { "apiKey": "***", "url": "https://old.example" } } } }
+        """);
+        using var editor = JsonDocument.Parse("""
+        { "models": { "providers": { "custom.openai": { "apiKey": "***", "url": "https://new.example" } } } }
+        """);
+        var edited = new[] { "models.providers" };
+        var blocked = ConfigEditorModel.FindUneditedRedactionSentinel(
+            editor.RootElement, edited, stored.RootElement);
+        var sent = ConfigEditorModel.OmitUntouchedRedactionSentinels(
+            editor.RootElement, edited, stored.RootElement);
+
+        Assert.Null(blocked);
+        var provider = sent.GetProperty("models").GetProperty("providers").GetProperty("custom.openai");
+        Assert.False(provider.TryGetProperty("apiKey", out _));
+        Assert.Equal("https://new.example", provider.GetProperty("url").GetString());
+    }
+
+    [Fact]
+    public void NestedArray_ReorderedOuterIds_DoNotTreatTheOtherRowsArrayAsIdKeyed()
+    {
+        using var stored = JsonDocument.Parse("""
+        {
+          "groups": [
+            { "id": "row-a", "accounts": [ { "id": "acct-1", "token": "secret-a" } ] },
+            { "id": "row-b", "accounts": [ { "token": "***" } ] }
+          ]
+        }
+        """);
+        using var editor = JsonDocument.Parse("""
+        {
+          "groups": [
+            { "id": "row-b", "accounts": [ { "token": "***" } ] },
+            { "id": "row-a", "accounts": [ { "id": "acct-1", "token": "<redacted>" } ] }
+          ]
+        }
+        """);
+        var edited = new[] { "groups" };
+        var blocked = ConfigEditorModel.FindUneditedRedactionSentinel(
+            editor.RootElement, edited, stored.RootElement);
+        var sent = ConfigEditorModel.OmitUntouchedRedactionSentinels(
+            editor.RootElement, edited, stored.RootElement);
+
+        Assert.Equal("groups[0].accounts[0].token", blocked);
+        Assert.Equal("***", sent.GetProperty("groups")[0].GetProperty("accounts")[0].GetProperty("token").GetString());
     }
 
     [Fact]
     public void IdKeyedArray_NewRowWithMask_IsRefusedAndKeepsTheDraft()
     {
         using var stored = JsonDocument.Parse("""
-        { "accounts": [ { "id": "acct-1", "token": "secret-a", "label": "desk" } ] }
+        { "accounts": [ { "id": "acct-1", "token": "<redacted>", "label": "desk" } ] }
         """);
         using var editor = JsonDocument.Parse("""
         {
