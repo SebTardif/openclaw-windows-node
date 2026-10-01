@@ -454,9 +454,7 @@ internal static class ConfigEditorModel
 
     private static bool SameSentinel(JsonElement loaded, string? submitted) =>
         loaded.ValueKind == JsonValueKind.String &&
-        ChannelConfigPatchBuilder.IsRedactionSentinel(loaded.GetString()) &&
-        ChannelConfigPatchBuilder.IsRedactionSentinel(submitted) &&
-        string.Equals(loaded.GetString()?.Trim(), submitted?.Trim(), StringComparison.OrdinalIgnoreCase);
+        string.Equals(loaded.GetString(), submitted, StringComparison.Ordinal);
 
     private static bool UnchangedLoadedSentinel(JsonElement root, string path, string submitted)
     {

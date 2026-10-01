@@ -426,6 +426,59 @@ public class ConfigEditorModelTests
     }
 
     [Fact]
+    public void ApplyChanges_ParentObjectEdit_KeepsSpacingAndCaseAroundALoadedMask()
+    {
+        using var spacedStored = JsonDocument.Parse("""{"metadata":{"label":"***"}}""");
+        using var spacedStaged = JsonDocument.Parse("""{"label":" *** "}""");
+        var spacedUpdated = ConfigEditorModel.ApplyChanges(
+            spacedStored.RootElement,
+            new Dictionary<string, object?> { ["metadata"] = spacedStaged.RootElement.Clone() });
+        var edited = new[] { "metadata" };
+        var spacedBlocked = ConfigEditorModel.FindUneditedRedactionSentinel(
+            spacedUpdated,
+            edited,
+            spacedStored.RootElement);
+        var spacedSent = ConfigEditorModel.OmitUntouchedRedactionSentinels(
+            spacedUpdated,
+            edited,
+            spacedStored.RootElement);
+        Assert.Null(spacedBlocked);
+        Assert.Equal(" *** ", spacedSent.GetProperty("metadata").GetProperty("label").GetString());
+
+        using var caseStored = JsonDocument.Parse("""{"metadata":{"label":"[REDACTED]"}}""");
+        using var caseStaged = JsonDocument.Parse("""{"label":"[redacted]"}""");
+        var caseUpdated = ConfigEditorModel.ApplyChanges(
+            caseStored.RootElement,
+            new Dictionary<string, object?> { ["metadata"] = caseStaged.RootElement.Clone() });
+        var caseBlocked = ConfigEditorModel.FindUneditedRedactionSentinel(
+            caseUpdated,
+            edited,
+            caseStored.RootElement);
+        var caseSent = ConfigEditorModel.OmitUntouchedRedactionSentinels(
+            caseUpdated,
+            edited,
+            caseStored.RootElement);
+        Assert.Null(caseBlocked);
+        Assert.Equal("[redacted]", caseSent.GetProperty("metadata").GetProperty("label").GetString());
+
+        using var tokenStored = JsonDocument.Parse("""{"metadata":{"token":"***"}}""");
+        using var tokenStaged = JsonDocument.Parse("""{"token":" *** "}""");
+        var tokenUpdated = ConfigEditorModel.ApplyChanges(
+            tokenStored.RootElement,
+            new Dictionary<string, object?> { ["metadata"] = tokenStaged.RootElement.Clone() });
+        var tokenBlocked = ConfigEditorModel.FindUneditedRedactionSentinel(
+            tokenUpdated,
+            edited,
+            tokenStored.RootElement);
+        var tokenSent = ConfigEditorModel.OmitUntouchedRedactionSentinels(
+            tokenUpdated,
+            edited,
+            tokenStored.RootElement);
+        Assert.Equal("metadata.token", tokenBlocked);
+        Assert.Equal(" *** ", tokenSent.GetProperty("metadata").GetProperty("token").GetString());
+    }
+
+    [Fact]
     public void ApplyChanges_ParentObjectEdit_RefusesChangedCredentialMask()
     {
         using var stored = JsonDocument.Parse("""{"metadata":{"token":"***"}}""");
