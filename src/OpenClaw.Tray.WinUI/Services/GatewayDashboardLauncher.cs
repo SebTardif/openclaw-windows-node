@@ -7,7 +7,7 @@ namespace OpenClawTray.Services;
 
 /// <summary>Uses the normal Dashboard credential path without setup completion authority.</summary>
 internal sealed class GatewayDashboardLauncher(
-    Func<bool> ensureTunnel,
+    Func<Task<bool>> ensureTunnel,
     Func<InteractiveGatewayCredential?> resolveCredential,
     Func<string, Task<bool>> launchBrowser,
     Action reportFailure,
@@ -18,7 +18,7 @@ internal sealed class GatewayDashboardLauncher(
     {
         try
         {
-            if (!ensureTunnel())
+            if (!await ensureTunnel())
                 throw new InvalidOperationException("The Gateway tunnel is unavailable.");
             var credential = resolveCredential()
                 ?? throw new InvalidOperationException("The Gateway credential is unavailable.");

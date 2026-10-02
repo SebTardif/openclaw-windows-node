@@ -100,6 +100,7 @@
     <Compile Include="..\..\src\OpenClaw.Tray.WinUI\Services\SetupDashboardHandoffStore.cs" Link="Services\SetupDashboardHandoffStore.cs" />
     <Compile Include="..\..\src\OpenClaw.Tray.WinUI\Services\SetupDashboardLiveFacts.cs" Link="Services\SetupDashboardLiveFacts.cs" />
     <Compile Include="..\..\src\OpenClaw.Tray.WinUI\Services\GatewayDashboardLauncher.cs" Link="Services\GatewayDashboardLauncher.cs" />
+    <Compile Include="..\..\src\OpenClaw.Tray.WinUI\Services\DashboardBrowserShell.cs" Link="Services\DashboardBrowserShell.cs" />
     <Compile Include="..\..\src\OpenClaw.SetupEngine\GatewayAiSetupCompletion.cs" Link="GatewayAiSetupCompletion.cs" />
     <Compile Include="..\..\src\OpenClaw.SetupEngine\SetupNativeCompletion.cs" Link="SetupNativeCompletion.cs" />
     <Compile Include="..\..\src\OpenClaw.Tray.WinUI\Services\SetupNativeHandoffLauncher.cs" Link="Services\SetupNativeHandoffLauncher.cs" />

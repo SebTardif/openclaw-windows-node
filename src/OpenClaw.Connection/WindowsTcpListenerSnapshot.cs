@@ -90,7 +90,7 @@ public static class WindowsTcpListenerSnapshot
         int remotePort,
         int processId,
         int forwardPort,
-        int? forwardProcessId,
+        int? browserProcessId,
         IReadOnlySet<string> seen)
     {
         if (!IsEstablishedLoopbackForwardUse(
@@ -104,13 +104,11 @@ public static class WindowsTcpListenerSnapshot
             return false;
         }
 
-        if (localPort == forwardPort &&
-            forwardProcessId is int owner &&
-            owner > 0 &&
-            processId != owner)
-        {
+        // An accepted SSH socket is not the browser that opened the dashboard.
+        if (localPort == forwardPort || remotePort != forwardPort)
             return false;
-        }
+        if (browserProcessId is not int browser || browser <= 0 || processId != browser)
+            return false;
 
         var key = EstablishedForwardKey(localAddress, localPort, remoteAddress, remotePort, processId);
         return !seen.Contains(key);
@@ -141,7 +139,7 @@ public static class WindowsTcpListenerSnapshot
 
     public static bool HasUnseenEstablishedForwardUse(
         int port,
-        int? forwardProcessId,
+        int? browserProcessId,
         IReadOnlySet<string> seen)
     {
         if (!OperatingSystem.IsWindows() || port is < 1 or > 65535 || seen is null)
@@ -159,7 +157,7 @@ public static class WindowsTcpListenerSnapshot
                     row.RemotePort,
                     row.ProcessId,
                     port,
-                    forwardProcessId,
+                    browserProcessId,
                     seen))
             {
                 found = true;

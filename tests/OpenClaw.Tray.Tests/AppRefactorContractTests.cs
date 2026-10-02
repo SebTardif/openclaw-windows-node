@@ -472,33 +472,51 @@ public sealed class AppRefactorContractTests
     public void Dashboard_SurfacesSshTunnelConfigurationFailure()
     {
         var source = ReadAppSources();
-        var method = ExtractMethod(source, "OpenDashboardAsync");
+        var method = ExtractMethod(source, "OpenDashboard");
+        var prepare = ExtractMethod(source, "PrepareDashboardLaunchAsync");
+        var launch = ExtractMethod(source, "LaunchDashboardBrowserAsync");
+        var launcher = File.ReadAllText(Path.Combine(
+            TestRepositoryPaths.GetRepositoryRoot(),
+            "src",
+            "OpenClaw.Tray.WinUI",
+            "Services",
+            "GatewayDashboardLauncher.cs"));
 
-        Assert.Contains("var sshGate = await EnsureDashboardSshForwardOwnedAsync(capturedTunnel);", method);
-        Assert.Contains("if (!sshGate.Allowed)", method);
-        Assert.Contains("_toastService?.ShowToast", method);
-        Assert.Contains("Check SSH tunnel settings and logs.", method);
-        Assert.Contains("DashboardBrowserHandoff.UrlUsesCapturedForward(url, after)", method);
-        Assert.Contains("TryEnterBrowserHandoff(generation, sshGate.LocalPort)", method);
-        Assert.Contains("HasDeferredStop", method);
-        Assert.Contains("TryReleaseBrowserHandoffUnlessDeferred(", method);
-        Assert.Contains("WatchBrowserHandoffConsumptionAsync(", method);
-        Assert.Contains("ExitBrowserHandoff()", method);
-        Assert.DoesNotContain("_gatewayRegistry?.GetActive()", method);
+        Assert.Contains("new GatewayDashboardLauncher(", method);
+        Assert.Contains("ShowDashboardLaunchFailureAsync", method);
+        Assert.Contains("Dismiss(GatewayDashboardLauncher.FailureNotificationId)", method);
+        Assert.Contains("await launcher.OpenAsync(path)", method);
+        Assert.DoesNotContain("GatewayDashboardUrlBuilder.Build", method);
+        Assert.DoesNotContain("Process.Start", method);
+        Assert.DoesNotContain("Failed to open dashboard", method);
+        Assert.Contains("if (!sshGate.Allowed)", prepare);
+        Assert.Contains("DashboardBrowserHandoff.SameBinding(", prepare);
+        Assert.DoesNotContain("GatewayDashboardUrlBuilder.Build", prepare);
+        Assert.Contains("DashboardBrowserHandoff.UrlUsesCapturedForward(url, prepared.Snapshot)", launch);
+        Assert.Contains("TryEnterBrowserHandoff(owned.Generation, owned.LocalPort, owned.ProcessId)", launch);
+        Assert.Contains("HasDeferredStop", launch);
+        Assert.Contains("NoteBrowserHandoffClient(", launch);
+        Assert.Contains("TryReleaseBrowserHandoffUnlessDeferred(", launch);
+        Assert.Contains("WatchBrowserHandoffConsumptionAsync(", launch);
+        Assert.Contains("ExitBrowserHandoff()", launch);
+        Assert.Contains("The dashboard did not confirm a browser connection. The SSH forward hold ended.", launch);
+        Assert.DoesNotContain("ex.Message", launch);
+        Assert.DoesNotContain("Process.Start", launch);
+        Assert.DoesNotContain("ex.Message", launcher);
         AssertInOrder(
-            method,
-            "TryCaptureDashboardGatewaySnapshot(",
-            "await EnsureDashboardSshForwardOwnedAsync(capturedTunnel)",
-            "DashboardBrowserHandoff.SameBinding(",
-            "GatewayDashboardUrlBuilder.Build(",
-            "UrlUsesCapturedForward(url, after)",
-            "TryEnterBrowserHandoff(generation, sshGate.LocalPort)",
+            launch,
+            "UrlUsesCapturedForward(url, prepared.Snapshot)",
+            "TryEnterBrowserHandoff(owned.Generation, owned.LocalPort, owned.ProcessId)",
             "HasDeferredStop",
-            "Process.Start(",
+            "DashboardBrowserShell.TryOpen",
+            "NoteBrowserHandoffClient(",
             "TryReleaseBrowserHandoffUnlessDeferred(",
-            "WatchBrowserHandoffConsumptionAsync(");
-        Assert.DoesNotContain("EnsureStarted(", method);
-        Assert.DoesNotContain("DashboardUrlUsesOwnedForward(", method);
+            "WatchBrowserHandoffConsumptionAsync(",
+            "ExitBrowserHandoff()");
+        AssertInOrder(
+            launcher,
+            "await ensureTunnel()",
+            "GatewayDashboardUrlBuilder.Build(");
     }
 
     [Fact]
@@ -509,17 +527,20 @@ public sealed class AppRefactorContractTests
 
         Assert.Contains("if (!_settings.UseSshTunnel)", gate);
         Assert.Contains("_sshTunnelService?.Stop()", gate);
-        Assert.Contains("return (true, null, 0);", gate);
+        Assert.Contains("return (true, null, 0, 0);", gate);
         Assert.Contains("EnsureSettingsOwnedForwardReadyAsync(", gate);
-        Assert.Contains("if (!owned)", gate);
-        Assert.Contains("OwnershipGeneration", gate);
+        Assert.Contains("if (!owned.Owned)", gate);
+        Assert.Contains("return (true, owned.Generation, owned.LocalPort, owned.ProcessId);", gate);
+        Assert.DoesNotContain("OwnershipGeneration", gate);
+        Assert.DoesNotContain("CurrentLocalPort", gate);
         Assert.DoesNotContain("GatewayDashboardUrlBuilder.Build(", gate);
         Assert.DoesNotContain("EnsureStarted(", gate);
         AssertInOrder(
             gate,
             "if (!_settings.UseSshTunnel)",
             "EnsureSettingsOwnedForwardReadyAsync(",
-            "if (!owned)");
+            "if (!owned.Owned)",
+            "owned.Generation");
     }
 
     [Fact]

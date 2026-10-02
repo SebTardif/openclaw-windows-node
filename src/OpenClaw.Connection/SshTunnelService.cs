@@ -7,6 +7,15 @@ using System.Net;
 namespace OpenClaw.Connection;
 
 /// <summary>
+/// SSH process that passed listener ownership for one dashboard launch.
+/// </summary>
+public readonly record struct SettingsOwnedForwardBinding(
+    bool Owned,
+    long Generation,
+    int LocalPort,
+    int ProcessId);
+
+/// <summary>
 /// Manages an SSH local port-forward process for gateway access.
 /// </summary>
 public sealed class SshTunnelService : ISshTunnelManager
@@ -21,7 +30,7 @@ public sealed class SshTunnelService : ISshTunnelManager
     private string? _lastSpec;
     private long _lifecycleGeneration;
     private int _browserHandoffLeases;
-    private int? _handoffForwardProcessId;
+    private int? _handoffBrowserProcessId;
     private HashSet<string>? _handoffSeenConnections;
     private DeferredTunnelStop _deferredStop;
 
@@ -636,7 +645,7 @@ public sealed class SshTunnelService : ISshTunnelManager
     public async Task<string> StartAsync(SshTunnelConfig config, CancellationToken ct) =>
         (await StartOwnedAsync(config, ct).ConfigureAwait(false)).Url;
 
-    public async Task<bool> EnsureSettingsOwnedForwardReadyAsync(
+    public async Task<SettingsOwnedForwardBinding> EnsureSettingsOwnedForwardReadyAsync(
         SshTunnelConfig config,
         CancellationToken cancellationToken)
     {
@@ -690,7 +699,23 @@ public sealed class SshTunnelService : ISshTunnelManager
                     cancellationToken).ConfigureAwait(false);
             }
 
-            return true;
+            lock (_stateLock)
+            {
+                if (generation != _lifecycleGeneration ||
+                    !ReferenceEquals(_process, process) ||
+                    !IsRunningLocked() ||
+                    !Equals(_currentConfig, normalizedConfig) ||
+                    _currentOwner is not (SshTunnelOwner.Settings or SshTunnelOwner.GatewayConnectionManager))
+                {
+                    return default;
+                }
+
+                return new SettingsOwnedForwardBinding(
+                    true,
+                    generation,
+                    normalizedConfig.LocalPort,
+                    processId);
+            }
         }
         catch (Exception ex)
         {
@@ -703,7 +728,7 @@ public sealed class SshTunnelService : ISshTunnelManager
                 if (!stillCurrent)
                 {
                     _logger.Warn($"SSH dashboard forward wait lost ownership: {ex.Message}");
-                    return false;
+                    return default;
                 }
 
                 LastError = ex.Message;
@@ -714,7 +739,7 @@ public sealed class SshTunnelService : ISshTunnelManager
                 StopIfCurrent(process, generation);
 
             _logger.Warn($"SSH dashboard forward is not owned: {ex.Message}");
-            return false;
+            return default;
         }
     }
 
@@ -726,15 +751,17 @@ public sealed class SshTunnelService : ISshTunnelManager
         }
     }
 
-    public bool TryEnterBrowserHandoff(long generation, int localPort)
+    public bool TryEnterBrowserHandoff(long generation, int localPort, int processId = 0)
     {
         lock (_stateLock)
         {
             if (!IsForwardCurrentLocked(generation, localPort))
                 return false;
+            if (processId > 0 && _process?.Id != processId)
+                return false;
 
             _browserHandoffLeases++;
-            _handoffForwardProcessId = _process?.Id;
+            _handoffBrowserProcessId = null;
             _handoffSeenConnections = WindowsTcpListenerSnapshot.TryCollectEstablishedForwardKeys(localPort, out var seen)
                 ? seen
                 : null;
@@ -742,9 +769,21 @@ public sealed class SshTunnelService : ISshTunnelManager
         }
     }
 
+    public void NoteBrowserHandoffClient(int processId)
+    {
+        if (processId <= 0)
+            return;
+
+        lock (_stateLock)
+        {
+            _handoffBrowserProcessId = processId;
+        }
+    }
+
     /// <summary>
-    /// Drops one browser-handoff lease when no stop is waiting.
-    /// A stop that arrived while the lease was held stays deferred and the lease stays.
+    /// Keeps one browser-handoff lease after launch and asks the caller to watch it.
+    /// A stop that arrives before attributable browser use stays deferred.
+    /// Returns false when <paramref name="localPort"/> is not leased.
     /// </summary>
     public bool TryReleaseBrowserHandoffUnlessDeferred(int localPort, out bool watchDeferredStop)
     {
@@ -754,13 +793,9 @@ public sealed class SshTunnelService : ISshTunnelManager
             if (_browserHandoffLeases <= 0 || _currentConfig?.LocalPort != localPort)
                 return false;
 
-            if (_deferredStop != DeferredTunnelStop.None)
-            {
-                watchDeferredStop = true;
-                return true;
-            }
-
-            _browserHandoffLeases--;
+            // Process.Start returns before the browser connects. Keep the lease
+            // until attributable use, including a stop that arrives after launch.
+            watchDeferredStop = true;
             return true;
         }
     }
@@ -785,6 +820,8 @@ public sealed class SshTunnelService : ISshTunnelManager
             {
                 if (_browserHandoffLeases > 0)
                     _browserHandoffLeases--;
+                if (_browserHandoffLeases == 0)
+                    _handoffBrowserProcessId = null;
 
                 if (_browserHandoffLeases != 0 || _deferredStop == DeferredTunnelStop.None)
                     return;
@@ -898,18 +935,21 @@ public sealed class SshTunnelService : ISshTunnelManager
 
     private bool BrowserHandoffHasUnseenForwardUse(int localPort)
     {
-        int? processId;
+        int? browserProcessId;
         IReadOnlySet<string>? seen;
         lock (_stateLock)
         {
-            processId = _handoffForwardProcessId;
             seen = _handoffSeenConnections;
+            browserProcessId = _handoffBrowserProcessId;
         }
 
         if (seen is null)
             return false;
 
-        return WindowsTcpListenerSnapshot.HasUnseenEstablishedForwardUse(localPort, processId, seen);
+        return WindowsTcpListenerSnapshot.HasUnseenEstablishedForwardUse(
+            localPort,
+            browserProcessId,
+            seen);
     }
 
     private bool IsForwardCurrentLocked(long generation, int localPort)

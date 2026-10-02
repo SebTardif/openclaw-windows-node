@@ -8,7 +8,9 @@ public sealed record DashboardGatewayTunnelSnapshot(
     string GatewayUrl,
     string Token,
     bool AppendToken,
-    SshTunnelConfig? Tunnel);
+    SshTunnelConfig? Tunnel,
+    bool IsBootstrapToken = false,
+    string Source = "");
 
 /// <summary>
 /// Binds a dashboard URL to the gateway and SSH destination checked before launch.
