@@ -125,7 +125,7 @@ disconnect, replacement, or close. This cache is not used for authorization.
 | Audited optional onboarding defaults shared by native, WSL and headless setup | `WizardOnboardingPolicy` | authoritative |
 | Optional-tail cancellation acknowledgement and saved-config/authenticated-health gates | `WizardOptionalSetupHandoff` | authoritative |
 | Native terminal TUI onboarding and pre-wizard registry publication | `NativeGatewaySetupHost` / `NativeGatewaySetupService` | closed |
-| Native Gateway credential preflight and retry authorization | `NativeGatewayEndpointSecurity` | authoritative |
+| Native Gateway credential preflight and retry authorization | `NativeGatewayEndpointSecurity` owns the bounded native readiness allowance and sanitized startup-timeout classification; `GatewayConnectionManager` applies that allowance without changing non-native handoff deadlines or authority fences | authoritative |
 | HTTP/dashboard/web-chat credential handoff routing and fresh native inspection | `InteractiveGatewayEndpointAuthorizer`, borrowing the manager-owned runtime | authoritative |
 | Local AI gateway-record ownership and WSL distro binding | `LocalAiGatewayDistroResolver` | authoritative |
 | Local AI provider policy and configuration execution | `LocalAiGatewayProviderCoordinator` owns publication/fallback; `ILocalAiGatewayConfigurationTransport` separates execution, with `WslLocalAiGatewayConfigurationTransport` retaining pinned-distro commands | authoritative |
@@ -158,7 +158,7 @@ disconnect, replacement, or close. This cache is not used for authorization.
 | Gateway dashboard management card | `ConnectionPage` owns the visible card and forwards to the existing `GatewayDashboardLauncher` path; `ChatPage` has no management banner | authoritative |
 | In-flight native chat navigation identity | `SetupNativeChatBinding` holds the exact request reference; `WorkspaceWindow` invalidates it at admitted agent/session navigation intent, before asynchronous creation. `ChatPage` checks identity and cancellation on ready and waiting paths; `SetupNativeHandoffLauncher` fences receipt consumption with the linked timeout | authoritative |
 | Native receipt acquisition classification and restart recovery settlement | `SetupDashboardHandoffStore` distinguishes acquired/busy/invalid/unavailable; `SetupNativeHandoffLauncher` retains recovery on busy/unavailable and clears it only after consumption or definitive rejection | authoritative |
-| Native completion startup readiness | `SetupNativeCompletionVerifier` waits for the manager-owned handshake and joins existing Local AI recovery through `LocalAiGatewayLifecycle`, then reborrows and verifies the exact route; `SetupNativeHandoffLauncher` bounds the entire attempt within the receipt lifetime and does not redisplay settled retry failures on automatic activation | authoritative |
+| Native completion startup readiness | `SetupNativeCompletionTiming` defines finite phase budgets; `SetupNativeCompletionVerifier` enforces both borrows, the existing Local AI recovery join and exact-model proof; `SetupDashboardHandoffStore` keeps five-minute unused admission and persists one non-renewable execution start/deadline under its exclusive lease; `SetupNativeHandoffLauncher` enforces navigation and total execution deadlines and does not redisplay settled retry failures on automatic activation | authoritative |
 | Pre-acquisition restart recovery deletion | `App.OpenNativeSetupCompletion`; deletion is delegated to the receipt outcome owner | closed |
 | Setup startup availability | `WindowManager` supplies app identity availability; `SetupWindow` gates presentation and persisted preference | authoritative |
 | Setup registration outcome and fallback admission | `WindowsStartupTaskRegistration` classifies completed numeric HRESULT; `SetupStartupPolicy` still requires strict task absence for rejected-operation Run-key fallback | authoritative |
@@ -446,6 +446,24 @@ in its host-owned profile; the isolated path leaves the agent's existing
 reload setting intact. Stopping either runtime does not delete its configuration.
 
 ### Isolated listener proof and legacy process ownership
+
+After a successful package start acknowledgement, `IsolatedGatewayRuntime`
+allows up to three minutes, including the start command, for its own start to
+become ready. A late successful acknowledgement retains ten seconds for status
+confirmation, extending the start/status ceiling to at most 190 seconds. This
+allowance remains subordinate to caller deadlines; the outer 210-second connection
+budget also includes preflight, inspection and handshake work. It polls status
+every two seconds without issuing another start.
+`starting` or `unhealthy` with no listener is only a pending observation, never
+credential authority. A listener racing the pending observation permits one fresh
+status recheck, but only `running` plus full port/process attribution can pass.
+Unknown/terminal states, persistently unattributed listeners and failed
+ownership checks fail closed. Cancellation/deadline failure retains the existing
+owned-start rollback rules; pre-existing pending services are not adopted.
+See [native startup contract limitations](ONBOARDING_WIZARD.md#native-startup-and-completion-deadlines)
+for the older package's ambiguous failed-start response, which is not admitted.
+The pending-start fixtures are conditional client-contract tests, not proof that
+the installed package can acknowledge a pending launch.
 
 `IsolatedGatewayRuntime` accepts a running Gateway only after a fresh
 package-qualified `clawctl gateway-service status --json` attributes its

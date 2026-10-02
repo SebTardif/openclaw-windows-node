@@ -23,8 +23,9 @@ separate and does not claim or restore Companion management.
 
 After setup restarts Companion, destination handoff waits for native connection
 startup and any already-admitted Local AI recovery before fresh model verification.
-The attempt is bounded to four and a half minutes, still subject to the original
-five-minute receipt expiry. A failed attempt remains available for explicit Retry,
+An unused receipt must still be acquired within five minutes. First exclusive
+acquisition persists one 13.5-minute execution window for the bounded phases below;
+neither restart nor retry renews it. A failed attempt remains available for explicit Retry,
 but automatic reactivation does not show the same failure dialog again. Successful
 runtime checks alone do not prove that a full, potentially longer chat turn has finished.
 
@@ -422,12 +423,100 @@ Legacy WhatsApp/Telegram receipt destinations retain their numeric mappings and
 channel focus behavior, but are not separate choices on this screen.
 
 Each explicit choice drains the prior AI page, rechecks the same Gateway,
-endpoint, agent, model and main session through a bounded read-only verification,
-then finalizes Windows choices once. Failures stay on the chooser with retry or
+endpoint, agent, model and main session through bounded verification,
+then finalizes Windows choices once. The prior page drain has its own 30-second
+deadline. Fresh proof has a separate six-minute ceiling, allowing the
+native owner's 210-second reconnect budget, the existing 120-second exact-model
+RPC budget and authority-check overhead. Neither deadline runs across finalization
+or destination publication: those retain caller cancellation and their underlying
+operation budgets, without abandoning or automatically replaying mutations.
+Verification does not publish provider configuration or finalize setup, but its
+authorization may start the selected owned Gateway and roll that start back.
+Failures stay on the chooser with retry or
 return-to-AI guidance. **Back to AI setup** is available only inside the error
 message, so changed verification has an actionable recovery without a permanent
 footer escape. Returning invalidates its admission and requires another
 verification. MCP-only/deferred routes do not claim verified AI.
+
+### Native startup and completion deadlines
+
+A reported slow native cold start took about 136 seconds. Conditional on a
+successful package acknowledgement, Companion uses a three-minute startup
+budget, with ten seconds for confirmation after a late acknowledgement, subject
+to the caller deadline (at most 190 seconds for start/status), then still requires fresh selected-port and process-sequence ownership
+proof. It never treats an `unhealthy`/`starting` observation as ready, waits for
+an unrelated pre-existing start, or retries the start command while polling.
+If a listener appears between a pending status and the host snapshot, one immediate
+status recheck may admit only a fresh `running` attestation. The full selected-port,
+listener and process-sequence checks still run; another pending status or failed
+attribution rejects the start.
+The published native connection borrow gets up to 210 seconds for startup,
+authenticated handshake and authorization before exact-model verification.
+Preflight and final inspection also consume that outer budget; the confirmation
+allowance never extends it. Slow surrounding work can therefore cancel confirmation.
+Native credential reauthorization also has a bounded 210-second allowance instead
+of the unrelated five-second SSH/listener-check budget. Non-native authorization
+keeps its existing deadline. Caller cancellation, superseded attempts, record drift
+and connection error states still reject admission.
+Page drain, selection
+verification, runtime startup and published-owner handoff are distinct lifetimes.
+
+`SetupNativeCompletionTiming` defines the published path's enforced phase ceilings:
+210 seconds for the first borrow, 210 seconds to join already-admitted Local AI
+recovery, 210 seconds for a fresh post-recovery borrow, 150 seconds for exact-model
+verification (including the existing 120-second RPC and authorization), and
+30 seconds for navigation. Their 810-second total bounds the exclusive execution
+lease. A phase can fail earlier due to its underlying owner or caller cancellation;
+unused phase time is not a guarantee that a different phase may overrun its ceiling.
+Recovery waits never initiate or replay a provider mutation.
+Timeouts retain a typed, finite phase (page drain, connection, Local AI recovery,
+model verification, or native startup). The aggregate pre-publication verification
+deadline uses neutral readiness guidance because it includes both connection and model
+work; it does not incorrectly attribute a connection stall to model inference.
+The chooser displays localized phase-specific
+guidance and local diagnostics record only the phase/type, never raw package output,
+model content or credentials.
+
+The five-minute unused-handle admission window is unchanged. The first acquisition
+atomically stores its execution start and deadline under the existing file lock. Retries,
+reacquisition by another process and app restarts use that same absolute deadline.
+Expired, malformed, abandoned in-flight and legacy retry records lacking execution
+provenance cannot grant a new window. Legacy unused records retain their original
+five-minute admission deadline. No Gateway credential lifetime changes.
+Fresh route/device/session proof and single-use consumption still fence navigation,
+and deadline cancellation reaches the active navigation request before settlement.
+
+**Installed package limitation:** package commit
+[`133deeb`](https://github.com/openclaw/openclaw-windows-packaging/tree/133deeb1a5efac2bcbc6564c90c038a999e6e842)
+(MSIX 2026.9.700.0, payload 2026.9.7) cannot safely expose its pending start:
+[`GatewayController`](https://github.com/openclaw/openclaw-windows-packaging/blob/133deeb1a5efac2bcbc6564c90c038a999e6e842/src/OpenClaw.Launcher/Gateway/GatewayController.cs)
+returns `Starting` after its 90-second listener wait;
+[`Program.WriteGatewayStartResult`](https://github.com/openclaw/openclaw-windows-packaging/blob/133deeb1a5efac2bcbc6564c90c038a999e6e842/src/OpenClaw.Launcher/Program.cs)
+maps it to exit 1; and
+[`ClawCtlJson.FromGateway`](https://github.com/openclaw/openclaw-windows-packaging/blob/133deeb1a5efac2bcbc6564c90c038a999e6e842/src/OpenClaw.Launcher/ClawCtlJson.cs)
+omits the Gateway object for that failed start. Only `ok:false` and a generic
+`cli_error` with human text remain. Its subsequent `unhealthy` status supplies no
+pending sandbox/process ownership proof. Companion intentionally rejects that
+ambiguous failure and preserves rollback rather than parsing prose or accepting
+arbitrary failures. The bounded polling change does **not** fix this package's
+90-second failure path.
+The successful pending-start fixtures describe conditional client behavior, not
+an acknowledged pending-start contract supported by that installed package.
+
+The packaging contract needs an explicit, versioned pending-start acknowledgement
+with defined exit/`ok` semantics and stable session/launch ownership identity,
+available on subsequent pending status checks and guarded stop operations.
+That must distinguish this launch from another start, exited/replaced processes,
+port changes and inspection failures. No guessed additional protocol fields are
+accepted by Companion here.
+
+A successful setup on payload 2026.9.4 followed by these failures on 2026.9.7 is
+a concrete version difference, not a controlled regression measurement. Package
+launcher timing, payload startup work and Companion's former combined 30-second
+selection deadline are separate contributors. The reported 22.5-second successful
+verification RPC plus authority subprocesses can exceed that former deadline;
+fixture tests reproduce that budget collision, but do not prove the exception
+shown by an installed UI whose original exception was not persisted.
 
 The original verification retains the exact main session and a SHA256 binding
 over the normalized identity directory and the local device ID that signed the
@@ -486,7 +575,8 @@ Run-key fallback. It may complete only if Task Scheduler confirms the exact
 enabled executable/action, principal, task path and logon trigger. A definite
 rejection with confirmed absence retains the legitimate Run-key fallback.
 
-The trusted profile-local handoff retains exclusive leasing, five-minute expiry,
+The trusted profile-local handoff retains exclusive leasing, five-minute unused
+admission and a non-renewable bounded execution deadline,
 consumption on successful native presentation and explicit failure retry. New
 `ai-v3:` opaque handles carry a typed native destination and exact verified
 session in the protected record, not in public activation JSON. The experimental
