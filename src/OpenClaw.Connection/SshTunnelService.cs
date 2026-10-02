@@ -457,8 +457,13 @@ public sealed class SshTunnelService : ISshTunnelManager
         }
 
         var processStarted = false;
+        var heldDashboardPort = DashboardForwardPortGuard.IsHolding(localPort);
+        var heldProxyPort = includeBrowserProxyForward && DashboardForwardPortGuard.IsHolding(localPort + 2);
         try
         {
+            DashboardForwardPortGuard.Release(localPort);
+            if (includeBrowserProxyForward)
+                DashboardForwardPortGuard.Release(localPort + 2);
             if (!process.Start())
             {
                 throw new InvalidOperationException("Failed to start ssh process");
@@ -520,6 +525,10 @@ public sealed class SshTunnelService : ISshTunnelManager
                 }
             }
             process.Dispose();
+            if (heldDashboardPort)
+                DashboardForwardPortGuard.Hold(localPort);
+            if (heldProxyPort)
+                DashboardForwardPortGuard.Hold(localPort + 2);
             throw new InvalidOperationException("Unable to start SSH tunnel process. Ensure OpenSSH client is installed and available in PATH.", ex);
         }
 
@@ -566,7 +575,8 @@ public sealed class SshTunnelService : ISshTunnelManager
 
     public void Dispose()
     {
-        Stop();
+        lock (_operationLock)
+            TeardownLocked();
     }
 
     public Task<bool> IsOwnedListenerReadyAsync(
@@ -873,7 +883,6 @@ public sealed class SshTunnelService : ISshTunnelManager
         long[] handoffIds;
         lock (_stateLock)
         {
-            var force = _deferredStop != DeferredTunnelStop.None;
             foreach (var handoff in _browserHandoffs)
             {
                 if (!handoff.Settled)
@@ -881,7 +890,7 @@ public sealed class SshTunnelService : ISshTunnelManager
             }
 
             handoffIds = _browserHandoffs
-                .Where(handoff => !handoff.Settled && (force || (!handoff.Submitted && !handoff.Opening)))
+                .Where(handoff => !handoff.Settled && !handoff.Submitted && !handoff.Opening)
                 .Select(handoff => handoff.Id)
                 .ToArray();
         }
@@ -1018,13 +1027,9 @@ public sealed class SshTunnelService : ISshTunnelManager
                 return true;
             }
 
-            // Browser process identity does not identify this dashboard navigation.
+            // A shell activation process can exit after handing the URL to an
+            // existing browser, so that exit is not navigation completion.
             var consumed = consumptionProbe?.Invoke(localPort) == true;
-            if (!consumed && handoffId > 0 && DashboardBrowserProcessExited(handoffId))
-            {
-                if (TryFinishHandoff(handoffId, localPort) || !IsBrowserHandoffOpen(handoffId))
-                    return true;
-            }
             if (consumed || !IsRunning)
             {
                 var completed = handoffId > 0
@@ -1042,31 +1047,6 @@ public sealed class SshTunnelService : ISshTunnelManager
             }
 
             await Task.Delay(TimeSpan.FromMilliseconds(200), cancellationToken).ConfigureAwait(false);
-        }
-    }
-
-    private bool DashboardBrowserProcessExited(long handoffId)
-    {
-        int? processId;
-        lock (_stateLock)
-        {
-            var handoff = FindOpenHandoffLocked(handoffId);
-            if (handoff is not { Submitted: true })
-                return false;
-            processId = handoff.BrowserProcessId;
-        }
-
-        if (processId is not int id || id <= 0)
-            return false;
-
-        try
-        {
-            using var process = Process.GetProcessById(id);
-            return process.HasExited;
-        }
-        catch (ArgumentException)
-        {
-            return true;
         }
     }
 
@@ -1232,8 +1212,33 @@ public sealed class SshTunnelService : ISshTunnelManager
 
     public Task StopAsync()
     {
-        Stop();
+        lock (_operationLock)
+            TeardownLocked();
         return Task.CompletedTask;
+    }
+
+    private void TeardownLocked()
+    {
+        int[] protectedPorts;
+        Process? process;
+        lock (_stateLock)
+        {
+            protectedPorts = _browserHandoffs
+                .Where(handoff => !handoff.Settled && (handoff.Submitted || handoff.Opening))
+                .Select(handoff => handoff.LocalPort)
+                .Distinct()
+                .ToArray();
+            foreach (var handoff in _browserHandoffs)
+                handoff.CancelRequested = true;
+            _browserHandoffs.Clear();
+            _browserHandoffLeases = 0;
+            _deferredStop = DeferredTunnelStop.None;
+            process = ClaimProcessForStopLocked();
+        }
+
+        StopClaimedProcess(process);
+        foreach (var port in protectedPorts)
+            DashboardForwardPortGuard.Hold(port);
     }
 
     public Task<bool> StopIfOwnedAsync(
@@ -1263,27 +1268,7 @@ public sealed class SshTunnelService : ISshTunnelManager
                 }
             }
 
-            CancelOpenBrowserHandoffs();
-            Process? process;
-            lock (_stateLock)
-            {
-                if (_lifecycleGeneration != ownershipGeneration ||
-                    !Equals(_currentConfig, normalizedConfig) ||
-                    _currentOwner != SshTunnelOwner.GatewayConnectionManager)
-                {
-                    return Task.FromResult(false);
-                }
-
-                if (_browserHandoffLeases > 0)
-                {
-                    RememberDeferredStopLocked(DeferredTunnelStop.Stop);
-                    return Task.FromResult(false);
-                }
-
-                process = ClaimProcessForStopLocked();
-            }
-
-            StopClaimedProcess(process);
+            TeardownLocked();
             return Task.FromResult(true);
         }
         finally

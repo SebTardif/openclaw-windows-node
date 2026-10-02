@@ -481,7 +481,7 @@ public sealed class SshTunnelServiceTests
     }
 
     [Fact]
-    public void Stop_AfterNavigationSubmitted_KeepsTheProcessUntilASecondStop()
+    public void Stop_AfterNavigationSubmitted_KeepsTheProcessUntilTeardown()
     {
         using var service = new SshTunnelService(NullLogger.Instance);
         var config = new SshTunnelConfig("user", "host", 18789, 45678);
@@ -504,11 +504,53 @@ public sealed class SshTunnelServiceTests
 
         service.Stop();
 
-        Assert.False(service.HasDeferredStop);
-        Assert.Equal(0, service.BrowserHandoffLeaseCount);
-        Assert.Null(TrackedProcess(service));
+        Assert.True(service.HasDeferredStop);
+        Assert.Equal(1, service.BrowserHandoffLeaseCount);
+        Assert.Same(process, TrackedProcess(service));
+        Assert.True(service.IsRunning);
+        Assert.False(process.HasExited);
+        Assert.False(DashboardForwardPortGuard.IsHolding(config.LocalPort));
+
+        service.Dispose();
+
         Assert.False(service.IsRunning);
+        Assert.True(DashboardForwardPortGuard.IsHolding(config.LocalPort));
         Assert.Throws<InvalidOperationException>(() => process.HasExited);
+        DashboardForwardPortGuard.Release(config.LocalPort);
+    }
+
+    [Fact]
+    public async Task Watch_DoesNotReleaseWhenTheActivationProcessHasExited()
+    {
+        using var service = new SshTunnelService(NullLogger.Instance);
+        var config = new SshTunnelConfig("user", "host", 18789, 45678);
+        using var process = PlantRunningTunnel(
+            service,
+            config,
+            SshTunnelOwner.Settings,
+            generation: 4);
+        using var shell = Process.Start(new ProcessStartInfo("cmd.exe", "/c exit")
+        {
+            CreateNoWindow = true,
+            UseShellExecute = false,
+        });
+        Assert.NotNull(shell);
+        Assert.True(shell.WaitForExit(3_000));
+        Assert.True(service.TryEnterBrowserHandoff(4, config.LocalPort, process.Id, out var handoffId));
+        Assert.True(service.TryBeginDashboardNavigation(handoffId));
+        Assert.True(service.CompleteDashboardNavigation(handoffId, opened: true, processId: shell.Id));
+
+        var settled = await service.WatchBrowserHandoffConsumptionAsync(
+            handoffId,
+            config.LocalPort,
+            TimeSpan.Zero,
+            consumptionProbe: null);
+
+        Assert.False(settled);
+        Assert.Equal(1, service.BrowserHandoffLeaseCount);
+        Assert.True(service.IsRunning);
+        Assert.False(process.HasExited);
+        service.ExitBrowserHandoff(handoffId);
     }
 
     [Fact]
