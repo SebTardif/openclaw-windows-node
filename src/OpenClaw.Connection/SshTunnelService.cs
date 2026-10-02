@@ -828,13 +828,60 @@ public sealed class SshTunnelService : ISshTunnelManager
         }
     }
 
+    public bool TryBeginDashboardNavigation(long handoffId)
+    {
+        lock (_stateLock)
+        {
+            var handoff = FindOpenHandoffLocked(handoffId);
+            if (handoff is null || handoff.CancelRequested || handoff.Submitted)
+                return false;
+
+            handoff.Opening = true;
+            return true;
+        }
+    }
+
+    public bool CompleteDashboardNavigation(long handoffId, bool opened, int? processId)
+    {
+        var exit = false;
+        lock (_stateLock)
+        {
+            var handoff = FindOpenHandoffLocked(handoffId);
+            if (handoff is null)
+                return false;
+
+            handoff.Opening = false;
+            if (!opened)
+            {
+                exit = true;
+            }
+            else
+            {
+                handoff.Submitted = true;
+                if (processId is int id && id > 0)
+                    handoff.BrowserProcessId = id;
+            }
+        }
+
+        if (exit)
+            ExitBrowserHandoff(handoffId);
+        return opened && IsBrowserHandoffOpen(handoffId);
+    }
+
     public void CancelOpenBrowserHandoffs()
     {
         long[] handoffIds;
         lock (_stateLock)
         {
+            var force = _deferredStop != DeferredTunnelStop.None;
+            foreach (var handoff in _browserHandoffs)
+            {
+                if (!handoff.Settled)
+                    handoff.CancelRequested = true;
+            }
+
             handoffIds = _browserHandoffs
-                .Where(handoff => !handoff.Settled)
+                .Where(handoff => !handoff.Settled && (force || (!handoff.Submitted && !handoff.Opening)))
                 .Select(handoff => handoff.Id)
                 .ToArray();
         }
@@ -973,6 +1020,11 @@ public sealed class SshTunnelService : ISshTunnelManager
 
             // Browser process identity does not identify this dashboard navigation.
             var consumed = consumptionProbe?.Invoke(localPort) == true;
+            if (!consumed && handoffId > 0 && DashboardBrowserProcessExited(handoffId))
+            {
+                if (TryFinishHandoff(handoffId, localPort) || !IsBrowserHandoffOpen(handoffId))
+                    return true;
+            }
             if (consumed || !IsRunning)
             {
                 var completed = handoffId > 0
@@ -990,6 +1042,31 @@ public sealed class SshTunnelService : ISshTunnelManager
             }
 
             await Task.Delay(TimeSpan.FromMilliseconds(200), cancellationToken).ConfigureAwait(false);
+        }
+    }
+
+    private bool DashboardBrowserProcessExited(long handoffId)
+    {
+        int? processId;
+        lock (_stateLock)
+        {
+            var handoff = FindOpenHandoffLocked(handoffId);
+            if (handoff is not { Submitted: true })
+                return false;
+            processId = handoff.BrowserProcessId;
+        }
+
+        if (processId is not int id || id <= 0)
+            return false;
+
+        try
+        {
+            using var process = Process.GetProcessById(id);
+            return process.HasExited;
+        }
+        catch (ArgumentException)
+        {
+            return true;
         }
     }
 
@@ -1050,6 +1127,9 @@ public sealed class SshTunnelService : ISshTunnelManager
         public long Id { get; init; }
         public int LocalPort { get; init; }
         public int? BrowserProcessId { get; set; }
+        public bool Opening { get; set; }
+        public bool Submitted { get; set; }
+        public bool CancelRequested { get; set; }
         public bool Settled { get; set; }
     }
 
@@ -1191,6 +1271,12 @@ public sealed class SshTunnelService : ISshTunnelManager
                     !Equals(_currentConfig, normalizedConfig) ||
                     _currentOwner != SshTunnelOwner.GatewayConnectionManager)
                 {
+                    return Task.FromResult(false);
+                }
+
+                if (_browserHandoffLeases > 0)
+                {
+                    RememberDeferredStopLocked(DeferredTunnelStop.Stop);
                     return Task.FromResult(false);
                 }
 

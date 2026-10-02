@@ -4100,7 +4100,7 @@ public partial class App : Application, OpenClawTray.Services.IAppCommands, IPer
             ? new SettingsOwnedForwardBinding(true, generation, sshGate.LocalPort, sshGate.ProcessId)
             : null;
         var browserGatewayUrl = ownedForward is { } forward
-            ? DashboardBrowserHandoff.LocalForwardBrowserUrl(forward.LocalPort)
+            ? DashboardBrowserHandoff.ProjectOntoLocalForward(after.GatewayUrl, forward.LocalPort)
             : after.GatewayUrl;
         return (DashboardLaunchReadiness.Ready, new DashboardLaunchPreparation(
             new InteractiveGatewayCredential(
@@ -4129,17 +4129,15 @@ public partial class App : Application, OpenClawTray.Services.IAppCommands, IPer
             return Task.FromResult(false);
         }
 
-        if (tunnel.HasDeferredStop)
+        if (tunnel.HasDeferredStop || !tunnel.TryBeginDashboardNavigation(handoffId))
         {
             tunnel.ExitBrowserHandoff(handoffId);
             return Task.FromResult(false);
         }
 
-        if (!DashboardBrowserShell.TryOpen(url, out _))
-        {
-            tunnel.ExitBrowserHandoff(handoffId);
+        var opened = DashboardBrowserShell.TryOpen(url, out var browserProcessId);
+        if (!tunnel.CompleteDashboardNavigation(handoffId, opened, browserProcessId))
             return Task.FromResult(false);
-        }
 
         var localPort = owned.LocalPort;
         _ = Task.Run(async () =>

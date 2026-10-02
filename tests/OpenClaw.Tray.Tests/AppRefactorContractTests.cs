@@ -491,7 +491,7 @@ public sealed class AppRefactorContractTests
         Assert.DoesNotContain("Failed to open dashboard", method);
         Assert.Contains("if (!sshGate.Allowed)", prepare);
         Assert.Contains("DashboardBrowserHandoff.SameBinding(", prepare);
-        Assert.Contains("DashboardBrowserHandoff.LocalForwardBrowserUrl(forward.LocalPort)", prepare);
+        Assert.Contains("DashboardBrowserHandoff.ProjectOntoLocalForward(after.GatewayUrl, forward.LocalPort)", prepare);
         Assert.DoesNotContain("GatewayDashboardUrlBuilder.Build", prepare);
         Assert.Contains("DashboardBrowserHandoff.UrlUsesCapturedForward(url, prepared.Snapshot)", launch);
         Assert.Contains("TryEnterBrowserHandoff(owned.Generation, owned.LocalPort, owned.ProcessId, out var handoffId)", launch);
@@ -512,9 +512,9 @@ public sealed class AppRefactorContractTests
             launch,
             "UrlUsesCapturedForward(url, prepared.Snapshot)",
             "TryEnterBrowserHandoff(owned.Generation, owned.LocalPort, owned.ProcessId, out var handoffId)",
-            "HasDeferredStop",
-            "ExitBrowserHandoff(handoffId)",
+            "TryBeginDashboardNavigation(handoffId)",
             "DashboardBrowserShell.TryOpen",
+            "CompleteDashboardNavigation(handoffId, opened, browserProcessId)",
             "WatchBrowserHandoffConsumptionAsync(",
             "if (!tunnel.IsRunning)",
             "ExitBrowserHandoff(handoffId)");

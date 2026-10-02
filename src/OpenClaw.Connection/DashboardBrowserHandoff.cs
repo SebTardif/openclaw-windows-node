@@ -40,8 +40,21 @@ public static class DashboardBrowserHandoff
             left.IncludeBrowserProxyForward == right.IncludeBrowserProxyForward;
     }
 
-    public static string LocalForwardBrowserUrl(int localPort) =>
-        $"http://127.0.0.1:{localPort}/";
+    public static string ProjectOntoLocalForward(string savedGatewayUrl, int localPort)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(savedGatewayUrl);
+        var normalized = savedGatewayUrl
+            .Replace("ws://", "http://", StringComparison.OrdinalIgnoreCase)
+            .Replace("wss://", "https://", StringComparison.OrdinalIgnoreCase);
+        var endpoint = new Uri(normalized, UriKind.Absolute);
+        var builder = new UriBuilder(endpoint)
+        {
+            Scheme = endpoint.Scheme is "https" ? "https" : "http",
+            Host = "127.0.0.1",
+            Port = localPort,
+        };
+        return builder.Uri.AbsoluteUri;
+    }
 
     public static bool UrlUsesCapturedForward(string url, DashboardGatewayTunnelSnapshot captured)
     {
