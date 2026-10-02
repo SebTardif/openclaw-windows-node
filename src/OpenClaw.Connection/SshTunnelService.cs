@@ -266,6 +266,7 @@ public sealed class SshTunnelService : ISshTunnelManager
     {
         CancelOpenBrowserHandoffs();
         Process? process;
+        int[] portsToRelease;
         lock (_stateLock)
         {
             if (_browserHandoffLeases > 0)
@@ -274,12 +275,37 @@ public sealed class SshTunnelService : ISshTunnelManager
                 return false;
             }
 
+            portsToRelease = PortsToReleaseLocked();
             process = ClaimProcessForStopLocked();
             _deferredStop = DeferredTunnelStop.None;
         }
 
         StopClaimedProcess(process);
+        ReleaseForwardPorts(portsToRelease);
         return true;
+    }
+
+    /// <summary>
+    /// Caller holds <see cref="_stateLock"/>. Claim clears the current config,
+    /// so the ports have to be captured first.
+    /// </summary>
+    private int[] PortsToReleaseLocked()
+    {
+        if (_browserHandoffs.Any(handoff => !handoff.Settled && (handoff.Submitted || handoff.Opening)))
+            return [];
+
+        return _browserHandoffs
+            .Select(handoff => handoff.LocalPort)
+            .Append(_currentConfig?.LocalPort ?? 0)
+            .Where(port => port > 0)
+            .Distinct()
+            .ToArray();
+    }
+
+    private static void ReleaseForwardPorts(int[] ports)
+    {
+        foreach (var port in ports)
+            DashboardForwardPortGuard.Release(port);
     }
 
     /// <summary>
@@ -337,6 +363,7 @@ public sealed class SshTunnelService : ISshTunnelManager
             CancelOpenBrowserHandoffs();
             Process? process = null;
             var deferred = false;
+            int[] portsToRelease = [];
             lock (_stateLock)
             {
                 if (_browserHandoffLeases > 0)
@@ -346,6 +373,7 @@ public sealed class SshTunnelService : ISshTunnelManager
                 }
                 else
                 {
+                    portsToRelease = PortsToReleaseLocked();
                     process = ClaimProcessForStopLocked();
                     _deferredStop = DeferredTunnelStop.None;
                     LastError = null;
@@ -354,7 +382,10 @@ public sealed class SshTunnelService : ISshTunnelManager
             }
 
             if (!deferred)
+            {
                 StopClaimedProcess(process);
+                ReleaseForwardPorts(portsToRelease);
+            }
         }
     }
 
@@ -366,12 +397,14 @@ public sealed class SshTunnelService : ISshTunnelManager
         var localPort = tunnel.LocalPort;
         var includeBrowserProxyForward = tunnel.IncludeBrowserProxyForward;
         var sshPort = tunnel.SshPort;
-        var alreadyHeld = DashboardForwardPortGuard.IsHolding(localPort);
-        DashboardForwardPortGuard.Hold(localPort);
-        if (!DashboardForwardPortGuard.AllowsDestination(localPort, user, host, remotePort))
+        var reuseGuard = DashboardForwardPortGuard.IsHolding(localPort);
+        if (reuseGuard &&
+            !DashboardForwardPortGuard.AllowsDestination(localPort, user, host, remotePort, sshPort))
+        {
             throw new InvalidOperationException("SSH destination does not match the dashboard forward.");
+        }
 
-        var sshLocalPort = AllocateLoopbackPort();
+        var sshLocalPort = reuseGuard ? AllocateLoopbackPort() : localPort;
         var psi = new ProcessStartInfo
         {
             FileName = "ssh",
@@ -382,7 +415,7 @@ public sealed class SshTunnelService : ISshTunnelManager
                 sshLocalPort,
                 includeBrowserProxyForward,
                 sshPort,
-                includeBrowserProxyForward ? localPort + 2 : null),
+                reuseGuard && includeBrowserProxyForward ? localPort + 2 : null),
             UseShellExecute = false,
             RedirectStandardOutput = true,
             RedirectStandardError = true,
@@ -448,6 +481,7 @@ public sealed class SshTunnelService : ISshTunnelManager
                 return;
             }
 
+            RetainPublicPortAfterUnexpectedExit(tunnel.LocalPort);
             _logger.Warn($"SSH tunnel exited unexpectedly (code {tunnelExit.ExitCode})");
             try { process.Dispose(); }
             catch (Exception disposeEx) { _logger.Debug($"SshTunnelService: process dispose after unexpected exit failed: {disposeEx.Message}"); }
@@ -472,7 +506,8 @@ public sealed class SshTunnelService : ISshTunnelManager
                 throw new InvalidOperationException("Failed to start ssh process");
             }
             processStarted = true;
-            DashboardForwardPortGuard.SetBackend(localPort, sshLocalPort, process.Id);
+            if (reuseGuard)
+                DashboardForwardPortGuard.SetBackend(localPort, sshLocalPort, process.Id, process.StartTime.ToUniversalTime());
             process.BeginOutputReadLine();
             process.BeginErrorReadLine();
 
@@ -529,8 +564,6 @@ public sealed class SshTunnelService : ISshTunnelManager
                 }
             }
             process.Dispose();
-            if (!alreadyHeld)
-                DashboardForwardPortGuard.Release(localPort);
             throw new InvalidOperationException("Unable to start SSH tunnel process. Ensure OpenSSH client is installed and available in PATH.", ex);
         }
 
@@ -1034,11 +1067,10 @@ public sealed class SshTunnelService : ISshTunnelManager
             // A shell activation process can exit after handing the URL to an
             // existing browser, so that exit is not navigation completion.
             var consumed = consumptionProbe?.Invoke(localPort) == true;
-            if (!consumed && !IsRunning && handoffId > 0 && IsSubmittedHandoff(handoffId))
+            if (!consumed && !IsRunning && handoffId > 0 && HandoffNeedsRetainedPort(handoffId))
             {
-                DashboardForwardPortGuard.ClearBackend(localPort);
-                if (!DashboardForwardPortGuard.IsHolding(localPort))
-                    DashboardForwardPortGuard.Hold(localPort);
+                RetainPublicPortAfterUnexpectedExit(localPort);
+                return true;
             }
             else if (consumed || !IsRunning)
             {
@@ -1255,9 +1287,13 @@ public sealed class SshTunnelService : ISshTunnelManager
     private void TeardownLocked()
     {
         int[] protectedPorts;
+        int stoppedPort;
         Process? process;
+        SshTunnelConfig? stoppedConfig;
         lock (_stateLock)
         {
+            stoppedConfig = _currentConfig;
+            stoppedPort = stoppedConfig?.LocalPort ?? 0;
             protectedPorts = _browserHandoffs
                 .Where(handoff => !handoff.Settled && (handoff.Submitted || handoff.Opening))
                 .Select(handoff => handoff.LocalPort)
@@ -1278,15 +1314,83 @@ public sealed class SshTunnelService : ISshTunnelManager
         {
             if (!DashboardForwardPortGuard.IsHolding(port))
                 DashboardForwardPortGuard.Hold(port);
+            if (stoppedConfig is not null && stoppedConfig.LocalPort == port)
+            {
+                DashboardForwardPortGuard.AllowsDestination(
+                    port,
+                    stoppedConfig.User,
+                    stoppedConfig.Host,
+                    stoppedConfig.RemotePort,
+                    stoppedConfig.SshPort);
+            }
         }
+
+        if (protectedPorts.Length == 0 && stoppedPort > 0)
+            DashboardForwardPortGuard.Release(stoppedPort);
     }
 
-    private bool IsSubmittedHandoff(long handoffId)
+    private bool HandoffNeedsRetainedPort(long handoffId)
     {
         lock (_stateLock)
         {
             var handoff = FindOpenHandoffLocked(handoffId);
-            return handoff is { Submitted: true };
+            return handoff is { Submitted: true } or { Opening: true };
+        }
+    }
+
+    /// <summary>
+    /// Keeps the public dashboard port after SSH exits and drops the lease.
+    /// Recovery can then start a backend listener. A deferred stop is not run.
+    /// </summary>
+    private void RetainPublicPortAfterUnexpectedExit(int localPort)
+    {
+        SshTunnelConfig? config;
+        long[] retainIds;
+        lock (_stateLock)
+        {
+            config = _currentConfig;
+            retainIds = _browserHandoffs
+                .Where(handoff => !handoff.Settled &&
+                    handoff.LocalPort == localPort &&
+                    (handoff.Submitted || handoff.Opening))
+                .Select(handoff => handoff.Id)
+                .ToArray();
+        }
+
+        if (retainIds.Length == 0)
+            return;
+
+        if (!DashboardForwardPortGuard.IsHolding(localPort))
+            DashboardForwardPortGuard.Hold(localPort);
+        if (config is not null && config.LocalPort == localPort)
+        {
+            DashboardForwardPortGuard.AllowsDestination(
+                localPort,
+                config.User,
+                config.Host,
+                config.RemotePort,
+                config.SshPort);
+        }
+
+        DashboardForwardPortGuard.ClearBackend(localPort);
+        foreach (var handoffId in retainIds)
+            DropHandoffForRecovery(handoffId);
+    }
+
+    private void DropHandoffForRecovery(long handoffId)
+    {
+        lock (_stateLock)
+        {
+            var handoff = _browserHandoffs.FirstOrDefault(item => item.Id == handoffId);
+            if (handoff is null || handoff.Settled)
+                return;
+
+            handoff.Settled = true;
+            _browserHandoffs.Remove(handoff);
+            if (_browserHandoffLeases > 0)
+                _browserHandoffLeases--;
+            if (_browserHandoffLeases == 0)
+                _deferredStop = DeferredTunnelStop.None;
         }
     }
 

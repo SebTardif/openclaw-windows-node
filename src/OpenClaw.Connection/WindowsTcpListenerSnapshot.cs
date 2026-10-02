@@ -304,6 +304,40 @@ public static class WindowsTcpListenerSnapshot
         return false;
     }
 
+    public static bool TryConfirmAcceptedLoopbackOwner(int listenPort, int clientPort, int processId)
+    {
+        if (!OperatingSystem.IsWindows() ||
+            listenPort is < 1 or > 65535 ||
+            clientPort is < 1 or > 65535 ||
+            processId <= 0)
+        {
+            return false;
+        }
+
+        var found = false;
+        var complete = true;
+        bool Visit(EstablishedTcpRow row)
+        {
+            if (row.State == TcpStateEstablished &&
+                row.LocalPort == listenPort &&
+                row.RemotePort == clientPort &&
+                IPAddress.IsLoopback(row.LocalAddress) &&
+                IPAddress.IsLoopback(row.RemoteAddress) &&
+                row.ProcessId == processId)
+            {
+                found = true;
+                return true;
+            }
+
+            return false;
+        }
+
+        VisitEstablished(AfInet, ipv6: false, Visit, ref complete);
+        if (!found)
+            VisitEstablished(AfInet6, ipv6: true, Visit, ref complete);
+        return found && complete;
+    }
+
     private static void VisitEstablished(
         int addressFamily,
         bool ipv6,

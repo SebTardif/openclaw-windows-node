@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Net;
 using System.Net.Sockets;
 
@@ -19,6 +20,8 @@ internal static class DashboardForwardPortGuard
         public string? User { get; set; }
         public string? Host { get; set; }
         public int? RemotePort { get; set; }
+        public int? SshPort { get; set; }
+        public DateTime? BackendStartTimeUtc { get; set; }
     }
 
     private static readonly object Gate = new();
@@ -51,30 +54,33 @@ internal static class DashboardForwardPortGuard
                 return;
             slot.BackendPort = null;
             slot.BackendProcessId = null;
+            slot.BackendStartTimeUtc = null;
         }
     }
 
-    internal static bool AllowsDestination(int port, string user, string host, int remotePort)
+    internal static bool AllowsDestination(int port, string user, string host, int remotePort, int sshPort)
     {
         lock (Gate)
         {
             if (!Listeners.TryGetValue(port, out var slot))
                 return true;
-            if (slot.User is null || slot.Host is null || slot.RemotePort is null)
+            if (slot.User is null || slot.Host is null || slot.RemotePort is null || slot.SshPort is null)
             {
                 slot.User = user;
                 slot.Host = host;
                 slot.RemotePort = remotePort;
+                slot.SshPort = sshPort;
                 return true;
             }
 
             return string.Equals(slot.User, user, StringComparison.Ordinal) &&
                 string.Equals(slot.Host, host, StringComparison.Ordinal) &&
-                slot.RemotePort == remotePort;
+                slot.RemotePort == remotePort &&
+                slot.SshPort == sshPort;
         }
     }
 
-    internal static void SetBackend(int port, int backendPort, int backendProcessId)
+    internal static void SetBackend(int port, int backendPort, int backendProcessId, DateTime backendStartTimeUtc)
     {
         lock (Gate)
         {
@@ -82,6 +88,7 @@ internal static class DashboardForwardPortGuard
             {
                 slot.BackendPort = backendPort;
                 slot.BackendProcessId = backendProcessId;
+                slot.BackendStartTimeUtc = backendStartTimeUtc;
             }
         }
     }
@@ -124,7 +131,7 @@ internal static class DashboardForwardPortGuard
             while (!slot.Cancel.IsCancellationRequested)
             {
                 var client = await slot.Listener.AcceptTcpClientAsync(slot.Cancel.Token).ConfigureAwait(false);
-                _ = Task.Run(() => Pump(port, client));
+                _ = Pump(port, client);
             }
         }
         catch (OperationCanceledException)
@@ -138,7 +145,7 @@ internal static class DashboardForwardPortGuard
         }
     }
 
-    private static void Pump(int port, TcpClient client)
+    private static async Task Pump(int port, TcpClient client)
     {
         using (client)
         {
@@ -152,27 +159,55 @@ internal static class DashboardForwardPortGuard
                 backendProcessId = slot.BackendProcessId;
             }
 
+            DateTime? backendStart;
+            lock (Gate)
+            {
+                backendStart = Listeners.TryGetValue(port, out var remembered) ? remembered.BackendStartTimeUtc : null;
+            }
+
             if (backendPort is not int target || backendProcessId is not int processId || processId <= 0)
                 return;
-            if (!BackendIsOwnedBy(target, processId))
+            if (!ProcessStillStartedAt(processId, backendStart))
                 return;
 
             try
             {
                 using var backend = new TcpClient();
                 backend.Connect(IPAddress.Loopback, target);
-                if (!ConnectedBackendIsOwnedBy(backend, target, processId))
+                if (backend.Client.LocalEndPoint is not IPEndPoint clientEnd ||
+                    backend.Client.RemoteEndPoint is not IPEndPoint serverEnd ||
+                    serverEnd.Port != target ||
+                    !IPAddress.IsLoopback(serverEnd.Address) ||
+                    !WindowsTcpListenerSnapshot.TryConfirmAcceptedLoopbackOwner(
+                        serverEnd.Port,
+                        clientEnd.Port,
+                        processId))
+                {
                     return;
+                }
 
                 var left = client.GetStream();
                 var right = backend.GetStream();
                 using var stop = new CancellationTokenSource();
                 var toRight = left.CopyToAsync(right, stop.Token);
                 var toLeft = right.CopyToAsync(left, stop.Token);
-                Task.WhenAny(toRight, toLeft).GetAwaiter().GetResult();
+                await Task.WhenAny(toRight, toLeft).ConfigureAwait(false);
                 stop.Cancel();
                 client.Close();
                 backend.Close();
+                try
+                {
+                    await Task.WhenAll(toRight, toLeft).ConfigureAwait(false);
+                }
+                catch (OperationCanceledException)
+                {
+                }
+                catch (IOException)
+                {
+                }
+                catch (ObjectDisposedException)
+                {
+                }
             }
             catch (IOException)
             {
@@ -186,28 +221,21 @@ internal static class DashboardForwardPortGuard
         }
     }
 
-    private static bool ConnectedBackendIsOwnedBy(TcpClient backend, int backendPort, int processId)
+    private static bool ProcessStillStartedAt(int processId, DateTime? startTimeUtc)
     {
-        if (backend.Client.RemoteEndPoint is not IPEndPoint remote || remote.Port != backendPort)
-            return false;
-        if (remote.Address is not { } address || !IPAddress.IsLoopback(address))
+        if (startTimeUtc is null)
             return false;
 
-        var snapshot = WindowsTcpListenerSnapshot.Capture();
-        var owners = snapshot.Listeners
-            .Where(listener => listener.Port == backendPort && IsLoopback(listener.Address))
-            .Select(listener => listener.ProcessId)
-            .Distinct()
-            .ToArray();
-        return owners.Length == 1 && owners[0] == processId;
+        try
+        {
+            using var process = Process.GetProcessById(processId);
+            var actual = process.StartTime.ToUniversalTime();
+            return Math.Abs((actual - startTimeUtc.Value).TotalSeconds) < 2;
+        }
+        catch (Exception ex) when (ex is ArgumentException or InvalidOperationException or System.ComponentModel.Win32Exception)
+        {
+            return false;
+        }
     }
 
-    private static bool IsLoopback(IPAddress address) => IPAddress.IsLoopback(address);
-
-    private static bool BackendIsOwnedBy(int backendPort, int processId)
-    {
-        var snapshot = WindowsTcpListenerSnapshot.Capture();
-        return snapshot.Listeners.Any(listener =>
-            listener.Port == backendPort && listener.ProcessId == processId);
-    }
 }

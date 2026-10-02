@@ -4055,7 +4055,8 @@ public partial class App : Application, OpenClawTray.Services.IAppCommands, IPer
                         new AppLogger(),
                         "Dashboard launch error");
                 },
-                () => _appNotificationService?.Dismiss(GatewayDashboardLauncher.FailureNotificationId));
+                () => _appNotificationService?.Dismiss(GatewayDashboardLauncher.FailureNotificationId),
+                () => prepared?.OwnedForward?.LocalPort);
             await launcher.OpenAsync(path);
         }, new AppLogger(), nameof(OpenDashboard));
     }
@@ -4099,12 +4100,9 @@ public partial class App : Application, OpenClawTray.Services.IAppCommands, IPer
         SettingsOwnedForwardBinding? ownedForward = sshGate.Generation is long generation
             ? new SettingsOwnedForwardBinding(true, generation, sshGate.LocalPort, sshGate.ProcessId)
             : null;
-        var browserGatewayUrl = ownedForward is { } forward
-            ? DashboardBrowserHandoff.ProjectOntoLocalForward(after.GatewayUrl, forward.LocalPort)
-            : after.GatewayUrl;
         return (DashboardLaunchReadiness.Ready, new DashboardLaunchPreparation(
             new InteractiveGatewayCredential(
-                browserGatewayUrl,
+                after.GatewayUrl,
                 after.Token,
                 after.IsBootstrapToken,
                 after.Source),

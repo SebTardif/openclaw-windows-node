@@ -77,21 +77,19 @@ public static class SshTunnelCommandLine
         ValidatePort(remotePort, nameof(remotePort));
         ValidatePort(localPort, nameof(localPort));
         ValidatePort(sshPort, nameof(sshPort));
+        var proxyLocalPort = browserProxyLocalPort ?? localPort + 2;
         if (includeBrowserProxyForward)
         {
             ValidateBrowserProxyPort(remotePort, nameof(remotePort));
-            ValidateBrowserProxyPort(localPort, nameof(localPort));
+            ValidateBrowserProxyPort(proxyLocalPort, nameof(browserProxyLocalPort));
+            ValidatePort(proxyLocalPort, nameof(browserProxyLocalPort));
         }
 
         var sb = new StringBuilder();
         sb.Append(BaseOptions);
         AppendLocalForward(sb, localPort, remotePort);
         if (includeBrowserProxyForward)
-        {
-            var proxyLocalPort = browserProxyLocalPort ?? localPort + 2;
-            ValidatePort(proxyLocalPort, nameof(browserProxyLocalPort));
             AppendLocalForward(sb, proxyLocalPort, remotePort + 2);
-        }
         if (sshPort != 22)
         {
             sb.Append("-p ");

@@ -245,9 +245,10 @@ public sealed class SshTunnelServiceTests
         DashboardForwardPortGuard.Hold(port);
         try
         {
-            Assert.True(DashboardForwardPortGuard.AllowsDestination(port, "user", "gateway.example", 18789));
-            Assert.False(DashboardForwardPortGuard.AllowsDestination(port, "user", "other.example", 18789));
-            Assert.False(DashboardForwardPortGuard.AllowsDestination(port, "user", "gateway.example", 18790));
+            Assert.True(DashboardForwardPortGuard.AllowsDestination(port, "user", "gateway.example", 18789, 22));
+            Assert.False(DashboardForwardPortGuard.AllowsDestination(port, "user", "other.example", 18789, 22));
+            Assert.False(DashboardForwardPortGuard.AllowsDestination(port, "user", "gateway.example", 18790, 22));
+            Assert.False(DashboardForwardPortGuard.AllowsDestination(port, "user", "gateway.example", 18789, 2222));
         }
         finally
         {
@@ -609,10 +610,19 @@ public sealed class SshTunnelServiceTests
             TimeSpan.Zero,
             consumptionProbe: null);
 
-        Assert.False(settled);
-        Assert.True(service.IsBrowserHandoffOpen(handoffId));
+        Assert.True(settled);
+        Assert.False(service.IsBrowserHandoffOpen(handoffId));
+        Assert.Equal(0, service.BrowserHandoffLeaseCount);
+        Assert.False(service.HasDeferredStop);
         Assert.True(DashboardForwardPortGuard.IsHolding(config.LocalPort));
-        DashboardForwardPortGuard.Release(config.LocalPort);
+        Assert.False(DashboardForwardPortGuard.AllowsDestination(
+            config.LocalPort,
+            config.User,
+            config.Host,
+            config.RemotePort,
+            2222));
+        service.Stop();
+        Assert.False(DashboardForwardPortGuard.IsHolding(config.LocalPort));
         service.ExitBrowserHandoff(handoffId);
     }
 

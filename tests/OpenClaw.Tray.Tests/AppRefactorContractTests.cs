@@ -491,7 +491,7 @@ public sealed class AppRefactorContractTests
         Assert.DoesNotContain("Failed to open dashboard", method);
         Assert.Contains("if (!sshGate.Allowed)", prepare);
         Assert.Contains("DashboardBrowserHandoff.SameBinding(", prepare);
-        Assert.Contains("DashboardBrowserHandoff.ProjectOntoLocalForward(after.GatewayUrl, forward.LocalPort)", prepare);
+        Assert.DoesNotContain("ProjectOntoLocalForward", prepare);
         Assert.DoesNotContain("GatewayDashboardUrlBuilder.Build", prepare);
         Assert.Contains("DashboardBrowserHandoff.UrlUsesCapturedForward(url, prepared.Snapshot)", launch);
         Assert.Contains("TryEnterBrowserHandoff(owned.Generation, owned.LocalPort, owned.ProcessId, out var handoffId)", launch);
@@ -521,6 +521,7 @@ public sealed class AppRefactorContractTests
         AssertInOrder(
             launcher,
             "await ensureTunnel()",
+            "ProjectOntoLocalForward",
             "GatewayDashboardUrlBuilder.Build(");
     }
 

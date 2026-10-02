@@ -11,7 +11,8 @@ internal sealed class GatewayDashboardLauncher(
     Func<InteractiveGatewayCredential?> resolveCredential,
     Func<string, Task<bool>> launchBrowser,
     Action reportFailure,
-    Action? reportOpened = null)
+    Action? reportOpened = null,
+    Func<int?>? ownedLocalForwardPort = null)
 {
     internal const string FailureNotificationId = "setup-dashboard-launch";
     public async Task<bool> OpenAsync(string? path = null)
@@ -22,7 +23,10 @@ internal sealed class GatewayDashboardLauncher(
                 throw new InvalidOperationException("The Gateway tunnel is unavailable.");
             var credential = resolveCredential()
                 ?? throw new InvalidOperationException("The Gateway credential is unavailable.");
-            var url = GatewayDashboardUrlBuilder.Build(credential.GatewayUrl, path, credential.Token,
+            var gatewayUrl = ownedLocalForwardPort?.Invoke() is int localPort
+                ? DashboardBrowserHandoff.ProjectOntoLocalForward(credential.GatewayUrl, localPort)
+                : credential.GatewayUrl;
+            var url = GatewayDashboardUrlBuilder.Build(gatewayUrl, path, credential.Token,
                 !credential.IsBootstrapToken && credential.Source == CredentialResolver.SourceSharedGatewayToken);
             if (!await launchBrowser(url))
                 throw new InvalidOperationException("Windows did not open the Dashboard.");
