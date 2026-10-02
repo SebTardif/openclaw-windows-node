@@ -30,8 +30,9 @@ public sealed class SshTunnelService : ISshTunnelManager
     private string? _lastSpec;
     private long _lifecycleGeneration;
     private int _browserHandoffLeases;
-    private int? _handoffBrowserProcessId;
-    private HashSet<string>? _handoffSeenConnections;
+    private readonly List<BrowserHandoffLease> _browserHandoffs = new();
+    private readonly HashSet<string> _claimedBrowserConnections = new(StringComparer.Ordinal);
+    private long _nextBrowserHandoffId;
     private DeferredTunnelStop _deferredStop;
 
     /// <summary>Raised when the SSH tunnel exits unexpectedly (not during shutdown).</summary>
@@ -751,32 +752,75 @@ public sealed class SshTunnelService : ISshTunnelManager
         }
     }
 
-    public bool TryEnterBrowserHandoff(long generation, int localPort, int processId = 0)
+    public bool TryEnterBrowserHandoff(long generation, int localPort, int processId = 0) =>
+        TryEnterBrowserHandoff(generation, localPort, processId, out _);
+
+    public bool TryEnterBrowserHandoff(long generation, int localPort, int processId, out long handoffId)
     {
         lock (_stateLock)
         {
+            handoffId = 0;
             if (!IsForwardCurrentLocked(generation, localPort))
                 return false;
             if (processId > 0 && _process?.Id != processId)
                 return false;
 
+            handoffId = ++_nextBrowserHandoffId;
             _browserHandoffLeases++;
-            _handoffBrowserProcessId = null;
-            _handoffSeenConnections = WindowsTcpListenerSnapshot.TryCollectEstablishedForwardKeys(localPort, out var seen)
-                ? seen
-                : null;
+            _browserHandoffs.Add(new BrowserHandoffLease
+            {
+                Id = handoffId,
+                LocalPort = localPort,
+                Seen = WindowsTcpListenerSnapshot.TryCollectEstablishedForwardKeys(localPort, out var seen)
+                    ? seen
+                    : null,
+            });
             return true;
         }
     }
 
-    public void NoteBrowserHandoffClient(int processId)
+    public void NoteBrowserHandoffClient(int processId) =>
+        NoteBrowserHandoffClient(NewestOpenHandoffId(), processId);
+
+    public void NoteBrowserHandoffClient(long handoffId, int processId)
     {
-        if (processId <= 0)
+        if (handoffId <= 0 || processId <= 0)
             return;
 
         lock (_stateLock)
         {
-            _handoffBrowserProcessId = processId;
+            var handoff = FindOpenHandoffLocked(handoffId);
+            if (handoff is not null)
+                handoff.BrowserProcessId = processId;
+        }
+    }
+
+    public void NoteBrowserHandoffProcessName(long handoffId, string processName)
+    {
+        if (handoffId <= 0 || string.IsNullOrWhiteSpace(processName))
+            return;
+
+        lock (_stateLock)
+        {
+            var handoff = FindOpenHandoffLocked(handoffId);
+            if (handoff is not null)
+                handoff.BrowserProcessName = processName;
+        }
+    }
+
+    internal int? HandoffBrowserProcessId(long handoffId)
+    {
+        lock (_stateLock)
+        {
+            return FindOpenHandoffLocked(handoffId)?.BrowserProcessId;
+        }
+    }
+
+    public bool IsBrowserHandoffOpen(long handoffId)
+    {
+        lock (_stateLock)
+        {
+            return FindOpenHandoffLocked(handoffId) is not null;
         }
     }
 
@@ -802,6 +846,20 @@ public sealed class SshTunnelService : ISshTunnelManager
 
     public void ExitBrowserHandoff()
     {
+        long handoffId;
+        lock (_stateLock)
+        {
+            var oldest = FindOldestOpenHandoffLocked();
+            if (oldest is null)
+                return;
+            handoffId = oldest.Id;
+        }
+
+        ExitBrowserHandoff(handoffId);
+    }
+
+    public void ExitBrowserHandoff(long handoffId)
+    {
         // Same order as Stop: operation lock, then state lock. Claim under the
         // state lock and kill only after releasing it. Do not take the operation
         // lock again when the caller already holds it.
@@ -818,10 +876,16 @@ public sealed class SshTunnelService : ISshTunnelManager
             var completeStop = false;
             lock (_stateLock)
             {
+                var handoff = _browserHandoffs.FirstOrDefault(item => item.Id == handoffId);
+                if (handoff is null || handoff.Settled)
+                    return;
+
+                handoff.Settled = true;
+                _browserHandoffs.Remove(handoff);
                 if (_browserHandoffLeases > 0)
                     _browserHandoffLeases--;
                 if (_browserHandoffLeases == 0)
-                    _handoffBrowserProcessId = null;
+                    _claimedBrowserConnections.Clear();
 
                 if (_browserHandoffLeases != 0 || _deferredStop == DeferredTunnelStop.None)
                     return;
@@ -883,7 +947,15 @@ public sealed class SshTunnelService : ISshTunnelManager
     /// Waits until the browser uses <paramref name="localPort"/>, or the SSH process is gone.
     /// A timeout leaves the lease and listener in place and returns false.
     /// </summary>
+    public Task<bool> WatchBrowserHandoffConsumptionAsync(
+        int localPort,
+        TimeSpan timeout,
+        Func<int, bool>? consumptionProbe,
+        CancellationToken cancellationToken = default) =>
+        WatchBrowserHandoffConsumptionAsync(0, localPort, timeout, consumptionProbe, cancellationToken);
+
     public async Task<bool> WatchBrowserHandoffConsumptionAsync(
+        long handoffId,
         int localPort,
         TimeSpan timeout,
         Func<int, bool>? consumptionProbe,
@@ -893,16 +965,26 @@ public sealed class SshTunnelService : ISshTunnelManager
         while (true)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            if (BrowserHandoffLeaseCount <= 0)
+            if (handoffId > 0)
+            {
+                if (!IsBrowserHandoffOpen(handoffId))
+                    return true;
+            }
+            else if (BrowserHandoffLeaseCount <= 0)
+            {
                 return true;
+            }
 
             var consumed = consumptionProbe != null
                 ? consumptionProbe(localPort)
-                : BrowserHandoffHasUnseenForwardUse(localPort);
-            if ((consumed || !IsRunning) &&
-                (TryCompleteDeferredBrowserHandoff(localPort) || BrowserHandoffLeaseCount <= 0))
+                : handoffId > 0 && TryClaimHandoffConsumption(handoffId, localPort);
+            if (consumed || !IsRunning)
             {
-                return true;
+                var completed = handoffId > 0
+                    ? TryFinishHandoff(handoffId, localPort)
+                    : TryCompleteDeferredBrowserHandoff(localPort);
+                if (completed || (handoffId > 0 ? !IsBrowserHandoffOpen(handoffId) : BrowserHandoffLeaseCount <= 0))
+                    return true;
             }
 
             if (DateTime.UtcNow >= deadline)
@@ -914,6 +996,122 @@ public sealed class SshTunnelService : ISshTunnelManager
 
             await Task.Delay(TimeSpan.FromMilliseconds(200), cancellationToken).ConfigureAwait(false);
         }
+    }
+
+    private bool TryFinishHandoff(long handoffId, int localPort)
+    {
+        lock (_stateLock)
+        {
+            var handoff = FindOpenHandoffLocked(handoffId);
+            if (handoff is null || handoff.LocalPort != localPort)
+                return false;
+        }
+
+        ExitBrowserHandoff(handoffId);
+        return true;
+    }
+
+    private bool TryClaimHandoffConsumption(long handoffId, int localPort)
+    {
+        var clients = WindowsTcpListenerSnapshot.ListEstablishedForwardClients(localPort);
+        List<BrowserHandoffView> views;
+        HashSet<string> claimed;
+        lock (_stateLock)
+        {
+            views = _browserHandoffs
+                .Select(handoff => new BrowserHandoffView(
+                    handoff.Id,
+                    handoff.Settled,
+                    handoff.BrowserProcessId,
+                    handoff.BrowserProcessName,
+                    handoff.Seen))
+                .ToList();
+            claimed = new HashSet<string>(_claimedBrowserConnections, StringComparer.Ordinal);
+        }
+
+        var rows = new List<ForwardClientRow>(clients.Count);
+        foreach (var client in clients)
+            rows.Add(new ForwardClientRow(client.Key, client.ProcessId, ProcessNameFor(client.ProcessId)));
+
+        if (!BrowserHandoffConsumption.TrySelectExclusiveConsumption(handoffId, views, rows, claimed, out var key) ||
+            key is null)
+        {
+            return false;
+        }
+
+        lock (_stateLock)
+        {
+            if (_claimedBrowserConnections.Contains(key) || FindOpenHandoffLocked(handoffId) is null)
+                return false;
+
+            _claimedBrowserConnections.Add(key);
+            return true;
+        }
+    }
+
+    private static string? ProcessNameFor(int processId)
+    {
+        if (processId <= 0)
+            return null;
+
+        try
+        {
+            using var process = Process.GetProcessById(processId);
+            return process.ProcessName;
+        }
+        catch (Exception ex) when (ex is ArgumentException or InvalidOperationException or System.ComponentModel.Win32Exception)
+        {
+            return null;
+        }
+    }
+
+    private long NewestOpenHandoffId()
+    {
+        lock (_stateLock)
+        {
+            return FindNewestOpenHandoffLocked()?.Id ?? 0;
+        }
+    }
+
+    private BrowserHandoffLease? FindOpenHandoffLocked(long handoffId) =>
+        _browserHandoffs.FirstOrDefault(handoff => handoff.Id == handoffId && !handoff.Settled);
+
+    private BrowserHandoffLease? FindOldestOpenHandoffLocked()
+    {
+        BrowserHandoffLease? oldest = null;
+        foreach (var handoff in _browserHandoffs)
+        {
+            if (handoff.Settled)
+                continue;
+            if (oldest is null || handoff.Id < oldest.Id)
+                oldest = handoff;
+        }
+
+        return oldest;
+    }
+
+    private BrowserHandoffLease? FindNewestOpenHandoffLocked()
+    {
+        BrowserHandoffLease? newest = null;
+        foreach (var handoff in _browserHandoffs)
+        {
+            if (handoff.Settled)
+                continue;
+            if (newest is null || handoff.Id > newest.Id)
+                newest = handoff;
+        }
+
+        return newest;
+    }
+
+    private sealed class BrowserHandoffLease
+    {
+        public long Id { get; init; }
+        public int LocalPort { get; init; }
+        public int? BrowserProcessId { get; set; }
+        public string? BrowserProcessName { get; set; }
+        public HashSet<string>? Seen { get; init; }
+        public bool Settled { get; set; }
     }
 
     /// <summary>
@@ -931,25 +1129,6 @@ public sealed class SshTunnelService : ISshTunnelManager
         None,
         Stop,
         ResetNotConfigured,
-    }
-
-    private bool BrowserHandoffHasUnseenForwardUse(int localPort)
-    {
-        int? browserProcessId;
-        IReadOnlySet<string>? seen;
-        lock (_stateLock)
-        {
-            seen = _handoffSeenConnections;
-            browserProcessId = _handoffBrowserProcessId;
-        }
-
-        if (seen is null)
-            return false;
-
-        return WindowsTcpListenerSnapshot.HasUnseenEstablishedForwardUse(
-            localPort,
-            browserProcessId,
-            seen);
     }
 
     private bool IsForwardCurrentLocked(long generation, int localPort)

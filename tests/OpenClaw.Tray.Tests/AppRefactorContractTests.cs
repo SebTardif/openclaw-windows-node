@@ -493,26 +493,29 @@ public sealed class AppRefactorContractTests
         Assert.Contains("DashboardBrowserHandoff.SameBinding(", prepare);
         Assert.DoesNotContain("GatewayDashboardUrlBuilder.Build", prepare);
         Assert.Contains("DashboardBrowserHandoff.UrlUsesCapturedForward(url, prepared.Snapshot)", launch);
-        Assert.Contains("TryEnterBrowserHandoff(owned.Generation, owned.LocalPort, owned.ProcessId)", launch);
+        Assert.Contains("TryEnterBrowserHandoff(owned.Generation, owned.LocalPort, owned.ProcessId, out var handoffId)", launch);
         Assert.Contains("HasDeferredStop", launch);
-        Assert.Contains("NoteBrowserHandoffClient(", launch);
+        Assert.Contains("NoteBrowserHandoffClient(handoffId, browserPid)", launch);
+        Assert.Contains("NoteBrowserHandoffProcessName(handoffId, browserName)", launch);
         Assert.Contains("TryReleaseBrowserHandoffUnlessDeferred(", launch);
         Assert.Contains("WatchBrowserHandoffConsumptionAsync(", launch);
-        Assert.Contains("ExitBrowserHandoff()", launch);
-        Assert.Contains("The dashboard did not confirm a browser connection. The SSH forward hold ended.", launch);
+        Assert.Contains("ExitBrowserHandoff(handoffId)", launch);
+        Assert.DoesNotContain("The dashboard did not confirm a browser connection. The SSH forward hold ended.", launch);
         Assert.DoesNotContain("ex.Message", launch);
         Assert.DoesNotContain("Process.Start", launch);
+        var watch = launch[launch.IndexOf("WatchBrowserHandoffConsumptionAsync(", StringComparison.Ordinal)..];
+        Assert.DoesNotContain("ExitBrowserHandoff", watch);
         Assert.DoesNotContain("ex.Message", launcher);
         AssertInOrder(
             launch,
             "UrlUsesCapturedForward(url, prepared.Snapshot)",
-            "TryEnterBrowserHandoff(owned.Generation, owned.LocalPort, owned.ProcessId)",
+            "TryEnterBrowserHandoff(owned.Generation, owned.LocalPort, owned.ProcessId, out var handoffId)",
             "HasDeferredStop",
+            "ExitBrowserHandoff(handoffId)",
             "DashboardBrowserShell.TryOpen",
-            "NoteBrowserHandoffClient(",
+            "NoteBrowserHandoffClient(handoffId, browserPid)",
             "TryReleaseBrowserHandoffUnlessDeferred(",
-            "WatchBrowserHandoffConsumptionAsync(",
-            "ExitBrowserHandoff()");
+            "WatchBrowserHandoffConsumptionAsync(");
         AssertInOrder(
             launcher,
             "await ensureTunnel()",

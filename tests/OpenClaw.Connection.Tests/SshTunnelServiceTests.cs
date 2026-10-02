@@ -643,15 +643,43 @@ public sealed class SshTunnelServiceTests
         Assert.False(service.TryEnterBrowserHandoff(4, config.LocalPort, otherProcessId));
         Assert.Equal(0, service.BrowserHandoffLeaseCount);
 
-        Assert.True(service.TryEnterBrowserHandoff(4, config.LocalPort, process.Id));
+        Assert.True(service.TryEnterBrowserHandoff(4, config.LocalPort, process.Id, out var handoffId));
         Assert.Equal(1, service.BrowserHandoffLeaseCount);
-        service.NoteBrowserHandoffClient(88);
-        Assert.Equal(88, (int?)GetPrivate(service, "_handoffBrowserProcessId"));
-        service.NoteBrowserHandoffClient(0);
-        Assert.Equal(88, (int?)GetPrivate(service, "_handoffBrowserProcessId"));
+        service.NoteBrowserHandoffClient(handoffId, 88);
+        Assert.Equal(88, service.HandoffBrowserProcessId(handoffId));
+        service.NoteBrowserHandoffClient(handoffId, 0);
+        Assert.Equal(88, service.HandoffBrowserProcessId(handoffId));
 
-        service.ExitBrowserHandoff();
-        Assert.Null(GetPrivate(service, "_handoffBrowserProcessId"));
+        service.ExitBrowserHandoff(handoffId);
+        Assert.Null(service.HandoffBrowserProcessId(handoffId));
+        if (!process.HasExited)
+            process.Kill(entireProcessTree: true);
+    }
+
+    [Fact]
+    public void BrowserHandoff_SecondOpenKeepsTheFirstBrowserIdentity()
+    {
+        using var service = new SshTunnelService(NullLogger.Instance);
+        var config = new SshTunnelConfig("user", "host", 18789, 45678);
+        using var process = PlantRunningTunnel(
+            service,
+            config,
+            SshTunnelOwner.Settings,
+            generation: 4);
+        Assert.True(service.TryEnterBrowserHandoff(4, config.LocalPort, process.Id, out var first));
+        Assert.True(service.TryEnterBrowserHandoff(4, config.LocalPort, process.Id, out var second));
+
+        service.NoteBrowserHandoffClient(first, 11);
+        service.NoteBrowserHandoffClient(second, 22);
+
+        Assert.Equal(11, service.HandoffBrowserProcessId(first));
+        Assert.Equal(22, service.HandoffBrowserProcessId(second));
+        Assert.Equal(2, service.BrowserHandoffLeaseCount);
+
+        service.ExitBrowserHandoff(second);
+        Assert.Equal(11, service.HandoffBrowserProcessId(first));
+        Assert.Equal(1, service.BrowserHandoffLeaseCount);
+        service.ExitBrowserHandoff(first);
         if (!process.HasExited)
             process.Kill(entireProcessTree: true);
     }

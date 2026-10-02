@@ -4117,67 +4117,67 @@ public partial class App : Application, OpenClawTray.Services.IAppCommands, IPer
         if (prepared.OwnedForward is not { } owned)
             return Task.FromResult(DashboardBrowserShell.TryOpen(url, out _));
 
-        if (!DashboardBrowserHandoff.UrlUsesCapturedForward(url, prepared.Snapshot) ||
-            _sshTunnelService?.TryEnterBrowserHandoff(owned.Generation, owned.LocalPort, owned.ProcessId) != true)
+        if (!DashboardBrowserHandoff.UrlUsesCapturedForward(url, prepared.Snapshot))
+            return Task.FromResult(false);
+
+        if (_sshTunnelService is not SshTunnelService tunnel ||
+            !tunnel.TryEnterBrowserHandoff(owned.Generation, owned.LocalPort, owned.ProcessId, out var handoffId))
         {
             return Task.FromResult(false);
         }
 
-        if (_sshTunnelService is { HasDeferredStop: true } deferredBeforeLaunch)
+        if (tunnel.HasDeferredStop)
         {
-            deferredBeforeLaunch.ExitBrowserHandoff();
+            tunnel.ExitBrowserHandoff(handoffId);
             return Task.FromResult(false);
         }
 
         if (!DashboardBrowserShell.TryOpen(url, out var browserProcessId))
         {
-            _sshTunnelService?.ExitBrowserHandoff();
+            tunnel.ExitBrowserHandoff(handoffId);
             return Task.FromResult(false);
         }
 
+        var hasBrowserIdentity = false;
         if (browserProcessId is int browserPid)
-            _sshTunnelService?.NoteBrowserHandoffClient(browserPid);
-
-        if (_sshTunnelService is { } service &&
-            service.TryReleaseBrowserHandoffUnlessDeferred(owned.LocalPort, out var watchDeferredStop) &&
-            watchDeferredStop)
         {
-            var localPort = owned.LocalPort;
-            _ = Task.Run(async () =>
+            tunnel.NoteBrowserHandoffClient(handoffId, browserPid);
+            hasBrowserIdentity = true;
+        }
+        else if (DashboardBrowserShell.TryGetDefaultBrowserProcessName() is { Length: > 0 } browserName)
+        {
+            tunnel.NoteBrowserHandoffProcessName(handoffId, browserName);
+            hasBrowserIdentity = true;
+        }
+
+        if (!hasBrowserIdentity ||
+            !tunnel.TryReleaseBrowserHandoffUnlessDeferred(owned.LocalPort, out var watchDeferredStop) ||
+            !watchDeferredStop)
+        {
+            return Task.FromResult(true);
+        }
+
+        var localPort = owned.LocalPort;
+        _ = Task.Run(async () =>
+        {
+            try
             {
-                try
+                while (tunnel.IsBrowserHandoffOpen(handoffId))
                 {
-                    var connected = await service.WatchBrowserHandoffConsumptionAsync(
+                    var connected = await tunnel.WatchBrowserHandoffConsumptionAsync(
+                        handoffId,
                         localPort,
                         TimeSpan.FromSeconds(60),
                         consumptionProbe: null).ConfigureAwait(false);
                     if (connected)
                         return;
-
-                    service.ExitBrowserHandoff();
-                    _toastService?.ShowToast(new ToastContentBuilder()
-                        .AddText("SSH tunnel")
-                        .AddText("The dashboard did not confirm a browser connection. The SSH forward hold ended."));
                 }
-                catch (Exception ex)
-                {
-                    try
-                    {
-                        service.ExitBrowserHandoff();
-                    }
-                    catch (Exception releaseEx)
-                    {
-                        Logger.Warn($"Dashboard browser handoff release failed: {releaseEx.GetType().Name}");
-                    }
-
-                    Logger.Warn($"Dashboard browser handoff watch failed: {ex.GetType().Name}");
-                }
-            });
-        }
-        else
-        {
-            _sshTunnelService?.ExitBrowserHandoff();
-        }
+            }
+            catch (Exception ex)
+            {
+                Logger.Warn($"Dashboard browser handoff watch failed: {ex.GetType().Name}");
+            }
+        });
 
         return Task.FromResult(true);
     }
