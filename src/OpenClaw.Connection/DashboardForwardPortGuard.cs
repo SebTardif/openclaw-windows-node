@@ -14,6 +14,7 @@ internal static class DashboardForwardPortGuard
     private sealed class Slot
     {
         public required TcpListener Listener { get; init; }
+        public TcpListener? V6Listener { get; init; }
         public required CancellationTokenSource Cancel { get; init; }
         public int? BackendPort { get; set; }
         public int? BackendProcessId { get; set; }
@@ -38,11 +39,30 @@ internal static class DashboardForwardPortGuard
                 return;
 
             var listener = new TcpListener(IPAddress.Loopback, port);
-            listener.Start();
+            TcpListener? v6 = null;
+            try
+            {
+                listener.Start();
+                if (Socket.OSSupportsIPv6)
+                {
+                    v6 = new TcpListener(IPAddress.IPv6Loopback, port);
+                    v6.Server.DualMode = false;
+                    v6.Start();
+                }
+            }
+            catch
+            {
+                try { listener.Stop(); } catch (SocketException) { }
+                try { v6?.Stop(); } catch (SocketException) { }
+                throw;
+            }
+
             var cancel = new CancellationTokenSource();
-            var slot = new Slot { Listener = listener, Cancel = cancel };
+            var slot = new Slot { Listener = listener, V6Listener = v6, Cancel = cancel };
             Listeners[port] = slot;
-            _ = Task.Run(() => AcceptAsync(port, slot));
+            _ = AcceptAsync(port, slot, listener);
+            if (v6 is not null)
+                _ = AcceptAsync(port, slot, v6);
         }
     }
 
@@ -110,6 +130,14 @@ internal static class DashboardForwardPortGuard
         catch (SocketException)
         {
         }
+
+        try
+        {
+            slot.V6Listener?.Stop();
+        }
+        catch (SocketException)
+        {
+        }
     }
 
     internal static bool IsHolding(int port)
@@ -124,13 +152,13 @@ internal static class DashboardForwardPortGuard
             return Listeners.TryGetValue(port, out var slot) ? slot.BackendPort : null;
     }
 
-    private static async Task AcceptAsync(int port, Slot slot)
+    private static async Task AcceptAsync(int port, Slot slot, TcpListener listener)
     {
         try
         {
             while (!slot.Cancel.IsCancellationRequested)
             {
-                var client = await slot.Listener.AcceptTcpClientAsync(slot.Cancel.Token).ConfigureAwait(false);
+                var client = await listener.AcceptTcpClientAsync(slot.Cancel.Token).ConfigureAwait(false);
                 _ = Pump(port, client);
             }
         }

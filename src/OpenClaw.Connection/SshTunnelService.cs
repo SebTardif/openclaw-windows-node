@@ -99,7 +99,7 @@ public sealed class SshTunnelService : ISshTunnelManager
             }
         }
     }
-    public string? LocalTunnelUrl => IsActive ? $"ws://localhost:{CurrentLocalPort}" : null;
+    public string? LocalTunnelUrl => IsActive ? $"ws://{LoopbackWebSocketHost(CurrentLocalPort)}:{CurrentLocalPort}" : null;
     public string? CurrentUser { get; private set; }
     public string? CurrentHost { get; private set; }
     public int CurrentRemotePort { get; private set; }
@@ -703,6 +703,12 @@ public sealed class SshTunnelService : ISshTunnelManager
 
         try
         {
+            if (DashboardForwardPortGuard.IsHolding(destinationPort) &&
+                !TryConfirmRetainedPublicRoute(destinationPort))
+            {
+                return Task.FromResult(false);
+            }
+
             var proofPort = ListenerPortToProve(destinationPort);
             if (proofPort < 1 ||
                 !ValidateListenerOwnership(
@@ -740,13 +746,22 @@ public sealed class SshTunnelService : ISshTunnelManager
     {
         Process? process = null;
         long generation = 0;
+        var acquiredGuard = false;
         try
         {
             cancellationToken.ThrowIfCancellationRequested();
-            ClaimDashboardPublicPort(config);
+            SshTunnelOwner restartOwner;
+            lock (_stateLock)
+            {
+                restartOwner = DashboardRestartOwner(
+                    _currentOwner,
+                    IsRunningLocked() && _currentConfig?.LocalPort == config.LocalPort);
+            }
+
+            acquiredGuard = ClaimDashboardPublicPort(config);
             EnsureStartedCore(
                 config,
-                SshTunnelOwner.Settings,
+                restartOwner,
                 tunnel => RejectOccupiedForwardPorts(tunnel));
 
             var normalizedConfig = config with
@@ -824,6 +839,9 @@ public sealed class SshTunnelService : ISshTunnelManager
                 LastError = ex.Message;
                 Status = TunnelStatus.Failed;
             }
+
+            if (acquiredGuard)
+                ReleaseUnsubmittedGuard(config.LocalPort);
 
             if (process is not null)
                 StopIfCurrent(process, generation);
@@ -1233,10 +1251,22 @@ public sealed class SshTunnelService : ISshTunnelManager
     }
 
     /// <summary>
+    /// Keeps a manager-owned tunnel on that owner when Dashboard moves SSH behind the public port.
+    /// </summary>
+    internal static SshTunnelOwner DashboardRestartOwner(SshTunnelOwner currentOwner, bool runningOnRequestedPort) =>
+        runningOnRequestedPort && currentOwner == SshTunnelOwner.GatewayConnectionManager
+            ? SshTunnelOwner.GatewayConnectionManager
+            : SshTunnelOwner.Settings;
+
+    internal static string LoopbackWebSocketHost(int port) =>
+        DashboardForwardPortGuard.IsHolding(port) ? "127.0.0.1" : "localhost";
+
+    /// <summary>
     /// Binds the dashboard's public port before SSH listens there.
+    /// Returns true when this call created the guard.
     /// The browser URL is not issued until this returns.
     /// </summary>
-    private void ClaimDashboardPublicPort(SshTunnelConfig config)
+    private bool ClaimDashboardPublicPort(SshTunnelConfig config)
     {
         var localPort = config.LocalPort;
         var user = config.User.Trim();
@@ -1249,7 +1279,7 @@ public sealed class SshTunnelService : ISshTunnelManager
                 host,
                 config.RemotePort,
                 config.SshPort);
-            return;
+            return false;
         }
 
         var ownsPublicPort = false;
@@ -1272,6 +1302,16 @@ public sealed class SshTunnelService : ISshTunnelManager
             host,
             config.RemotePort,
             config.SshPort);
+        return true;
+    }
+
+    private void ReleaseUnsubmittedGuard(int port)
+    {
+        var protect = false;
+        lock (_stateLock)
+            protect = _dashboardProtectedPorts.Contains(port);
+        if (!protect)
+            DashboardForwardPortGuard.Release(port);
     }
 
     private static void RejectOccupiedForwardPorts(SshTunnelConfig tunnel)
@@ -1359,7 +1399,7 @@ public sealed class SshTunnelService : ISshTunnelManager
                     ct).ConfigureAwait(false);
             }
             return new SshTunnelStartResult(
-                $"ws://localhost:{config.LocalPort}",
+                $"ws://{LoopbackWebSocketHost(config.LocalPort)}:{config.LocalPort}",
                 normalizedConfig,
                 generation);
         }
@@ -1544,6 +1584,13 @@ public sealed class SshTunnelService : ISshTunnelManager
                 }
             }
 
+            if (DashboardForwardPortGuard.IsHolding(localPort) &&
+                !TryConfirmRetainedPublicRoute(localPort))
+            {
+                await Task.Delay(TimeSpan.FromMilliseconds(50), cancellationToken).ConfigureAwait(false);
+                continue;
+            }
+
             var proofPort = ListenerPortToProve(localPort);
             if (proofPort > 0 &&
                 ValidateListenerOwnership(
@@ -1580,6 +1627,29 @@ public sealed class SshTunnelService : ISshTunnelManager
 
             StopClaimedProcess(claimed);
         }
+    }
+
+    internal static bool TryConfirmRetainedPublicRoute(int publicPort)
+    {
+        var snapshot = WindowsTcpListenerSnapshot.Capture();
+        if (!snapshot.Ipv4Complete || !snapshot.Ipv6Complete)
+            return false;
+
+        var listeners = snapshot.Listeners
+            .Where(listener => listener.Port == publicPort && CanServeLoopback(listener.Address))
+            .ToArray();
+        var ownerPid = Environment.ProcessId;
+        if (listeners.Any(listener => listener.ProcessId != ownerPid))
+        {
+            throw new InvalidOperationException(
+                $"Local port {publicPort} is not owned exclusively by the dashboard forward.");
+        }
+
+        if (listeners.Length == 0)
+            return false;
+
+        return !Socket.OSSupportsIPv6 ||
+            listeners.Any(listener => listener.Address.AddressFamily == System.Net.Sockets.AddressFamily.InterNetworkV6);
     }
 
     internal static void EnsurePortIsUnoccupied(

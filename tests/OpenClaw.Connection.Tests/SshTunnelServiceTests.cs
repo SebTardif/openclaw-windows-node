@@ -257,6 +257,79 @@ public sealed class SshTunnelServiceTests
     }
 
     [Fact]
+    public void DashboardRestartOwner_PreservesManagerOwnership()
+    {
+        Assert.Equal(
+            SshTunnelOwner.GatewayConnectionManager,
+            SshTunnelService.DashboardRestartOwner(SshTunnelOwner.GatewayConnectionManager, runningOnRequestedPort: true));
+        Assert.Equal(
+            SshTunnelOwner.Settings,
+            SshTunnelService.DashboardRestartOwner(SshTunnelOwner.GatewayConnectionManager, runningOnRequestedPort: false));
+        Assert.Equal(
+            SshTunnelOwner.Settings,
+            SshTunnelService.DashboardRestartOwner(SshTunnelOwner.Settings, runningOnRequestedPort: true));
+    }
+
+    [Fact]
+    public void Hold_ReservesBothLoopbackRoutes()
+    {
+        using var probe = new TcpListener(IPAddress.Loopback, 0);
+        probe.Start();
+        var port = ((IPEndPoint)probe.LocalEndpoint).Port;
+        probe.Stop();
+        DashboardForwardPortGuard.Hold(port);
+        try
+        {
+            using var ipv4 = new TcpListener(IPAddress.Loopback, port);
+            Assert.ThrowsAny<SocketException>(() => ipv4.Start());
+            if (Socket.OSSupportsIPv6)
+            {
+                var ipv6 = new TcpListener(IPAddress.IPv6Loopback, port);
+                ipv6.Server.DualMode = false;
+                Assert.ThrowsAny<SocketException>(() => ipv6.Start());
+            }
+
+            Assert.Equal("127.0.0.1", SshTunnelService.LoopbackWebSocketHost(port));
+            var confirmed = false;
+            for (var attempt = 0; attempt < 20 && !confirmed; attempt++)
+            {
+                confirmed = SshTunnelService.TryConfirmRetainedPublicRoute(port);
+                if (!confirmed)
+                    Thread.Sleep(50);
+            }
+
+            Assert.True(confirmed);
+        }
+        finally
+        {
+            DashboardForwardPortGuard.Release(port);
+        }
+    }
+
+    [Fact]
+    public async Task EnsureSettingsOwnedForwardReadyAsync_ReleasesGuardWhenStartupFails()
+    {
+        using var probe = new TcpListener(IPAddress.Loopback, 0);
+        probe.Start();
+        var port = ((IPEndPoint)probe.LocalEndpoint).Port;
+        probe.Stop();
+        using var service = new SshTunnelService(NullLogger.Instance);
+        try
+        {
+            var ready = await service.EnsureSettingsOwnedForwardReadyAsync(
+                new SshTunnelConfig("user", "host", 18789, port, false, 0),
+                CancellationToken.None);
+
+            Assert.False(ready.Owned);
+            Assert.False(DashboardForwardPortGuard.IsHolding(port));
+        }
+        finally
+        {
+            DashboardForwardPortGuard.Release(port);
+        }
+    }
+
+    [Fact]
     public void RejectForeignForwardPort_AllowsTheDashboardGuard()
     {
         const int port = 45679;
