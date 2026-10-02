@@ -1,4 +1,5 @@
 using OpenClawTray.Services;
+using System.Xml.Linq;
 
 namespace OpenClaw.Tray.Tests;
 
@@ -48,6 +49,32 @@ public sealed class SetupWindowArgumentProjectionTests
             currentProcessId: 1000);
 
         Assert.Equal(["--config=custom.json"], projected);
+    }
+
+    [Fact]
+    public void Project_RemovesPackagedToastActivationArgument()
+    {
+        var manifest = XDocument.Load(Path.Combine(
+            TestRepositoryPaths.GetRepositoryRoot(),
+            "src",
+            "OpenClaw.Tray.WinUI",
+            "Package.appxmanifest"));
+        var activationArgument = Assert.Single(
+            manifest.Descendants(),
+            element => element.Name.LocalName == "ExeServer" &&
+                (string?)element.Attribute("Executable") == "OpenClaw.Tray.WinUI.exe")
+            .Attribute("Arguments")?.Value;
+        Assert.False(string.IsNullOrWhiteSpace(activationArgument));
+
+        foreach (var argument in new[] { activationArgument!, activationArgument!.ToLowerInvariant() })
+        {
+            var projected = SetupWindowArgumentProjection.Project(
+                ["OpenClaw.Tray.WinUI.exe", argument, "--config=custom.json"],
+                _ => false,
+                currentProcessId: 1000);
+
+            Assert.Equal(["--config=custom.json"], projected);
+        }
     }
 
     [Fact]
