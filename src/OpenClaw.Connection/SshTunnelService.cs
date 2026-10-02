@@ -3,6 +3,7 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Net;
+using System.Net.Sockets;
 
 namespace OpenClaw.Connection;
 
@@ -457,18 +458,28 @@ public sealed class SshTunnelService : ISshTunnelManager
         }
 
         var processStarted = false;
-        var heldDashboardPort = DashboardForwardPortGuard.IsHolding(localPort);
-        var heldProxyPort = includeBrowserProxyForward && DashboardForwardPortGuard.IsHolding(localPort + 2);
+        var keepPublicPort = DashboardForwardPortGuard.IsHolding(localPort) && !includeBrowserProxyForward;
+        var sshLocalPort = keepPublicPort ? AllocateLoopbackPort() : localPort;
+        if (keepPublicPort)
+        {
+            psi.Arguments = SshTunnelCommandLine.BuildArguments(
+                user,
+                host,
+                remotePort,
+                sshLocalPort,
+                includeBrowserProxyForward: false,
+                sshPort);
+        }
+
         try
         {
-            DashboardForwardPortGuard.Release(localPort);
-            if (includeBrowserProxyForward)
-                DashboardForwardPortGuard.Release(localPort + 2);
             if (!process.Start())
             {
                 throw new InvalidOperationException("Failed to start ssh process");
             }
             processStarted = true;
+            if (keepPublicPort)
+                DashboardForwardPortGuard.SetBackend(localPort, sshLocalPort, process.Id);
             process.BeginOutputReadLine();
             process.BeginErrorReadLine();
 
@@ -525,10 +536,6 @@ public sealed class SshTunnelService : ISshTunnelManager
                 }
             }
             process.Dispose();
-            if (heldDashboardPort)
-                DashboardForwardPortGuard.Hold(localPort);
-            if (heldProxyPort)
-                DashboardForwardPortGuard.Hold(localPort + 2);
             throw new InvalidOperationException("Unable to start SSH tunnel process. Ensure OpenSSH client is installed and available in PATH.", ex);
         }
 
@@ -627,11 +634,13 @@ public sealed class SshTunnelService : ISshTunnelManager
 
         try
         {
-            if (!ValidateListenerOwnership(
+            var proofPort = ListenerPortToProve(destinationPort);
+            if (proofPort < 1 ||
+                !ValidateListenerOwnership(
                     WindowsTcpListenerSnapshot.Capture(),
-                    destinationPort,
-                     processId,
-                     processStartTimeUtc))
+                    proofPort,
+                    processId,
+                    processStartTimeUtc))
             {
                 return Task.FromResult(false);
             }
@@ -1140,9 +1149,34 @@ public sealed class SshTunnelService : ISshTunnelManager
 
     private static void RejectOccupiedForwardPorts(SshTunnelConfig tunnel)
     {
-        EnsurePortIsUnoccupied(WindowsTcpListenerSnapshot.Capture(), tunnel.LocalPort);
+        RejectForeignForwardPort(tunnel.LocalPort);
         if (tunnel.IncludeBrowserProxyForward)
-            EnsurePortIsUnoccupied(WindowsTcpListenerSnapshot.Capture(), tunnel.LocalPort + 2);
+            RejectForeignForwardPort(tunnel.LocalPort + 2);
+    }
+
+    internal static void RejectForeignForwardPort(int port)
+    {
+        if (DashboardForwardPortGuard.IsHolding(port))
+            return;
+
+        EnsurePortIsUnoccupied(WindowsTcpListenerSnapshot.Capture(), port);
+    }
+
+    private static int ListenerPortToProve(int publicPort)
+    {
+        if (!DashboardForwardPortGuard.IsHolding(publicPort))
+            return publicPort;
+
+        return DashboardForwardPortGuard.BackendPort(publicPort) ?? -1;
+    }
+
+    private static int AllocateLoopbackPort()
+    {
+        var listener = new TcpListener(IPAddress.Loopback, 0);
+        listener.Start();
+        var port = ((IPEndPoint)listener.LocalEndpoint).Port;
+        listener.Stop();
+        return port;
     }
 
     public async Task<SshTunnelStartResult> StartOwnedAsync(
@@ -1300,11 +1334,13 @@ public sealed class SshTunnelService : ISshTunnelManager
                 }
             }
 
-            if (ValidateListenerOwnership(
-                WindowsTcpListenerSnapshot.Capture(),
-                localPort,
-                processId,
-                processStartTimeUtc))
+            var proofPort = ListenerPortToProve(localPort);
+            if (proofPort > 0 &&
+                ValidateListenerOwnership(
+                    WindowsTcpListenerSnapshot.Capture(),
+                    proofPort,
+                    processId,
+                    processStartTimeUtc))
             {
                 return;
             }

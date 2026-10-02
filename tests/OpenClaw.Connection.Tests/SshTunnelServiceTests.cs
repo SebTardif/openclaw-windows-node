@@ -238,6 +238,22 @@ public sealed class SshTunnelServiceTests
     }
 
     [Fact]
+    public void RejectForeignForwardPort_AllowsTheDashboardGuard()
+    {
+        const int port = 45679;
+        DashboardForwardPortGuard.Release(port);
+        DashboardForwardPortGuard.Hold(port);
+        try
+        {
+            SshTunnelService.RejectForeignForwardPort(port);
+        }
+        finally
+        {
+            DashboardForwardPortGuard.Release(port);
+        }
+    }
+
+    [Fact]
     public void EnsurePortIsUnoccupied_RejectsExistingListener()
     {
         var snapshot = new WindowsTcpListenerSnapshotResult(
