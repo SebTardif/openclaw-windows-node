@@ -49,6 +49,23 @@ public static class SshTunnelCommandLine
         int localPort,
         bool includeBrowserProxyForward,
         int sshPort)
+        => BuildArguments(
+            user,
+            host,
+            remotePort,
+            localPort,
+            includeBrowserProxyForward,
+            sshPort,
+            browserProxyLocalPort: null);
+
+    public static string BuildArguments(
+        string user,
+        string host,
+        int remotePort,
+        int localPort,
+        bool includeBrowserProxyForward,
+        int sshPort,
+        int? browserProxyLocalPort)
     {
         user = user.Trim();
         host = host.Trim();
@@ -70,7 +87,11 @@ public static class SshTunnelCommandLine
         sb.Append(BaseOptions);
         AppendLocalForward(sb, localPort, remotePort);
         if (includeBrowserProxyForward)
-            AppendLocalForward(sb, localPort + 2, remotePort + 2);
+        {
+            var proxyLocalPort = browserProxyLocalPort ?? localPort + 2;
+            ValidatePort(proxyLocalPort, nameof(browserProxyLocalPort));
+            AppendLocalForward(sb, proxyLocalPort, remotePort + 2);
+        }
         if (sshPort != 22)
         {
             sb.Append("-p ");

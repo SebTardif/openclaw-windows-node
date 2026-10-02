@@ -366,6 +366,12 @@ public sealed class SshTunnelService : ISshTunnelManager
         var localPort = tunnel.LocalPort;
         var includeBrowserProxyForward = tunnel.IncludeBrowserProxyForward;
         var sshPort = tunnel.SshPort;
+        var alreadyHeld = DashboardForwardPortGuard.IsHolding(localPort);
+        DashboardForwardPortGuard.Hold(localPort);
+        if (!DashboardForwardPortGuard.AllowsDestination(localPort, user, host, remotePort))
+            throw new InvalidOperationException("SSH destination does not match the dashboard forward.");
+
+        var sshLocalPort = AllocateLoopbackPort();
         var psi = new ProcessStartInfo
         {
             FileName = "ssh",
@@ -373,9 +379,10 @@ public sealed class SshTunnelService : ISshTunnelManager
                 user,
                 host,
                 remotePort,
-                localPort,
+                sshLocalPort,
                 includeBrowserProxyForward,
-                sshPort),
+                sshPort,
+                includeBrowserProxyForward ? localPort + 2 : null),
             UseShellExecute = false,
             RedirectStandardOutput = true,
             RedirectStandardError = true,
@@ -458,19 +465,6 @@ public sealed class SshTunnelService : ISshTunnelManager
         }
 
         var processStarted = false;
-        var keepPublicPort = DashboardForwardPortGuard.IsHolding(localPort) && !includeBrowserProxyForward;
-        var sshLocalPort = keepPublicPort ? AllocateLoopbackPort() : localPort;
-        if (keepPublicPort)
-        {
-            psi.Arguments = SshTunnelCommandLine.BuildArguments(
-                user,
-                host,
-                remotePort,
-                sshLocalPort,
-                includeBrowserProxyForward: false,
-                sshPort);
-        }
-
         try
         {
             if (!process.Start())
@@ -478,8 +472,7 @@ public sealed class SshTunnelService : ISshTunnelManager
                 throw new InvalidOperationException("Failed to start ssh process");
             }
             processStarted = true;
-            if (keepPublicPort)
-                DashboardForwardPortGuard.SetBackend(localPort, sshLocalPort, process.Id);
+            DashboardForwardPortGuard.SetBackend(localPort, sshLocalPort, process.Id);
             process.BeginOutputReadLine();
             process.BeginErrorReadLine();
 
@@ -536,6 +529,8 @@ public sealed class SshTunnelService : ISshTunnelManager
                 }
             }
             process.Dispose();
+            if (!alreadyHeld)
+                DashboardForwardPortGuard.Release(localPort);
             throw new InvalidOperationException("Unable to start SSH tunnel process. Ensure OpenSSH client is installed and available in PATH.", ex);
         }
 
@@ -1039,7 +1034,13 @@ public sealed class SshTunnelService : ISshTunnelManager
             // A shell activation process can exit after handing the URL to an
             // existing browser, so that exit is not navigation completion.
             var consumed = consumptionProbe?.Invoke(localPort) == true;
-            if (consumed || !IsRunning)
+            if (!consumed && !IsRunning && handoffId > 0 && IsSubmittedHandoff(handoffId))
+            {
+                DashboardForwardPortGuard.ClearBackend(localPort);
+                if (!DashboardForwardPortGuard.IsHolding(localPort))
+                    DashboardForwardPortGuard.Hold(localPort);
+            }
+            else if (consumed || !IsRunning)
             {
                 var completed = handoffId > 0
                     ? TryFinishHandoff(handoffId, localPort)
@@ -1270,9 +1271,23 @@ public sealed class SshTunnelService : ISshTunnelManager
             process = ClaimProcessForStopLocked();
         }
 
+        foreach (var port in protectedPorts)
+            DashboardForwardPortGuard.ClearBackend(port);
         StopClaimedProcess(process);
         foreach (var port in protectedPorts)
-            DashboardForwardPortGuard.Hold(port);
+        {
+            if (!DashboardForwardPortGuard.IsHolding(port))
+                DashboardForwardPortGuard.Hold(port);
+        }
+    }
+
+    private bool IsSubmittedHandoff(long handoffId)
+    {
+        lock (_stateLock)
+        {
+            var handoff = FindOpenHandoffLocked(handoffId);
+            return handoff is { Submitted: true };
+        }
     }
 
     public Task<bool> StopIfOwnedAsync(

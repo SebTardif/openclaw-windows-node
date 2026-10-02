@@ -238,6 +238,24 @@ public sealed class SshTunnelServiceTests
     }
 
     [Fact]
+    public void AllowsDestination_PinsTheOriginalGateway()
+    {
+        const int port = 45681;
+        DashboardForwardPortGuard.Release(port);
+        DashboardForwardPortGuard.Hold(port);
+        try
+        {
+            Assert.True(DashboardForwardPortGuard.AllowsDestination(port, "user", "gateway.example", 18789));
+            Assert.False(DashboardForwardPortGuard.AllowsDestination(port, "user", "other.example", 18789));
+            Assert.False(DashboardForwardPortGuard.AllowsDestination(port, "user", "gateway.example", 18790));
+        }
+        finally
+        {
+            DashboardForwardPortGuard.Release(port);
+        }
+    }
+
+    [Fact]
     public void RejectForeignForwardPort_AllowsTheDashboardGuard()
     {
         const int port = 45679;
@@ -566,6 +584,35 @@ public sealed class SshTunnelServiceTests
         Assert.Equal(1, service.BrowserHandoffLeaseCount);
         Assert.True(service.IsRunning);
         Assert.False(process.HasExited);
+        service.ExitBrowserHandoff(handoffId);
+    }
+
+    [Fact]
+    public async Task Watch_SubmittedNavigation_KeepsThePortWhenSshExits()
+    {
+        using var service = new SshTunnelService(NullLogger.Instance);
+        var config = new SshTunnelConfig("user", "host", 18789, 45678);
+        using var process = PlantRunningTunnel(
+            service,
+            config,
+            SshTunnelOwner.Settings,
+            generation: 4);
+        Assert.True(service.TryEnterBrowserHandoff(4, config.LocalPort, process.Id, out var handoffId));
+        Assert.True(service.TryBeginDashboardNavigation(handoffId));
+        Assert.True(service.CompleteDashboardNavigation(handoffId, opened: true, processId: null));
+        process.Kill(entireProcessTree: true);
+        Assert.True(process.WaitForExit(3_000));
+
+        var settled = await service.WatchBrowserHandoffConsumptionAsync(
+            handoffId,
+            config.LocalPort,
+            TimeSpan.Zero,
+            consumptionProbe: null);
+
+        Assert.False(settled);
+        Assert.True(service.IsBrowserHandoffOpen(handoffId));
+        Assert.True(DashboardForwardPortGuard.IsHolding(config.LocalPort));
+        DashboardForwardPortGuard.Release(config.LocalPort);
         service.ExitBrowserHandoff(handoffId);
     }
 

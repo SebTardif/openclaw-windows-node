@@ -16,6 +16,9 @@ internal static class DashboardForwardPortGuard
         public required CancellationTokenSource Cancel { get; init; }
         public int? BackendPort { get; set; }
         public int? BackendProcessId { get; set; }
+        public string? User { get; set; }
+        public string? Host { get; set; }
+        public int? RemotePort { get; set; }
     }
 
     private static readonly object Gate = new();
@@ -37,6 +40,37 @@ internal static class DashboardForwardPortGuard
             var slot = new Slot { Listener = listener, Cancel = cancel };
             Listeners[port] = slot;
             _ = Task.Run(() => AcceptAsync(port, slot));
+        }
+    }
+
+    internal static void ClearBackend(int port)
+    {
+        lock (Gate)
+        {
+            if (!Listeners.TryGetValue(port, out var slot))
+                return;
+            slot.BackendPort = null;
+            slot.BackendProcessId = null;
+        }
+    }
+
+    internal static bool AllowsDestination(int port, string user, string host, int remotePort)
+    {
+        lock (Gate)
+        {
+            if (!Listeners.TryGetValue(port, out var slot))
+                return true;
+            if (slot.User is null || slot.Host is null || slot.RemotePort is null)
+            {
+                slot.User = user;
+                slot.Host = host;
+                slot.RemotePort = remotePort;
+                return true;
+            }
+
+            return string.Equals(slot.User, user, StringComparison.Ordinal) &&
+                string.Equals(slot.Host, host, StringComparison.Ordinal) &&
+                slot.RemotePort == remotePort;
         }
     }
 
@@ -127,11 +161,18 @@ internal static class DashboardForwardPortGuard
             {
                 using var backend = new TcpClient();
                 backend.Connect(IPAddress.Loopback, target);
+                if (!ConnectedBackendIsOwnedBy(backend, target, processId))
+                    return;
+
                 var left = client.GetStream();
                 var right = backend.GetStream();
-                var toRight = left.CopyToAsync(right);
-                var toLeft = right.CopyToAsync(left);
-                Task.WaitAll(toRight, toLeft);
+                using var stop = new CancellationTokenSource();
+                var toRight = left.CopyToAsync(right, stop.Token);
+                var toLeft = right.CopyToAsync(left, stop.Token);
+                Task.WhenAny(toRight, toLeft).GetAwaiter().GetResult();
+                stop.Cancel();
+                client.Close();
+                backend.Close();
             }
             catch (IOException)
             {
@@ -144,6 +185,24 @@ internal static class DashboardForwardPortGuard
             }
         }
     }
+
+    private static bool ConnectedBackendIsOwnedBy(TcpClient backend, int backendPort, int processId)
+    {
+        if (backend.Client.RemoteEndPoint is not IPEndPoint remote || remote.Port != backendPort)
+            return false;
+        if (remote.Address is not { } address || !IPAddress.IsLoopback(address))
+            return false;
+
+        var snapshot = WindowsTcpListenerSnapshot.Capture();
+        var owners = snapshot.Listeners
+            .Where(listener => listener.Port == backendPort && IsLoopback(listener.Address))
+            .Select(listener => listener.ProcessId)
+            .Distinct()
+            .ToArray();
+        return owners.Length == 1 && owners[0] == processId;
+    }
+
+    private static bool IsLoopback(IPAddress address) => IPAddress.IsLoopback(address);
 
     private static bool BackendIsOwnedBy(int backendPort, int processId)
     {
