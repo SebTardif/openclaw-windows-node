@@ -297,6 +297,25 @@ syntax checks admit both names, while registration and exact family matching
 remain mandatory before launching. An existing same-user record is not silently
 migrated to a newly installed isolated package; it requires new setup.
 
+`scripts\NativeGatewaySourceBuild.psm1` owns the source-build safety boundary:
+machine-wide build/unregister serialization, protected creation of work directories,
+read-only validation of existing tree and ancestor ACLs, and prebuilt metadata/hash
+validation before cache selection. Existing unsafe permissions are rejected, not
+silently repaired. This protects loose-package code without changing Store resolution.
+
+Developers opt in to a source-built Gateway with
+`OPENCLAW_NATIVE_GATEWAY_DEV_PATCH=<patch>`. `scripts\Build-NativeGatewayFromSource.ps1`
+builds an `openclaw/openclaw` ref and registers it with the packaging repo's
+`Deploy-LocalPackage.ps1 -Patch` as the side-by-side loose registration
+`OpenClawFoundation.OpenClawGateway-<patch>` under the Store publisher, with
+package-qualified aliases `openclaw-<patch>.exe` and `clawctl-<patch>.exe`. While the
+variable is set, new setup selects only that patched package
+(`NativeGatewayPackageIdentity.IsSelectable`) and a missing patch is an explicit error,
+never `NativeGatewayPackageNotInstalledException`, so WinGet never runs. Saved profiles
+bound to a patched family resolve only while the variable names that patch
+(`IsResolvable`); otherwise the resolver reports which value to set. With the variable
+unset, selection, resolution and aliases are identical to the Store path.
+
 After native capability/permission review, `NativeGatewaySetupPage` starts
 automatically. It rechecks device support, then calls
 `NativeGatewayPackageAcquisition.EnsureAsync`. Only the typed
