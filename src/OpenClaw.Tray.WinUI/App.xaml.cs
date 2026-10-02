@@ -4099,9 +4099,12 @@ public partial class App : Application, OpenClawTray.Services.IAppCommands, IPer
         SettingsOwnedForwardBinding? ownedForward = sshGate.Generation is long generation
             ? new SettingsOwnedForwardBinding(true, generation, sshGate.LocalPort, sshGate.ProcessId)
             : null;
+        var browserGatewayUrl = ownedForward is { } forward
+            ? DashboardBrowserHandoff.LocalForwardBrowserUrl(forward.LocalPort)
+            : after.GatewayUrl;
         return (DashboardLaunchReadiness.Ready, new DashboardLaunchPreparation(
             new InteractiveGatewayCredential(
-                after.GatewayUrl,
+                browserGatewayUrl,
                 after.Token,
                 after.IsBootstrapToken,
                 after.Source),

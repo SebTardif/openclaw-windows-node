@@ -40,6 +40,9 @@ public static class DashboardBrowserHandoff
             left.IncludeBrowserProxyForward == right.IncludeBrowserProxyForward;
     }
 
+    public static string LocalForwardBrowserUrl(int localPort) =>
+        $"http://127.0.0.1:{localPort}/";
+
     public static bool UrlUsesCapturedForward(string url, DashboardGatewayTunnelSnapshot captured)
     {
         if (captured.Tunnel is not SshTunnelConfig tunnel)

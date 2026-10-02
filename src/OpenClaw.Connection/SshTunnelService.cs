@@ -258,12 +258,12 @@ public sealed class SshTunnelService : ISshTunnelManager
     }
 
     /// <summary>
-    /// Stops the tracked tunnel. Returns false when a browser handoff lease
-    /// defers the stop and leaves the process, spec, owner, and status unchanged.
-    /// The deferred stop completes on the last <see cref="ExitBrowserHandoff"/>.
+    /// Stops the tracked tunnel. An open dashboard handoff is cancelled first
+    /// so Disconnect, Restart, and shutdown are not stuck behind it.
     /// </summary>
     private bool StopLocked()
     {
+        CancelOpenBrowserHandoffs();
         Process? process;
         lock (_stateLock)
         {
@@ -333,6 +333,7 @@ public sealed class SshTunnelService : ISshTunnelManager
     {
         lock (_operationLock)
         {
+            CancelOpenBrowserHandoffs();
             Process? process = null;
             var deferred = false;
             lock (_stateLock)
@@ -827,6 +828,21 @@ public sealed class SshTunnelService : ISshTunnelManager
         }
     }
 
+    public void CancelOpenBrowserHandoffs()
+    {
+        long[] handoffIds;
+        lock (_stateLock)
+        {
+            handoffIds = _browserHandoffs
+                .Where(handoff => !handoff.Settled)
+                .Select(handoff => handoff.Id)
+                .ToArray();
+        }
+
+        foreach (var handoffId in handoffIds)
+            ExitBrowserHandoff(handoffId);
+    }
+
     public void ExitBrowserHandoff()
     {
         long handoffId;
@@ -1151,19 +1167,29 @@ public sealed class SshTunnelService : ISshTunnelManager
         try
         {
             ct.ThrowIfCancellationRequested();
-            Process? process;
+            var normalizedConfig = config with
+            {
+                User = config.User.Trim(),
+                Host = config.Host.Trim(),
+            };
             lock (_stateLock)
             {
                 ct.ThrowIfCancellationRequested();
-                var normalizedConfig = config with
-                {
-                    User = config.User.Trim(),
-                    Host = config.Host.Trim(),
-                };
                 if (_lifecycleGeneration != ownershipGeneration ||
                     !Equals(_currentConfig, normalizedConfig) ||
-                    _currentOwner != SshTunnelOwner.GatewayConnectionManager ||
-                    _browserHandoffLeases > 0)
+                    _currentOwner != SshTunnelOwner.GatewayConnectionManager)
+                {
+                    return Task.FromResult(false);
+                }
+            }
+
+            CancelOpenBrowserHandoffs();
+            Process? process;
+            lock (_stateLock)
+            {
+                if (_lifecycleGeneration != ownershipGeneration ||
+                    !Equals(_currentConfig, normalizedConfig) ||
+                    _currentOwner != SshTunnelOwner.GatewayConnectionManager)
                 {
                     return Task.FromResult(false);
                 }

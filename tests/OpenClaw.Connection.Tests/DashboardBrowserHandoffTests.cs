@@ -56,6 +56,25 @@ public sealed class DashboardBrowserHandoffTests
     }
 
     [Fact]
+    public void LocalForwardBrowserUrl_ProjectsTheVerifiedPort()
+    {
+        var tunnel = new SshTunnelConfig("user", "gateway.example", 18789, 19001);
+        var saved = new DashboardGatewayTunnelSnapshot(
+            "gateway-a",
+            "wss://gateway.example/",
+            "token-a",
+            true,
+            tunnel);
+
+        var browserUrl = DashboardBrowserHandoff.LocalForwardBrowserUrl(tunnel.LocalPort);
+
+        Assert.Equal("http://127.0.0.1:19001/", browserUrl);
+        Assert.True(DashboardBrowserHandoff.UrlUsesCapturedForward(
+            browserUrl + "#token=token-a",
+            saved));
+    }
+
+    [Fact]
     public void UrlUsesCapturedForward_RequiresLoopbackPortAndCapturedToken()
     {
         var captured = new DashboardGatewayTunnelSnapshot(

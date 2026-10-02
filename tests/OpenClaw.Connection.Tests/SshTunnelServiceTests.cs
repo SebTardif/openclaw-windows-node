@@ -434,7 +434,7 @@ public sealed class SshTunnelServiceTests
     }
 
     [Fact]
-    public async Task StopIfOwnedAsync_WhileBrowserHandoffLeaseHeld_ReturnsFalseAndKeepsProcess()
+    public async Task StopIfOwnedAsync_DuringBrowserHandoff_CancelsTheHoldAndStops()
     {
         using var service = new SshTunnelService(NullLogger.Instance);
         var config = new SshTunnelConfig("user", "host", 18789, 45678);
@@ -445,26 +445,19 @@ public sealed class SshTunnelServiceTests
             generation: 4);
         Assert.True(service.TryEnterBrowserHandoff(4, config.LocalPort));
 
-        try
-        {
-            var stopped = await service.StopIfOwnedAsync(config, ownershipGeneration: 4, CancellationToken.None);
+        var stopped = await service.StopIfOwnedAsync(config, ownershipGeneration: 4, CancellationToken.None);
 
-            Assert.False(stopped);
-            Assert.Same(process, TrackedProcess(service));
-            Assert.Equal(4, service.OwnershipGeneration);
-            Assert.True(service.IsRunning);
-            Assert.Equal(TunnelStatus.Up, service.Status);
-            Assert.Equal(config, service.ActiveConfig);
-            Assert.Equal(SshTunnelOwner.GatewayConnectionManager, CurrentOwner(service));
-        }
-        finally
-        {
-            service.ExitBrowserHandoff();
-        }
+        Assert.True(stopped);
+        Assert.Equal(0, service.BrowserHandoffLeaseCount);
+        Assert.False(service.IsBrowserHandoffOpen(1));
+        Assert.Null(TrackedProcess(service));
+        Assert.False(service.IsRunning);
+        Assert.Equal(TunnelStatus.Stopped, service.Status);
+        Assert.Throws<InvalidOperationException>(() => process.HasExited);
     }
 
     [Fact]
-    public void ResetNotConfigured_DuringBrowserHandoff_DoesNotReportNotConfiguredUntilLeaseEnds()
+    public void ResetNotConfigured_DuringBrowserHandoff_CancelsTheHoldImmediately()
     {
         using var service = new SshTunnelService(NullLogger.Instance);
         var config = new SshTunnelConfig("user", "host", 18789, 45678);
@@ -479,25 +472,7 @@ public sealed class SshTunnelServiceTests
 
         service.ResetNotConfigured();
 
-        var held = Assert.Throws<InvalidOperationException>(
-            () => service.EnsureStarted("other", "host", 18789, 45679));
-        Assert.Equal("SSH tunnel is held for a dashboard launch.", held.Message);
-        Assert.Same(process, TrackedProcess(service));
-        Assert.False(process.HasExited);
-        Assert.Equal(TunnelStatus.Up, service.Status);
-        Assert.NotEqual(TunnelStatus.NotConfigured, service.Status);
-        Assert.Equal("tunnel still up", service.LastError);
-        Assert.True(service.IsRunning);
-
-        service.ExitBrowserHandoff();
-
-        Assert.Same(process, TrackedProcess(service));
-        Assert.False(process.HasExited);
-        Assert.Equal(TunnelStatus.Up, service.Status);
-        Assert.Equal("tunnel still up", service.LastError);
-
-        service.ExitBrowserHandoff();
-
+        Assert.Equal(0, service.BrowserHandoffLeaseCount);
         Assert.Null(TrackedProcess(service));
         Assert.Throws<InvalidOperationException>(() => process.HasExited);
         Assert.Equal(TunnelStatus.NotConfigured, service.Status);
@@ -506,7 +481,7 @@ public sealed class SshTunnelServiceTests
     }
 
     [Fact]
-    public void Stop_DuringBrowserHandoff_KillsProcessWhenLeaseEnds()
+    public void Stop_DuringBrowserHandoff_CancelsTheHoldAndStops()
     {
         using var service = new SshTunnelService(NullLogger.Instance);
         var config = new SshTunnelConfig("user", "host", 18789, 45678);
@@ -519,13 +494,8 @@ public sealed class SshTunnelServiceTests
 
         service.Stop();
 
-        Assert.Same(process, TrackedProcess(service));
-        Assert.False(process.HasExited);
-        Assert.Equal(TunnelStatus.Up, service.Status);
-        Assert.True(service.IsRunning);
-
-        service.ExitBrowserHandoff();
-
+        Assert.Equal(0, service.BrowserHandoffLeaseCount);
+        Assert.False(service.HasDeferredStop);
         Assert.Null(TrackedProcess(service));
         Assert.Throws<InvalidOperationException>(() => process.HasExited);
         Assert.Equal(TunnelStatus.Stopped, service.Status);
@@ -533,7 +503,7 @@ public sealed class SshTunnelServiceTests
     }
 
     [Fact]
-    public void StopDuringBrowserHandoff_KeepsListenerUntilConsumptionProbe()
+    public void StopDuringBrowserHandoff_DoesNotWaitForBrowserTraffic()
     {
         using var service = new SshTunnelService(NullLogger.Instance);
         var config = new SshTunnelConfig("user", "host", 18789, 45678);
@@ -544,32 +514,17 @@ public sealed class SshTunnelServiceTests
             generation: 4);
         Assert.True(service.TryEnterBrowserHandoff(4, config.LocalPort));
 
-        try
-        {
-            service.Stop();
+        service.Stop();
 
-            Assert.True(service.HasDeferredStop);
-            Assert.Equal(1, service.BrowserHandoffLeaseCount);
-            Assert.False(service.TryCompleteDeferredBrowserHandoff(1));
-            Assert.Same(process, TrackedProcess(service));
-            Assert.False(process.HasExited);
-            Assert.True(service.IsRunning);
-
-            Assert.True(service.TryCompleteDeferredBrowserHandoff(config.LocalPort));
-            Assert.Equal(0, service.BrowserHandoffLeaseCount);
-            Assert.False(service.HasDeferredStop);
-            Assert.Null(TrackedProcess(service));
-            Assert.Equal(TunnelStatus.Stopped, service.Status);
-        }
-        finally
-        {
-            if (service.BrowserHandoffLeaseCount > 0)
-                service.ExitBrowserHandoff();
-        }
+        Assert.False(service.HasDeferredStop);
+        Assert.Equal(0, service.BrowserHandoffLeaseCount);
+        Assert.Null(TrackedProcess(service));
+        Assert.Throws<InvalidOperationException>(() => process.HasExited);
+        Assert.Equal(TunnelStatus.Stopped, service.Status);
     }
 
     [Fact]
-    public void ReleaseBrowserHandoff_KeepsLeaseWhenStopIsAlreadyDeferred()
+    public void ReleaseBrowserHandoff_AfterStop_FindsNoLease()
     {
         using var service = new SshTunnelService(NullLogger.Instance);
         var config = new SshTunnelConfig("user", "host", 18789, 45678);
@@ -581,20 +536,12 @@ public sealed class SshTunnelServiceTests
         Assert.True(service.TryEnterBrowserHandoff(4, config.LocalPort));
         service.Stop();
 
-        try
-        {
-            Assert.True(service.TryReleaseBrowserHandoffUnlessDeferred(config.LocalPort, out var watch));
-            Assert.True(watch);
-            Assert.Equal(1, service.BrowserHandoffLeaseCount);
-            Assert.True(service.HasDeferredStop);
-            Assert.False(process.HasExited);
-            Assert.True(service.IsRunning);
-        }
-        finally
-        {
-            if (service.BrowserHandoffLeaseCount > 0)
-                service.ExitBrowserHandoff();
-        }
+        Assert.False(service.TryReleaseBrowserHandoffUnlessDeferred(config.LocalPort, out var watch));
+        Assert.False(watch);
+        Assert.Equal(0, service.BrowserHandoffLeaseCount);
+        Assert.False(service.HasDeferredStop);
+        Assert.Throws<InvalidOperationException>(() => process.HasExited);
+        Assert.False(service.IsRunning);
     }
 
     [Fact]
@@ -695,7 +642,6 @@ public sealed class SshTunnelServiceTests
             SshTunnelOwner.Settings,
             generation: 4);
         Assert.True(service.TryEnterBrowserHandoff(4, config.LocalPort));
-        service.Stop();
 
         try
         {
@@ -707,7 +653,7 @@ public sealed class SshTunnelServiceTests
             Assert.False(completed);
             Assert.False(process.HasExited);
             Assert.Equal(1, service.BrowserHandoffLeaseCount);
-            Assert.True(service.HasDeferredStop);
+            Assert.False(service.HasDeferredStop);
             Assert.True(service.IsRunning);
             Assert.Equal(TunnelStatus.Up, service.Status);
         }
@@ -729,7 +675,6 @@ public sealed class SshTunnelServiceTests
             SshTunnelOwner.Settings,
             generation: 4);
         Assert.True(service.TryEnterBrowserHandoff(4, config.LocalPort, process.Id, out var handoffId));
-        service.Stop();
 
         var waiting = await service.WatchBrowserHandoffConsumptionAsync(
             handoffId,
@@ -738,7 +683,7 @@ public sealed class SshTunnelServiceTests
             consumptionProbe: null);
         Assert.False(waiting);
         Assert.Equal(1, service.BrowserHandoffLeaseCount);
-        Assert.True(service.HasDeferredStop);
+        Assert.False(service.HasDeferredStop);
         Assert.True(service.IsRunning);
 
         process.Kill(entireProcessTree: true);
