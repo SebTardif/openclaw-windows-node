@@ -81,7 +81,6 @@ public static class SshTunnelCommandLine
         if (includeBrowserProxyForward)
         {
             ValidateBrowserProxyPort(remotePort, nameof(remotePort));
-            ValidateBrowserProxyPort(proxyLocalPort, nameof(browserProxyLocalPort));
             ValidatePort(proxyLocalPort, nameof(browserProxyLocalPort));
         }
 

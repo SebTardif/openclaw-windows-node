@@ -516,49 +516,46 @@ public sealed class SshTunnelServiceTests
     }
 
     [Fact]
-    public void Stop_AfterNavigationSubmitted_KeepsTheProcessUntilTeardown()
+    public void Stop_AfterNavigationSubmitted_StopsSshAndKeepsThePort()
     {
-        using var service = new SshTunnelService(NullLogger.Instance);
-        var config = new SshTunnelConfig("user", "host", 18789, 45678);
-        using var process = PlantRunningTunnel(
-            service,
-            config,
-            SshTunnelOwner.Settings,
-            generation: 4);
-        Assert.True(service.TryEnterBrowserHandoff(4, config.LocalPort, process.Id, out var handoffId));
-        Assert.True(service.TryBeginDashboardNavigation(handoffId));
-        Assert.True(service.CompleteDashboardNavigation(handoffId, opened: true, processId: null));
+        var port = 45678;
+        DashboardForwardPortGuard.Release(port);
+        using (var service = new SshTunnelService(NullLogger.Instance))
+        {
+            var config = new SshTunnelConfig("user", "host", 18789, port);
+            using var process = PlantRunningTunnel(
+                service,
+                config,
+                SshTunnelOwner.Settings,
+                generation: 4);
+            Assert.True(service.TryEnterBrowserHandoff(4, config.LocalPort, process.Id, out var handoffId));
+            Assert.True(service.TryBeginDashboardNavigation(handoffId));
+            Assert.True(service.CompleteDashboardNavigation(handoffId, opened: true, processId: null));
 
-        service.Stop();
+            service.Stop();
 
-        Assert.True(service.HasDeferredStop);
-        Assert.Equal(1, service.BrowserHandoffLeaseCount);
-        Assert.Same(process, TrackedProcess(service));
-        Assert.True(service.IsRunning);
-        Assert.False(process.HasExited);
+            Assert.False(service.HasDeferredStop);
+            Assert.Equal(0, service.BrowserHandoffLeaseCount);
+            Assert.False(service.IsRunning);
+            Assert.True(DashboardForwardPortGuard.IsHolding(port));
+            Assert.Throws<InvalidOperationException>(() => process.HasExited);
 
-        service.Stop();
+            service.Stop();
 
-        Assert.True(service.HasDeferredStop);
-        Assert.Equal(1, service.BrowserHandoffLeaseCount);
-        Assert.Same(process, TrackedProcess(service));
-        Assert.True(service.IsRunning);
-        Assert.False(process.HasExited);
-        Assert.False(DashboardForwardPortGuard.IsHolding(config.LocalPort));
+            Assert.True(DashboardForwardPortGuard.IsHolding(port));
+        }
 
-        service.Dispose();
-
-        Assert.False(service.IsRunning);
-        Assert.True(DashboardForwardPortGuard.IsHolding(config.LocalPort));
-        Assert.Throws<InvalidOperationException>(() => process.HasExited);
-        DashboardForwardPortGuard.Release(config.LocalPort);
+        DashboardForwardPortGuard.Release(port);
     }
 
     [Fact]
     public async Task Watch_DoesNotReleaseWhenTheActivationProcessHasExited()
     {
-        using var service = new SshTunnelService(NullLogger.Instance);
+        var service = new SshTunnelService(NullLogger.Instance);
         var config = new SshTunnelConfig("user", "host", 18789, 45678);
+        DashboardForwardPortGuard.Release(config.LocalPort);
+        try
+        {
         using var process = PlantRunningTunnel(
             service,
             config,
@@ -586,13 +583,22 @@ public sealed class SshTunnelServiceTests
         Assert.True(service.IsRunning);
         Assert.False(process.HasExited);
         service.ExitBrowserHandoff(handoffId);
+        }
+        finally
+        {
+            service.Dispose();
+            DashboardForwardPortGuard.Release(config.LocalPort);
+        }
     }
 
     [Fact]
     public async Task Watch_SubmittedNavigation_KeepsThePortWhenSshExits()
     {
-        using var service = new SshTunnelService(NullLogger.Instance);
+        var service = new SshTunnelService(NullLogger.Instance);
         var config = new SshTunnelConfig("user", "host", 18789, 45678);
+        DashboardForwardPortGuard.Release(config.LocalPort);
+        try
+        {
         using var process = PlantRunningTunnel(
             service,
             config,
@@ -622,8 +628,15 @@ public sealed class SshTunnelServiceTests
             config.RemotePort,
             2222));
         service.Stop();
-        Assert.False(DashboardForwardPortGuard.IsHolding(config.LocalPort));
+        Assert.True(DashboardForwardPortGuard.IsHolding(config.LocalPort));
+        Assert.Equal(0, service.BrowserHandoffLeaseCount);
         service.ExitBrowserHandoff(handoffId);
+        }
+        finally
+        {
+            service.Dispose();
+            DashboardForwardPortGuard.Release(config.LocalPort);
+        }
     }
 
     [Fact]

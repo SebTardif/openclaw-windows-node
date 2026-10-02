@@ -31,6 +31,7 @@ public sealed class SshTunnelService : ISshTunnelManager
     private string? _lastSpec;
     private long _lifecycleGeneration;
     private int _browserHandoffLeases;
+    private readonly HashSet<int> _dashboardProtectedPorts = new();
     private readonly List<BrowserHandoffLease> _browserHandoffs = new();
     private long _nextBrowserHandoffId;
     private DeferredTunnelStop _deferredStop;
@@ -259,20 +260,34 @@ public sealed class SshTunnelService : ISshTunnelManager
     }
 
     /// <summary>
-    /// Stops the tracked tunnel. An open dashboard handoff is cancelled first
-    /// so Disconnect, Restart, and shutdown are not stuck behind it.
+    /// Stops SSH. A port already handed to the dashboard stays bound here.
+    /// An unsubmitted handoff still defers the stop.
     /// </summary>
     private bool StopLocked()
     {
         CancelOpenBrowserHandoffs();
+        int[] portsToKeep;
+        SshTunnelConfig? config;
+        lock (_stateLock)
+        {
+            portsToKeep = _dashboardProtectedPorts.ToArray();
+            config = _currentConfig;
+            if (_browserHandoffLeases > 0 && portsToKeep.Length == 0)
+            {
+                RememberDeferredStopLocked(DeferredTunnelStop.Stop);
+                return false;
+            }
+        }
+
+        BindDashboardGuards(portsToKeep, config);
         Process? process;
         int[] portsToRelease;
         lock (_stateLock)
         {
-            if (_browserHandoffLeases > 0)
+            if (portsToKeep.Length > 0)
             {
-                RememberDeferredStopLocked(DeferredTunnelStop.Stop);
-                return false;
+                _browserHandoffs.Clear();
+                _browserHandoffLeases = 0;
             }
 
             portsToRelease = PortsToReleaseLocked();
@@ -297,9 +312,27 @@ public sealed class SshTunnelService : ISshTunnelManager
         return _browserHandoffs
             .Select(handoff => handoff.LocalPort)
             .Append(_currentConfig?.LocalPort ?? 0)
-            .Where(port => port > 0)
+            .Where(port => port > 0 && !_dashboardProtectedPorts.Contains(port))
             .Distinct()
             .ToArray();
+    }
+
+    private static void BindDashboardGuards(int[] ports, SshTunnelConfig? config)
+    {
+        foreach (var port in ports)
+        {
+            if (!DashboardForwardPortGuard.IsHolding(port))
+                DashboardForwardPortGuard.Hold(port);
+            if (config is not null && config.LocalPort == port)
+            {
+                DashboardForwardPortGuard.AllowsDestination(
+                    port,
+                    config.User,
+                    config.Host,
+                    config.RemotePort,
+                    config.SshPort);
+            }
+        }
     }
 
     private static void ReleaseForwardPorts(int[] ports)
@@ -361,31 +394,39 @@ public sealed class SshTunnelService : ISshTunnelManager
         lock (_operationLock)
         {
             CancelOpenBrowserHandoffs();
-            Process? process = null;
-            var deferred = false;
-            int[] portsToRelease = [];
+            int[] portsToKeep;
+            SshTunnelConfig? config;
             lock (_stateLock)
             {
-                if (_browserHandoffLeases > 0)
+                portsToKeep = _dashboardProtectedPorts.ToArray();
+                config = _currentConfig;
+                if (_browserHandoffLeases > 0 && portsToKeep.Length == 0)
                 {
                     RememberDeferredStopLocked(DeferredTunnelStop.ResetNotConfigured);
-                    deferred = true;
-                }
-                else
-                {
-                    portsToRelease = PortsToReleaseLocked();
-                    process = ClaimProcessForStopLocked();
-                    _deferredStop = DeferredTunnelStop.None;
-                    LastError = null;
-                    Status = TunnelStatus.NotConfigured;
+                    return;
                 }
             }
 
-            if (!deferred)
+            BindDashboardGuards(portsToKeep, config);
+            Process? process;
+            int[] portsToRelease;
+            lock (_stateLock)
             {
-                StopClaimedProcess(process);
-                ReleaseForwardPorts(portsToRelease);
+                if (portsToKeep.Length > 0)
+                {
+                    _browserHandoffs.Clear();
+                    _browserHandoffLeases = 0;
+                }
+
+                portsToRelease = PortsToReleaseLocked();
+                process = ClaimProcessForStopLocked();
+                _deferredStop = DeferredTunnelStop.None;
+                LastError = null;
+                Status = TunnelStatus.NotConfigured;
             }
+
+            StopClaimedProcess(process);
+            ReleaseForwardPorts(portsToRelease);
         }
     }
 
@@ -702,6 +743,7 @@ public sealed class SshTunnelService : ISshTunnelManager
         try
         {
             cancellationToken.ThrowIfCancellationRequested();
+            ClaimDashboardPublicPort(config);
             EnsureStartedCore(
                 config,
                 SshTunnelOwner.Settings,
@@ -884,6 +926,7 @@ public sealed class SshTunnelService : ISshTunnelManager
                 return false;
 
             handoff.Opening = true;
+            _dashboardProtectedPorts.Add(handoff.LocalPort);
             return true;
         }
     }
@@ -901,10 +944,19 @@ public sealed class SshTunnelService : ISshTunnelManager
             if (!opened)
             {
                 exit = true;
+                if (!_browserHandoffs.Any(other =>
+                        !other.Settled &&
+                        other.Id != handoff.Id &&
+                        other.LocalPort == handoff.LocalPort &&
+                        (other.Submitted || other.Opening)))
+                {
+                    _dashboardProtectedPorts.Remove(handoff.LocalPort);
+                }
             }
             else
             {
                 handoff.Submitted = true;
+                _dashboardProtectedPorts.Add(handoff.LocalPort);
                 if (processId is int id && id > 0)
                     handoff.BrowserProcessId = id;
             }
@@ -1180,6 +1232,48 @@ public sealed class SshTunnelService : ISshTunnelManager
             _currentConfig?.LocalPort == localPort;
     }
 
+    /// <summary>
+    /// Binds the dashboard's public port before SSH listens there.
+    /// The browser URL is not issued until this returns.
+    /// </summary>
+    private void ClaimDashboardPublicPort(SshTunnelConfig config)
+    {
+        var localPort = config.LocalPort;
+        var user = config.User.Trim();
+        var host = config.Host.Trim();
+        if (DashboardForwardPortGuard.IsHolding(localPort))
+        {
+            DashboardForwardPortGuard.AllowsDestination(
+                localPort,
+                user,
+                host,
+                config.RemotePort,
+                config.SshPort);
+            return;
+        }
+
+        var ownsPublicPort = false;
+        lock (_stateLock)
+        {
+            ownsPublicPort = IsRunningLocked() && _currentConfig?.LocalPort == localPort;
+        }
+
+        if (ownsPublicPort)
+            Stop();
+
+        RejectForeignForwardPort(localPort);
+        if (config.IncludeBrowserProxyForward)
+            RejectForeignForwardPort(localPort + 2);
+
+        DashboardForwardPortGuard.Hold(localPort);
+        DashboardForwardPortGuard.AllowsDestination(
+            localPort,
+            user,
+            host,
+            config.RemotePort,
+            config.SshPort);
+    }
+
     private static void RejectOccupiedForwardPorts(SshTunnelConfig tunnel)
     {
         RejectForeignForwardPort(tunnel.LocalPort);
@@ -1297,33 +1391,28 @@ public sealed class SshTunnelService : ISshTunnelManager
             protectedPorts = _browserHandoffs
                 .Where(handoff => !handoff.Settled && (handoff.Submitted || handoff.Opening))
                 .Select(handoff => handoff.LocalPort)
+                .Concat(_dashboardProtectedPorts)
+                .Where(port => port > 0)
                 .Distinct()
                 .ToArray();
+        }
+
+        BindDashboardGuards(protectedPorts, stoppedConfig);
+        lock (_stateLock)
+        {
             foreach (var handoff in _browserHandoffs)
                 handoff.CancelRequested = true;
             _browserHandoffs.Clear();
             _browserHandoffLeases = 0;
             _deferredStop = DeferredTunnelStop.None;
+            foreach (var port in protectedPorts)
+                _dashboardProtectedPorts.Remove(port);
             process = ClaimProcessForStopLocked();
         }
 
         foreach (var port in protectedPorts)
             DashboardForwardPortGuard.ClearBackend(port);
         StopClaimedProcess(process);
-        foreach (var port in protectedPorts)
-        {
-            if (!DashboardForwardPortGuard.IsHolding(port))
-                DashboardForwardPortGuard.Hold(port);
-            if (stoppedConfig is not null && stoppedConfig.LocalPort == port)
-            {
-                DashboardForwardPortGuard.AllowsDestination(
-                    port,
-                    stoppedConfig.User,
-                    stoppedConfig.Host,
-                    stoppedConfig.RemotePort,
-                    stoppedConfig.SshPort);
-            }
-        }
 
         if (protectedPorts.Length == 0 && stoppedPort > 0)
             DashboardForwardPortGuard.Release(stoppedPort);
@@ -1355,6 +1444,8 @@ public sealed class SshTunnelService : ISshTunnelManager
                     (handoff.Submitted || handoff.Opening))
                 .Select(handoff => handoff.Id)
                 .ToArray();
+            if (retainIds.Length > 0)
+                _dashboardProtectedPorts.Add(localPort);
         }
 
         if (retainIds.Length == 0)
