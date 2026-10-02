@@ -495,16 +495,17 @@ public sealed class AppRefactorContractTests
         Assert.Contains("DashboardBrowserHandoff.UrlUsesCapturedForward(url, prepared.Snapshot)", launch);
         Assert.Contains("TryEnterBrowserHandoff(owned.Generation, owned.LocalPort, owned.ProcessId, out var handoffId)", launch);
         Assert.Contains("HasDeferredStop", launch);
-        Assert.Contains("NoteBrowserHandoffClient(handoffId, browserPid)", launch);
-        Assert.Contains("NoteBrowserHandoffProcessName(handoffId, browserName)", launch);
-        Assert.Contains("TryReleaseBrowserHandoffUnlessDeferred(", launch);
         Assert.Contains("WatchBrowserHandoffConsumptionAsync(", launch);
         Assert.Contains("ExitBrowserHandoff(handoffId)", launch);
+        Assert.DoesNotContain("NoteBrowserHandoffProcessName", launch);
+        Assert.DoesNotContain("TryGetDefaultBrowserProcessName", launch);
+        Assert.DoesNotContain("hasBrowserIdentity", launch);
         Assert.DoesNotContain("The dashboard did not confirm a browser connection. The SSH forward hold ended.", launch);
         Assert.DoesNotContain("ex.Message", launch);
         Assert.DoesNotContain("Process.Start", launch);
         var watch = launch[launch.IndexOf("WatchBrowserHandoffConsumptionAsync(", StringComparison.Ordinal)..];
-        Assert.DoesNotContain("ExitBrowserHandoff", watch);
+        Assert.Contains("if (!tunnel.IsRunning)", watch);
+        Assert.Contains("ExitBrowserHandoff(handoffId)", watch);
         Assert.DoesNotContain("ex.Message", launcher);
         AssertInOrder(
             launch,
@@ -513,9 +514,9 @@ public sealed class AppRefactorContractTests
             "HasDeferredStop",
             "ExitBrowserHandoff(handoffId)",
             "DashboardBrowserShell.TryOpen",
-            "NoteBrowserHandoffClient(handoffId, browserPid)",
-            "TryReleaseBrowserHandoffUnlessDeferred(",
-            "WatchBrowserHandoffConsumptionAsync(");
+            "WatchBrowserHandoffConsumptionAsync(",
+            "if (!tunnel.IsRunning)",
+            "ExitBrowserHandoff(handoffId)");
         AssertInOrder(
             launcher,
             "await ensureTunnel()",

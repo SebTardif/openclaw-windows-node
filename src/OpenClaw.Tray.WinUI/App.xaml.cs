@@ -4132,29 +4132,10 @@ public partial class App : Application, OpenClawTray.Services.IAppCommands, IPer
             return Task.FromResult(false);
         }
 
-        if (!DashboardBrowserShell.TryOpen(url, out var browserProcessId))
+        if (!DashboardBrowserShell.TryOpen(url, out _))
         {
             tunnel.ExitBrowserHandoff(handoffId);
             return Task.FromResult(false);
-        }
-
-        var hasBrowserIdentity = false;
-        if (browserProcessId is int browserPid)
-        {
-            tunnel.NoteBrowserHandoffClient(handoffId, browserPid);
-            hasBrowserIdentity = true;
-        }
-        else if (DashboardBrowserShell.TryGetDefaultBrowserProcessName() is { Length: > 0 } browserName)
-        {
-            tunnel.NoteBrowserHandoffProcessName(handoffId, browserName);
-            hasBrowserIdentity = true;
-        }
-
-        if (!hasBrowserIdentity ||
-            !tunnel.TryReleaseBrowserHandoffUnlessDeferred(owned.LocalPort, out var watchDeferredStop) ||
-            !watchDeferredStop)
-        {
-            return Task.FromResult(true);
         }
 
         var localPort = owned.LocalPort;
@@ -4164,18 +4145,20 @@ public partial class App : Application, OpenClawTray.Services.IAppCommands, IPer
             {
                 while (tunnel.IsBrowserHandoffOpen(handoffId))
                 {
-                    var connected = await tunnel.WatchBrowserHandoffConsumptionAsync(
+                    var settled = await tunnel.WatchBrowserHandoffConsumptionAsync(
                         handoffId,
                         localPort,
                         TimeSpan.FromSeconds(60),
                         consumptionProbe: null).ConfigureAwait(false);
-                    if (connected)
+                    if (settled)
                         return;
                 }
             }
             catch (Exception ex)
             {
                 Logger.Warn($"Dashboard browser handoff watch failed: {ex.GetType().Name}");
+                if (!tunnel.IsRunning)
+                    tunnel.ExitBrowserHandoff(handoffId);
             }
         });
 

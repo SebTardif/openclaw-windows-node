@@ -114,122 +114,13 @@ public static class WindowsTcpListenerSnapshot
         return !seen.Contains(key);
     }
 
-    public static bool TryCollectEstablishedForwardKeys(int port, out HashSet<string> keys)
-    {
-        var collected = new HashSet<string>(StringComparer.Ordinal);
-        keys = collected;
-        if (!OperatingSystem.IsWindows() || port is < 1 or > 65535)
-            return false;
-
-        var complete = true;
-        VisitEstablished(AfInet, ipv6: false, row =>
-        {
-            if (RowMatchesForward(row, port))
-                collected.Add(row.Key);
-            return false;
-        }, ref complete);
-        VisitEstablished(AfInet6, ipv6: true, row =>
-        {
-            if (RowMatchesForward(row, port))
-                collected.Add(row.Key);
-            return false;
-        }, ref complete);
-        return complete;
-    }
-
-    public static bool HasUnseenEstablishedForwardUse(
-        int port,
-        int? browserProcessId,
-        IReadOnlySet<string> seen)
-    {
-        if (!OperatingSystem.IsWindows() || port is < 1 or > 65535 || seen is null)
-            return false;
-
-        var found = false;
-        var complete = true;
-        bool Visit(EstablishedTcpRow row)
-        {
-            if (IsUnseenEstablishedForwardUse(
-                    row.State,
-                    row.LocalAddress,
-                    row.LocalPort,
-                    row.RemoteAddress,
-                    row.RemotePort,
-                    row.ProcessId,
-                    port,
-                    browserProcessId,
-                    seen))
-            {
-                found = true;
-                return true;
-            }
-
-            return false;
-        }
-
-        VisitEstablished(AfInet, ipv6: false, Visit, ref complete);
-        if (!found)
-            VisitEstablished(AfInet6, ipv6: true, Visit, ref complete);
-        return found;
-    }
-
-    public readonly record struct EstablishedForwardClient(string Key, int ProcessId);
-
-    public static IReadOnlyList<EstablishedForwardClient> ListEstablishedForwardClients(int port)
-    {
-        var collected = new List<EstablishedForwardClient>();
-        if (!OperatingSystem.IsWindows() || port is < 1 or > 65535)
-            return collected;
-
-        var complete = true;
-        void Visit(EstablishedTcpRow row)
-        {
-            if (row.RemotePort == port &&
-                row.LocalPort != port &&
-                IsEstablishedLoopbackForwardUse(
-                    row.State,
-                    row.LocalAddress,
-                    row.LocalPort,
-                    row.RemoteAddress,
-                    row.RemotePort,
-                    port))
-            {
-                collected.Add(new EstablishedForwardClient(row.Key, row.ProcessId));
-            }
-        }
-
-        VisitEstablished(AfInet, ipv6: false, row =>
-        {
-            Visit(row);
-            return false;
-        }, ref complete);
-        VisitEstablished(AfInet6, ipv6: true, row =>
-        {
-            Visit(row);
-            return false;
-        }, ref complete);
-        return collected;
-    }
-
     private readonly record struct EstablishedTcpRow(
         uint State,
         IPAddress LocalAddress,
         int LocalPort,
         IPAddress RemoteAddress,
         int RemotePort,
-        int ProcessId)
-    {
-        public string Key => EstablishedForwardKey(LocalAddress, LocalPort, RemoteAddress, RemotePort, ProcessId);
-    }
-
-    private static bool RowMatchesForward(EstablishedTcpRow row, int port) =>
-        IsEstablishedLoopbackForwardUse(
-            row.State,
-            row.LocalAddress,
-            row.LocalPort,
-            row.RemoteAddress,
-            row.RemotePort,
-            port);
+        int ProcessId);
 
     public static string? GetProcessCommandLine(int processId)
     {

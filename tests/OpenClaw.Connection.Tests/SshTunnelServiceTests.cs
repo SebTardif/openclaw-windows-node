@@ -719,6 +719,44 @@ public sealed class SshTunnelServiceTests
     }
 
     [Fact]
+    public async Task WatchBrowserHandoff_NullProbe_HoldsUntilTheSshProcessIsGone()
+    {
+        using var service = new SshTunnelService(NullLogger.Instance);
+        var config = new SshTunnelConfig("user", "host", 18789, 45678);
+        using var process = PlantRunningTunnel(
+            service,
+            config,
+            SshTunnelOwner.Settings,
+            generation: 4);
+        Assert.True(service.TryEnterBrowserHandoff(4, config.LocalPort, process.Id, out var handoffId));
+        service.Stop();
+
+        var waiting = await service.WatchBrowserHandoffConsumptionAsync(
+            handoffId,
+            config.LocalPort,
+            TimeSpan.Zero,
+            consumptionProbe: null);
+        Assert.False(waiting);
+        Assert.Equal(1, service.BrowserHandoffLeaseCount);
+        Assert.True(service.HasDeferredStop);
+        Assert.True(service.IsRunning);
+
+        process.Kill(entireProcessTree: true);
+        Assert.True(process.WaitForExit(3_000));
+
+        var settled = await service.WatchBrowserHandoffConsumptionAsync(
+            handoffId,
+            config.LocalPort,
+            TimeSpan.FromSeconds(2),
+            consumptionProbe: null);
+        Assert.True(settled);
+        Assert.False(service.IsBrowserHandoffOpen(handoffId));
+        Assert.Equal(0, service.BrowserHandoffLeaseCount);
+        Assert.False(service.HasDeferredStop);
+        Assert.False(service.IsRunning);
+    }
+
+    [Fact]
     public async Task WatchBrowserHandoff_ProbeCompletesDeferredStop()
     {
         using var service = new SshTunnelService(NullLogger.Instance);

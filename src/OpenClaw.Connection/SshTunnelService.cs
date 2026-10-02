@@ -31,7 +31,6 @@ public sealed class SshTunnelService : ISshTunnelManager
     private long _lifecycleGeneration;
     private int _browserHandoffLeases;
     private readonly List<BrowserHandoffLease> _browserHandoffs = new();
-    private readonly HashSet<string> _claimedBrowserConnections = new(StringComparer.Ordinal);
     private long _nextBrowserHandoffId;
     private DeferredTunnelStop _deferredStop;
 
@@ -771,9 +770,6 @@ public sealed class SshTunnelService : ISshTunnelManager
             {
                 Id = handoffId,
                 LocalPort = localPort,
-                Seen = WindowsTcpListenerSnapshot.TryCollectEstablishedForwardKeys(localPort, out var seen)
-                    ? seen
-                    : null,
             });
             return true;
         }
@@ -792,19 +788,6 @@ public sealed class SshTunnelService : ISshTunnelManager
             var handoff = FindOpenHandoffLocked(handoffId);
             if (handoff is not null)
                 handoff.BrowserProcessId = processId;
-        }
-    }
-
-    public void NoteBrowserHandoffProcessName(long handoffId, string processName)
-    {
-        if (handoffId <= 0 || string.IsNullOrWhiteSpace(processName))
-            return;
-
-        lock (_stateLock)
-        {
-            var handoff = FindOpenHandoffLocked(handoffId);
-            if (handoff is not null)
-                handoff.BrowserProcessName = processName;
         }
     }
 
@@ -884,9 +867,6 @@ public sealed class SshTunnelService : ISshTunnelManager
                 _browserHandoffs.Remove(handoff);
                 if (_browserHandoffLeases > 0)
                     _browserHandoffLeases--;
-                if (_browserHandoffLeases == 0)
-                    _claimedBrowserConnections.Clear();
-
                 if (_browserHandoffLeases != 0 || _deferredStop == DeferredTunnelStop.None)
                     return;
 
@@ -975,9 +955,8 @@ public sealed class SshTunnelService : ISshTunnelManager
                 return true;
             }
 
-            var consumed = consumptionProbe != null
-                ? consumptionProbe(localPort)
-                : handoffId > 0 && TryClaimHandoffConsumption(handoffId, localPort);
+            // Browser process identity does not identify this dashboard navigation.
+            var consumed = consumptionProbe?.Invoke(localPort) == true;
             if (consumed || !IsRunning)
             {
                 var completed = handoffId > 0
@@ -1009,60 +988,6 @@ public sealed class SshTunnelService : ISshTunnelManager
 
         ExitBrowserHandoff(handoffId);
         return true;
-    }
-
-    private bool TryClaimHandoffConsumption(long handoffId, int localPort)
-    {
-        var clients = WindowsTcpListenerSnapshot.ListEstablishedForwardClients(localPort);
-        List<BrowserHandoffView> views;
-        HashSet<string> claimed;
-        lock (_stateLock)
-        {
-            views = _browserHandoffs
-                .Select(handoff => new BrowserHandoffView(
-                    handoff.Id,
-                    handoff.Settled,
-                    handoff.BrowserProcessId,
-                    handoff.BrowserProcessName,
-                    handoff.Seen))
-                .ToList();
-            claimed = new HashSet<string>(_claimedBrowserConnections, StringComparer.Ordinal);
-        }
-
-        var rows = new List<ForwardClientRow>(clients.Count);
-        foreach (var client in clients)
-            rows.Add(new ForwardClientRow(client.Key, client.ProcessId, ProcessNameFor(client.ProcessId)));
-
-        if (!BrowserHandoffConsumption.TrySelectExclusiveConsumption(handoffId, views, rows, claimed, out var key) ||
-            key is null)
-        {
-            return false;
-        }
-
-        lock (_stateLock)
-        {
-            if (_claimedBrowserConnections.Contains(key) || FindOpenHandoffLocked(handoffId) is null)
-                return false;
-
-            _claimedBrowserConnections.Add(key);
-            return true;
-        }
-    }
-
-    private static string? ProcessNameFor(int processId)
-    {
-        if (processId <= 0)
-            return null;
-
-        try
-        {
-            using var process = Process.GetProcessById(processId);
-            return process.ProcessName;
-        }
-        catch (Exception ex) when (ex is ArgumentException or InvalidOperationException or System.ComponentModel.Win32Exception)
-        {
-            return null;
-        }
     }
 
     private long NewestOpenHandoffId()
@@ -1109,8 +1034,6 @@ public sealed class SshTunnelService : ISshTunnelManager
         public long Id { get; init; }
         public int LocalPort { get; init; }
         public int? BrowserProcessId { get; set; }
-        public string? BrowserProcessName { get; set; }
-        public HashSet<string>? Seen { get; init; }
         public bool Settled { get; set; }
     }
 
