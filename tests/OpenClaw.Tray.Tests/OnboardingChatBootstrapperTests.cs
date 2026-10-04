@@ -71,7 +71,7 @@ public sealed class OnboardingChatBootstrapperTests : IDisposable
     }
 
     [Fact]
-    public async Task BootstrapAsync_DoesNotConsumeGate_WhenCompletionTimesOut()
+    public async Task BootstrapAsync_ConsumesGate_WhenSendIsAcknowledgedButCompletionTimesOut()
     {
         var settings = new SettingsManager(_settingsDir);
         var client = new FakeOperatorGatewayClient { Result = new ChatSendResult { RunId = "run-timeout" } };
@@ -80,7 +80,22 @@ public sealed class OnboardingChatBootstrapperTests : IDisposable
 
         Assert.False(result);
         Assert.Equal(1, client.SendCount);
-        Assert.False(settings.HasInjectedFirstRunBootstrap);
+        Assert.True(settings.HasInjectedFirstRunBootstrap);
+    }
+
+    [Fact]
+    public async Task BootstrapAsync_AcknowledgedSend_DoesNotSendTheHelloAgain()
+    {
+        var settings = new SettingsManager(_settingsDir);
+        var client = new FakeOperatorGatewayClient { Result = new ChatSendResult { RunId = "run-timeout" } };
+
+        var first = await OnboardingChatBootstrapper.BootstrapAsync(client, settings, TimeSpan.FromMilliseconds(25));
+        var second = await OnboardingChatBootstrapper.BootstrapAsync(client, settings, TimeSpan.FromMilliseconds(25));
+
+        Assert.False(first);
+        Assert.True(second);
+        Assert.Equal(1, client.SendCount);
+        Assert.True(settings.HasInjectedFirstRunBootstrap);
     }
 
     [Fact]

@@ -115,6 +115,10 @@ public static class OnboardingChatBootstrapper
             if (settings.HasInjectedFirstRunBootstrap)
                 return true;
 
+            // The gateway already stored this user message. Save the flag before
+            // waiting so a cancelled or timed-out completion cannot send it again.
+            MarkBootstrapped(settings);
+
             var completed = await runCompletion.WaitForCompletionAsync(
                 result.RunId,
                 timeoutAt,
