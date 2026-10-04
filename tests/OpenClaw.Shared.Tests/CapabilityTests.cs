@@ -1153,6 +1153,30 @@ public class BrowserProxyCapabilityTests
     }
 
     [Fact]
+    public async Task BrowserProxy_UnverifiedListener_DoesNotSendTheRequest()
+    {
+        var handler = new CapturingHandler("""{"ok":true}""");
+        var cap = new BrowserProxyCapability(
+            NullLogger.Instance,
+            "ws://127.0.0.1:18789",
+            "shared-gateway-token",
+            handler,
+            controlPortOverride: 18791,
+            authorizeEndpointAsync: (_, _) => Task.FromResult(false));
+
+        var res = await cap.ExecuteAsync(new NodeInvokeRequest
+        {
+            Id = "browser-unverified-listener",
+            Command = "browser.proxy",
+            Args = Parse("""{"method":"GET","path":"/tabs"}""")
+        });
+
+        Assert.False(res.Ok);
+        Assert.Contains("could not be verified", res.Error);
+        Assert.Null(handler.LastRequest);
+    }
+
+    [Fact]
     public async Task BrowserProxy_ControlPortOverrideOutOfRange_ReturnsError()
     {
         var cap = new BrowserProxyCapability(

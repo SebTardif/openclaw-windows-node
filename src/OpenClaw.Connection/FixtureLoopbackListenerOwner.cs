@@ -1,3 +1,4 @@
+using System.ComponentModel;
 using System.Diagnostics;
 using System.Net;
 using System.Runtime.InteropServices;
@@ -26,26 +27,57 @@ public static class FixtureLoopbackListenerOwner
             return false;
         }
 
-        using var current = Process.GetCurrentProcess();
-        int parentId;
         try
         {
-            parentId = GetParentProcessId(current.SafeHandle);
+            using var current = Process.GetCurrentProcess();
+            var parentId = GetParentProcessId(current.SafeHandle);
+            if (parentId <= 0)
+                return false;
+            using var parent = Process.GetProcessById(parentId);
+            // Keep this handle for the whole check. A later PID lookup can observe
+            // a different process after Windows reuses the number.
+            var parentHandle = parent.SafeHandle;
+            if (parent.HasExited)
+                return false;
+            var parentStart = parent.StartTime.ToUniversalTime();
+            var childStart = current.StartTime.ToUniversalTime();
+            var snapshot = WindowsTcpListenerSnapshot.Capture();
+            if (!snapshot.Ipv4Complete)
+                return false;
+            var onPort = snapshot.Listeners.Where(listener => listener.Port == port).ToArray();
+            var owned = onPort.Length > 0 && onPort.All(listener =>
+                IsLiveParentListener(
+                    parent.HasExited,
+                    parentStart,
+                    childStart,
+                    parent.Id,
+                    listener));
+            parent.Refresh();
+            return owned
+                && !parent.HasExited
+                && parent.StartTime.ToUniversalTime() == parentStart
+                && parentHandle == parent.SafeHandle;
         }
-        catch (InvalidOperationException)
+        catch (Exception ex) when (ex is ArgumentException or InvalidOperationException or Win32Exception or OverflowException)
         {
             return false;
         }
-        if (parentId <= 0)
-            return false;
+    }
 
-        var snapshot = WindowsTcpListenerSnapshot.Capture();
-        if (!snapshot.Ipv4Complete)
+    internal static bool IsLiveParentListener(
+        bool parentHasExited,
+        DateTime parentStartUtc,
+        DateTime childStartUtc,
+        int parentId,
+        WindowsTcpListenerInfo listener)
+    {
+        if (parentHasExited || parentId <= 0 || listener.ProcessId != parentId)
             return false;
-        return snapshot.Listeners.Any(listener =>
-            listener.Port == port &&
-            listener.ProcessId == parentId &&
-            listener.Address.Equals(IPAddress.Loopback));
+        if (parentStartUtc > childStartUtc)
+            return false;
+        if (!IPAddress.IsLoopback(listener.Address))
+            return false;
+        return listener.ProcessStartTimeUtc == parentStartUtc;
     }
 
     private static int GetParentProcessId(SafeProcessHandle process)
