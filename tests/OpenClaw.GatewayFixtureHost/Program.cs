@@ -6,23 +6,29 @@ internal static class Program
     {
         if (args.Length == 0 || args.Contains("--help"))
         {
-            Console.WriteLine("Usage: dotnet OpenClaw.GatewayFixtureHost.dll --app <built-app.exe> [--artifacts <directory>] [--duration-seconds <1..86400>]");
+            Console.WriteLine("Usage: dotnet OpenClaw.GatewayFixtureHost.dll --app <built-app.exe> [--artifacts <directory>] [--duration-seconds <1..86400>] [--browser-proxy]");
             Console.WriteLine("Starts the multi-session-browse fixture and an isolated real app. Ctrl+C stops only this run.");
             return args.Length == 0 ? 2 : 0;
         }
         string? appPath = null;
         string? artifacts = null;
         int? durationSeconds = null;
-        for (var index = 0; index < args.Length; index += 2)
+        var enableNodeBrowserProxy = false;
+        for (var index = 0; index < args.Length; index++)
         {
+            if (args[index] == "--browser-proxy")
+            {
+                enableNodeBrowserProxy = true;
+                continue;
+            }
             if (index + 1 >= args.Length || args[index] is not ("--app" or "--artifacts" or "--duration-seconds"))
             {
                 Console.Error.WriteLine($"Unknown or incomplete option: {args[index]}");
                 return 2;
             }
-            if (args[index] == "--app") appPath = args[index + 1];
-            else if (args[index] == "--artifacts") artifacts = args[index + 1];
-            else if (int.TryParse(args[index + 1], out var duration) && duration is >= 1 and <= 86400)
+            if (args[index] == "--app") appPath = args[++index];
+            else if (args[index] == "--artifacts") artifacts = args[++index];
+            else if (int.TryParse(args[++index], out var duration) && duration is >= 1 and <= 86400)
                 durationSeconds = duration;
             else
             {
@@ -40,10 +46,13 @@ internal static class Program
         Console.CancelKeyPress += cancel;
         try
         {
-            await using var run = await GatewayFixtureRun.StartAsync(appPath, artifacts, stop.Token);
+            await using var run = await GatewayFixtureRun.StartAsync(
+                appPath, artifacts, stop.Token, enableNodeBrowserProxy: enableNodeBrowserProxy);
             await run.InvokeAsync("app.navigate", new { page = "chat" });
             Console.WriteLine($"Fixture ready. App PID: {run.AppProcessId}");
             Console.WriteLine($"Gateway: {run.Gateway.Endpoint}");
+            if (run.BrowserControlPort is { } controlPort)
+                Console.WriteLine($"Browser control: http://127.0.0.1:{controlPort}/");
             Console.WriteLine($"MCP: http://127.0.0.1:{run.McpPort}/");
             Console.WriteLine($"Profile: {run.Profile.DataDirectory}");
             Console.WriteLine($"Artifacts: {run.ArtifactsDirectory}");

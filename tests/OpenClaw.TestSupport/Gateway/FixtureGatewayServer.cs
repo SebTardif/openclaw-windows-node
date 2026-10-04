@@ -332,10 +332,11 @@ public sealed class FixtureGatewayServer : IAsyncDisposable
                                 throw new FixtureRequestException("INVALID_REQUEST", "Operator is already connected.");
                             if (method != "connect")
                                 throw new FixtureRequestException("AUTH_REQUIRED", "Operator connect is required before reading fixture data.");
-                            Authenticate(parameters, nonce);
+                            var role = Authenticate(parameters, nonce);
                             await SendAsync(socket, sendLock, new
                             {
-                                type = "res", id, ok = true, payload = _scenario.CreateHello($"fixture-connection-{connectionId}")
+                                type = "res", id, ok = true,
+                                payload = _scenario.CreateHello($"fixture-connection-{connectionId}", role)
                             }, connection.Token);
                             authenticated = true;
                             lock (_sync)
@@ -448,15 +449,16 @@ public sealed class FixtureGatewayServer : IAsyncDisposable
         }
     }
 
-    private void Authenticate(JsonElement p, string nonce)
+    private string Authenticate(JsonElement p, string nonce)
     {
         if (p.ValueKind != JsonValueKind.Object)
             throw new FixtureRequestException("INVALID_PARAMS", "connect params must be an object.");
         if (!p.TryGetProperty("auth", out var auth) || ReadString(auth, "token") is not { } token
             || !CryptographicOperations.FixedTimeEquals(_tokenHash, SHA256.HashData(Encoding.UTF8.GetBytes(token))))
             throw new FixtureRequestException("AUTH_TOKEN_MISMATCH", "Unauthorized: fixture token mismatch.");
-        if (ReadString(p, "role") != "operator")
-            throw new FixtureRequestException("INVALID_PARAMS", "Fixture Gateway supports only the operator role.");
+        var role = ReadString(p, "role");
+        if (role is not ("operator" or "node"))
+            throw new FixtureRequestException("INVALID_PARAMS", "Fixture Gateway supports only the operator and node roles.");
         if (!p.TryGetProperty("minProtocol", out var min) || min.ValueKind != JsonValueKind.Number || !min.TryGetInt32(out var minimum)
             || !p.TryGetProperty("maxProtocol", out var max) || max.ValueKind != JsonValueKind.Number || !max.TryGetInt32(out var maximum)
             || minimum > _scenario.ProtocolVersion || maximum < _scenario.ProtocolVersion || minimum > maximum)
@@ -467,6 +469,7 @@ public sealed class FixtureGatewayServer : IAsyncDisposable
             || string.IsNullOrWhiteSpace(ReadString(device, "publicKey"))
             || string.IsNullOrWhiteSpace(ReadString(device, "signature")))
             throw new FixtureRequestException("INVALID_PARAMS", "Expected a signed operator envelope for this challenge.");
+        return role;
     }
 
     private int Record(

@@ -529,6 +529,20 @@ public sealed class GatewayFixtureProtocolTests
         Assert.DoesNotContain("PRIVATE-UPGRADE-DATA", diagnostic);
     }
 
+    [Fact]
+    public async Task RealNodeClient_FixtureAcceptsTheNodeRole()
+    {
+        var token = CreateToken();
+        await using var server = await FixtureGatewayServer.StartAsync(GatewayScenario.CreateBrowse(), token);
+        using var data = new TempDirectory(".fixture-node-");
+        using var node = new WindowsNodeClient(server.Endpoint.AbsoluteUri, token, data.Path);
+        var handshake = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        node.HandshakeSucceeded += (_, _) => handshake.TrySetResult();
+        await node.ConnectAsync();
+        await handshake.Task.WaitAsync(Deadline);
+        Assert.Contains(server.Requests, request => request.Method == "connect" && request.Outcome == "ok");
+    }
+
     private static string CreateToken() => Convert.ToHexString(RandomNumberGenerator.GetBytes(32));
     private static TaskCompletionSource<T> Signal<T>() => new(TaskCreationOptions.RunContinuationsAsynchronously);
     private static TempDirectory CreateIdentity() => new(Path.Combine(Directory.GetCurrentDirectory(), ".fixture-identity-"));

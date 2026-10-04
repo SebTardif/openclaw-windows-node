@@ -21,10 +21,13 @@ public sealed class GatewayFixtureProfile : IDisposable
     public string GatewayId { get; } = Guid.NewGuid().ToString();
     public Uri GatewayEndpoint { get; }
 
-    public GatewayFixtureProfile(Uri endpoint, string token)
+    public bool NodeBrowserProxyEnabled { get; }
+
+    public GatewayFixtureProfile(Uri endpoint, string token, bool enableNodeBrowserProxy = false)
     {
         ValidateEndpoint(endpoint);
         ArgumentException.ThrowIfNullOrWhiteSpace(token);
+        NodeBrowserProxyEnabled = enableNodeBrowserProxy;
         GatewayEndpoint = endpoint;
         _directory = new TempDirectory("openclaw-gateway-fixture-");
         try
@@ -35,7 +38,7 @@ public sealed class GatewayFixtureProfile : IDisposable
             {
                 GatewayUrl = endpoint.AbsoluteUri,
                 EnableMcpServer = true,
-                EnableNodeMode = false,
+                EnableNodeMode = enableNodeBrowserProxy,
                 AutoStart = false,
                 GlobalHotkeyEnabled = false,
                 ShowNotifications = false,
@@ -45,7 +48,7 @@ public sealed class GatewayFixtureProfile : IDisposable
                 HasInjectedFirstRunBootstrap = true,
                 EnableManagedLocalGatewayAutoRepair = false,
                 NodeSystemRunEnabled = false,
-                NodeBrowserProxyEnabled = false,
+                NodeBrowserProxyEnabled = enableNodeBrowserProxy,
                 NodeCanvasEnabled = false,
                 NodeScreenEnabled = false,
                 NodeCameraEnabled = false,
