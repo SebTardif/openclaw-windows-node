@@ -20,14 +20,18 @@ internal enum GatewayLogTailIssue
 /// stdout instead of as a <c>wizard.payload</c> WS frame, leaving the tray UI
 /// blank.
 ///
-/// Spawns <c>wsl.exe -- tail -F /tmp/openclaw/openclaw-*.log</c> and parses
+/// Spawns <c>wsl.exe</c> with a bash loop that waits for
+/// <c>/tmp/openclaw/openclaw-*.log</c> and then runs <c>tail -F</c>. Parses
 /// its stdout (the <c>\\wsl$\</c> 9P share is unreliable). Silently no-ops if
 /// wsl.exe or the distro is unavailable (remote/Tailscale gateway case).
 /// </summary>
 internal sealed class WizardConsoleTail : IDisposable
 {
     private const string DefaultDistroName = "OpenClawGateway";
-    private const string LogGlob = "/tmp/openclaw/openclaw-*.log";
+    // Bash expands a glob once, before tail starts. The loop waits until a
+    // log exists, then replaces this process with tail -F on those names.
+    internal const string TailCommand =
+        "dir=/tmp/openclaw; while true; do set -- \"$dir\"/openclaw-*.log; if [ -e \"$1\" ]; then exec tail -F -n 0 \"$@\"; fi; sleep 0.2; done";
     private static readonly Regex s_ansiEscapeRegex = new(
         @"\x1B(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1B\\)|[PX^_].*?\x1B\\|[@-Z\\-_])",
         RegexOptions.Compiled | RegexOptions.Singleline);
@@ -101,9 +105,7 @@ internal sealed class WizardConsoleTail : IDisposable
             psi.ArgumentList.Add("--");
             psi.ArgumentList.Add("bash");
             psi.ArgumentList.Add("-c");
-            // -n 0 = start at end of file (don't replay history).
-            // 2>/dev/null = drop "cannot open" if the file doesn't exist yet; -F will pick it up on creation.
-            psi.ArgumentList.Add($"tail -F -n 0 {LogGlob} 2>/dev/null");
+            psi.ArgumentList.Add(TailCommand);
 
             process = Process.Start(psi);
         }
@@ -142,7 +144,7 @@ internal sealed class WizardConsoleTail : IDisposable
         {
             process.BeginOutputReadLine();
             process.BeginErrorReadLine();
-            _logger.Debug($"WizardConsoleTail: attached to {_distroName}:{LogGlob} (pid {process.Id})");
+            _logger.Debug($"WizardConsoleTail: attached to {_distroName}:/tmp/openclaw/openclaw-*.log (pid {process.Id})");
         }
         catch (Exception ex)
         {

@@ -487,4 +487,15 @@ public class WizardConsoleTailTests
 
         Assert.Equal("install failed: npm ENOSPC", extracted);
     }
+
+    [Fact]
+    public void TailCommand_WaitsUntilALogExists()
+    {
+        var command = WizardConsoleTail.TailCommand;
+
+        Assert.Contains("while true", command, StringComparison.Ordinal);
+        Assert.Contains("exec tail -F -n 0", command, StringComparison.Ordinal);
+        Assert.Contains("\"$dir\"/openclaw-*.log", command, StringComparison.Ordinal);
+        Assert.DoesNotContain("2>/dev/null", command, StringComparison.Ordinal);
+    }
 }
