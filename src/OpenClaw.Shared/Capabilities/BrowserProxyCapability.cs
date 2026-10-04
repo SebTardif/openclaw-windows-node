@@ -15,6 +15,7 @@ public class BrowserProxyCapability : NodeCapabilityBase
     private const int DefaultTimeoutMs = 20_000;
     private const int MaxTimeoutMs = 120_000;
     private const long MaxFileBytes = 10 * 1024 * 1024;
+    private const int MaxResponseBytes = 1_048_576;
     private static readonly string[] s_commands = ["browser.proxy"];
     private readonly string _gatewayUrl;
     private readonly string _bearerToken;
@@ -49,7 +50,9 @@ public class BrowserProxyCapability : NodeCapabilityBase
         _allowGatewayPortFallback = allowGatewayPortFallback ??
             BrowserControlEndpoint.AllowsGatewayPortFallback(gatewayUrl);
         _authorizeEndpointAsync = authorizeEndpointAsync;
-        _httpClient = handler == null ? new HttpClient() : new HttpClient(handler);
+        _httpClient = handler == null
+            ? new HttpClient(CreateDirectHandler(), disposeHandler: true)
+            : new HttpClient(handler);
     }
 
     public override string Category => "browser";
@@ -85,15 +88,21 @@ public class BrowserProxyCapability : NodeCapabilityBase
             }
 
             using var httpRequest = CreateHttpRequest(method, uri, request.Args, usePasswordAuth: false);
-            using var response = await _httpClient.SendAsync(httpRequest, timeoutCts.Token);
-            var responseText = await response.Content.ReadAsStringAsync(timeoutCts.Token);
+            using var response = await _httpClient.SendAsync(
+                httpRequest,
+                HttpCompletionOption.ResponseHeadersRead,
+                timeoutCts.Token);
+            var responseText = await ReadCappedTextAsync(response.Content, timeoutCts.Token);
 
             if (response.StatusCode == HttpStatusCode.Unauthorized &&
                 !string.IsNullOrWhiteSpace(_bearerToken))
             {
                 using var passwordRequest = CreateHttpRequest(method, uri, request.Args, usePasswordAuth: true);
-                using var passwordResponse = await _httpClient.SendAsync(passwordRequest, timeoutCts.Token);
-                var passwordResponseText = await passwordResponse.Content.ReadAsStringAsync(timeoutCts.Token);
+                using var passwordResponse = await _httpClient.SendAsync(
+                    passwordRequest,
+                    HttpCompletionOption.ResponseHeadersRead,
+                    timeoutCts.Token);
+                var passwordResponseText = await ReadCappedTextAsync(passwordResponse.Content, timeoutCts.Token);
                 return BuildProxyResponse(passwordResponse, passwordResponseText);
             }
 
@@ -107,6 +116,11 @@ public class BrowserProxyCapability : NodeCapabilityBase
         {
             Logger.Warn($"browser proxy: control host unreachable on 127.0.0.1:{controlPort}: {ex.Message}");
             return Error($"Browser control host is not reachable on 127.0.0.1:{controlPort}. {BuildReachabilityGuidance(controlPort, _sshRemoteGatewayPort)}");
+        }
+        catch (InvalidDataException ex)
+        {
+            Logger.Warn($"browser proxy: control host response was rejected: {ex.Message}");
+            return Error("Browser control response exceeds the size limit");
         }
         catch (JsonException ex)
         {
@@ -122,6 +136,31 @@ public class BrowserProxyCapability : NodeCapabilityBase
         {
             Logger.Warn($"browser proxy: file read denied: {ex.Message}");
             return Error("Browser proxy file read denied");
+        }
+    }
+
+    private static SocketsHttpHandler CreateDirectHandler() => new()
+    {
+        UseProxy = false,
+        AllowAutoRedirect = false,
+    };
+
+    private static async Task<string> ReadCappedTextAsync(HttpContent content, System.Threading.CancellationToken cancellationToken)
+    {
+        if (content.Headers.ContentLength is > MaxResponseBytes)
+            throw new InvalidDataException("Browser control response exceeds the size limit.");
+
+        await using Stream input = await content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
+        using var output = new MemoryStream();
+        var buffer = new byte[16 * 1024];
+        while (true)
+        {
+            int read = await input.ReadAsync(buffer.AsMemory(), cancellationToken).ConfigureAwait(false);
+            if (read == 0)
+                return Encoding.UTF8.GetString(output.GetBuffer(), 0, (int)output.Length);
+            if (output.Length + read > MaxResponseBytes)
+                throw new InvalidDataException("Browser control response exceeds the size limit.");
+            output.Write(buffer, 0, read);
         }
     }
 

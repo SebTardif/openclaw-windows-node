@@ -1413,6 +1413,113 @@ public class BrowserProxyCapabilityTests
         Assert.Contains("profile=work", requestUri);
     }
 
+    [Fact]
+    public async Task BrowserProxy_RejectsAnOversizedControlBody()
+    {
+        var handler = new CapturingHandler(new string('a', 1_048_577));
+        var cap = new BrowserProxyCapability(
+            NullLogger.Instance,
+            "ws://127.0.0.1:18789",
+            "token",
+            handler);
+
+        var res = await cap.ExecuteAsync(new NodeInvokeRequest
+        {
+            Id = "bp-oversize",
+            Command = "browser.proxy",
+            Args = Parse("""{"path":"/tabs"}""")
+        });
+
+        Assert.False(res.Ok);
+        Assert.Contains("size limit", res.Error, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("aaaa", res.Error);
+    }
+
+    [Fact]
+    public async Task BrowserProxy_DoesNotSendTheTokenThroughTheProcessProxy()
+    {
+        using var proxy = new TcpListener(IPAddress.Loopback, 0);
+        using var control = new TcpListener(IPAddress.Loopback, 0);
+        proxy.Start();
+        control.Start();
+        int proxyPort = ((IPEndPoint)proxy.LocalEndpoint).Port;
+        int controlPort = ((IPEndPoint)control.LocalEndpoint).Port;
+        int gatewayPort = controlPort - 2;
+        int proxyConnections = 0;
+        using var stop = new CancellationTokenSource();
+        Task proxyAccepts = Task.Run(async () =>
+        {
+            try
+            {
+                while (!stop.IsCancellationRequested)
+                {
+                    TcpClient accepted = await proxy.AcceptTcpClientAsync(stop.Token);
+                    Interlocked.Increment(ref proxyConnections);
+                    accepted.Dispose();
+                }
+            }
+            catch (OperationCanceledException)
+            {
+            }
+            catch (ObjectDisposedException)
+            {
+            }
+        });
+        Task controlAccept = Task.Run(async () =>
+        {
+            using TcpClient accepted = await control.AcceptTcpClientAsync(stop.Token);
+            await using NetworkStream stream = accepted.GetStream();
+            var buffer = new byte[4096];
+            _ = await stream.ReadAsync(buffer, stop.Token);
+            byte[] response = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 11\r\nConnection: close\r\n\r\n{\"ok\":true}"u8.ToArray();
+            await stream.WriteAsync(response, stop.Token);
+        });
+
+        string? previousHttp = Environment.GetEnvironmentVariable("HTTP_PROXY");
+        string? previousAll = Environment.GetEnvironmentVariable("ALL_PROXY");
+        Environment.SetEnvironmentVariable("HTTP_PROXY", $"http://127.0.0.1:{proxyPort}");
+        Environment.SetEnvironmentVariable("ALL_PROXY", $"http://127.0.0.1:{proxyPort}");
+        try
+        {
+            var cap = new BrowserProxyCapability(
+                NullLogger.Instance,
+                $"ws://127.0.0.1:{gatewayPort}",
+                "secret-token");
+            var res = await cap.ExecuteAsync(new NodeInvokeRequest
+            {
+                Id = "bp-direct",
+                Command = "browser.proxy",
+                Args = Parse("""{"path":"/tabs","timeoutMs":5000}""")
+            });
+
+            await Task.Delay(200);
+            Console.WriteLine(
+                "browser-proxy direct gateway_port={0} control_port={1} proxy_port={2} proxy_connections={3} ok={4}",
+                gatewayPort,
+                controlPort,
+                proxyPort,
+                proxyConnections,
+                res.Ok);
+            Assert.True(res.Ok);
+            Assert.Equal(0, Volatile.Read(ref proxyConnections));
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("HTTP_PROXY", previousHttp);
+            Environment.SetEnvironmentVariable("ALL_PROXY", previousAll);
+            stop.Cancel();
+            proxy.Stop();
+            control.Stop();
+            try
+            {
+                await proxyAccepts.WaitAsync(TimeSpan.FromSeconds(2));
+            }
+            catch (OperationCanceledException)
+            {
+            }
+        }
+    }
+
     private sealed class CapturingHandler : HttpMessageHandler
     {
         private readonly string _response;
