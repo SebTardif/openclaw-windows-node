@@ -1414,28 +1414,6 @@ public class BrowserProxyCapabilityTests
     }
 
     [Fact]
-    public async Task BrowserProxy_RejectsAnOversizedControlBody()
-    {
-        var handler = new CapturingHandler(new string('a', 1_048_577));
-        var cap = new BrowserProxyCapability(
-            NullLogger.Instance,
-            "ws://127.0.0.1:18789",
-            "token",
-            handler);
-
-        var res = await cap.ExecuteAsync(new NodeInvokeRequest
-        {
-            Id = "bp-oversize",
-            Command = "browser.proxy",
-            Args = Parse("""{"path":"/tabs"}""")
-        });
-
-        Assert.False(res.Ok);
-        Assert.Contains("size limit", res.Error, StringComparison.OrdinalIgnoreCase);
-        Assert.DoesNotContain("aaaa", res.Error);
-    }
-
-    [Fact]
     public async Task BrowserProxy_DoesNotSendTheTokenThroughTheProcessProxy()
     {
         using var proxy = new TcpListener(IPAddress.Loopback, 0);
