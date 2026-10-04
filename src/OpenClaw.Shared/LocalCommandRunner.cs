@@ -15,6 +15,9 @@ public class LocalCommandRunner : ICommandRunner
     private readonly IOpenClawLogger _logger;
     
     private const int OutputDrainTimeoutMs = 500;
+
+    /// <summary>Same default as <see cref="SettingsData.SandboxMaxOutputBytes"/>.</summary>
+    private const int DefaultMaxOutputBytes = 4 * 1024 * 1024;
     
     public string Name => "local";
     
@@ -87,20 +90,56 @@ public class LocalCommandRunner : ICommandRunner
         var outputLock = new object();
         var stdoutCompleted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var stderrCompleted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        // Null and non-positive caps use the 4 MiB host default. Stop before the
+        // combined builders pass the cap, then kill as a timeout would.
+        var maxOutputBytes = request.MaxOutputBytes is int configured && configured > 0
+            ? configured
+            : DefaultMaxOutputBytes;
+        var outputBytes = 0L;
+        var outputCapped = false;
+
+        void AppendBoundedOutput(StringBuilder builder, string line)
+        {
+            var kill = false;
+            lock (outputLock)
+            {
+                if (outputCapped)
+                    return;
+
+                var additionBytes = (long)Encoding.UTF8.GetByteCount(line) + Encoding.UTF8.GetByteCount(Environment.NewLine);
+                if (outputBytes + additionBytes > maxOutputBytes)
+                {
+                    outputCapped = true;
+                    stderrBuilder.AppendLine("[output truncated]");
+                    kill = true;
+                }
+                else
+                {
+                    outputBytes += additionBytes;
+                    builder.AppendLine(line);
+                }
+            }
+
+            if (!kill)
+                return;
+
+            _logger.Warn($"[EXEC] Output exceeded {maxOutputBytes} bytes; stopping process");
+            KillProcess(process);
+        }
 
         process.OutputDataReceived += (_, e) =>
         {
             if (e.Data is null)
                 stdoutCompleted.TrySetResult();
             else
-                lock (outputLock) { stdoutBuilder.AppendLine(e.Data); }
+                AppendBoundedOutput(stdoutBuilder, e.Data);
         };
         process.ErrorDataReceived += (_, e) =>
         {
             if (e.Data is null)
                 stderrCompleted.TrySetResult();
             else
-                lock (outputLock) { stderrBuilder.AppendLine(e.Data); }
+                AppendBoundedOutput(stderrBuilder, e.Data);
         };
         
         // Use the Exited event rather than WaitForExitAsync to detect process exit.
@@ -180,6 +219,8 @@ public class LocalCommandRunner : ICommandRunner
         {
             stdout = stdoutBuilder.ToString().TrimEnd();
             stderr = stderrBuilder.ToString().TrimEnd();
+            if (outputCapped)
+                timedOut = true;
         }
         
         var result = new CommandResult
