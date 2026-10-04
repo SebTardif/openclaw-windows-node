@@ -19,6 +19,7 @@ public sealed class GatewayFixtureRun : IAsyncDisposable
     private Process? _process;
     private McpClient? _client;
     private LoopbackControlHost? _control;
+    private Process? _foreignControl;
     private bool _disposed;
     private string? _mcpToken;
     private JsonElement? _lastStatus;
@@ -29,8 +30,10 @@ public sealed class GatewayFixtureRun : IAsyncDisposable
     public string ArtifactsDirectory { get; }
     public int AppProcessId => _process?.Id ?? throw new InvalidOperationException("The fixture app has not started.");
     public int McpPort { get; private set; }
-    public int? BrowserControlPort => _control?.Port;
+    public int? BrowserControlPort => _control?.Port ?? _foreignControlPort;
     public int BrowserControlRequests => _control?.Requests ?? 0;
+    public string? ForeignControlCountFile { get; private set; }
+    private int? _foreignControlPort;
     public bool IsRunning => _process is { HasExited: false };
     public int? AppExitCode => _process is { HasExited: true } ? _process.ExitCode : null;
 
@@ -52,14 +55,15 @@ public sealed class GatewayFixtureRun : IAsyncDisposable
         CancellationToken cancellationToken = default,
         bool allowAgentCreation = false,
         bool requireAgentSelection = false,
-        bool enableNodeBrowserProxy = false)
+        bool enableNodeBrowserProxy = false,
+        bool foreignBrowserControl = false)
     {
         if (!OperatingSystem.IsWindows())
             throw new PlatformNotSupportedException("The fixture app requires a Windows desktop.");
         var executable = GatewayFixtureProfile.ValidateApp(appPath);
         var token = Convert.ToHexString(RandomNumberGenerator.GetBytes(32));
-        var (gateway, control) = await StartGatewayAsync(
-            token, allowAgentCreation, requireAgentSelection, enableNodeBrowserProxy, cancellationToken);
+        var (gateway, control, foreign, foreignPort, foreignCountFile) = await StartGatewayAsync(
+            token, allowAgentCreation, requireAgentSelection, enableNodeBrowserProxy, foreignBrowserControl, cancellationToken);
         GatewayFixtureProfile profile;
         try
         {
@@ -70,6 +74,7 @@ public sealed class GatewayFixtureRun : IAsyncDisposable
             await gateway.DisposeAsync();
             if (control is not null)
                 await control.DisposeAsync();
+            KillForeign(foreign);
             throw;
         }
         GatewayFixtureRun run;
@@ -77,7 +82,10 @@ public sealed class GatewayFixtureRun : IAsyncDisposable
         {
             run = new GatewayFixtureRun(gateway, profile, token, executable, artifactRoot)
             {
-                _control = control
+                _control = control,
+                _foreignControl = foreign,
+                _foreignControlPort = foreignPort,
+                ForeignControlCountFile = foreignCountFile
             };
         }
         catch
@@ -87,6 +95,7 @@ public sealed class GatewayFixtureRun : IAsyncDisposable
                 await gateway.DisposeAsync();
                 if (control is not null)
                     await control.DisposeAsync();
+                KillForeign(foreign);
             }
             finally { profile.Dispose(); }
             throw;
@@ -124,7 +133,7 @@ public sealed class GatewayFixtureRun : IAsyncDisposable
                     return status.GetProperty("operatorState").GetString() == "Connected"
                         && status.GetProperty("sessionCount").GetInt32() >= 5;
                 }, "fixture operator and populated session catalog", TimeSpan.FromSeconds(30), cancellationToken);
-                if (_control is not null)
+                if (Profile.NodeBrowserProxyEnabled)
                 {
                     await WaitForAsync(async () =>
                     {
@@ -325,11 +334,12 @@ public sealed class GatewayFixtureRun : IAsyncDisposable
         return string.IsNullOrEmpty(_mcpToken) ? text : text.Replace(_mcpToken, "[MCP credential redacted]", StringComparison.Ordinal);
     }
 
-    private static async Task<(FixtureGatewayServer Gateway, LoopbackControlHost? Control)> StartGatewayAsync(
+    private static async Task<(FixtureGatewayServer Gateway, LoopbackControlHost? Control, Process? Foreign, int? ForeignPort, string? ForeignCountFile)> StartGatewayAsync(
         string token,
         bool allowAgentCreation,
         bool requireAgentSelection,
         bool enableNodeBrowserProxy,
+        bool foreignBrowserControl,
         CancellationToken cancellationToken)
     {
         for (var attempt = 0; attempt < 8; attempt++)
@@ -338,17 +348,72 @@ public sealed class GatewayFixtureRun : IAsyncDisposable
             var gateway = await FixtureGatewayServer.StartAsync(
                 GatewayScenario.CreateBrowse(allowAgentCreation, requireAgentSelection), token, cancellationToken);
             if (!enableNodeBrowserProxy)
-                return (gateway, null);
+                return (gateway, null, null, null, null);
             var controlPort = gateway.Endpoint.Port + 2;
             if (controlPort is >= 1 and <= 65535 and not (8765 or 18789))
             {
-                var control = LoopbackControlHost.TryStart(controlPort);
-                if (control is not null)
-                    return (gateway, control);
+                if (foreignBrowserControl)
+                {
+                    var countFile = Path.Combine(Path.GetTempPath(), $"ocwn-foreign-control-{controlPort}.txt");
+                    var child = StartForeignControl(controlPort, countFile);
+                    if (await WaitForFileAsync(countFile, cancellationToken))
+                        return (gateway, null, child, controlPort, countFile);
+                    try { child.Kill(entireProcessTree: true); } catch (InvalidOperationException) { }
+                    child.Dispose();
+                }
+                else
+                {
+                    var control = LoopbackControlHost.TryStart(controlPort);
+                    if (control is not null)
+                        return (gateway, control, null, null, null);
+                }
             }
             await gateway.DisposeAsync();
         }
         throw new InvalidOperationException("Could not bind a loopback browser control port beside the fixture gateway.");
+    }
+
+    private static void KillForeign(Process? process)
+    {
+        if (process is null)
+            return;
+        try
+        {
+            if (!process.HasExited)
+                process.Kill(entireProcessTree: true);
+        }
+        catch (InvalidOperationException) { }
+        process.Dispose();
+    }
+
+    private static Process StartForeignControl(int port, string countFile)
+    {
+        var dll = typeof(GatewayFixtureRun).Assembly.Location;
+        var start = new ProcessStartInfo("dotnet")
+        {
+            UseShellExecute = false,
+            CreateNoWindow = true,
+        };
+        start.ArgumentList.Add("exec");
+        start.ArgumentList.Add(dll);
+        start.ArgumentList.Add("--control-listen");
+        start.ArgumentList.Add(port.ToString());
+        start.ArgumentList.Add(countFile);
+        return Process.Start(start)
+            ?? throw new InvalidOperationException("Failed to start the foreign browser-control listener.");
+    }
+
+    private static async Task<bool> WaitForFileAsync(string path, CancellationToken cancellationToken)
+    {
+        var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(5);
+        while (DateTime.UtcNow < deadline)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (File.Exists(path))
+                return true;
+            await Task.Delay(50, cancellationToken);
+        }
+        return false;
     }
 
     private static int FindFreePort()
@@ -384,6 +449,16 @@ public sealed class GatewayFixtureRun : IAsyncDisposable
         {
             try
             {
+                if (_foreignControl is not null)
+                {
+                    try
+                    {
+                        if (!_foreignControl.HasExited)
+                            _foreignControl.Kill(entireProcessTree: true);
+                    }
+                    catch (InvalidOperationException) { }
+                    _foreignControl.Dispose();
+                }
                 if (_control is not null)
                     await _control.DisposeAsync();
             }
