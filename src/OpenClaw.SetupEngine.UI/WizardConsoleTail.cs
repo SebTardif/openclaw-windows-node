@@ -31,7 +31,7 @@ internal sealed class WizardConsoleTail : IDisposable
     // Bash expands a glob once, before tail starts. The loop waits until a
     // log exists, then replaces this process with tail -F on those names.
     internal const string TailCommand =
-        "dir=/tmp/openclaw; while true; do set -- \"$dir\"/openclaw-*.log; if [ -e \"$1\" ]; then exec tail -F -n 0 \"$@\"; fi; sleep 0.2; done";
+        "dir=/tmp/openclaw; while true; do set -- \"$dir\"/openclaw-*.log; if [ -e \"$1\" ]; then exec tail -n +1 -F \"$@\"; fi; sleep 0.2; done";
     private static readonly Regex s_ansiEscapeRegex = new(
         @"\x1B(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1B\\)|[PX^_].*?\x1B\\|[@-Z\\-_])",
         RegexOptions.Compiled | RegexOptions.Singleline);
@@ -95,6 +95,7 @@ internal sealed class WizardConsoleTail : IDisposable
                 FileName = "wsl.exe",
                 RedirectStandardOutput = true,
                 RedirectStandardError = true,
+                RedirectStandardInput = true,
                 StandardOutputEncoding = Encoding.UTF8,
                 StandardErrorEncoding = Encoding.UTF8,
                 UseShellExecute = false,
@@ -104,10 +105,15 @@ internal sealed class WizardConsoleTail : IDisposable
             psi.ArgumentList.Add(_distroName);
             psi.ArgumentList.Add("--");
             psi.ArgumentList.Add("bash");
-            psi.ArgumentList.Add("-c");
-            psi.ArgumentList.Add(TailCommand);
+            psi.ArgumentList.Add("-s");
 
             process = Process.Start(psi);
+            if (process != null)
+            {
+                process.StandardInput.Write(TailCommand);
+                process.StandardInput.Write('\n');
+                process.StandardInput.Close();
+            }
         }
         catch (Exception ex)
         {

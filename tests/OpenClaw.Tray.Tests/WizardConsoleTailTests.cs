@@ -494,8 +494,9 @@ public class WizardConsoleTailTests
         var command = WizardConsoleTail.TailCommand;
 
         Assert.Contains("while true", command, StringComparison.Ordinal);
-        Assert.Contains("exec tail -F -n 0", command, StringComparison.Ordinal);
+        Assert.Contains("exec tail -n +1 -F", command, StringComparison.Ordinal);
         Assert.Contains("\"$dir\"/openclaw-*.log", command, StringComparison.Ordinal);
+        Assert.DoesNotContain("bash -c", command, StringComparison.Ordinal);
         Assert.DoesNotContain("2>/dev/null", command, StringComparison.Ordinal);
     }
 }
