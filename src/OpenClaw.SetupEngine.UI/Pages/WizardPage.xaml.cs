@@ -805,6 +805,7 @@ public sealed partial class WizardPage : Page
         finally
         {
             WizardAnswerGate.End(ref _answerInFlight);
+            UpdateContinueState();
         }
     }
 
@@ -867,6 +868,7 @@ public sealed partial class WizardPage : Page
         finally
         {
             WizardAnswerGate.End(ref _answerInFlight);
+            UpdateContinueState();
         }
     }
 
@@ -1004,7 +1006,10 @@ public sealed partial class WizardPage : Page
         finally
         {
             if (beganAnswer)
+            {
                 WizardAnswerGate.End(ref _answerInFlight);
+                UpdateContinueState();
+            }
             if (generation == _operationGeneration)
                 _expectedTerminalRestart = false;
         }
