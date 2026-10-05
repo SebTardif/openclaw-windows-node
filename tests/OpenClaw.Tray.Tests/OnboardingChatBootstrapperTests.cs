@@ -333,6 +333,78 @@ public sealed class OnboardingChatBootstrapperTests : IDisposable
     }
 
     [Fact]
+    public async Task BootstrapAsync_SendsBootstrapPrompt_WhenGatewayReportsMarkerFilesMissing()
+    {
+        var settings = new SettingsManager(_settingsDir);
+        var client = new FakeOperatorGatewayClient
+        {
+            Result = new ChatSendResult { RunId = "run-missing-markers" },
+            AgentFilesListResponse = JsonDocument.Parse("""
+                {
+                  "agentId": "main",
+                  "files": [
+                    {"name": "AGENTS.md", "missing": true, "expectedAbsent": false},
+                    {"name": "SOUL.md", "missing": true, "expectedAbsent": true},
+                    {"name": "USER.md", "missing": true, "expectedAbsent": true},
+                    {"name": "BOOTSTRAP.md", "missing": true, "expectedAbsent": false},
+                    {"name": "MEMORY.md", "missing": true, "expectedAbsent": true}
+                  ]
+                }
+                """).RootElement.Clone()
+        };
+
+        var registryDir = Path.Combine(_settingsDir, "registry-missing-markers");
+        Directory.CreateDirectory(registryDir);
+        var registry = new GatewayRegistry(registryDir);
+        registry.AddOrUpdate(new GatewayRecord
+        {
+            Id = "gw-missing",
+            Url = "ws://127.0.0.1:19031",
+            SharedGatewayToken = "proof-shared-token",
+            IsLocal = false
+        });
+
+        var task = OnboardingChatBootstrapper.BootstrapAsync(client, settings, TimeSpan.FromSeconds(5), registry: registry);
+        // slopwatch-ignore: SW004 Test delay is an intentional bounded async wait; replacing it would change the scenario under test.
+        await Task.Delay(50);
+        client.RaiseFinalAssistant("run-missing-markers");
+        var result = await task;
+
+        Assert.True(result);
+        Assert.Equal(1, client.SendCount);
+        Assert.Equal(OnboardingChatBootstrapper.Message, client.LastMessage);
+        Assert.True(settings.HasInjectedFirstRunBootstrap);
+    }
+
+    [Fact]
+    public async Task BootstrapAsync_SkipsPrompt_WhenGatewayReportsMarkerFileNotMissing()
+    {
+        var settings = new SettingsManager(_settingsDir);
+        var client = new FakeOperatorGatewayClient
+        {
+            IsConnectedToGateway = true,
+            AgentFilesListResponse = JsonDocument.Parse("""
+                {"agentId":"main","files":[{"name":"SOUL.md","missing":false}]}
+                """).RootElement.Clone()
+        };
+        var registryDir = Path.Combine(_settingsDir, "registry-present-marker");
+        Directory.CreateDirectory(registryDir);
+        var registry = new GatewayRegistry(registryDir);
+        registry.AddOrUpdate(new GatewayRecord
+        {
+            Id = "gw-present",
+            Url = "ws://127.0.0.1:19031",
+            SharedGatewayToken = "proof-shared-token"
+        });
+
+        var result = await OnboardingChatBootstrapper.BootstrapAsync(client, settings, TimeSpan.FromSeconds(5), registry: registry);
+
+        Assert.True(result);
+        Assert.Equal(0, client.SendCount);
+        Assert.True(settings.HasInjectedFirstRunBootstrap);
+    }
+
+    [Fact]
     public async Task BootstrapAsync_SendsBootstrapPrompt_WhenFreshSetupWorkspaceOnlyHasSeedSoulFile()
     {
         var settings = new SettingsManager(_settingsDir);
