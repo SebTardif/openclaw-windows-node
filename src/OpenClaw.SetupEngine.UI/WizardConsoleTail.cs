@@ -31,7 +31,7 @@ internal sealed class WizardConsoleTail : IDisposable
     // Bash expands a glob once, before tail starts. The loop waits until a
     // log exists, then replaces this process with tail -F on those names.
     internal const string TailCommand =
-        "dir=/tmp/openclaw; while true; do set -- \"$dir\"/openclaw-*.log; if [ -e \"$1\" ]; then exec tail -n +1 -F \"$@\"; fi; sleep 0.2; done";
+        "dir=/tmp/openclaw; set -- \"$dir\"/openclaw-*.log; if [ -e \"$1\" ]; then exec tail -n 0 -F \"$@\"; fi; while true; do set -- \"$dir\"/openclaw-*.log; if [ -e \"$1\" ]; then exec tail -n +1 -F \"$@\"; fi; sleep 0.2; done";
     private static readonly Regex s_ansiEscapeRegex = new(
         @"\x1B(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1B\\)|[PX^_].*?\x1B\\|[@-Z\\-_])",
         RegexOptions.Compiled | RegexOptions.Singleline);
