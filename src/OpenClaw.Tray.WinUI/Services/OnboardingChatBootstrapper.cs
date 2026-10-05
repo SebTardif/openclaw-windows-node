@@ -114,8 +114,13 @@ public static class OnboardingChatBootstrapper
             var result = await client.SendChatMessageForRunAsync(Message).ConfigureAwait(true);
             if (settings.HasInjectedFirstRunBootstrap)
                 return true;
+            if (result.IsTerminalFailure)
+            {
+                Logger.Warn($"[OnboardingChatBootstrapper] chat.send was not accepted (status={result.Status ?? "<none>"})");
+                return false;
+            }
 
-            // The gateway already stored this user message. Save the flag before
+            // The gateway accepted this user message. Save the flag before
             // waiting so a cancelled or timed-out completion cannot send it again.
             MarkBootstrapped(settings);
 

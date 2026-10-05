@@ -84,6 +84,24 @@ public sealed class OnboardingChatBootstrapperTests : IDisposable
     }
 
     [Fact]
+    public async Task BootstrapAsync_TerminalSendFailure_LeavesTheGateForARetry()
+    {
+        var settings = new SettingsManager(_settingsDir);
+        var client = new FakeOperatorGatewayClient
+        {
+            Result = new ChatSendResult { RunId = "run-rejected", Status = "error", Error = "rejected" },
+        };
+
+        var first = await OnboardingChatBootstrapper.BootstrapAsync(client, settings, TimeSpan.FromMilliseconds(25));
+        var second = await OnboardingChatBootstrapper.BootstrapAsync(client, settings, TimeSpan.FromMilliseconds(25));
+
+        Assert.False(first);
+        Assert.False(second);
+        Assert.Equal(2, client.SendCount);
+        Assert.False(settings.HasInjectedFirstRunBootstrap);
+    }
+
+    [Fact]
     public async Task BootstrapAsync_AcknowledgedSend_DoesNotSendTheHelloAgain()
     {
         var settings = new SettingsManager(_settingsDir);
