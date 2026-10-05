@@ -99,6 +99,23 @@ public class LocalCommandRunnerTests
     }
 
     [Fact(Timeout = 20000)]
+    public async Task Run_SplitUtf8Character_StaysIntactAcrossReads()
+    {
+        var runner = new LocalCommandRunner();
+        var result = await runner.RunAsync(new CommandRequest
+        {
+            Command = "$o=[Console]::OpenStandardOutput(); $o.Write([byte[]](0xF0,0x9F),0,2); $o.Flush(); Start-Sleep -Milliseconds 200; $o.Write([byte[]](0x98,0x80),0,2); $o.Flush()",
+            Shell = "powershell",
+            TimeoutMs = 10000,
+            MaxOutputBytes = 64,
+        });
+
+        Assert.False(result.TimedOut, result.Stderr);
+        Assert.Equal("😀", result.Stdout);
+        Assert.DoesNotContain("\uFFFD", result.Stdout);
+    }
+
+    [Fact(Timeout = 20000)]
     public async Task Run_UnterminatedStdoutFlood_StopsBeforeANewline()
     {
         var runner = new LocalCommandRunner();

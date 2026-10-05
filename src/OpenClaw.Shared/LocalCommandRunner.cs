@@ -101,17 +101,13 @@ public class LocalCommandRunner : ICommandRunner
         async Task ReadCappedAsync(Stream stream, StringBuilder builder, TaskCompletionSource completed)
         {
             var buffer = new byte[8192];
+            var chars = new char[Encoding.UTF8.GetMaxCharCount(buffer.Length)];
+            var decoder = Encoding.UTF8.GetDecoder();
             try
             {
                 while (true)
                 {
                     var read = await stream.ReadAsync(buffer, ct).ConfigureAwait(false);
-                    if (read == 0)
-                    {
-                        completed.TrySetResult();
-                        return;
-                    }
-
                     var kill = false;
                     lock (outputLock)
                     {
@@ -119,17 +115,28 @@ public class LocalCommandRunner : ICommandRunner
                         {
                             kill = true;
                         }
+                        else if (read == 0)
+                        {
+                            decoder.Convert(
+                                Array.Empty<byte>(), 0, 0,
+                                chars, 0, chars.Length,
+                                flush: true,
+                                out _, out var flushed, out _);
+                            if (AppendFittingChars(builder, chars, flushed, maxOutputBytes, ref outputBytes) < flushed)
+                            {
+                                outputCapped = true;
+                                stderrBuilder.AppendLine("[output truncated]");
+                                kill = true;
+                            }
+                        }
                         else
                         {
-                            var room = maxOutputBytes - outputBytes;
-                            var take = (int)Math.Min(read, Math.Max(0, room));
-                            if (take > 0)
-                            {
-                                builder.Append(Encoding.UTF8.GetString(buffer, 0, take));
-                                outputBytes += take;
-                            }
-
-                            if (take < read)
+                            decoder.Convert(
+                                buffer, 0, read,
+                                chars, 0, chars.Length,
+                                flush: false,
+                                out _, out var produced, out _);
+                            if (AppendFittingChars(builder, chars, produced, maxOutputBytes, ref outputBytes) < produced)
                             {
                                 outputCapped = true;
                                 stderrBuilder.AppendLine("[output truncated]");
@@ -138,19 +145,48 @@ public class LocalCommandRunner : ICommandRunner
                         }
                     }
 
-                    if (!kill)
-                        continue;
-
-                    _logger.Warn($"[EXEC] Output exceeded {maxOutputBytes} bytes; stopping process");
-                    KillProcess(process);
-                    completed.TrySetResult();
-                    return;
+                    if (read == 0 || kill)
+                    {
+                        if (kill)
+                        {
+                            _logger.Warn($"[EXEC] Output exceeded {maxOutputBytes} bytes; stopping process");
+                            KillProcess(process);
+                        }
+                        completed.TrySetResult();
+                        return;
+                    }
                 }
             }
             catch (Exception ex) when (ex is IOException or OperationCanceledException)
             {
                 completed.TrySetResult();
             }
+        }
+
+        static int AppendFittingChars(StringBuilder builder, char[] chars, int count, long maxBytes, ref long outputBytes)
+        {
+            var taken = 0;
+            var bytes = 0L;
+            var room = maxBytes - outputBytes;
+            while (taken < count)
+            {
+                var length = char.IsHighSurrogate(chars[taken]) && taken + 1 < count ? 2 : 1;
+                if (taken + length > count)
+                    break;
+                var size = Encoding.UTF8.GetByteCount(chars, taken, length);
+                if (bytes + size > room)
+                    break;
+                bytes += size;
+                taken += length;
+            }
+
+            if (taken > 0)
+            {
+                builder.Append(chars, 0, taken);
+                outputBytes += bytes;
+            }
+
+            return taken;
         }
         
         // Use the Exited event rather than WaitForExitAsync to detect process exit.
