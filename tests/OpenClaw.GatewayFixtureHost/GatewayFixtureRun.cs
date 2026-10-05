@@ -354,12 +354,15 @@ public sealed class GatewayFixtureRun : IAsyncDisposable
             {
                 if (foreignBrowserControl)
                 {
-                    var countFile = Path.Combine(Path.GetTempPath(), $"ocwn-foreign-control-{controlPort}.txt");
+                    var countFile = Path.Combine(
+                        Path.GetTempPath(),
+                        $"ocwn-foreign-control-{controlPort}-{Guid.NewGuid():N}.txt");
                     var child = StartForeignControl(controlPort, countFile);
                     if (await WaitForFileAsync(countFile, cancellationToken))
                         return (gateway, null, child, controlPort, countFile);
                     try { child.Kill(entireProcessTree: true); } catch (InvalidOperationException) { }
                     child.Dispose();
+                    TryDelete(countFile);
                 }
                 else
                 {
@@ -371,6 +374,15 @@ public sealed class GatewayFixtureRun : IAsyncDisposable
             await gateway.DisposeAsync();
         }
         throw new InvalidOperationException("Could not bind a loopback browser control port beside the fixture gateway.");
+    }
+
+    private static void TryDelete(string? path)
+    {
+        if (string.IsNullOrWhiteSpace(path))
+            return;
+        try { File.Delete(path); }
+        catch (IOException) { }
+        catch (UnauthorizedAccessException) { }
     }
 
     private static void KillForeign(Process? process)
@@ -458,6 +470,7 @@ public sealed class GatewayFixtureRun : IAsyncDisposable
                     }
                     catch (InvalidOperationException) { }
                     _foreignControl.Dispose();
+                    TryDelete(ForeignControlCountFile);
                 }
                 if (_control is not null)
                     await _control.DisposeAsync();
