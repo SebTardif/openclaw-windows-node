@@ -112,9 +112,17 @@ internal static class Program
     private static async Task<int> ListenForControlAsync(int port, string countFile)
     {
         var requests = 0;
-        File.WriteAllText(countFile, "requests=0\n");
         var listener = new TcpListener(IPAddress.Loopback, port);
-        listener.Start();
+        try
+        {
+            listener.Start();
+        }
+        catch (SocketException)
+        {
+            return 1;
+        }
+
+        File.WriteAllText(countFile, "requests=0\n");
         using var stop = new CancellationTokenSource();
         Console.CancelKeyPress += (_, eventArgs) =>
         {
