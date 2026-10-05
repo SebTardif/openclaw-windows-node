@@ -98,6 +98,25 @@ public class LocalCommandRunnerTests
         Assert.True(result.DurationMs < 12000, $"cap should stop the process before the timeout, duration={result.DurationMs}ms");
     }
 
+    [Fact(Timeout = 20000)]
+    public async Task Run_UnterminatedStdoutFlood_StopsBeforeANewline()
+    {
+        var runner = new LocalCommandRunner();
+        var result = await runner.RunAsync(new CommandRequest
+        {
+            Command = "$o=[Console]::OpenStandardOutput(); $b=New-Object byte[] 256; while ($true) { $o.Write($b,0,$b.Length) }",
+            Shell = "powershell",
+            TimeoutMs = 15000,
+            MaxOutputBytes = 4096,
+        });
+
+        Assert.True(result.TimedOut, $"timedOut={result.TimedOut} exit={result.ExitCode} duration={result.DurationMs} stderr={result.Stderr}");
+        Assert.Contains("[output truncated]", result.Stderr);
+        Assert.True(Encoding.UTF8.GetByteCount(result.Stdout) <= 4096, $"stdout bytes={Encoding.UTF8.GetByteCount(result.Stdout)}");
+        Assert.DoesNotContain("\n", result.Stdout);
+        Assert.True(result.DurationMs < 12000, $"duration={result.DurationMs}ms");
+    }
+
     [Fact(Timeout = 15000)]
     public async Task Run_HostOutputUnderCap_EchoHiSucceedsWithoutMarker()
     {

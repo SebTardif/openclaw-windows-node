@@ -98,49 +98,60 @@ public class LocalCommandRunner : ICommandRunner
         var outputBytes = 0L;
         var outputCapped = false;
 
-        void AppendBoundedOutput(StringBuilder builder, string line)
+        async Task ReadCappedAsync(Stream stream, StringBuilder builder, TaskCompletionSource completed)
         {
-            var kill = false;
-            lock (outputLock)
+            var buffer = new byte[8192];
+            try
             {
-                if (outputCapped)
-                    return;
+                while (true)
+                {
+                    var read = await stream.ReadAsync(buffer, ct).ConfigureAwait(false);
+                    if (read == 0)
+                    {
+                        completed.TrySetResult();
+                        return;
+                    }
 
-                var additionBytes = (long)Encoding.UTF8.GetByteCount(line) + Encoding.UTF8.GetByteCount(Environment.NewLine);
-                if (outputBytes + additionBytes > maxOutputBytes)
-                {
-                    outputCapped = true;
-                    stderrBuilder.AppendLine("[output truncated]");
-                    kill = true;
-                }
-                else
-                {
-                    outputBytes += additionBytes;
-                    builder.AppendLine(line);
+                    var kill = false;
+                    lock (outputLock)
+                    {
+                        if (outputCapped)
+                        {
+                            kill = true;
+                        }
+                        else
+                        {
+                            var room = maxOutputBytes - outputBytes;
+                            var take = (int)Math.Min(read, Math.Max(0, room));
+                            if (take > 0)
+                            {
+                                builder.Append(Encoding.UTF8.GetString(buffer, 0, take));
+                                outputBytes += take;
+                            }
+
+                            if (take < read)
+                            {
+                                outputCapped = true;
+                                stderrBuilder.AppendLine("[output truncated]");
+                                kill = true;
+                            }
+                        }
+                    }
+
+                    if (!kill)
+                        continue;
+
+                    _logger.Warn($"[EXEC] Output exceeded {maxOutputBytes} bytes; stopping process");
+                    KillProcess(process);
+                    completed.TrySetResult();
+                    return;
                 }
             }
-
-            if (!kill)
-                return;
-
-            _logger.Warn($"[EXEC] Output exceeded {maxOutputBytes} bytes; stopping process");
-            KillProcess(process);
+            catch (Exception ex) when (ex is IOException or OperationCanceledException)
+            {
+                completed.TrySetResult();
+            }
         }
-
-        process.OutputDataReceived += (_, e) =>
-        {
-            if (e.Data is null)
-                stdoutCompleted.TrySetResult();
-            else
-                AppendBoundedOutput(stdoutBuilder, e.Data);
-        };
-        process.ErrorDataReceived += (_, e) =>
-        {
-            if (e.Data is null)
-                stderrCompleted.TrySetResult();
-            else
-                AppendBoundedOutput(stderrBuilder, e.Data);
-        };
         
         // Use the Exited event rather than WaitForExitAsync to detect process exit.
         // WaitForExitAsync (.NET 6+) internally calls WaitForExit() which blocks until
@@ -154,8 +165,8 @@ public class LocalCommandRunner : ICommandRunner
         try
         {
             process.Start();
-            process.BeginOutputReadLine();
-            process.BeginErrorReadLine();
+            _ = ReadCappedAsync(process.StandardOutput.BaseStream, stdoutBuilder, stdoutCompleted);
+            _ = ReadCappedAsync(process.StandardError.BaseStream, stderrBuilder, stderrCompleted);
         }
         catch (Exception ex)
         {
