@@ -60,6 +60,11 @@ public static class InteractiveGatewayCredentialResolver
         var active = registry?.GetActive();
         if (active != null && !string.IsNullOrWhiteSpace(active.Url))
         {
+            if (active.NativePackageFamilyName is not null && authorizeCredential is null)
+            {
+                credential = null;
+                return false;
+            }
             // For HTTP surfaces (chat), prefer SharedGatewayToken over DeviceToken.
             // DeviceToken is for WebSocket auth (auth.deviceToken); SharedGatewayToken
             // is for HTTP ?token= auth which the chat/dashboard endpoints expect.
@@ -107,8 +112,19 @@ public static class InteractiveGatewayCredentialResolver
                 return true;
             }
 
-            credential = null;
-            return false;
+            if (active.NativePackageFamilyName is not null ||
+                !string.Equals(
+                    LegacyStartupDeviceToken.EndpointIdentityKey(active.Url),
+                    LegacyStartupDeviceToken.EndpointIdentityKey(effectiveGatewayUrl),
+                    StringComparison.Ordinal))
+            {
+                credential = null;
+                return false;
+            }
+
+            // The settings identity file can still hold an older device token.
+            // A matching URL may use the legacy shared or bootstrap token only.
+            settingsDirectory = Path.Combine(settingsDirectory, "no-legacy-device-identity");
         }
 
         var gatewayUrl = effectiveGatewayUrl;
