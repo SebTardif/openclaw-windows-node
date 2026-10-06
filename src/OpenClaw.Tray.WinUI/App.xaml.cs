@@ -1863,21 +1863,10 @@ public partial class App : Application, OpenClawTray.Services.IAppCommands, IPer
         if (!Directory.Exists(identityDir))
             Directory.CreateDirectory(identityDir);
 
-        // Copy identity file from legacy location if needed.
-        // device-key-ed25519.json holds BOTH the operator DeviceToken and the
-        // node NodeDeviceToken on a single record (DeviceIdentity.DeviceKeyData),
-        // so this single copy migrates both roles' identity for paired-pre-
-        // unification installs (the easy-button setup engine used to write the
-        // node-side tokens to this same legacy path via NodeService.ConnectAsync).
-        // The legacy file is preserved (copy, not move) for at least one release
-        // to allow safe rollback.
-        var legacyIdentityPath = Path.Combine(SettingsManager.SettingsDirectoryPath, "device-key-ed25519.json");
-        var newIdentityPath = Path.Combine(identityDir, "device-key-ed25519.json");
-        if (File.Exists(legacyIdentityPath) && !File.Exists(newIdentityPath))
-        {
-            try { File.Copy(legacyIdentityPath, newIdentityPath, overwrite: false); }
-            catch (Exception ex) { Logger.Warn($"Failed to copy identity file: {ex.Message}"); }
-        }
+        // Legacy identity copy stays in ChooseStartupOperatorCredential and
+        // ChooseStartupNodeCredential. Those paths stamp the gateway URL and
+        // refuse a copy that does not match it. An unconditional copy here
+        // would send a device token after the gateway URL was reassigned.
 
         // Delegate to connection manager — it creates the client, fires OperatorClientChanged,
         // and our handler re-wires the 27 event subscriptions

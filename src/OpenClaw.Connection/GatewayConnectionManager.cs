@@ -336,9 +336,7 @@ public sealed class GatewayConnectionManager :
             };
 
             // Per-gateway identity directory — each gateway has its own keypair + tokens
-            var perGatewayIdentityDir = _registry.GetIdentityDirectory(record.Id);
-            if (!Directory.Exists(perGatewayIdentityDir))
-                Directory.CreateDirectory(perGatewayIdentityDir);
+            var perGatewayIdentityDir = IdentityDirectoryForCredentialSend(record);
 
             var credentialResolution = _credentialResolver.ResolveOperatorDetailed(record, perGatewayIdentityDir);
             var credential = credentialResolution.Credential;
@@ -805,9 +803,7 @@ public sealed class GatewayConnectionManager :
             return null;
         }
 
-        var perGatewayIdentityDir = _registry.GetIdentityDirectory(record.Id);
-        if (!Directory.Exists(perGatewayIdentityDir))
-            Directory.CreateDirectory(perGatewayIdentityDir);
+        var perGatewayIdentityDir = IdentityDirectoryForCredentialSend(record);
 
         // Same-gateway node reapproval reconnects keep the operator alive so it can
         // request the post-handshake node.list; all other paths reset lifecycle/tunnel state.
@@ -2374,6 +2370,24 @@ public sealed class GatewayConnectionManager :
         return Uri.TryCreate(record.Url, UriKind.Absolute, out var uri) &&
             (string.Equals(uri.Scheme, "wss", StringComparison.OrdinalIgnoreCase) ||
              string.Equals(uri.Scheme, "https", StringComparison.OrdinalIgnoreCase));
+    }
+
+    /// <summary>
+    /// A legacy identity stamped for another URL stays on disk, but this connect
+    /// loads a different directory so the stored device token is not sent.
+    /// </summary>
+    private string IdentityDirectoryForCredentialSend(GatewayRecord record)
+    {
+        var identityDirectory = _registry.GetIdentityDirectory(record.Id);
+        if (!Directory.Exists(identityDirectory))
+            Directory.CreateDirectory(identityDirectory);
+        if (LegacyStartupDeviceToken.AllowsStoredDeviceToken(identityDirectory, record.Url))
+            return identityDirectory;
+
+        var unbound = Path.Combine(identityDirectory, "unbound-url");
+        Directory.CreateDirectory(unbound);
+        _logger.Info("[ConnMgr] Stored device identity is bound to a different gateway URL, so it was not sent.");
+        return unbound;
     }
 
     private async Task<EndpointCredentialAuthorization> AuthorizeCredentialForEndpointAsync(

@@ -42,6 +42,9 @@ public class LegacyStartupDeviceTokenTests : IDisposable
         Assert.Equal("paired-tok", operatorChoice.Resolution.Credential!.Token);
         Assert.Equal(CredentialResolver.SourceDeviceToken, operatorChoice.Resolution.Credential.Source);
         Assert.True(File.Exists(Path.Combine(perGateway, LegacyStartupDeviceToken.IdentityFileName)));
+        Assert.Equal(
+            record.Url,
+            File.ReadAllText(Path.Combine(perGateway, LegacyStartupDeviceToken.BoundUrlFileName)).Trim());
         Assert.True(File.Exists(Path.Combine(_legacyDir, LegacyStartupDeviceToken.IdentityFileName)));
 
         var nodeDir = DirectoryFor("node-gateway");
