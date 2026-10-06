@@ -40,9 +40,6 @@ internal sealed class GatewayDirectConnectService
     private readonly Action _reconcileRuntimeTunnel;
     private readonly IOpenClawLogger _logger;
     private readonly TimeSpan _terminalTimeout;
-    private ConnectionSettingsSnapshot? _settingsBeforeCandidate;
-    private bool _candidateSynchronized;
-
     public GatewayDirectConnectService(
         IGatewayConnectionManager connectionManager,
         GatewayRegistry registry,
@@ -290,12 +287,6 @@ internal sealed class GatewayDirectConnectService
         }
     }
 
-    public void BeginSharedTokenSettingsAttempt()
-    {
-        _settingsBeforeCandidate = ConnectionSettingsSnapshot.Capture(_settings);
-        _candidateSynchronized = false;
-    }
-
     public async Task<SetupCodeResult> CheckAsync(
         GatewayDirectConnectRequest request, CancellationToken cancellationToken,
         GatewayValidationIdentity? preparedIdentity = null)
@@ -398,17 +389,11 @@ internal sealed class GatewayDirectConnectService
 
     public void SynchronizeSettingsWithCommittedGateway(GatewayRecord committedGateway)
     {
+        var snapshot = ConnectionSettingsSnapshot.Capture(_settings);
         var active = _registry.GetActive();
         if (active is null)
         {
-            if (_settingsBeforeCandidate is null)
-            {
-                throw new InvalidOperationException("The committed gateway is no longer active.");
-            }
-
-            _settingsBeforeCandidate.Restore(_settings);
-            _settingsBeforeCandidate = null;
-            _candidateSynchronized = false;
+            snapshot.Restore(_settings);
             _reconcileRuntimeTunnel();
             return;
         }
@@ -419,17 +404,10 @@ internal sealed class GatewayDirectConnectService
                 "The committed gateway was superseded before its settings could be synchronized.");
         }
 
-        if (_settingsBeforeCandidate is null)
-        {
-            _settingsBeforeCandidate = ConnectionSettingsSnapshot.Capture(_settings);
-            _candidateSynchronized = false;
-        }
-
         try
         {
             ApplySettings(committedGateway);
             _reconcileRuntimeTunnel();
-            FinishSettingsSynchronization();
             return;
         }
         catch (Exception ex)
@@ -438,26 +416,19 @@ internal sealed class GatewayDirectConnectService
             {
                 ApplySettings(committedGateway);
                 _reconcileRuntimeTunnel();
-                FinishSettingsSynchronization();
                 return;
             }
             catch (Exception recoveryException)
             {
                 string? restoreError = null;
-                if (_settingsBeforeCandidate is not null)
+                try
                 {
-                    try
-                    {
-                        _settingsBeforeCandidate.Restore(_settings);
-                        _reconcileRuntimeTunnel();
-                    }
-                    catch (Exception restoreException)
-                    {
-                        restoreError = $" Prior settings restore failed: {restoreException.Message}";
-                    }
-
-                    _settingsBeforeCandidate = null;
-                    _candidateSynchronized = false;
+                    snapshot.Restore(_settings);
+                    _reconcileRuntimeTunnel();
+                }
+                catch (Exception restoreException)
+                {
+                    restoreError = $" Prior settings restore failed: {restoreException.Message}";
                 }
 
                 throw new InvalidOperationException(
@@ -465,18 +436,6 @@ internal sealed class GatewayDirectConnectService
                     ex);
             }
         }
-    }
-
-    private void FinishSettingsSynchronization()
-    {
-        if (_candidateSynchronized)
-        {
-            _settingsBeforeCandidate = null;
-            _candidateSynchronized = false;
-            return;
-        }
-
-        _candidateSynchronized = true;
     }
 
     internal static GatewayRecord BuildCandidate(

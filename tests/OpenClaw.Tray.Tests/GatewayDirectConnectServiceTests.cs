@@ -677,10 +677,9 @@ public sealed class GatewayDirectConnectServiceTests : IDisposable
     }
 
     [Fact]
-    public void SynchronizeSettings_RollbackTunnelFailure_KeepsPreAttemptSnapshot()
+    public void SynchronizeSettings_SecondOperationRestoresItsOwnSnapshot()
     {
         var prior = AddPreviousGateway();
-        var priorUrl = _settings.GatewayUrl;
         var calls = 0;
         var service = new GatewayDirectConnectService(
             _manager,
@@ -694,20 +693,24 @@ public sealed class GatewayDirectConnectServiceTests : IDisposable
             },
             NullLogger.Instance,
             TimeSpan.FromMilliseconds(100));
-        var candidate = prior with { Url = "wss://rejected.example" };
-        _registry.AddOrUpdate(candidate);
+        var committed = prior with { Url = "wss://committed.example" };
+        _registry.AddOrUpdate(committed);
+        _registry.SetActive(committed.Id);
         _registry.Save();
-        service.SynchronizeSettingsWithCommittedGateway(candidate);
-        Assert.Equal("wss://rejected.example", _settings.GatewayUrl);
+        service.SynchronizeSettingsWithCommittedGateway(committed);
+        Assert.Equal("wss://committed.example", _settings.GatewayUrl);
 
-        _registry.AddOrUpdate(prior);
-        _registry.SetActive(prior.Id);
+        _settings.GatewayUrl = "wss://newer.example";
+        _settings.SaveOrThrow();
+        var second = committed with { Url = "wss://other.example" };
+        _registry.AddOrUpdate(second);
         _registry.Save();
         var error = Assert.Throws<InvalidOperationException>(
-            () => service.SynchronizeSettingsWithCommittedGateway(prior));
+            () => service.SynchronizeSettingsWithCommittedGateway(second));
 
         Assert.Contains("out of sync", error.Message, StringComparison.Ordinal);
-        Assert.Equal(priorUrl, _settings.GatewayUrl);
+        Assert.Equal("wss://newer.example", _settings.GatewayUrl);
+        Assert.NotEqual(prior.Url, _settings.GatewayUrl);
     }
 
     [Fact]
@@ -765,7 +768,6 @@ public sealed class GatewayDirectConnectServiceTests : IDisposable
             },
             NullLogger.Instance,
             TimeSpan.FromMilliseconds(100));
-        service.BeginSharedTokenSettingsAttempt();
         var candidate = prior with { Url = "wss://rejected.example" };
         _registry.AddOrUpdate(candidate);
         _registry.Save();
@@ -779,7 +781,8 @@ public sealed class GatewayDirectConnectServiceTests : IDisposable
             () => service.SynchronizeSettingsWithCommittedGateway(prior));
 
         Assert.Contains("out of sync", error.Message, StringComparison.Ordinal);
-        Assert.Equal(priorUrl, _settings.GatewayUrl);
+        Assert.Equal("wss://rejected.example", _settings.GatewayUrl);
+        Assert.NotEqual(priorUrl, _settings.GatewayUrl);
     }
 
     [Fact]
