@@ -1,5 +1,6 @@
 using System.Security.Cryptography;
 using System.Text;
+using OpenClaw.Shared;
 
 namespace OpenClaw.Connection;
 
@@ -50,7 +51,7 @@ internal static class LegacyStartupDeviceToken
         }
 
         var legacy = resolveFromDirectory(legacySettingsDirectory);
-        if (!IsStoredDeviceCredential(legacy.Credential))
+        if (!ShouldCopyLegacyIdentity(legacy, legacySettingsDirectory))
             return new(primary, perGatewayIdentityDirectory, Copied: false, CopyError: null);
 
         var copyError = TryCopyLegacyIdentity(
@@ -71,7 +72,65 @@ internal static class LegacyStartupDeviceToken
 
     private static bool UrlsMatch(string recordUrl, string? effectiveGatewayUrl) =>
         !string.IsNullOrWhiteSpace(effectiveGatewayUrl)
-        && string.Equals(recordUrl, effectiveGatewayUrl, StringComparison.OrdinalIgnoreCase);
+        && string.Equals(
+            EndpointIdentityKey(recordUrl),
+            EndpointIdentityKey(effectiveGatewayUrl),
+            StringComparison.Ordinal);
+
+    /// <summary>
+    /// Scheme and host are case-insensitive. The path, query, and fragment keep
+    /// their case because the gateway route does.
+    /// </summary>
+    internal static string EndpointIdentityKey(string? url)
+    {
+        if (string.IsNullOrWhiteSpace(url))
+            return string.Empty;
+
+        var trimmed = url.Trim();
+        if (!Uri.TryCreate(trimmed, UriKind.Absolute, out var uri))
+            return trimmed;
+
+        var builder = new StringBuilder();
+        builder.Append(uri.Scheme.ToLowerInvariant());
+        builder.Append("://");
+        builder.Append(uri.IdnHost.ToLowerInvariant());
+        if (!uri.IsDefaultPort)
+        {
+            builder.Append(':');
+            builder.Append(uri.Port);
+        }
+
+        builder.Append(uri.AbsolutePath);
+        builder.Append(uri.Query);
+        builder.Append(uri.Fragment);
+        return builder.ToString();
+    }
+
+    private static bool ShouldCopyLegacyIdentity(
+        GatewayCredentialResolution legacy,
+        string legacySettingsDirectory)
+    {
+        if (legacy.PrimaryStatus is GatewayCredentialResolutionStatus.Corrupt
+                or GatewayCredentialResolutionStatus.Unreadable
+            || legacy.Status is GatewayCredentialResolutionStatus.Corrupt
+                or GatewayCredentialResolutionStatus.Unreadable)
+        {
+            return false;
+        }
+
+        if (IsStoredDeviceCredential(legacy.Credential))
+            return true;
+
+        try
+        {
+            return DeviceIdentity.HasStoredDeviceTokenForRole(legacySettingsDirectory, "node")
+                || DeviceIdentity.HasStoredDeviceTokenForRole(legacySettingsDirectory, "operator");
+        }
+        catch (DeviceIdentityLoadException)
+        {
+            return false;
+        }
+    }
 
     private static bool IdentityFileExists(string directory) =>
         File.Exists(Path.Combine(directory, IdentityFileName));
@@ -87,7 +146,10 @@ internal static class LegacyStartupDeviceToken
             return true;
 
         var bound = File.ReadAllText(path).Trim();
-        return string.Equals(bound, recordUrl?.Trim(), StringComparison.OrdinalIgnoreCase);
+        return string.Equals(
+            EndpointIdentityKey(bound),
+            EndpointIdentityKey(recordUrl),
+            StringComparison.Ordinal);
     }
 
     public static void StampBoundUrl(string identityDirectory, string recordUrl)
@@ -121,7 +183,7 @@ internal static class LegacyStartupDeviceToken
 
     private static string RealmKey(string recordUrl)
     {
-        var hash = SHA256.HashData(Encoding.UTF8.GetBytes(recordUrl.Trim().ToLowerInvariant()));
+        var hash = SHA256.HashData(Encoding.UTF8.GetBytes(EndpointIdentityKey(recordUrl)));
         return Convert.ToHexString(hash)[..32].ToLowerInvariant();
     }
 

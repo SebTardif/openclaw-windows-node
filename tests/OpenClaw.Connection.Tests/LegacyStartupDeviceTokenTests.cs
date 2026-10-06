@@ -220,6 +220,54 @@ public class LegacyStartupDeviceTokenTests : IDisposable
         Assert.Equal(Path.GetFullPath(root), Path.GetFullPath(selected));
     }
 
+    [Fact]
+    public void Prefer_CopiesLegacyNodeToken_WhenOperatorCredentialIsShared()
+    {
+        WriteLegacyIdentity(null, "node-tok");
+        var perGateway = DirectoryFor("gateway");
+        var record = RecordWithWeakerTokens();
+
+        var choice = LegacyStartupDeviceToken.Prefer(
+            _resolver.ResolveOperatorDetailed(record, perGateway),
+            record.Url,
+            record.Url,
+            perGateway,
+            _legacyDir,
+            dir => _resolver.ResolveOperatorDetailed(record, dir));
+
+        Assert.True(choice.Copied);
+        Assert.Equal("shared", choice.Resolution.Credential!.Token);
+        Assert.Equal(CredentialResolver.SourceSharedGatewayToken, choice.Resolution.Credential.Source);
+        var node = _resolver.ResolveNode(record, perGateway);
+        Assert.Equal("node-tok", node!.Token);
+        Assert.Equal(CredentialResolver.SourceNodeDeviceToken, node.Source);
+    }
+
+    [Fact]
+    public void EndpointIdentity_PreservesPathCase()
+    {
+        var upper = "wss://host.example/GatewayA";
+        var lowerPath = "wss://host.example/gatewaya";
+        var sameHost = "WSS://Host.Example/GatewayA";
+        Assert.NotEqual(
+            LegacyStartupDeviceToken.EndpointIdentityKey(upper),
+            LegacyStartupDeviceToken.EndpointIdentityKey(lowerPath));
+        Assert.Equal(
+            LegacyStartupDeviceToken.EndpointIdentityKey(upper),
+            LegacyStartupDeviceToken.EndpointIdentityKey(sameHost));
+
+        var root = DirectoryFor("case-root");
+        File.WriteAllText(
+            Path.Combine(root, LegacyStartupDeviceToken.IdentityFileName),
+            "{}");
+        LegacyStartupDeviceToken.StampBoundUrl(root, upper);
+        var other = LegacyStartupDeviceToken.SelectIdentityDirectory(root, lowerPath);
+        Assert.NotEqual(Path.GetFullPath(root), Path.GetFullPath(other));
+        Assert.False(LegacyStartupDeviceToken.AllowsStoredDeviceToken(root, lowerPath));
+        Assert.True(LegacyStartupDeviceToken.AllowsStoredDeviceToken(root, sameHost));
+        Assert.False(File.Exists(Path.Combine(other, LegacyStartupDeviceToken.IdentityFileName)));
+    }
+
     private void WriteLegacyIdentity(string? operatorToken, string? nodeToken)
     {
         var identity = new DeviceIdentity(_legacyDir);
