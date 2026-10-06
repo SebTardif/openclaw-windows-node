@@ -57,6 +57,8 @@ public static class ChannelConfigPatchBuilder
         "***",
         "*****",
         "********",
+        // config.get replaces a stored secret with this exact mask.
+        "__OPENCLAW_REDACTED__",
     };
 
     public static bool IsRedactionSentinel(string? value) =>

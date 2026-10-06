@@ -952,6 +952,89 @@ public class ConfigEditorModelTests
     }
 
     [Fact]
+    public void GatewayRedactionMask_UnrelatedEdit_OmitsApiKeyAndKeepsModels()
+    {
+        using var stored = JsonDocument.Parse("""
+        {
+          "models": {
+            "providers": {
+              "custom.openai": {
+                "apiKey": "__OPENCLAW_REDACTED__",
+                "baseUrl": "https://old.example",
+                "models": [ { "id": "m1", "name": "one" } ]
+              }
+            }
+          }
+        }
+        """);
+        using var editor = JsonDocument.Parse("""
+        {
+          "models": {
+            "providers": {
+              "custom.openai": {
+                "apiKey": "__OPENCLAW_REDACTED__",
+                "baseUrl": "https://new.example",
+                "models": [ { "id": "m1", "name": "one" } ]
+              }
+            }
+          }
+        }
+        """);
+        var edited = new[] { "models.providers.custom.openai.baseUrl" };
+        var blocked = ConfigEditorModel.FindUneditedRedactionSentinel(
+            editor.RootElement, edited, stored.RootElement);
+        var sent = ConfigEditorModel.OmitUntouchedRedactionSentinels(
+            editor.RootElement, edited, stored.RootElement);
+        var provider = sent.GetProperty("models").GetProperty("providers").GetProperty("custom.openai");
+
+        Assert.Null(blocked);
+        Assert.False(provider.TryGetProperty("apiKey", out _));
+        Assert.Equal("https://new.example", provider.GetProperty("baseUrl").GetString());
+        Assert.Equal("m1", provider.GetProperty("models")[0].GetProperty("id").GetString());
+    }
+
+    [Fact]
+    public void GatewayRedactionMask_ParentEdit_RefusesAndKeepsTheDraft()
+    {
+        using var stored = JsonDocument.Parse("""
+        {
+          "models": {
+            "providers": {
+              "custom.openai": {
+                "apiKey": "__OPENCLAW_REDACTED__",
+                "baseUrl": "https://old.example",
+                "models": [ { "id": "m1" } ]
+              }
+            }
+          }
+        }
+        """);
+        using var editor = JsonDocument.Parse("""
+        {
+          "models": {
+            "providers": {
+              "custom.openai": {
+                "apiKey": "***",
+                "baseUrl": "https://draft.example",
+                "models": [ { "id": "m1" } ]
+              }
+            }
+          }
+        }
+        """);
+        var edited = new[] { "models.providers" };
+        var blocked = ConfigEditorModel.FindUneditedRedactionSentinel(
+            editor.RootElement, edited, stored.RootElement);
+        var sent = ConfigEditorModel.OmitUntouchedRedactionSentinels(
+            editor.RootElement, edited, stored.RootElement);
+        var provider = sent.GetProperty("models").GetProperty("providers").GetProperty("custom.openai");
+
+        Assert.Equal("models.providers.custom.openai.apiKey", blocked);
+        Assert.Equal("***", provider.GetProperty("apiKey").GetString());
+        Assert.Equal("https://draft.example", provider.GetProperty("baseUrl").GetString());
+    }
+
+    [Fact]
     public void DottedProviderKey_NonIdAccountsArray_RefusesAndKeepsTheMask()
     {
         using var stored = JsonDocument.Parse("""

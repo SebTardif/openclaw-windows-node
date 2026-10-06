@@ -195,6 +195,7 @@ public class ChannelConfigPatchBuilderTests
     [InlineData("<redacted>")]
     [InlineData("[redacted]")]
     [InlineData("  [REDACTED]  ")] // trimmed before matching
+    [InlineData("__OPENCLAW_REDACTED__")]
     public void BuildPatch_DetectsCommonRedactionSentinels(string sentinel)
     {
         var existing = Json($$"""
