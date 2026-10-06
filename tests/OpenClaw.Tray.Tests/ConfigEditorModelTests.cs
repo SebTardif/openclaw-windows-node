@@ -1035,6 +1035,64 @@ public class ConfigEditorModelTests
     }
 
     [Fact]
+    public void GatewayRedactionMask_DirectEdit_RefusesLegacyPlaceholder()
+    {
+        using var stored = JsonDocument.Parse("""
+        {
+          "models": {
+            "providers": {
+              "custom": {
+                "apiKey": "__OPENCLAW_REDACTED__",
+                "baseUrl": "https://old.example"
+              }
+            }
+          }
+        }
+        """);
+        using var editor = JsonDocument.Parse("""
+        {
+          "models": {
+            "providers": {
+              "custom": {
+                "apiKey": "***",
+                "baseUrl": "https://old.example"
+              }
+            }
+          }
+        }
+        """);
+        var edited = new[] { "models.providers.custom.apiKey" };
+        var blocked = ConfigEditorModel.FindUneditedRedactionSentinel(
+            editor.RootElement, edited, stored.RootElement);
+        var sent = ConfigEditorModel.OmitUntouchedRedactionSentinels(
+            editor.RootElement, edited, stored.RootElement);
+        var provider = sent.GetProperty("models").GetProperty("providers").GetProperty("custom");
+
+        Assert.Equal("models.providers.custom.apiKey", blocked);
+        Assert.Equal("***", provider.GetProperty("apiKey").GetString());
+        Assert.Equal("https://old.example", provider.GetProperty("baseUrl").GetString());
+    }
+
+    [Fact]
+    public void GatewayRedactionMask_DirectSecretRefIdEdit_KeepsTheReplacement()
+    {
+        using var stored = JsonDocument.Parse("""
+        { "auth": { "profiles": { "one": { "id": "__OPENCLAW_REDACTED__" } } } }
+        """);
+        using var editor = JsonDocument.Parse("""
+        { "auth": { "profiles": { "one": { "id": "***" } } } }
+        """);
+        var edited = new[] { "auth.profiles.one.id" };
+        var blocked = ConfigEditorModel.FindUneditedRedactionSentinel(
+            editor.RootElement, edited, stored.RootElement);
+        var sent = ConfigEditorModel.OmitUntouchedRedactionSentinels(
+            editor.RootElement, edited, stored.RootElement);
+
+        Assert.Null(blocked);
+        Assert.Equal("***", sent.GetProperty("auth").GetProperty("profiles").GetProperty("one").GetProperty("id").GetString());
+    }
+
+    [Fact]
     public void GatewayRedactionMask_SecretRefProviderEdit_KeepsTheMaskedId()
     {
         using var stored = JsonDocument.Parse("""

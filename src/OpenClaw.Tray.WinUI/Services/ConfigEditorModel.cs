@@ -218,8 +218,15 @@ internal static class ConfigEditorModel
         {
             var loadedSentinel = baseDocument.ValueKind == JsonValueKind.String &&
                                  ChannelConfigPatchBuilder.IsRedactionSentinel(baseDocument.GetString());
+            // __OPENCLAW_REDACTED__ stays out of the Channels sentinel set.
+            // A direct edit of a credential that replaces that mask with a
+            // legacy placeholder is the same refusal as the parent-object edit.
             if (edited.Contains(path))
-                return loadedSentinel ? path : null;
+            {
+                return loadedSentinel || LoadedCredentialIsNativeMask(baseDocument, path)
+                    ? path
+                    : null;
+            }
 
             if (HasAncestorEdit(edited, path) &&
                 IsCredentialPath(path) &&
@@ -574,6 +581,11 @@ internal static class ConfigEditorModel
 
         return ArrayIsIdKeyed(array);
     }
+
+    private static bool LoadedCredentialIsNativeMask(JsonElement loaded, string path) =>
+        IsCredentialPath(path) &&
+        loaded.ValueKind == JsonValueKind.String &&
+        ChannelConfigPatchBuilder.IsNativeGatewayRedactionMask(loaded.GetString());
 
     private static bool LoadedValueIsSentinel(JsonElement loaded) =>
         loaded.ValueKind == JsonValueKind.String &&
