@@ -56,6 +56,7 @@ public sealed partial class CanvasWindow : WindowEx
     private readonly Microsoft.UI.Dispatching.DispatcherQueue? _dispatcherQueue;
     private TypedEventHandler<CoreWebView2, CoreWebView2WebMessageReceivedEventArgs>? _webMessageReceivedHandler;
     private TypedEventHandler<CoreWebView2, CoreWebView2WebResourceRequestedEventArgs>? _webResourceRequestedHandler;
+    private TypedEventHandler<CoreWebView2, CoreWebView2WebResourceRequestedEventArgs>? _blockedNavigationHandler;
     private string? _webResourceRequestedFilter;
 
     /// <summary>
@@ -316,6 +317,7 @@ public sealed partial class CanvasWindow : WindowEx
             ConfigureGatewayAuthHeaderInjection();
 
             // Handle navigation events
+            ConfigureBlockedNavigationResponses(CanvasWebView.CoreWebView2);
             CanvasWebView.CoreWebView2.NavigationStarting += OnNavigationStarting;
             CanvasWebView.CoreWebView2.NewWindowRequested += OnNewWindowRequested;
             CanvasWebView.CoreWebView2.NavigationCompleted += OnNavigationCompleted;
@@ -431,6 +433,32 @@ public sealed partial class CanvasWindow : WindowEx
         }
     }
     
+    private void ConfigureBlockedNavigationResponses(CoreWebView2 coreWebView2)
+    {
+        if (_blockedNavigationHandler != null)
+        {
+            coreWebView2.WebResourceRequested -= _blockedNavigationHandler;
+            coreWebView2.RemoveWebResourceRequestedFilter("*", CoreWebView2WebResourceContext.All);
+        }
+
+        _blockedNavigationHandler = OnBlockedNavigationRequested;
+        coreWebView2.AddWebResourceRequestedFilter("*", CoreWebView2WebResourceContext.All);
+        coreWebView2.WebResourceRequested += _blockedNavigationHandler;
+    }
+
+    private void OnBlockedNavigationRequested(CoreWebView2 sender, CoreWebView2WebResourceRequestedEventArgs args)
+    {
+        var uri = args.Request.Uri;
+        if (string.IsNullOrEmpty(uri) || IsUrlSafe(uri))
+            return;
+
+        args.Response = sender.Environment.CreateWebResourceResponse(
+            new InMemoryRandomAccessStream(),
+            403,
+            "Blocked",
+            "Content-Type: text/plain");
+    }
+
     private void OnNavigationStarting(CoreWebView2 sender, CoreWebView2NavigationStartingEventArgs args)
     {
         if (args.Uri is not string uri || !IsUrlSafe(uri))
@@ -505,6 +533,12 @@ public sealed partial class CanvasWindow : WindowEx
                 _webMessageReceivedHandler = null;
             }
             RemoveGatewayAuthHeaderInjection(CanvasWebView.CoreWebView2);
+            if (_blockedNavigationHandler != null)
+            {
+                CanvasWebView.CoreWebView2.WebResourceRequested -= _blockedNavigationHandler;
+                CanvasWebView.CoreWebView2.RemoveWebResourceRequestedFilter("*", CoreWebView2WebResourceContext.All);
+                _blockedNavigationHandler = null;
+            }
             CanvasWebView.CoreWebView2.NavigationStarting -= OnNavigationStarting;
             CanvasWebView.CoreWebView2.NewWindowRequested -= OnNewWindowRequested;
             CanvasWebView.CoreWebView2.NavigationCompleted -= OnNavigationCompleted;
