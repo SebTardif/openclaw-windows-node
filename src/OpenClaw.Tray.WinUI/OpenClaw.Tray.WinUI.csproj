@@ -58,6 +58,8 @@
     <RuntimeIdentifier>win-arm64</RuntimeIdentifier>
   </PropertyGroup>
 
+  <Import Project="Migration.Build.props" />
+
   <!-- Unpackaged (default): traditional EXE distribution via Inno Setup -->
   <PropertyGroup Condition="'$(PackageMsix)' != 'true'">
     <WindowsPackageType>None</WindowsPackageType>
@@ -378,6 +380,21 @@
       <_WxcExecPackageFiles Include="$(MxcSdkBinDir)*.dll" />
       <ResolvedFileToPublish Include="@(_WxcExecPackageFiles)">
         <RelativePath>tools\mxc\$(MxcArch)\%(Filename)%(Extension)</RelativePath>
+        <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+      </ResolvedFileToPublish>
+    </ItemGroup>
+  </Target>
+
+  <!-- llama-server is downloaded under LocalAppData and runs outside the MSIX
+       package graph. Keep a private copy of the publish-time VC runtime in the
+       package so SetupEngine can stage its three imported DLLs app-local. -->
+  <Target Name="AddLocalAiVCRuntimeToPublishItems"
+          BeforeTargets="ComputeFilesToPublish"
+          DependsOnTargets="ResolveOpenClawVCRuntimeFromVSInstall"
+          Condition="'$(PackageMsix)' == 'true'">
+    <ItemGroup>
+      <ResolvedFileToPublish Include="@(OpenClawVCRuntimeFiles)">
+        <RelativePath>tools\local-ai-vc-runtime\%(Filename)%(Extension)</RelativePath>
         <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
       </ResolvedFileToPublish>
     </ItemGroup>
