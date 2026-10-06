@@ -83,9 +83,14 @@ public static class InteractiveGatewayCredentialResolver
                 return true;
             }
 
-            // Fall back to standard credential resolution (DeviceToken → Bootstrap)
+            // Device and bootstrap tokens come from this URL's identity directory.
+            // The root copy can be stamped for an older URL, and the settings
+            // file can still hold that older token without a stamp.
             var resolver = new CredentialResolver(identityReader);
-            var resolved = resolver.ResolveOperator(active, registry!.GetIdentityDirectory(active.Id));
+            var identityDirectory = LegacyStartupDeviceToken.SelectIdentityDirectory(
+                registry!.GetIdentityDirectory(active.Id),
+                active.Url);
+            var resolved = resolver.ResolveOperator(active, identityDirectory);
             if (resolved != null)
             {
                 if (authorizeCredential is not null &&
@@ -102,11 +107,8 @@ public static class InteractiveGatewayCredentialResolver
                 return true;
             }
 
-            if (!string.Equals(active.Url, effectiveGatewayUrl, StringComparison.OrdinalIgnoreCase))
-            {
-                credential = null;
-                return false;
-            }
+            credential = null;
+            return false;
         }
 
         var gatewayUrl = effectiveGatewayUrl;
