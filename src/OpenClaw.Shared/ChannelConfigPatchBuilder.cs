@@ -57,12 +57,20 @@ public static class ChannelConfigPatchBuilder
         "***",
         "*****",
         "********",
-        // config.get replaces a stored secret with this exact mask.
-        "__OPENCLAW_REDACTED__",
     };
+
+    /// <summary>
+    /// Exact mask <c>config.get</c> substitutes for a stored secret.
+    /// The gateway restores this value before it writes, so a Channels save
+    /// must still send it. It is not a <see cref="IsRedactionSentinel"/> hit.
+    /// </summary>
+    public const string NativeGatewayRedactionMask = "__OPENCLAW_REDACTED__";
 
     public static bool IsRedactionSentinel(string? value) =>
         value != null && RedactionSentinels.Contains(value.Trim());
+
+    public static bool IsNativeGatewayRedactionMask(string? value) =>
+        string.Equals(value, NativeGatewayRedactionMask, StringComparison.Ordinal);
 
     /// <summary>
     /// Build a patched full-config from the cached config and a list of

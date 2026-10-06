@@ -1035,6 +1035,47 @@ public class ConfigEditorModelTests
     }
 
     [Fact]
+    public void GatewayRedactionMask_SecretRefProviderEdit_KeepsTheMaskedId()
+    {
+        using var stored = JsonDocument.Parse("""
+        {
+          "auth": {
+            "profiles": {
+              "one": {
+                "source": "env",
+                "provider": "one",
+                "id": "__OPENCLAW_REDACTED__"
+              }
+            }
+          }
+        }
+        """);
+        using var editor = JsonDocument.Parse("""
+        {
+          "auth": {
+            "profiles": {
+              "one": {
+                "source": "env",
+                "provider": "two",
+                "id": "__OPENCLAW_REDACTED__"
+              }
+            }
+          }
+        }
+        """);
+        var edited = new[] { "auth.profiles" };
+        var blocked = ConfigEditorModel.FindUneditedRedactionSentinel(
+            editor.RootElement, edited, stored.RootElement);
+        var sent = ConfigEditorModel.OmitUntouchedRedactionSentinels(
+            editor.RootElement, edited, stored.RootElement);
+        var profile = sent.GetProperty("auth").GetProperty("profiles").GetProperty("one");
+
+        Assert.Null(blocked);
+        Assert.Equal("two", profile.GetProperty("provider").GetString());
+        Assert.Equal("__OPENCLAW_REDACTED__", profile.GetProperty("id").GetString());
+    }
+
+    [Fact]
     public void DottedProviderKey_NonIdAccountsArray_RefusesAndKeepsTheMask()
     {
         using var stored = JsonDocument.Parse("""

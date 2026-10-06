@@ -303,10 +303,20 @@ internal static class ConfigEditorModel
 
                 if (property.Value is JsonValue value &&
                     value.TryGetValue<string>(out var text) &&
-                    ChannelConfigPatchBuilder.IsRedactionSentinel(text) &&
+                    (ChannelConfigPatchBuilder.IsRedactionSentinel(text) ||
+                     ChannelConfigPatchBuilder.IsNativeGatewayRedactionMask(text)) &&
                     !edited.Contains(childPath) &&
                     ShouldOmitUntouchedSentinel(childPath))
                 {
+                    // Leave a native mask on a non-credential leaf, including a
+                    // SecretRef id. The gateway uses that mask to restore the
+                    // stored id or to refuse a provider change.
+                    if (ChannelConfigPatchBuilder.IsNativeGatewayRedactionMask(text) &&
+                        !IsCredentialPath(childPath))
+                    {
+                        continue;
+                    }
+
                     if (!IsCredentialPath(childPath) && !LoadedValueIsSentinel(loadedChild))
                         continue;
 
