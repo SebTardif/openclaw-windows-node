@@ -53,6 +53,7 @@ public sealed class GatewayFixtureRun : IAsyncDisposable
         CancellationToken cancellationToken = default,
         bool allowAgentCreation = false,
         bool requireAgentSelection = false,
+        bool allowSessionMutations = false,
         GatewayScenario? scenario = null,
         Func<GatewayFixtureProfile, string>? prepareSetupHandoff = null)
     {
@@ -60,7 +61,7 @@ public sealed class GatewayFixtureRun : IAsyncDisposable
             throw new PlatformNotSupportedException("The fixture app requires a Windows desktop.");
         var executable = GatewayFixtureProfile.ValidateApp(appPath);
         var token = Convert.ToHexString(RandomNumberGenerator.GetBytes(32));
-        scenario ??= GatewayScenario.CreateBrowse(allowAgentCreation, requireAgentSelection);
+        scenario ??= GatewayScenario.CreateBrowse(allowAgentCreation, requireAgentSelection, allowSessionMutations);
         var gateway = await FixtureGatewayServer.StartAsync(scenario, token, cancellationToken);
         GatewayFixtureProfile profile;
         try

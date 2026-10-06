@@ -58,6 +58,8 @@ public sealed class SetupNativeChatWarningTests(UIThreadFixture fixture)
             fixture.Container.Children.Add(page);
             // TestApp deliberately has no product services. Seed only the real
             // navigation binding, never an authenticated transport or a bypass.
+            var removed = typeof(ChatPage).GetField("_sessionRemoved", BindingFlags.Instance | BindingFlags.NonPublic)!;
+            removed.SetValue(page, true);
             var binding = (SetupNativeChatBinding)typeof(ChatPage)
                 .GetField("_nativeSetupBinding", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(page)!;
             var request = new SetupNativeNavigationRequest(new(
@@ -66,6 +68,7 @@ public sealed class SetupNativeChatWarningTests(UIThreadFixture fixture)
                 new(SetupNativeDestination.Chat, "agent:verified:main")));
             binding.Bind(request);
             page.RetainNativeSetupForDestination(request.WorkspaceDestination!);
+            Assert.False((bool)removed.GetValue(page)!);
             page.ApplyNativeSetupWarning(SetupNativeChatWarning.AuthorityUnconfirmed, "test");
             var bar = Assert.IsType<InfoBar>(page.FindName("NativeSetupError"));
             page.RetainNativeSetupForDestination(request.WorkspaceDestination!);
@@ -106,7 +109,10 @@ public sealed class SetupNativeChatWarningTests(UIThreadFixture fixture)
             binding.Bind(request);
             page.RetainNativeSetupForDestination(request.WorkspaceDestination!);
             page.ApplyNativeSetupWarning(SetupNativeChatWarning.AuthorityUnconfirmed, "test");
+            var removed = typeof(ChatPage).GetField("_sessionRemoved", BindingFlags.Instance | BindingFlags.NonPublic)!;
+            removed.SetValue(page, true);
             page.QueueSession(sessionKey);
+            Assert.Equal(string.IsNullOrEmpty(sessionKey), (bool)removed.GetValue(page)!);
             Assert.Equal(retained, ReferenceEquals(request, binding.Request));
             var bar = Assert.IsType<InfoBar>(page.FindName("NativeSetupError"));
             Assert.Equal(retained, bar.IsOpen);
