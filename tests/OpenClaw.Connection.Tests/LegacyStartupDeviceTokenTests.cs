@@ -177,6 +177,49 @@ public class LegacyStartupDeviceTokenTests : IDisposable
         Assert.False(File.Exists(Path.Combine(perGateway, LegacyStartupDeviceToken.IdentityFileName)));
     }
 
+    [Fact]
+    public void SelectIdentityDirectory_GivesEachReassignedUrlItsOwnDeviceToken()
+    {
+        var root = DirectoryFor("stamped-root");
+        LegacyStartupDeviceToken.StampBoundUrl(root, "wss://a.example");
+
+        var first = LegacyStartupDeviceToken.SelectIdentityDirectory(root, "wss://b.example");
+        var second = LegacyStartupDeviceToken.SelectIdentityDirectory(root, "wss://c.example");
+        var firstAgain = LegacyStartupDeviceToken.SelectIdentityDirectory(root, "wss://b.example");
+
+        Assert.Equal(Path.GetFullPath(first), Path.GetFullPath(firstAgain));
+        Assert.NotEqual(Path.GetFullPath(first), Path.GetFullPath(second));
+        Assert.NotEqual(Path.GetFullPath(root), Path.GetFullPath(first));
+        Assert.True(LegacyStartupDeviceToken.AllowsStoredDeviceToken(first, "wss://b.example"));
+        Assert.False(LegacyStartupDeviceToken.AllowsStoredDeviceToken(first, "wss://c.example"));
+
+        var identity = new DeviceIdentity(first);
+        identity.Initialize();
+        identity.StoreDeviceTokenForRole("operator", "bee-token", ["operator.read"]);
+        var shared = new GatewayRecord
+        {
+            Id = "gw-1",
+            Url = "wss://b.example",
+            SharedGatewayToken = "shared"
+        };
+
+        var fromFirst = _resolver.ResolveOperator(shared, first);
+        var fromSecond = _resolver.ResolveOperator(shared with { Url = "wss://c.example" }, second);
+
+        Assert.Equal("bee-token", fromFirst!.Token);
+        Assert.Equal(CredentialResolver.SourceDeviceToken, fromFirst.Source);
+        Assert.Equal("shared", fromSecond!.Token);
+        Assert.Equal(CredentialResolver.SourceSharedGatewayToken, fromSecond.Source);
+    }
+
+    [Fact]
+    public void SelectIdentityDirectory_KeepsAnUnstampedRoot()
+    {
+        var root = DirectoryFor("plain-root");
+        var selected = LegacyStartupDeviceToken.SelectIdentityDirectory(root, "wss://a.example");
+        Assert.Equal(Path.GetFullPath(root), Path.GetFullPath(selected));
+    }
+
     private void WriteLegacyIdentity(string? operatorToken, string? nodeToken)
     {
         var identity = new DeviceIdentity(_legacyDir);

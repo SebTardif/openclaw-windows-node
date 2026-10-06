@@ -1714,7 +1714,9 @@ public sealed class GatewayConnectionManager :
             {
                 var existing = _registry.FindByUrl(gatewayUrl);
                 var recordId = existing?.Id ?? Guid.NewGuid().ToString();
-                var identityDir = _registry.GetIdentityDirectory(recordId);
+                var identityDir = LegacyStartupDeviceToken.SelectIdentityDirectory(
+                    _registry.GetIdentityDirectory(recordId),
+                    gatewayUrl);
                 var hasDurableTokens =
                     DeviceIdentity.HasStoredDeviceTokenForRole(identityDir, "operator", _logger) ||
                     DeviceIdentity.HasStoredDeviceTokenForRole(identityDir, "node", _logger);
@@ -2381,13 +2383,16 @@ public sealed class GatewayConnectionManager :
         var identityDirectory = _registry.GetIdentityDirectory(record.Id);
         if (!Directory.Exists(identityDirectory))
             Directory.CreateDirectory(identityDirectory);
-        if (LegacyStartupDeviceToken.AllowsStoredDeviceToken(identityDirectory, record.Url))
-            return identityDirectory;
+        var selected = LegacyStartupDeviceToken.SelectIdentityDirectory(identityDirectory, record.Url);
+        if (!string.Equals(
+                Path.GetFullPath(selected),
+                Path.GetFullPath(identityDirectory),
+                StringComparison.OrdinalIgnoreCase))
+        {
+            _logger.Info("[ConnMgr] Stored device identity is bound to a different gateway URL, so it was not sent.");
+        }
 
-        var unbound = Path.Combine(identityDirectory, "unbound-url");
-        Directory.CreateDirectory(unbound);
-        _logger.Info("[ConnMgr] Stored device identity is bound to a different gateway URL, so it was not sent.");
-        return unbound;
+        return selected;
     }
 
     private async Task<EndpointCredentialAuthorization> AuthorizeCredentialForEndpointAsync(

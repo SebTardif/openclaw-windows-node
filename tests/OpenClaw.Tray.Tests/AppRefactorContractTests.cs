@@ -337,6 +337,7 @@ public sealed class AppRefactorContractTests
             "BeginManualGatewayLifecycleOperationAsync",
             "var previousActiveId = _registry.ActiveGatewayId",
             "await _connectionManager.DisconnectAsync()",
+            "LegacyStartupDeviceToken.SelectIdentityDirectory(",
             "BeginTransactionalTokenClear(identityDir, _logger)");
         AssertInOrder(
             serviceConnect,
@@ -705,7 +706,9 @@ public sealed class AppRefactorContractTests
         var connectMethod = ExtractMethod(source, "TryConnectGatewayIfCredentialAvailable");
         var nodeCredentialMethod = ExtractMethod(source, "ChooseStartupNodeCredential");
 
-        Assert.Contains("ChooseStartupNodeCredential(record, resolver, identityDir)", connectMethod);
+        Assert.Contains("LegacyStartupDeviceToken.SelectIdentityDirectory(", connectMethod);
+        Assert.Contains("ChooseStartupNodeCredential(record, resolver, identityDir, copyLegacyIdentity)", connectMethod);
+        Assert.Contains("if (!copyLegacyIdentity)", nodeCredentialMethod);
         Assert.Contains("RefuseUncopiedLegacyDeviceCredential(", connectMethod);
         Assert.Contains("_connectionManager.ConnectNodeOnlyAsync(record.Id)", connectMethod);
         Assert.Contains("LegacyStartupDeviceToken.Prefer(", nodeCredentialMethod);

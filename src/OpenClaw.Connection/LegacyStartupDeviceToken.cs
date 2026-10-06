@@ -1,3 +1,6 @@
+using System.Security.Cryptography;
+using System.Text;
+
 namespace OpenClaw.Connection;
 
 /// <summary>
@@ -94,6 +97,32 @@ internal static class LegacyStartupDeviceToken
 
         Directory.CreateDirectory(identityDirectory);
         File.WriteAllText(Path.Combine(identityDirectory, BoundUrlFileName), recordUrl.Trim());
+    }
+
+    /// <summary>
+    /// Root identity when it is allowed for this URL. A stamped root that belongs
+    /// to another URL uses a directory named only for this URL, stamped before
+    /// any credential is read, so a later URL cannot reuse that pairing.
+    /// </summary>
+    public static string SelectIdentityDirectory(string perGatewayIdentityDirectory, string recordUrl)
+    {
+        if (string.IsNullOrWhiteSpace(recordUrl) ||
+            AllowsStoredDeviceToken(perGatewayIdentityDirectory, recordUrl))
+        {
+            return perGatewayIdentityDirectory;
+        }
+
+        var realm = Path.Combine(perGatewayIdentityDirectory, "realms", RealmKey(recordUrl));
+        Directory.CreateDirectory(realm);
+        if (!File.Exists(Path.Combine(realm, BoundUrlFileName)))
+            StampBoundUrl(realm, recordUrl);
+        return realm;
+    }
+
+    private static string RealmKey(string recordUrl)
+    {
+        var hash = SHA256.HashData(Encoding.UTF8.GetBytes(recordUrl.Trim().ToLowerInvariant()));
+        return Convert.ToHexString(hash)[..32].ToLowerInvariant();
     }
 
     private static string? TryCopyLegacyIdentity(
