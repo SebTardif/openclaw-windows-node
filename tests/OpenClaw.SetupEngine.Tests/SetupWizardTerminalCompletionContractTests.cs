@@ -37,7 +37,7 @@ public sealed class SetupWizardTerminalCompletionContractTests
     {
         var source = WizardPageSource();
         var apply = ExtractMethod(source, "ApplyPayloadAsync");
-        var start = ExtractMethod(source, "StartWizardAsync");
+        var start = ExtractMethod(source, "StartWizardCoreAsync");
         var sendAnswer = ExtractMethod(source, "SendCurrentAnswerAsync");
         var sendOption = ExtractMethod(source, "SendOptionValueAsync");
         var expandMore = ExtractMethod(source, "ExpandMoreOptionsAsync");
@@ -54,7 +54,10 @@ public sealed class SetupWizardTerminalCompletionContractTests
             "if (!decision.MarksWizardCompleted)",
             "ShowError(error);",
             "return;");
-        Assert.DoesNotContain("this.prompt is not a function", apply, StringComparison.Ordinal);
+        Assert.Contains(
+            "(_nativeSession is not null || !error.Contains(\"this.prompt is not a function\", StringComparison.OrdinalIgnoreCase))",
+            apply,
+            StringComparison.Ordinal);
         AssertInOrder(
             apply,
             "_finalStepTracker.RecordProgressAcknowledgement();",
