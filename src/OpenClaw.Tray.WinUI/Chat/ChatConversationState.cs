@@ -880,19 +880,22 @@ internal sealed class ChatConversationState
     internal ChatDataSnapshot RestoreFailedWelcomeSend(
         string threadId,
         string messageText,
-        ChatProjectionContext context)
+        ChatProjectionContext context,
+        string? failedMessageId = null)
     {
         lock (_gate)
         {
             if (!string.IsNullOrWhiteSpace(threadId) && !string.IsNullOrWhiteSpace(messageText))
             {
-                _queue.RemoveFailedMessages(threadId, messageText);
-                // A follow-up can already be queued or promoted before this recovery
-                // runs. Those checks happen before any timeline replacement.
+                if (!string.IsNullOrWhiteSpace(failedMessageId))
+                    _queue.RemoveFailedMessage(threadId, failedMessageId);
+                // A follow-up can already be queued, failed, or promoted before this
+                // recovery runs. Those checks happen before any timeline replacement.
                 if (_timelines.TryGetValue(threadId, out var timeline)
                     && !timeline.TurnActive
                     && !_queue.HasPendingMessages(threadId)
                     && !_queue.HasSendingMessages(threadId)
+                    && !_queue.HasFailedMessages(threadId)
                     && IsFailedWelcomeTimeline(timeline, messageText))
                 {
                     _timelines[threadId] = ChatTimelineState.Initial() with

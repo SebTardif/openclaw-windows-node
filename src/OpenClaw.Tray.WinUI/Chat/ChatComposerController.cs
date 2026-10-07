@@ -11,7 +11,7 @@ namespace OpenClawTray.Chat;
 /// Provider result plus whether this controller was still the live host when that result arrived.
 /// A disposed host can observe <see cref="Submitted"/> true. That is not a failed submission.
 /// </summary>
-internal readonly record struct ChatSendCoreResult(bool Submitted, bool HostLive)
+internal readonly record struct ChatSendCoreResult(bool Submitted, bool HostLive, string? FailedMessageId = null)
 {
     public bool AcceptedByLiveHost => Submitted && HostLive;
 
@@ -294,7 +294,10 @@ internal sealed partial class ChatComposerController : IDisposable
         }
 
         var submitted = await _port.SendMessageAsync(threadId, message, attachments, _lifetimeToken).ConfigureAwait(true);
-        return new(submitted, StillLive());
+        var failedMessageId = submitted || _port is not ChatComposerRuntimePort runtime
+            ? null
+            : runtime.LastFailedSendMessageId;
+        return new(submitted, StillLive(), failedMessageId);
     }
 
     public void Stop()

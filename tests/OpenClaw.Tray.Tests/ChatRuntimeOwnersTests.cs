@@ -516,25 +516,71 @@ public sealed class ChatConversationStateTests
         Assert.True(timeline.TurnActive);
         Assert.Equal(2, userRows);
     }
+
+    [Fact]
+    public void RestoreFailedWelcomeSend_KeepsAFailedSameTextFollowUp()
+    {
+        var state = new ChatConversationState(
+            ConnectionStatus.Connected,
+            lastChatState: null,
+            seedModels: null);
+        var context = new ChatProjectionContext("main", HasHandshakeSnapshot: true);
+        state.Load([new SessionInfo { Key = "main", IsMain = true }], context);
+        var chip = state.AdmitMessage(
+            "main",
+            "What can you do?",
+            "What can you do?",
+            "nonce-welcome",
+            attachments: null,
+            DateTimeOffset.UnixEpoch,
+            context);
+        Assert.NotNull(chip.Dispatch);
+        var followUp = state.AdmitMessage(
+            "main",
+            "What can you do?",
+            "What can you do?",
+            "nonce-follow",
+            attachments: null,
+            DateTimeOffset.UnixEpoch,
+            context);
+        Assert.True(followUp.Queued);
+        state.FailSend(chip.Dispatch, "gateway closed", "gateway closed", context);
+        var started = state.TryStartNextQueuedSend("main", requireConnected: false, context);
+        Assert.NotNull(started.Dispatch);
+        state.FailSend(started.Dispatch!, "gateway closed", "gateway closed", context);
+
+        var restored = state.RestoreFailedWelcomeSend(
+            "main",
+            "What can you do?",
+            context,
+            chip.MessageId);
+
+        Assert.True(restored.QueuedMessagesByThread?.TryGetValue("main", out var queued) == true
+            && queued.Any(message => message.Id == followUp.MessageId
+                && message.SendState == ChatQueuedMessageSendState.Failed));
+        Assert.Contains(
+            restored.Timelines["main"].Entries,
+            entry => entry.Kind == ChatTimelineItemKind.User && entry.Text == "What can you do?");
+    }
 }
 
 public sealed class ChatQueueFailedWelcomeTests
 {
     [Fact]
-    public void RemoveFailedMessages_RemovesOnlyTheMatchingText()
+    public void RemoveFailedMessage_RemovesOnlyTheNamedId()
     {
         var queue = new ChatQueueState();
         queue.AddMessage("main", new ChatQueuedMessage(
             "a", "What can you do?", DateTimeOffset.UnixEpoch, "n1", ChatQueuedMessageSendState.Failed));
         queue.AddMessage("main", new ChatQueuedMessage(
-            "b", "hello", DateTimeOffset.UnixEpoch, "n2", ChatQueuedMessageSendState.Failed));
+            "b", "What can you do?", DateTimeOffset.UnixEpoch, "n2", ChatQueuedMessageSendState.Failed));
 
-        var removed = queue.RemoveFailedMessages("main", "What can you do?");
+        var removed = queue.RemoveFailedMessage("main", "a");
 
-        Assert.Equal(1, removed);
+        Assert.True(removed);
         var remaining = queue.SnapshotMessages()["main"];
         Assert.Single(remaining);
-        Assert.Equal("hello", remaining[0].Text);
+        Assert.Equal("b", remaining[0].Id);
     }
 }
 

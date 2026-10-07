@@ -311,7 +311,7 @@ public sealed class OpenClawReactorChatRoot : Component<OpenClawReactorChatRootP
                         suggestion,
                         Array.Empty<ChatAttachment>());
                     if (result.FailedWhileHostLive && props.Provider is OpenClawChatDataProvider native)
-                        native.RestoreFailedWelcomeSend(threadId, suggestion);
+                        native.RestoreFailedWelcomeSend(threadId, suggestion, result.FailedMessageId);
                 }
                 finally
                 {

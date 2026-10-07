@@ -384,12 +384,18 @@ public sealed class OpenClawChatDataProvider : IChatDataProvider
         return result;
     }
 
-    public void RestoreFailedWelcomeSend(string threadId, string messageText)
+    public const string FailedSendMessageIdDataKey = "OpenClaw.FailedSendMessageId";
+
+    public void RestoreFailedWelcomeSend(string threadId, string messageText, string? failedMessageId = null)
     {
         if (string.IsNullOrWhiteSpace(threadId) || string.IsNullOrWhiteSpace(messageText))
             return;
 
-        Publish(_state.RestoreFailedWelcomeSend(threadId, messageText, ProjectionContext()));
+        Publish(_state.RestoreFailedWelcomeSend(
+            threadId,
+            messageText,
+            ProjectionContext(),
+            failedMessageId));
     }
 
     public Task<bool> CancelQueuedMessageAsync(string threadId, string queuedMessageId, CancellationToken cancellationToken = default)
@@ -581,6 +587,7 @@ public sealed class OpenClawChatDataProvider : IChatDataProvider
                     : ChatTelemetryOutcome.Failure,
                 ChatTurnTelemetryReason.SendRejected);
             _telemetry.CompletePreparedTurn(rejectedCompletion);
+            ex.Data[FailedSendMessageIdDataKey] = request.Id;
             Logger.Warn($"[Queue] chat.send failed threadId='{threadId}' queuedMessageId='{request.Id}' sendRunId='{request.SendRunId}': {ex.Message}");
             // Surface as an error in the timeline + notification, while the
             // failed queue card keeps the attempted text visible for retry/edit.
