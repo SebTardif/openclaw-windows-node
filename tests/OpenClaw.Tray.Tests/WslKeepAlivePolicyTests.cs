@@ -54,10 +54,15 @@ public class WslKeepAlivePolicyTests
 
         Assert.True(element.TryGetDateTime(out var localWall));
         var mislabeled = DateTime.SpecifyKind(localWall, DateTimeKind.Utc);
-        Assert.False(WslKeepAlivePolicy.IsMarkedKeepaliveProcessIdentity(
+        var oldPathMatches = WslKeepAlivePolicy.IsMarkedKeepaliveProcessIdentity(
             "wsl",
             markerUtc,
-            mislabeled));
+            mislabeled);
+        // TryGetDateTime converts the offset into local time. SpecifyKind
+        // then labels that wall clock as UTC. The two instants differ only
+        // when the machine is not already on UTC.
+        var shift = TimeZoneInfo.Local.GetUtcOffset(markerUtc);
+        Assert.Equal(shift == TimeSpan.Zero, oldPathMatches);
     }
 
     [Fact]
