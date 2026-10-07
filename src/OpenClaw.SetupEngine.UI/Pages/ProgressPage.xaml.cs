@@ -153,13 +153,9 @@ public sealed partial class ProgressPage : Page, IAsyncDisposable
             _pipeline = new SetupPipeline(steps);
             _pipeline.StepProgress += OnStepProgress;
 
-            // Do not pass the setup token to Task.Run. Cancel must not complete this
-            // task before RunAsync finishes its CancellationToken.None rollback.
             var pipeline = _pipeline;
-            var pipelineTask = Task.Run(() => pipeline.RunAsync(ctx));
-            SetupWindow.Active?.AttachProgressPipeline(pipelineTask);
             var result = await SetupPipeline.RunWithSettlementAsync(
-                () => pipelineTask,
+                () => Task.Run(() => pipeline.RunAsync(ctx), cts.Token),
                 outcome => config.NativeLocalAiAcquisition ? Task.CompletedTask : setupOwner?.SettleGatewaySetupAsync(ctx.ExpectedGatewayRegistry,
                     outcome?.Outcome == PipelineOutcome.Success ? config.LocalAiRecoveryGatewayId ?? ctx.GatewayRecordId : null)
                     ?? Task.CompletedTask);
@@ -272,7 +268,7 @@ public sealed partial class ProgressPage : Page, IAsyncDisposable
         await _pipelineTask;
     }
 
-    internal void CancelPipeline()
+    private void CancelPipeline()
     {
         if (!_pipelineFinished)
             _runCts?.Cancel();
