@@ -1,3 +1,4 @@
+using System.Text.Json;
 using OpenClaw.Connection;
 using OpenClawTray.Services;
 
@@ -35,6 +36,28 @@ public class WslKeepAlivePolicyTests
             "wsl",
             markerStart.AddMinutes(1),
             markerStart));
+    }
+
+    [Fact]
+    public void MarkerStart_OffsetTimestampMatchesUtcProcessStart()
+    {
+        using var document = JsonDocument.Parse("""{"StartTimeUtc":"2026-09-23T00:53:13+00:00"}""");
+        var element = document.RootElement.GetProperty("StartTimeUtc");
+
+        Assert.True(WslKeepAlivePolicy.TryReadMarkerStartTimeUtc(element, out var markerUtc));
+        Assert.Equal(DateTimeKind.Utc, markerUtc.Kind);
+        Assert.Equal(new DateTime(2026, 9, 23, 0, 53, 13, DateTimeKind.Utc), markerUtc);
+        Assert.True(WslKeepAlivePolicy.IsMarkedKeepaliveProcessIdentity(
+            "wsl",
+            markerUtc.AddSeconds(1),
+            markerUtc));
+
+        Assert.True(element.TryGetDateTime(out var localWall));
+        var mislabeled = DateTime.SpecifyKind(localWall, DateTimeKind.Utc);
+        Assert.False(WslKeepAlivePolicy.IsMarkedKeepaliveProcessIdentity(
+            "wsl",
+            markerUtc,
+            mislabeled));
     }
 
     [Fact]
