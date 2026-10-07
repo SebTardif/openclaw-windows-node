@@ -13,17 +13,26 @@ infrastructure changes. Those fail-closed pull requests run the x64 publish
 smoke only; ARM64 portable publish remains required on `main` and tags.
 When either release-build lane is selected, CI also builds both architectures
 of Dev-signed and unsigned Store MSIX **workflow artifacts**. CI Gate requires
-that MSIX job to succeed. Every tag release also attaches the unsigned Store
-MSIX bundle, standalone packages, and metadata for manual Partner Center
-submission. Dev-signed packages stay in Actions.
+that MSIX job to succeed. Every tag release also attaches the signed Dev MSIX
+packages with their matching public certificates, provenance metadata, and
+installation instructions. Unsigned Store packages stay in Actions for manual
+Partner Center submission.
 
 ## Inno-to-Store migration foundation
 
-Issue #1374's foundation does not advertise or initiate migration. No Store
-action, MSIX importer, or completion writer is enabled by this change.
+Issue #1374 is delivered in two PRs: the preservation/startup foundation, then
+the complete migration experience and release enablement. There is no planned
+third PR. The Store product ID is **`9NFPR3BGDRR5`**. The selected first supported
+Inno release is **`v2026.9.5`**, the planned next patch after `v2026.9.4`, provided
+both PRs ship together. The fixed source floor is pinned to **`2026.9.5.0`**.
+`MigrationProductionEnabled` is checked in as `true` so the coordinated release
+and its CI artifacts carry migration; publication stays gated on the tag-time
+acceptance listed under [Coordinated production release](#coordinated-production-release)
+below. A listing ID is not evidence that a Store-distributed
+package has passed migration acceptance.
 
-`MigrationPreparation.Prepare` is a non-UI API for a future explicitly consented
-Inno action. It inventories existing state without moving the WSL gateway or
+`MigrationPreparation.Prepare` is the non-UI inventory API used after explicit
+consent and verified source shutdown. It inventories state without moving the WSL gateway or
 Local AI payload. Its protected intent is stored under
 `%APPDATA%\OpenClawTray\store-migration\intent.dpapi`. Repeating preparation with
 unchanged state reuses the unexpired intent. Intent expires after 30 days; only
@@ -49,7 +58,7 @@ and exited processes do not block. Unresolved possible source processes still
 fail closed. The finalizer serializes with `prepare.lock`, rereads the
 DPAPI completion receipt under that lock, and recaptures the bounded migration
 inventory before applying the receipt's saved auto-start preference through the
-packaged startup API. It deletes intent followed by the same validated completion
+packaged startup API. It deletes explicit consent, intent, then the same validated completion
 receipt, so a crash after intent deletion retries from the retained receipt. It
 fails closed on source inspection, receipt, inventory, startup-preference, or
 cleanup failure and leaves the receipt for restart recovery. It never starts
@@ -109,6 +118,16 @@ sessions under that lock, using the same fail-closed process policy as finalizat
 Running sources and busy locks return the close-Inno/Retry decision; uncertain
 process inspection blocks migration without publishing a record.
 
+Explicit consent is allowed while Inno holds its runtime reader: consent reads
+and grants take a read-shared `prepare.lock` handle, which still excludes Store's
+exclusive preparation, completion, and finalization. Grants also take an exclusive
+`consent.lock` to serialize writers across sessions. A read never creates either
+lock. A durable consent reader can finish while another writer is waiting, and
+atomic replacement refuses to overwrite a read-locked record. Consent alone
+never permits state adoption or preservation-mode uninstall. Finalization removes
+the consent writer lock before deleting consent, intent, and completion, keeping
+the completion receipt last.
+
 The file handle, not the session-local single-instance mutex, provides continuous
 cross-session exclusion for participating Inno releases. Process inspection is a
 compatibility backstop for already-running older sources, not a lease preventing
@@ -120,18 +139,126 @@ Before rollout, prove exact signed x64 and ARM64 packages, storage/DPAPI access,
 restart recovery, current-head guidance, and manual uninstall preservation.
 Passing unit or PowerShell contract tests is not signed-package migration proof.
 
-### Store migration consent preview
+### Coordinated production release
 
-The Store-side preview adds installation detection, startup admission, and an
-explicit consent/close-Inno retry flow, and it writes protected intent and
-completion records. It is not the full migration journey: runtime state adoption,
-source-version enablement, and the recovery/finalization journey remain out of
-scope. **Ordinary
-builds remain unchanged.** There is no
-production minimum source version, runtime toggle, or environment-variable
-bypass. Do not enable migration by choosing the current app version as a
-placeholder for a verified safeguard-containing Inno release.
+`src\OpenClaw.Tray.WinUI\Migration.Build.props` owns the common Inno and Store
+build contract. The tray project imports it for both x64 and ARM64 publishing,
+including CI's installer and Store package payloads:
 
+| Property | Checked-in value | Shipping requirement |
+|---|---|---|
+| `MigrationStoreProductId` | `9NFPR3BGDRR5` | Verify the listing and installed production package identity. |
+| `MigrationMinimumSourceVersion` | `2026.9.5.0` | Verify that the selected first stable Inno release contains all preservation, lifetime-lock, and startup safeguards. |
+| `MigrationProductionEnabled` | `true` | Enabled for the coordinated `2026.9.5` release. Set to `false` to ship a release without migration. |
+
+Production builds emit `PRODUCTION_MIGRATION` and protected-flow configuration
+metadata only for non-Dev **Release** builds targeting `win-x64` or `win-arm64`.
+Enabling production without a valid, nonzero three- or four-part numeric source
+floor fails the build. Debug and Dev builds remain outside this production gate;
+Debug previews require their separate explicit flags. There is no runtime or
+environment-variable activation switch.
+
+The same coordinated release can introduce the safeguards and the full migration
+flow. A separate preliminary Inno release is not required. Users on older Inno
+versions must **update Inno first**, then migrate: Store installation cannot repair
+an older uninstaller or give an older running binary the lifetime lock.
+
+The minimum is the **fixed first supported Inno version**, not the current target
+app version, GitVersion output, or reserved MSIX package version. Do not raise it
+on each subsequent release. If the first release changes before shipping, update
+the single pinned value and repeat acceptance with those exact artifacts.
+
+Before tagging the coordinated release or claiming issue #1374 complete:
+
+- Verify the selected `v2026.9.5` release contains both PRs and make that supported
+  Inno update available to existing users, with update-first guidance for older
+  sources. If the release number or contents change, revise the pin before shipping.
+- Prove exact production identity, Store listing handoff, DPAPI/storage access,
+  and signed x64 and ARM64 packages through the real distribution path.
+- Exercise fresh consent, running-Inno graceful shutdown, manual close/Retry,
+  restart recovery, older-source rejection, and ordinary non-migration startup.
+- Verify normal interactive and silent Inno removal preserves the completed
+  migration, while explicit full cleanup retains its separate destructive contract.
+- Verify saved gateway credentials, a real WSL or remote gateway connection,
+  Local AI state, and startup preference survive; Store services start only after
+  exact source removal and finalization.
+- Collect current UI evidence for longer consent, light/dark themes, compact
+  windows, scaling, keyboard navigation, and screen-reader behavior. Unit tests,
+  fixture screenshots, and locally test-signed packages do not replace missing
+  signed-package, ARM64, accessibility, or gateway continuity proof.
+
+These are release-acceptance gates, not merge-time gates. The switch is checked in as `true`
+so the coordinated release and its CI artifacts carry migration, but a tag must not
+be published until each item above is satisfied against that tag's real artifacts.
+The controlled alpha-promotion path below may reserve an immutable tag to build
+those artifacts, but cannot publish the stable GitHub release until acceptance.
+If acceptance fails before the Store package is published, set
+`MigrationProductionEnabled` to `false` and retag rather than shipping an unverified
+launch gate. A synthetic source floor supplied for disposable package testing is not
+approval of a production release version.
+
+The switch is a pre-publication gate, not a recall. Once a Store package carrying
+`PRODUCTION_MIGRATION` is published, the floor and the entire flow are compiled into
+that package: a later Inno release built with the switch off cannot disable migration
+for users who already have the Store build, and that Inno release still sits above the
+pinned floor. Turning the switch off only prevents *new* migration-capable Store
+builds. To stop migrations already reaching users, publish a corrected Store package.
+
+Two things keep the Store app from starting. A handoff holding a completion receipt
+keeps it from starting because that state has data that must not be abandoned, and the
+receipt decides this rather than the state name: a receipt still protects the handoff
+when the source looks unsupported, when the recorded source version no longer matches,
+or when the record cannot be decoded. Separately, a previous app that is positively
+detected as installed keeps the Store app inactive even with no receipt, because issue
+#1374 permits only one active production client. That block requires payload evidence,
+not just an uninstall registration, so an interrupted uninstall that leaves an orphan
+registry key cannot strand the user without a working client. The two blocks differ in
+how long they last, and the difference matters when supporting a user. The receipt block
+is durable: it records that data has already moved, so a later pass that fails or cannot
+read the record does not release it. The installed-source block is only ever as good as
+the pass that measured it, so it is recomputed every time and never carried forward.
+Removing the previous app is precisely how a user ends that block, and a stale copy of it
+would keep the Store app closed after the previous app was already gone. The remaining
+unhappy paths, a failed inspection or a record needing recovery, inform the user and then
+continue to normal startup, because refusing to launch cannot repair either one.
+Still confirm before the tag that the released Inno installer registers
+`DisplayVersion` `2026.9.5` and `DisplayName` `OpenClaw Companion version 2026.9.5`.
+Both are refused, and each produces a different message, so check for the right one.
+A prerelease suffix is a version refusal: that user is told to update the previous app
+to a supported version first. A mismatched name is an unsupported installation: that
+user is told migration is unavailable. Neither is offered migration, so the registered
+values still have to be exact.
+
+### Developer migration test package
+
+Neither standard MSIX artifact can exercise migration. The unsigned Store package
+is a submission asset and cannot be installed, and the Dev package is refused by
+the Store migration guard because its identity is not the production one.
+
+CI therefore also publishes `openclaw-msix-dev-migration-test-<arch>` from
+`scripts\Export-MigrationTestMsix.ps1`: the production-identity Store package,
+test-signed with a disposable certificate whose subject matches the production
+publisher. "Dev" in the artifact name means *for developers*; the package identity
+is production.
+
+That identity is what makes it useful and what makes it dangerous:
+
+- It shares a package family name with the Store release, so it is **not**
+  side-by-side. Uninstall the Store build before installing it.
+- Migration runs against real data directories. The Store guard rejects data path
+  redirection, so it cannot be aimed at a scratch profile.
+- With an Inno installation present, it will adopt and then uninstall it.
+
+Use a disposable machine or VM. The exporter refuses to sign an already-signed
+package and refuses any package built without migration enabled, so the artifact
+cannot silently ship disabled. It stays workflow-only and must never be published.
+
+### Migration experience and Debug previews
+
+The Store-side preview hosts a dedicated WinUI migration window before normal
+services start. Release non-Dev builds now ship this experience by default;
+Debug and Dev builds do not. Do not enable migration by choosing the current app
+version as a placeholder for a verified safeguard-containing Inno release.
 An explicit test build may set `StoreMigrationPreview=true` and
 `StoreMigrationPreviewMinimumSourceVersion` to a three- or four-part numeric
 test source version. This is accepted only for **Debug MSIX builds with the
@@ -147,6 +274,43 @@ dotnet publish .\src\OpenClaw.Tray.WinUI\OpenClaw.Tray.WinUI.csproj `
   -p:StoreMigrationPreviewMinimumSourceVersion=<verified-test-source-version>
 ```
 
+The optional unpackaged Inno handoff is independently gated:
+
+```powershell
+dotnet publish .\src\OpenClaw.Tray.WinUI\OpenClaw.Tray.WinUI.csproj `
+  -c Debug -r win-x64 --self-contained -m:1 `
+  -p:PackageMsix=false -p:DevBuild=false -p:InnoMigrationPreview=true `
+  -p:MigrationPreviewStoreProductId=<explicit-12-character-Store-product-ID>
+```
+
+Use that payload only in a disposable, exact current-user Inno fixture.
+Release, packaged, and Dev-identity Inno previews fail the build. No preview
+product ID is supplied by default. Without one, Settings hides **Install Store version
+and migrate**. The ID accepts only 12 uppercase ASCII letters/digits and opens
+`ms-windows-store://pdp/?ProductId=...`; do not substitute a guessed listing.
+The shutdown receiver can still be exercised without a Store listing.
+
+The Settings action confirms explicit consent before saving `consent.dpapi`
+and opening the listing. This is a distinct `consent` record in the shared
+current-user DPAPI contract, not an inventory intent. It binds the exact
+source version, user, architecture, canonical paths and target package identity,
+expires after 30 days, and rejects a future creation time. Missing, expired,
+invalid or source-mismatched consent requires Store confirmation. Operational
+read failures block instead of silently consenting. Consent and completion
+remain independent: consent never authorizes destructive uninstall.
+Explicit confirmation does not overwrite corrupt consent. A rejected grant
+enters recovery, which stays retryable: the window keeps Retry and the
+Installed apps shortcut so a user who removes the previous app is noticed by
+the next pass, and it offers to discard migration records that can no longer
+carry the handoff. Records are judged one file at a time, so a corrupt receipt
+beside a good intent costs only the receipt. Two things are discardable: a
+record that does not decode, and a leftover consent or intent once the previous
+app is gone and no readable receipt remains, because there is then nothing left
+to migrate from. A receipt that still decodes is never deleted, and a retry
+never treats an earlier confirmation as still standing. A discard that cannot
+run, usually because the previous app is running and holds the migration lease,
+is reported in the window rather than passing silently.
+
 The preview:
 
 - Reads only the exact production Inno uninstall registration, not display-name
@@ -156,45 +320,206 @@ The preview:
 - Requires coherent source version and executable architecture evidence.
   Prerelease/informational versions do not satisfy the stable version gate.
 - Reads existing intent/completion records through the shared DPAPI codec.
-  Invalid or inaccessible records block startup. An orphan intent requires
-  recovery; completion without Inno requires finalization, not fresh startup.
+  A completion receipt requires finalization before normal startup, and that holds
+  even when the receipt cannot be decoded or read: its presence on disk proves data
+  already moved. An orphan intent, or an unreadable record with no receipt beside it,
+  is reported and then gets out of the way, because refusing to launch cannot repair
+  it. Completion without Inno requires finalization, not fresh startup.
 - Stops before production instance forwarding, settings, gateway/node/MCP
   services, updates, or startup-task reconciliation when migration is needed.
   All normal launch, protocol, and startup-task activations use this gate.
-- Shows a localized consent decision through native **Yes / No** buttons.
-  The body refers directly to those buttons, without a separate action legend.
-  A valid Inno intent does not replace that Store-side consent.
+- Shows localized **Migrate / Not now** buttons unless valid explicit handoff
+  consent already exists. An inventory intent never replaces consent.
+  Keyboard focus defaults to Not now. Not now closes the Store window without
+  changing source state, and leaves the Store app inactive while the source app
+  is installed, per issue #1374. The user must migrate or remove the source app
+  before the Store app starts normally.
+  Unlike PR 1's native Yes/No preview, this window labels its buttons directly;
+  it does not append a separate action legend or reinterpret Yes/No as Migrate.
   Before acceptance, every locale discloses protected migration records, the
   normal Inno startup block after successful validation, and the required manual
-  uninstall followed by reopening Store. It explains preservation, no automatic
+  uninstall followed by Store finalization. It explains preservation, no automatic
   uninstall, and the option to leave without starting migration. Retry guidance
-  permits uninstall only after the preview reports recorded completion.
-- After consent, checks the production Inno mutex. While Inno is running, the
-  preview instructs the user to close it, choose **Yes** to retry, or choose
-  **No** to exit the preview. It never force-closes the source process.
+  permits uninstall only after the window reports recorded completion.
+- After consent, requests graceful exit through the existing current-user
+  activation pipe. This is a private fixed IPC message, not an `openclaw:`
+  route. Only the gated, exact Inno process accepts it after rechecking protected
+  consent, then delegates to the canonical app shutdown coordinator. The sender
+  bounds IPC to two seconds and checks mutex release for up to ten seconds.
+  Unsupported, unavailable or slow receivers leave **Close the previous app /
+  Retry** guidance. Sending the message alone is not proof of exit; source
+  ownership is checked again before preparation and completion. No force-kill.
 - When Inno is closed, the preview acquires exclusive migration ownership,
   rechecks exact source evidence, and writes a protected, DPAPI-bound inventory
   intent. It then captures the inventory again, requires its fingerprint to
   match the intent, and requires canonical operator credential resolution for
   the active saved gateway before atomically writing a protected completion
-  receipt. This is not state adoption. It does not start gateway, node, or MCP
+  receipt. Data is adopted in place. It does not start gateway, node, or MCP
   services; provision or repair gateways; delete source state; invoke uninstall;
-  or finalize migration. The receipt blocks normal Store startup and tells the
-  user to uninstall Inno manually. On a later Store start, only an exact
+  automatically. The receipt blocks normal Store startup and exposes **Open
+  Installed apps**. The user uninstalls Inno manually, then selects **Retry** or
+  reopens Store. Only an exact
   `NotInstalled` result plus absent canonical source payload/process/mutex
   evidence permits finalization. The finalizer does not acquire the Inno-visible
   mutex, serializes on `prepare.lock`, rereads and matches the durable completion
   receipt, recaptures the inventory fingerprint, applies the saved auto-start
   preference through the tray adapter, and clears records only after that call
-  succeeds.
+  succeeds. Successful finalization resumes the original launch, including any
+  pending protocol activation. Errors remain visible with Retry; state transitions
+  are announced to accessibility clients and no percentage is invented.
 - Preserves normal fresh-install behavior when there is no exact Inno
   registration and no pending migration record.
 
 This admission result is not an authorization to uninstall. The consent workflow
 reacquires exclusive ownership, revalidates source state, and writes completion
-only after its active-gateway credential check succeeds. Runtime state adoption,
-source-version enablement, and the complete recovery/finalization journey remain
-release gates.
+only after its active-gateway credential check succeeds. Official signed-package
+acceptance on x64 and ARM64, local and remote gateway continuity, verification
+of the selected Inno release's safeguards, actual Store handoff, and production
+enablement remain release gates. The source floor and Store listing ID are
+assigned above; UI tests with fake operations are not package-boundary or real
+migration proof.
+
+## Promote a published alpha to stable
+
+Use **Actions > Promote alpha to stable**, on **main**, to select a published
+`vX.Y.Z-alpha.N` candidate. This is an additional supported release path: it
+promotes an approved ancestor of main instead of including every newer commit.
+The stable target is always `vX.Y.Z`. Arbitrary version changes, correction
+promotion, and Partner Center submission are not supported by this workflow.
+
+Start with `prepare=false` (the default). The read-only preview checks the exact
+alpha SHA, its successful canonical release run and required jobs, ancestry,
+stable ordering, and published target availability. It links the included changes since
+the previous stable release and the newer main changes excluded. Preview does
+not reserve tags or MSIX versions, sign packages, or publish anything.
+The read-only workflow token cannot discover private draft conflicts.
+Preparation checks unrelated or duplicate drafts before reserving the tag.
+
+```powershell
+gh workflow run promote-alpha-release.yml `
+  --repo openclaw/openclaw-windows-node --ref main `
+  -f alpha_tag=v2026.9.5-alpha.93 -f prepare=false
+```
+
+Before preparing a release, a repository administrator must create the
+**stable-release** environment with required reviewers and administrator bypass
+disabled. Restrict its deployment branches to `main`. For normal reviewers,
+enable **Prevent self-review**. To let OpenClaw release managers publish without
+a separate reviewer, set the only required reviewer to
+`openclaw/release-managers-openclaw` (team ID `16590423`) and disable
+**Prevent self-review**. GitHub enforces team membership for approval; members
+may approve their own run, including through their authorized release agent.
+Other teams, individual reviewers, or additional reviewers cannot use this
+self-review exception. Missing or weaker protection fails before any tag is
+created.
+The existing `release-signing` environment is still used for Azure OIDC signing;
+it is not a substitute for this final acceptance approval.
+
+Rerun with `prepare=true` to authorize reservation and building:
+
+```powershell
+gh workflow run promote-alpha-release.yml `
+  --repo openclaw/openclaw-windows-node --ref main `
+  -f alpha_tag=v2026.9.5-alpha.93 -f prepare=true
+```
+
+The workflow freezes two different revisions. The candidate SHA owns product
+source, tests, build scripts, and Inno installer inputs. The dispatch SHA on main
+owns release policy, validation orchestration, signing checks, MSIX allocation,
+and publication. The local reusable workflow reference binds CI to that same
+pipeline revision. No main product files are copied into the candidate tree.
+Incompatible historical source fails normally; do not silently patch the alpha
+or replace its SHA with main to make it pass.
+
+Preparation creates a checkout-only stable tag in each candidate build/test
+workspace so GitVersion resolves the stable version without project-version
+overrides. These refs are never pushed and do not change versioning on main.
+The full CI Gate remains mandatory. Only after protected publication approval
+and artifact verification does publication create the public annotated stable
+tag with immutable promotion provenance. It uses `GITHUB_TOKEN`, whose ref
+creation does not trigger another tag-push workflow. Do not replace it with a
+PAT or dispatch CI on the old candidate tag: that would execute the historical
+workflow instead of the selected pipeline.
+
+The existing MSIX allocator reserves a new package version for the stable tag,
+shared by both architectures. Promotion rechecks candidate eligibility and
+approval protection, then the allocator verifies the existing same-base alpha
+tag resolves to the exact source SHA on every allocation attempt. Its metadata
+records the future stable ref without requiring that public tag during
+preparation. Ordinary release allocations still require their exact public
+source tag. Neither the alpha package version nor an existing
+published stable release is reused. The result is the same **source**, not
+identical bytes: versions, signatures, build tools, and restored dependencies
+can differ. Use the recorded pipeline revision and build logs when investigating
+toolchain differences, and validate the newly built artifacts.
+
+After CI, signing, and package validation, `alpha-promotion-<attempt>` contains the
+prepared installers, portable ZIPs, signed Dev MSIX ZIPs, and `promotion.json`.
+Unsigned Store submission packages remain separate workflow artifacts, matching
+the normal release path. Dev ZIPs include their public certificates, provenance,
+and installation instructions; they are not Microsoft Store-signed packages.
+The manifest records source and pipeline SHAs, original alpha CI, previous
+stable, preparation run/attempt, MSIX reservation, and every asset's SHA-256.
+The job summary presents this manifest before the **stable-release** review.
+Record links to the required acceptance evidence in the environment review.
+For `v2026.9.5`, this includes the coordinated migration proof above on exact
+signed x64 and ARM64 packages. A Store listing or a green CI badge is not that
+proof. Do not approve a run with missing acceptance.
+
+Ordinary same-repository publication uses `GITHUB_TOKEN` with **Contents: write**.
+An extra publication credential is needed only when the candidate adds or
+modifies files under `.github/workflows/` relative to current main. Older product
+code or workflow deletions alone do not require it. The publication owner checks
+complete Git trees before creating any public tag and fails closed if that
+permission check cannot complete. GitHub's
+[release API authorization contract](https://docs.github.com/en/rest/releases/releases#update-a-release)
+requires **Workflows: write** for that historical-workflow exception, which
+`GITHUB_TOKEN` cannot receive. For those candidates only, configure
+`STABLE_RELEASE_TOKEN` as an environment secret in `stable-release`, using a
+GitHub App installation token or fine-grained token restricted to this repository
+with **Contents: write** and **Workflows: write**. The protected token is used
+only for draft creation and final release publication, never for Git refs,
+candidate builds, or eligibility checks. Tag creation and asset uploads continue
+to use `GITHUB_TOKEN`, so historical tag workflows are not triggered. Missing or
+malformed exception credentials, or substituted workflow tokens, block before
+tag creation. Protected publication approval is required in both cases.
+
+Approval publishes the exact prepared artifact ID, not a rebuild. Under the
+shared release-publication lock, CI rechecks source tags, Latest ordering,
+approval protection, and hashes, uploads to a private draft, verifies the
+uploaded digest set, then marks the release stable and Latest. Release notes
+compare the previous stable tag to the chosen candidate, not to current main.
+`promotion.json` is attached permanently to the published release. This does not
+modify, resubmit, or claim acceptance of the package already in Microsoft Store.
+
+### Promotion retry and cancellation
+
+- Preview can be repeated without side effects. The initial alpha release and
+  its successful CI evidence must remain available while promotion is pending.
+- An unpublished stable tag can be reused only with identical annotation,
+  candidate, previous stable, and pipeline provenance. Resume the original
+  workflow run if main has advanced. A new pipeline cannot silently adopt an
+  older reservation. Published targets are never replaced or moved.
+- Failed or cancelled preparation, or rejected/cancelled approval, creates no
+  public stable tag and does not advance subsequent main alphas. The separate
+  MSIX package-version reservation remains consumed to preserve monotonicity.
+- Once approval is granted and publication starts, the public stable tag is
+  created immediately before draft creation and uploads. A failure or cancellation
+  in that publication window retains the tag and any partial draft for an exact
+  retry; main alphas can then advance. Do not remove or move a publication tag.
+- Rerun failed jobs to reuse the exact prepared artifact after a partial upload.
+  A rerun that rebuilds outputs creates a new attempt artifact and requires new
+  approval. An existing draft bound to different bytes blocks publication;
+  inspect and explicitly remove only that unpublished draft before retrying.
+  Duplicate drafts for the target tag also block publication.
+- If publication succeeds but final verification fails, do not rerun or replace
+  the release. Confirm it is published, non-prerelease, and Latest, and verify
+  every uploaded asset's size and SHA-256 against the approved manifest.
+  Record that verification in the run's acceptance evidence before closing it.
+- A newer stable publication, moved candidate, changed acceptance protection,
+  missing/expired evidence, or mismatched artifact stops publication. Pending
+  promotion artifacts expire after 30 days. Restart acceptance for rebuilt
+  artifacts rather than treating an expired approval as reusable proof.
 
 ## Release checklist
 
@@ -215,10 +540,11 @@ release gates.
      "Verify Release Binary Signing Policy", `
      "OpenClaw.Tray.WinUI.exe", `
      "build-msix:", `
-     "Stage Store MSIX release assets"
+     "Stage signed Dev MSIX release assets"
    ```
 
-3. Create a new stable, stable correction, or prerelease tag from `origin/main`.
+3. For a direct release, create a new stable, stable correction, or prerelease tag from `origin/main`.
+   For an existing published alpha, use the controlled promotion workflow above.
    Never move a previously published tag.
 
    ```powershell
@@ -278,9 +604,9 @@ Stable, stable-correction, and alpha tags use the same signed CI release pipelin
   numeric-suffix tag, including malformed ones such as `-0` and `-03`, is routed
   through the validator rather than silently classified by GitVersion.
 - `vX.Y.Z-alpha.N` creates a prerelease that stable updater checks do not offer.
-  It also includes unsigned x64/ARM64 Store submission MSIX files and their
-  metadata, not Dev-signed installers. The pre-release is visible on GitHub's
-  Releases page but is not promoted as Latest.
+  Like every canonical tag, it includes signed x64/ARM64 Dev MSIX ZIPs with
+  their matching public certificates and instructions. The pre-release is
+  visible on GitHub's Releases page but is not promoted as Latest.
   The daily workflow evaluates the default branch at 2:00 PM Pacific, skips a
   head already represented by a published release, and defers while an
   unpublished non-alpha tag points at the head. After each successful alpha
@@ -353,22 +679,19 @@ Current release artifacts are:
 
 Every stable, correction, and prerelease additionally contains:
 
-- `OpenClaw.msixbundle` (recommended Partner Center submission input)
-- `OpenClaw-x64.msix` and `OpenClaw-arm64.msix`
-- `OpenClaw-x64.msix-metadata.json` and
-  `OpenClaw-arm64.msix-metadata.json`
+- `OpenClaw-Dev-x64.zip`
+- `OpenClaw-Dev-arm64.zip`
 
-These are **unsigned Store submission inputs, not installers**. Upload the
-bundle to Partner Center for one architecture-selecting submission. The
-standalone packages remain available for inspection or fallback. Microsoft
-signs accepted Store submissions. The release step checks both
-architectures' clean source provenance, identity, version, and package hashes,
-then proves that the bundle embeds those exact bytes. It fails rather than
-publishing a partial or mismatched set.
+Each archive contains the signed Dev-identity MSIX, its matching public
+certificate, `msix-metadata.json`, and `INSTALL.txt`. These packages are
+development-signed for sideloading, not Microsoft Store-signed. Testers must
+extract the matching architecture archive and follow its instructions,
+including explicitly trusting the included public certificate.
 
-Dev-signed tester MSIX packages, public certificates, and instructions remain
-Actions artifacts only. No production signing step is applied to the unsigned
-Store packages.
+Unsigned Store submission packages, the multi-architecture bundle, and their
+metadata remain Actions artifacts only. Upload the unsigned bundle to Partner
+Center for one architecture-selecting submission. No production signing step
+is applied to those Store inputs.
 
 Store distribution remains paused: automatic Partner Center submission,
 Store-signed retrieval and publication, and official lifecycle acceptance
@@ -445,14 +768,16 @@ Preview candidates never reserve a number and can change between reruns;
 they must not be treated as official Store submissions.
 
 The release stager requires `-VersionInfoPath` for the exact reserved result. It
-checks the app version, source commit, reserved allocation, package
-version, and both architectures' metadata before copying any assets:
+checks the app version, source commit, workflow run, reserved allocation,
+package and certificate hashes, Dev identity, signature presence, version, and
+both architectures' metadata before creating any release ZIPs:
 
 ```powershell
-.\scripts\Stage-StoreMsixReleaseAssets.ps1 `
+.\scripts\Stage-DevMsixReleaseAssets.ps1 `
   -ArtifactDirectory 'artifacts\msix-release' `
   -OutputDirectory 'msix-release' `
   -Version $appVersion -ExpectedSourceCommit $sourceCommit `
+  -ExpectedRevision $runNumber -ExpectedWorkflowRunId $runId `
   -VersionInfoPath $reservedVersionInfoPath
 ```
 
@@ -588,8 +913,9 @@ validation. Release tags cannot enter the `release` job until **CI Gate**
 confirms classification, fast validation, tests, E2E, and release builds all
 succeeded. The `build-msix` and `build-msix-bundle` jobs must also succeed
 whenever release metadata is required. The release job downloads and attaches
-its unsigned Store bundle, standalone packages, and metadata for every
-canonical tag. Dev tester distribution stays workflow-only.
+its signed x64 and ARM64 Dev packages, public certificates, metadata, and
+instructions for every canonical tag. Unsigned Store distribution stays
+workflow-only.
 
 The release job should:
 
@@ -600,10 +926,10 @@ The release job should:
 5. Create the portable x64 and ARM64 ZIPs.
 6. Build Inno installers.
 7. Sign installers.
-8. Stage the validated unsigned Store MSIX
-   bundle, standalone packages, and metadata.
+8. Stage the validated signed Dev MSIX packages and their public-only support
+   files into architecture-specific ZIPs.
 9. Create a GitHub release whose prerelease flag matches the tag, with installer
-   and portable ZIP assets plus the Store submission assets.
+   and portable ZIP assets plus the signed Dev MSIX ZIPs.
 
 ## Post-release verification
 
@@ -621,6 +947,9 @@ Expected:
 - Stable tags: `isPrerelease` is `false`.
 - Alpha tags: `isPrerelease` is `true` and `isLatest` is `false`.
 - Installer EXEs are signed.
+- `OpenClaw-Dev-x64.zip` and `OpenClaw-Dev-arm64.zip` are present, and each
+  contains the signed MSIX, matching public certificate, metadata, and
+  `INSTALL.txt`.
 - In ZIP payload:
   - `OpenClaw.Tray.WinUI.exe` is OpenClaw-signed.
   - All listed OpenClaw-owned DLLs are OpenClaw-signed.
@@ -647,7 +976,8 @@ gh run list --repo openclaw/openclaw-windows-node `
   --limit 10
 ```
 
-Only tag when `HEAD == origin/main`.
+For direct releases, only tag when `HEAD == origin/main`. An older alpha may
+only receive a stable tag through the controlled promotion workflow above.
 
 ## Versioning rules
 
