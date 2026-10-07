@@ -196,8 +196,7 @@ public partial class App : Application, OpenClawTray.Services.IAppCommands, IPer
             identityDirectory,
             DeviceIdentityFileReader.Instance,
             (record, candidate) =>
-                candidate.Source != CredentialResolver.SourceSharedGatewayToken ||
-                _managedLocalPortProvenance?.IsStrongCredentialAllowed(record, candidate) != false,
+                InteractiveEndpointAuthorizer?.IsCredentialAllowed(record, candidate) == true,
             out var credential,
             out _);
 

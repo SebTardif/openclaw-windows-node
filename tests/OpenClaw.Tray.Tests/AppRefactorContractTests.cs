@@ -492,7 +492,7 @@ public sealed class AppRefactorContractTests
             "_gatewayRegistry.GetIdentityDirectory(pinned.Id)",
             "InteractiveGatewayCredentialResolver.TryResolveRecord(",
             "DeviceIdentityFileReader.Instance",
-            "IsStrongCredentialAllowed(record, candidate)",
+            "IsCredentialAllowed(record, candidate)",
             "DashboardPinStillMatches(pinned)",
             "token = credential.Token");
         Assert.DoesNotContain("ResolveOperator(", method);
