@@ -384,6 +384,14 @@ public sealed class OpenClawChatDataProvider : IChatDataProvider
         return result;
     }
 
+    public void RestoreEmptyWelcomeThread(string threadId)
+    {
+        if (string.IsNullOrWhiteSpace(threadId))
+            return;
+
+        Publish(_state.RestoreEmptyWelcomeThread(threadId, ProjectionContext()));
+    }
+
     public Task<bool> CancelQueuedMessageAsync(string threadId, string queuedMessageId, CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();

@@ -305,11 +305,13 @@ public sealed class OpenClawReactorChatRoot : Component<OpenClawReactorChatRootP
             {
                 try
                 {
-                    await props.ComposerSession.Controller.SendCoreAsync(
+                    var accepted = await props.ComposerSession.Controller.SendCoreAsync(
                         threadId,
                         title,
                         suggestion,
                         Array.Empty<ChatAttachment>());
+                    if (!accepted && props.Provider is OpenClawChatDataProvider native)
+                        native.RestoreEmptyWelcomeThread(threadId);
                 }
                 finally
                 {

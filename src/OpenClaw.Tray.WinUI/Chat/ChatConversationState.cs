@@ -877,6 +877,30 @@ internal sealed class ChatConversationState
         }
     }
 
+    internal ChatDataSnapshot RestoreEmptyWelcomeThread(
+        string threadId,
+        ChatProjectionContext context)
+    {
+        lock (_gate)
+        {
+            _queue.RemoveFailedMessages(threadId);
+            if (_timelines.TryGetValue(threadId, out var timeline)
+                && timeline.LocalNonces.Count > 0
+                && timeline.Entries.All(entry =>
+                    entry.Kind is ChatTimelineItemKind.Status or ChatTimelineItemKind.User))
+            {
+                _timelines[threadId] = ChatTimelineState.Initial() with
+                {
+                    HistoryLoaded = timeline.HistoryLoaded,
+                };
+            }
+
+            if (!_queue.HasSendingMessages(threadId))
+                _queue.ClearLocallyInitiated(threadId);
+            return BuildSnapshotLocked(context);
+        }
+    }
+
     internal ChatSendFailure FailSend(
         ChatQueuedSendDispatch dispatch,
         string queueError,

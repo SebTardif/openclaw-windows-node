@@ -280,6 +280,25 @@ internal sealed class ChatQueueState
             _messageIdsByRunId.Remove(threadId);
     }
 
+    internal int RemoveFailedMessages(string threadId)
+    {
+        if (!_messages.TryGetValue(threadId, out var messages))
+            return 0;
+
+        var failedIds = messages
+            .Where(message => message.SendState == ChatQueuedMessageSendState.Failed)
+            .Select(message => message.Id)
+            .ToArray();
+        var removed = 0;
+        foreach (var id in failedIds)
+        {
+            if (RemoveMessage(threadId, id))
+                removed++;
+        }
+
+        return removed;
+    }
+
     internal bool RemoveMessage(string threadId, string messageId)
     {
         if (!_messages.TryGetValue(threadId, out var messages))
