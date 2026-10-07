@@ -14,6 +14,42 @@ public sealed class GatewayFixtureProtocolTests
 {
     private static readonly TimeSpan Deadline = TimeSpan.FromSeconds(20);
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task SessionMutations_AuthenticatedAcceptanceIsOptInAndResponseBound(bool allow)
+    {
+        var token = CreateToken();
+        await using var server = await FixtureGatewayServer.StartAsync(
+            GatewayScenario.CreateBrowse(allowSessionMutations: allow), token);
+        await using var connected = await ConnectedClient.OpenAsync(server, token);
+        var client = connected.Client;
+        var epoch = client.SessionMutationConnectionEpoch!.Value;
+        server.HoldSessionMutations();
+        var patch = client.PatchSessionConfirmedAsync(GatewayScenario.OtherSessionKey,
+            new SessionPatch { Archived = true }, epoch);
+        await server.WaitForRequestAsync("sessions.patch", GatewayScenario.OtherSessionKey);
+        // Drain an independent authenticated request while the mutation response is held.
+        await client.SendWizardRequestAsync("health");
+        Assert.False(patch.IsCompleted);
+        server.ReleaseSessionMutations();
+        if (!allow)
+        {
+            await Assert.ThrowsAsync<InvalidOperationException>(() => patch);
+            return;
+        }
+        await patch.WaitAsync(Deadline);
+        var active = await client.SendWizardRequestAsync("sessions.list");
+        Assert.DoesNotContain(active.GetProperty("sessions").EnumerateArray(),
+            row => row.GetProperty("key").GetString() == GatewayScenario.OtherSessionKey);
+        var archived = await client.ListArchivedSessionsAsync();
+        Assert.Equal(GatewayScenario.OtherSessionKey, Assert.Single(archived.Sessions).Key);
+        await client.DeleteSessionConfirmedAsync(GatewayScenario.OtherSessionKey, epoch);
+        Assert.Empty((await client.ListArchivedSessionsAsync()).Sessions);
+        await Assert.ThrowsAsync<InvalidOperationException>(() => client.DeleteSessionConfirmedAsync(GatewayScenario.MainSessionKey, epoch));
+        Assert.Empty(server.UnexpectedRequests);
+    }
+
     [Fact]
     public void BrowseScenario_HasStableSingleSourceMetadataAndRejectsUnknownScenario()
     {
@@ -241,7 +277,6 @@ public sealed class GatewayFixtureProtocolTests
     [InlineData("config.patch")]
     [InlineData("config.apply")]
     [InlineData("node.invoke")]
-    [InlineData("exec.approval.resolve")]
     public async Task RealClient_WritesAreRejectedWithoutChangingScenario(string method)
     {
         var token = CreateToken();
@@ -256,6 +291,122 @@ public sealed class GatewayFixtureProtocolTests
         var after = await connected.Client.SendWizardRequestAsync("config.get");
         Assert.Equal(before.GetRawText(), after.GetRawText());
         Assert.Contains(server.Requests, r => r.Method == method && r.Outcome == "error:FIXTURE_READ_ONLY");
+        Assert.Empty(server.UnexpectedRequests);
+    }
+
+    [Fact]
+    public async Task RealClient_ApprovalResolveGetsSyntheticAckAndRecordsSafeCorrelation()
+    {
+        var token = CreateToken();
+        await using var server = await FixtureGatewayServer.StartAsync(GatewayScenario.CreateBrowse(), token);
+        await using var connected = await ConnectedClient.OpenAsync(server, token);
+        await server.PublishAgentEventAsync(GatewayScenario.MainSessionKey, new
+        {
+            phase = "requested",
+            approvalId = "fixture-approval-1",
+            command = "echo fixture",
+        });
+
+        await connected.Client.ResolveExecApprovalAsync("fixture-approval-1", "allow-once");
+
+        var request = await server.WaitForCompletedRequestAsync("exec.approval.resolve");
+        Assert.Equal("fixture-approval-1", request.ApprovalId);
+        Assert.Equal("allow-once", request.Decision);
+        Assert.Equal("ok", request.Outcome);
+        Assert.Empty(server.UnexpectedRequests);
+    }
+
+    [Fact]
+    public async Task RealClient_ApprovalResolveInvalidDecisionDoesNotConsumeIssuedId()
+    {
+        var token = CreateToken();
+        await using var server = await FixtureGatewayServer.StartAsync(GatewayScenario.CreateBrowse(), token);
+        await using var connected = await ConnectedClient.OpenAsync(server, token);
+        await server.PublishAgentEventAsync(GatewayScenario.MainSessionKey, new
+        {
+            phase = "requested",
+            approvalId = "fixture-approval-invalid",
+            command = "echo fixture",
+        });
+
+        var error = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            connected.Client.SendWizardRequestAsync(
+                "exec.approval.resolve",
+                new { id = "fixture-approval-invalid", decision = "approve" }));
+        await connected.Client.ResolveExecApprovalAsync("fixture-approval-invalid", "allow-once");
+
+        Assert.Contains("Unsupported approval decision", error.Message);
+        var requests = server.Requests
+            .Where(request => request.Method == "exec.approval.resolve")
+            .ToArray();
+        Assert.Collection(
+            requests,
+            request =>
+            {
+                Assert.Equal("fixture-approval-invalid", request.ApprovalId);
+                Assert.Equal("<unknown>", request.Decision);
+                Assert.Equal("error:INVALID_PARAMS", request.Outcome);
+            },
+            request =>
+            {
+                Assert.Equal("fixture-approval-invalid", request.ApprovalId);
+                Assert.Equal("allow-once", request.Decision);
+                Assert.Equal("ok", request.Outcome);
+            });
+        Assert.Empty(server.UnexpectedRequests);
+    }
+
+    [Fact]
+    public async Task RealClient_ApprovalResolveRejectsUnissuedFixtureId()
+    {
+        var token = CreateToken();
+        await using var server = await FixtureGatewayServer.StartAsync(GatewayScenario.CreateBrowse(), token);
+        await using var connected = await ConnectedClient.OpenAsync(server, token);
+
+        var error = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            connected.Client.ResolveExecApprovalAsync("fixture-never-issued", "deny"));
+
+        Assert.Contains("not issued by the fixture", error.Message);
+        var request = Assert.Single(server.Requests, request => request.Method == "exec.approval.resolve");
+        Assert.Equal("fixture-never-issued", request.ApprovalId);
+        Assert.Equal("deny", request.Decision);
+        Assert.Equal("error:INVALID_PARAMS", request.Outcome);
+        Assert.Empty(server.UnexpectedRequests);
+    }
+
+    [Fact]
+    public async Task RealClient_ApprovalResolveAcknowledgesIssuedIdOnlyOnce()
+    {
+        var token = CreateToken();
+        await using var server = await FixtureGatewayServer.StartAsync(GatewayScenario.CreateBrowse(), token);
+        await using var connected = await ConnectedClient.OpenAsync(server, token);
+        await server.PublishAgentEventAsync(GatewayScenario.MainSessionKey, new
+        {
+            phase = "requested",
+            approvalId = "fixture-one-shot",
+            command = "echo fixture",
+        });
+
+        var attempts = await Task.WhenAll(Enumerable.Range(0, 2).Select(async _ =>
+        {
+            try
+            {
+                await connected.Client.ResolveExecApprovalAsync("fixture-one-shot", "allow-once");
+                return "ok";
+            }
+            catch (InvalidOperationException ex)
+            {
+                Assert.Contains("not issued by the fixture", ex.Message);
+                return "rejected";
+            }
+        }));
+
+        Assert.Equal(1, attempts.Count(result => result == "ok"));
+        Assert.Equal(1, attempts.Count(result => result == "rejected"));
+        Assert.Contains(server.Requests, request =>
+            request.Method == "exec.approval.resolve" && request.Outcome == "ok");
+        Assert.Contains(server.Requests, request =>
+            request.Method == "exec.approval.resolve" && request.Outcome == "error:INVALID_PARAMS");
         Assert.Empty(server.UnexpectedRequests);
     }
 
