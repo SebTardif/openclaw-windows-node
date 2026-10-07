@@ -60,6 +60,12 @@ public static class InteractiveGatewayCredentialResolver
         var active = registry?.GetActive();
         if (active != null && !string.IsNullOrWhiteSpace(active.Url))
         {
+            if (active.NativePackageFamilyName is not null && authorizeCredential is null)
+            {
+                credential = null;
+                return false;
+            }
+
             if (TryResolveRecord(
                     active,
                     registry!.GetIdentityDirectory(active.Id),
@@ -74,7 +80,8 @@ public static class InteractiveGatewayCredentialResolver
             if (rejected)
                 return false;
 
-            if (!string.Equals(active.Url, effectiveGatewayUrl, StringComparison.OrdinalIgnoreCase))
+            if (active.NativePackageFamilyName is not null ||
+                !string.Equals(active.Url, effectiveGatewayUrl, StringComparison.OrdinalIgnoreCase))
             {
                 credential = null;
                 return false;
