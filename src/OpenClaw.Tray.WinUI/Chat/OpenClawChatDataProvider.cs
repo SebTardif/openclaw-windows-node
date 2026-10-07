@@ -563,6 +563,11 @@ public sealed class OpenClawChatDataProvider : IChatDataProvider
                     Publish(failure.Snapshot);
                     TryDispatchNextQueuedSend(threadId);
                 }
+
+                // The task completes so a reset does not surface as an error.
+                // The composer port reads this flag and does not clear the draft.
+                if (rethrow)
+                    StaleSendReport.MarkSuperseded();
                 return;
             }
 

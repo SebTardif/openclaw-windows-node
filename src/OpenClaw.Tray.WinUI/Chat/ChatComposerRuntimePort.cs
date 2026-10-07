@@ -27,7 +27,7 @@ internal sealed class ChatComposerRuntimePort(IChatDataProvider provider) : ICha
         try
         {
             await provider.SendMessageAsync(threadId, message, cancellationToken, attachments).ConfigureAwait(true);
-            return true;
+            return !StaleSendReport.ConsumeSuperseded();
         }
         catch (Exception ex)
         {
