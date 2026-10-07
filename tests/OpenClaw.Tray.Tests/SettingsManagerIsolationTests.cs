@@ -340,8 +340,7 @@ public sealed class SettingsManagerIsolationTests
         var app = File.ReadAllText(Path.Combine(root, "src", "OpenClaw.Tray.WinUI", "App.xaml.cs"));
         var chat = File.ReadAllText(Path.Combine(root, "src", "OpenClaw.Tray.WinUI", "Pages", "ChatPage.xaml.cs"));
         var appChat = SliceMethod(app, "bool TryResolveChatCredentials(");
-        var chatUrl = SliceMethod(chat, "string? TryComputeChatUrl(");
-        var chatWeb = SliceMethod(chat, "Task InitializeWebViewAsync(");
+        var chatUrl = SliceMethod(chat, "async Task ApplyWebViewSurfaceAsync(");
 
         Assert.Contains("_settings.LegacyToken", appChat, StringComparison.Ordinal);
         Assert.Contains("_settings.LegacyBootstrapToken", appChat, StringComparison.Ordinal);
@@ -350,11 +349,9 @@ public sealed class SettingsManagerIsolationTests
         Assert.Contains("settings.LegacyToken", chatUrl, StringComparison.Ordinal);
         Assert.Contains("settings.LegacyBootstrapToken", chatUrl, StringComparison.Ordinal);
         Assert.Contains("settings.GetLegacyCredentialGatewayUrlOrNull()", chatUrl, StringComparison.Ordinal);
+        Assert.Contains("ResolveChatCredential", chatUrl, StringComparison.Ordinal);
         Assert.Contains("ChatSurfaceResolver.BuildChatUrl", chatUrl, StringComparison.Ordinal);
-        Assert.Contains("settings.LegacyToken", chatWeb, StringComparison.Ordinal);
-        Assert.Contains("settings.LegacyBootstrapToken", chatWeb, StringComparison.Ordinal);
-        Assert.Contains("settings.GetLegacyCredentialGatewayUrlOrNull()", chatWeb, StringComparison.Ordinal);
-        Assert.Contains("InteractiveGatewayCredentialResolver.TryResolve", chatWeb, StringComparison.Ordinal);
+        Assert.DoesNotContain("settings.GetEffectiveGatewayUrl()", chatUrl, StringComparison.Ordinal);
     }
 
     private static string SliceMethod(string source, string signatureText)
