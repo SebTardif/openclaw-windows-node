@@ -67,6 +67,17 @@ public class SettingsManager
     /// default URL is not a saved gateway and must not receive legacy secrets.
     /// </summary>
     public bool HasPersistedGatewayUrl { get; private set; }
+
+    /// <summary>
+    /// Gateway URL last saved by the user, or null when none was saved.
+    /// <see cref="GatewayUrl"/> fills in the setup default, so rollback must
+    /// copy this value instead of the getter.
+    /// </summary>
+    internal string? PersistedGatewayUrl =>
+        HasPersistedGatewayUrl && !string.IsNullOrWhiteSpace(_data.GatewayUrl)
+            ? _data.GatewayUrl
+            : null;
+
     public bool HasLegacyGatewayCredentials =>
         !string.IsNullOrWhiteSpace(LegacyToken) ||
         !string.IsNullOrWhiteSpace(LegacyBootstrapToken);
@@ -629,8 +640,22 @@ public class SettingsManager
         lock (_saveLock)
         {
             var before = ToSettingsData();
-            try { edit(); SaveOrThrow(); }
-            catch { _data = before; throw; }
+            var hadPersistedGatewayUrl = HasPersistedGatewayUrl;
+            try
+            {
+                edit();
+                SaveOrThrow();
+            }
+            catch
+            {
+                // The GatewayUrl setter stores explicit-target provenance beside
+                // SettingsData. Restoring the record alone leaves that flag set,
+                // and the getter then presents the setup default as a saved gateway.
+                _data = before;
+                HasPersistedGatewayUrl = hadPersistedGatewayUrl &&
+                    !string.IsNullOrWhiteSpace(before.GatewayUrl);
+                throw;
+            }
         }
     }
 

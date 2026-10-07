@@ -183,6 +183,94 @@ public sealed class SettingsManagerIsolationTests
     }
 
     [Fact]
+    public void FailedSave_DoesNotAdmitSetupGatewayForLegacyRootIdentity()
+    {
+        var dir = Path.Combine(Path.GetTempPath(), "OpenClawTray.Tests", Guid.NewGuid().ToString("N"));
+
+        try
+        {
+            Directory.CreateDirectory(dir);
+            File.WriteAllText(
+                Path.Combine(dir, "settings.json"),
+                """
+                {
+                  "Token": "test-auth-token",
+                  "BootstrapToken": "test-token-placeholder",
+                  "EnableNodeMode": true
+                }
+                """);
+            var identity = new DeviceIdentity(dir);
+            identity.Initialize();
+            identity.StoreDeviceTokenForRole("operator", "operator-role-token");
+
+            var settings = new SettingsManager(dir);
+            Assert.False(settings.HasPersistedGatewayUrl);
+            Assert.Null(settings.PersistedGatewayUrl);
+            var other = new SettingsManager(dir) { NotificationSound = "external" };
+            other.SaveOrThrow();
+
+            Assert.Throws<SettingsPersistenceConflictException>(() =>
+                settings.UpdateAndSave(() => settings.GatewayUrl = settings.GatewayUrl));
+
+            Assert.False(settings.HasPersistedGatewayUrl);
+            Assert.Null(settings.PersistedGatewayUrl);
+            Assert.Null(settings.GetLegacyCredentialGatewayUrlOrNull());
+            Assert.Equal(OpenClawTray.AppIdentity.SetupGatewayUrl, settings.GetEffectiveGatewayUrl());
+            Assert.False(ResolveInteractive(dir, settings, null, null, out var credential));
+            Assert.Null(credential);
+            Assert.False(ResolveInteractive(
+                dir,
+                settings,
+                "test-auth-token",
+                "test-token-placeholder",
+                out var rawCredential));
+            Assert.Null(rawCredential);
+        }
+        finally
+        {
+            if (Directory.Exists(dir))
+            {
+                // slopwatch-ignore: SW003 Test cleanup is best-effort and must not hide the assertion.
+                try { Directory.Delete(dir, recursive: true); } catch { }
+            }
+        }
+    }
+
+    [Fact]
+    public void FailedSave_KeepsAnExplicitGatewayTarget()
+    {
+        var dir = Path.Combine(Path.GetTempPath(), "OpenClawTray.Tests", Guid.NewGuid().ToString("N"));
+
+        try
+        {
+            var settings = new SettingsManager(dir)
+            {
+                GatewayUrl = "wss://saved.example.invalid",
+            };
+            settings.SaveOrThrow();
+            var other = new SettingsManager(dir) { NotificationSound = "external" };
+            other.SaveOrThrow();
+
+            Assert.Throws<SettingsPersistenceConflictException>(() =>
+                settings.UpdateAndSave(() => settings.GatewayUrl = "wss://attempt.example.invalid"));
+
+            Assert.True(settings.HasPersistedGatewayUrl);
+            Assert.Equal("wss://saved.example.invalid", settings.PersistedGatewayUrl);
+            Assert.Equal(
+                "wss://saved.example.invalid",
+                settings.GetLegacyCredentialGatewayUrlOrNull());
+        }
+        finally
+        {
+            if (Directory.Exists(dir))
+            {
+                // slopwatch-ignore: SW003 Test cleanup is best-effort and must not hide the assertion.
+                try { Directory.Delete(dir, recursive: true); } catch { }
+            }
+        }
+    }
+
+    [Fact]
     public void ExplicitGatewayUrl_BecomesPersistedLegacyCredentialTarget()
     {
         var dir = Path.Combine(Path.GetTempPath(), "OpenClawTray.Tests", Guid.NewGuid().ToString("N"));

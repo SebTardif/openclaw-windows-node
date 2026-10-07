@@ -1,3 +1,4 @@
+using System.Text.Json;
 using OpenClaw.Connection;
 using OpenClaw.Shared;
 using OpenClawTray.Services;
@@ -257,6 +258,8 @@ public sealed class GatewayDirectConnectServiceTests : IDisposable
         Assert.Equal(previous.Url, restored.Url);
         Assert.Equal(previous.Id, _registry.ActiveGatewayId);
         Assert.Equal(previous.Url, _settings.GatewayUrl);
+        Assert.True(_settings.HasPersistedGatewayUrl);
+        Assert.Equal(previous.Url, _settings.GetLegacyCredentialGatewayUrlOrNull());
         Assert.Equal(
             "operator-old",
             DeviceIdentity.TryReadStoredDeviceTokenForRole(
@@ -268,6 +271,49 @@ public sealed class GatewayDirectConnectServiceTests : IDisposable
                 _registry.GetIdentityDirectory(previous.Id),
                 "node"));
         Assert.Equal(2, _tunnelReconcileCount);
+    }
+
+    [Fact]
+    public async Task Connect_FailureFromUrlLessProfile_DoesNotPersistSetupGateway()
+    {
+        Assert.False(_settings.HasPersistedGatewayUrl);
+        Assert.Null(_settings.GetLegacyCredentialGatewayUrlOrNull());
+        var identity = new DeviceIdentity(_tempDir);
+        identity.Initialize();
+        identity.StoreDeviceTokenForRole("operator", "operator-role-token");
+        _manager.NextSnapshot = Failed("candidate", "rejected");
+
+        var result = await CreateService().ConnectAsync(new GatewayDirectConnectRequest(
+            "wss://candidate.example",
+            SharedToken: null,
+            FriendlyName: "Candidate",
+            SshTunnel: null));
+
+        Assert.Equal(GatewayDirectConnectOutcome.Failed, result.Outcome);
+        Assert.False(result.GatewayCommitted);
+        Assert.False(result.RollbackIncomplete);
+        Assert.Empty(_registry.GetAll());
+        Assert.False(_settings.HasPersistedGatewayUrl);
+        Assert.Null(_settings.PersistedGatewayUrl);
+        Assert.Null(_settings.GetLegacyCredentialGatewayUrlOrNull());
+        Assert.NotEqual("wss://candidate.example", _settings.GatewayUrl);
+        var savedPath = Path.Combine(_tempDir, "settings.json");
+        Assert.True(File.Exists(savedPath));
+        using var saved = JsonDocument.Parse(File.ReadAllText(savedPath));
+        var savedUrl = saved.RootElement.TryGetProperty("GatewayUrl", out var gatewayUrl) &&
+            gatewayUrl.ValueKind == JsonValueKind.String
+                ? gatewayUrl.GetString()
+                : null;
+        Assert.True(string.IsNullOrWhiteSpace(savedUrl));
+        Assert.False(InteractiveGatewayCredentialResolver.TryResolve(
+            registry: null,
+            _tempDir,
+            DeviceIdentityFileReader.Instance,
+            _settings.GetLegacyCredentialGatewayUrlOrNull(),
+            legacyToken: null,
+            legacyBootstrapToken: null,
+            out var credential));
+        Assert.Null(credential);
     }
 
     [Fact]
