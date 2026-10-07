@@ -887,15 +887,19 @@ internal sealed class ChatConversationState
             if (!string.IsNullOrWhiteSpace(threadId) && !string.IsNullOrWhiteSpace(messageText))
             {
                 _queue.RemoveFailedMessages(threadId, messageText);
+                // A follow-up can already be queued or promoted before this recovery
+                // runs. Those checks happen before any timeline replacement.
                 if (_timelines.TryGetValue(threadId, out var timeline)
+                    && !timeline.TurnActive
+                    && !_queue.HasPendingMessages(threadId)
+                    && !_queue.HasSendingMessages(threadId)
                     && IsFailedWelcomeTimeline(timeline, messageText))
                 {
                     _timelines[threadId] = ChatTimelineState.Initial() with
                     {
                         HistoryLoaded = timeline.HistoryLoaded,
                     };
-                    if (!_queue.HasSendingMessages(threadId))
-                        _queue.ClearLocallyInitiated(threadId);
+                    _queue.ClearLocallyInitiated(threadId);
                 }
             }
 
@@ -908,7 +912,7 @@ internal sealed class ChatConversationState
         if (timeline.LocalNonces.Count == 0 || timeline.Entries.Count == 0)
             return false;
 
-        var sawUser = false;
+        var userCount = 0;
         var sawStatus = false;
         foreach (var entry in timeline.Entries)
         {
@@ -922,10 +926,10 @@ internal sealed class ChatConversationState
                 || !string.Equals(entry.Text, messageText, StringComparison.Ordinal))
                 return false;
 
-            sawUser = true;
+            userCount++;
         }
 
-        return sawUser && sawStatus;
+        return sawStatus && userCount == 1;
     }
 
     internal ChatSendFailure FailSend(
