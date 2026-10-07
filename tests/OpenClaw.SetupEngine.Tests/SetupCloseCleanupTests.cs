@@ -61,4 +61,39 @@ public sealed class SetupCloseCleanupTests : IDisposable
         rollback.SetResult();
         await Assert.ThrowsAnyAsync<Exception>(() => waiting);
     }
+
+    [Fact]
+    public async Task FaultedContext_RunsTeardownAfterPipelineAndBeforeLockRelease()
+    {
+        Assert.True(SetupRunLock.TryAcquire(_tempDir, out var held, out var message));
+        Assert.Null(message);
+
+        var pipeline = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var context = Task.FromException(new InvalidOperationException("context failed"));
+        var teardownStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var waiting = SetupCloseCleanup.WaitInsideTeardownAsync(
+            context,
+            pipeline.Task,
+            () =>
+            {
+                teardownStarted.TrySetResult();
+                return Task.CompletedTask;
+            });
+
+        var finishedEarly = await Task.WhenAny(teardownStarted.Task, Task.Delay(TimeSpan.FromMilliseconds(200)));
+        Assert.NotSame(teardownStarted.Task, finishedEarly);
+        Assert.False(SetupRunLock.TryAcquire(_tempDir, out var stolen, out _));
+        stolen?.Dispose();
+
+        pipeline.SetResult();
+        await Assert.ThrowsAnyAsync<Exception>(() => waiting);
+        Assert.True(teardownStarted.Task.IsCompletedSuccessfully);
+        Assert.False(SetupRunLock.TryAcquire(_tempDir, out stolen, out _));
+        stolen?.Dispose();
+
+        held!.Dispose();
+        Assert.True(SetupRunLock.TryAcquire(_tempDir, out var next, out var nextMessage));
+        Assert.Null(nextMessage);
+        next?.Dispose();
+    }
 }

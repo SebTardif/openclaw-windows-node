@@ -1140,7 +1140,8 @@ public sealed class AppRefactorContractTests
         AssertInOrder(
             setupWindow,
             "_lifetimeCts.Cancel()",
-            "await SetupCloseCleanup.WaitForRunningWorkAsync(_contextApplyTask, _progressPipelineTask)",
+            "await SetupCloseCleanup.WaitInsideTeardownAsync(",
+            "await pageCleanup",
             "_setupLock?.Dispose()");
         Assert.Contains("distroNameOverride: _config.DistroName", wizardPage);
         Assert.Contains("if (AppIdentity.IsDev)", updateCoordinator);
@@ -1339,7 +1340,9 @@ public sealed class AppRefactorContractTests
             setupWindow,
             "_lifetimeCts.Cancel()",
             "progressPage.CancelPipeline()",
-            "await SetupCloseCleanup.WaitForRunningWorkAsync(_contextApplyTask, _progressPipelineTask)",
+            "await SetupCloseCleanup.WaitInsideTeardownAsync(",
+            "await pageCleanup",
+            "await ReleaseNativeSetupAsync()",
             "catch (OperationCanceledException)",
             "_setupLock?.Dispose()",
             "_cleanupCompleted.TrySetResult(true)");

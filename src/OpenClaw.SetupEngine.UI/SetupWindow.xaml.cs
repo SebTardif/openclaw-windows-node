@@ -176,50 +176,47 @@ public sealed partial class SetupWindow : Window
                 _lifetimeCts.Cancel();
                 if (RootFrame.Content is ProgressPage progressPage)
                     progressPage.CancelPipeline();
-                await SetupCloseCleanup.WaitForRunningWorkAsync(_contextApplyTask, _progressPipelineTask);
-                var nativeCleanup = RootFrame.Content switch
-                {
-                    NativeGatewaySetupPage nativePage => nativePage.CancelAndWaitAsync(),
-                    WizardPage wizardPage => wizardPage.CancelAndWaitAsync(),
-                    _ => Task.CompletedTask,
-                };
-                var pageCleanup = RootFrame.Content is IAsyncDisposable pageLifetime
-                    ? pageLifetime.DisposeAsync().AsTask()
-                    : Task.CompletedTask;
-                try
-                {
-                    try
+                await SetupCloseCleanup.WaitInsideTeardownAsync(
+                    _contextApplyTask,
+                    _progressPipelineTask,
+                    async () =>
                     {
-                        await nativeCleanup;
-                    }
-                    finally
-                    {
-                        if (_contextApplyTask is { } contextApplyTask)
-                            await contextApplyTask;
-                    }
-                }
-                finally
-                {
-                    try
-                    {
-                        await pageCleanup;
-                    }
-                    finally
-                    {
+                        var nativeCleanup = RootFrame.Content switch
+                        {
+                            NativeGatewaySetupPage nativePage => nativePage.CancelAndWaitAsync(),
+                            WizardPage wizardPage => wizardPage.CancelAndWaitAsync(),
+                            _ => Task.CompletedTask,
+                        };
+                        var pageCleanup = RootFrame.Content is IAsyncDisposable pageLifetime
+                            ? pageLifetime.DisposeAsync().AsTask()
+                            : Task.CompletedTask;
                         try
                         {
-                            await _nativePageCleanupTask;
-                            await _aiPageCleanupTask;
-                            if (_localAiTransitionTask is { } transition)
-                                await transition;
+                            await nativeCleanup;
                         }
                         finally
                         {
-                            AccessDraft?.ClearNativeConnectionSecrets();
-                            await ReleaseNativeSetupAsync();
+                            try
+                            {
+                                await pageCleanup;
+                            }
+                            finally
+                            {
+                                try
+                                {
+                                    await _nativePageCleanupTask;
+                                    await _aiPageCleanupTask;
+                                    if (_localAiTransitionTask is { } transition)
+                                        await transition;
+                                }
+                                finally
+                                {
+                                    AccessDraft?.ClearNativeConnectionSecrets();
+                                    await ReleaseNativeSetupAsync();
+                                }
+                            }
                         }
-                    }
-                }
+                    });
             }
             catch (OperationCanceledException)
             {
