@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Text.Json;
 using OpenClaw.Connection;
 using OpenClaw.Shared;
@@ -278,6 +279,8 @@ public sealed class GatewayDirectConnectServiceTests : IDisposable
     {
         Assert.False(_settings.HasPersistedGatewayUrl);
         Assert.Null(_settings.GetLegacyCredentialGatewayUrlOrNull());
+        var setupPort = OpenClawTray.AppIdentity.SetupGatewayPort;
+        var before = CountOwnTcpConnectionsToPort(setupPort);
         var identity = new DeviceIdentity(_tempDir);
         identity.Initialize();
         identity.StoreDeviceTokenForRole("operator", "operator-role-token");
@@ -314,6 +317,43 @@ public sealed class GatewayDirectConnectServiceTests : IDisposable
             legacyBootstrapToken: null,
             out var credential));
         Assert.Null(credential);
+        var after = CountOwnTcpConnectionsToPort(setupPort);
+        Assert.Equal(before, after);
+        Console.WriteLine(
+            $"DIRECT_CONNECT_ROLLBACK setup_port={setupPort} own_tcp_before={before} own_tcp_after={after}");
+    }
+
+    private static int CountOwnTcpConnectionsToPort(int port)
+    {
+        using var process = Process.Start(new ProcessStartInfo
+        {
+            FileName = "netstat",
+            Arguments = "-ano -p tcp",
+            RedirectStandardOutput = true,
+            UseShellExecute = false,
+            CreateNoWindow = true,
+        });
+        if (process is null)
+            return -1;
+        var text = process.StandardOutput.ReadToEnd();
+        process.WaitForExit(5000);
+        var suffix = ":" + port;
+        var pid = Environment.ProcessId.ToString();
+        var count = 0;
+        foreach (var raw in text.Split('\n'))
+        {
+            var line = raw.Trim();
+            if (!line.StartsWith("TCP", StringComparison.OrdinalIgnoreCase))
+                continue;
+            var parts = line.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+            if (parts.Length < 5 || parts[^1] != pid)
+                continue;
+            if (parts[1].EndsWith(suffix, StringComparison.Ordinal) ||
+                parts[2].EndsWith(suffix, StringComparison.Ordinal))
+                count++;
+        }
+
+        return count;
     }
 
     [Fact]
