@@ -533,6 +533,20 @@ public sealed class GatewayFixtureProtocolTests
     public Task Upgrade_DisconnectedPeerIsRecordedWithoutPoisoningServerOrShutdown(string headers) =>
         AssertRejectedUpgradeAsync(headers, "error:UPGRADE_DISCONNECTED");
 
+    [Fact]
+    public async Task CloseConnectionsAsync_ToleratesAConnectionHandlerThatDisposedItsSendLock()
+    {
+        var token = CreateToken();
+        await using var server = await FixtureGatewayServer.StartAsync(GatewayScenario.CreateBrowse(), token);
+        for (var attempt = 0; attempt < 20; attempt++)
+        {
+            var connected = await ConnectedClient.OpenAsync(server, token);
+            var restart = server.CloseConnectionsAsync();
+            await connected.DisposeAsync();
+            await restart.WaitAsync(Deadline);
+        }
+    }
+
     private static async Task AssertRejectedUpgradeAsync(string headers, string outcome)
     {
         var token = CreateToken();

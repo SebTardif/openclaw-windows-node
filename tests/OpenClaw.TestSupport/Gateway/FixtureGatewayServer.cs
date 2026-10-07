@@ -88,13 +88,30 @@ public sealed class FixtureGatewayServer : IAsyncDisposable
         lock (_sync) connections = _authenticatedConnections.Values.ToArray();
         foreach (var connection in connections)
         {
-            await connection.SendLock.WaitAsync(cancellationToken);
+            // The connection handler disposes this semaphore when it exits. A restart
+            // can observe the connection after that handler has already closed it.
+            try
+            {
+                await connection.SendLock.WaitAsync(cancellationToken);
+            }
+            catch (ObjectDisposedException)
+            {
+                continue;
+            }
+
             try
             {
                 if (connection.Socket.State == WebSocketState.Open)
                     await connection.Socket.CloseOutputAsync((WebSocketCloseStatus)1012, "Fixture restart", cancellationToken);
             }
-            finally { connection.SendLock.Release(); }
+            catch (ObjectDisposedException)
+            {
+            }
+            finally
+            {
+                try { connection.SendLock.Release(); }
+                catch (ObjectDisposedException) { }
+            }
         }
     }
 
