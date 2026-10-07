@@ -47,8 +47,42 @@ public static class GatewayClientEndpointResolver
             return false;
         }
 
-        endpoint = Resolve(record);
+        if (!TrySubstituteLocalDashboardAddress(record.Url, config.LocalPort, out endpoint))
+        {
+            endpoint = "";
+            appendSharedToken = false;
+            return false;
+        }
+
         appendSharedToken = !string.IsNullOrWhiteSpace(record.SharedGatewayToken);
+        return true;
+    }
+
+    // The socket client uses Resolve. The browser keeps the saved route
+    // and only the host and port move onto the local forward.
+    private static bool TrySubstituteLocalDashboardAddress(string savedUrl, int localPort, out string endpoint)
+    {
+        endpoint = "";
+        if (!Uri.TryCreate(savedUrl, UriKind.Absolute, out var saved))
+            return false;
+
+        var builder = new UriBuilder(saved)
+        {
+            Host = "localhost",
+            Port = localPort,
+        };
+        builder.UserName = "";
+        builder.Password = "";
+        var text = builder.Uri.AbsoluteUri;
+        if (saved.AbsolutePath == "/" &&
+            string.IsNullOrEmpty(saved.Query) &&
+            string.IsNullOrEmpty(saved.Fragment) &&
+            !savedUrl.TrimEnd().EndsWith('/'))
+        {
+            text = text.TrimEnd('/');
+        }
+
+        endpoint = text;
         return true;
     }
 

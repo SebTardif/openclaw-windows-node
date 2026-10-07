@@ -4167,13 +4167,13 @@ public partial class App : Application, OpenClawTray.Services.IAppCommands, IPer
                 return;
             }
 
-            OpenDashboardUri(GatewayDashboardUrlBuilder.Build(
+            await LaunchPreparedDashboardAsync(GatewayDashboardUrlBuilder.Build(
                 tunnelEndpoint,
                 path,
                 decision.Token,
                 decision.AppendToken &&
                 !tunnelIsBootstrapToken &&
-                tunnelCredentialSource == CredentialResolver.SourceSharedGatewayToken));
+                tunnelCredentialSource == CredentialResolver.SourceSharedGatewayToken), path);
             return;
         }
 
@@ -4193,23 +4193,26 @@ public partial class App : Application, OpenClawTray.Services.IAppCommands, IPer
             return;
         }
 
-        OpenDashboardUri(GatewayDashboardUrlBuilder.Build(
+        await LaunchPreparedDashboardAsync(GatewayDashboardUrlBuilder.Build(
             gatewayUrl,
             path,
             token,
-            !isBootstrapToken && credentialSource == CredentialResolver.SourceSharedGatewayToken));
+            !isBootstrapToken && credentialSource == CredentialResolver.SourceSharedGatewayToken), path);
     }
 
-    private static void OpenDashboardUri(string url)
+    private Task LaunchPreparedDashboardAsync(string url, string? path)
     {
-        try
-        {
-            Process.Start(new ProcessStartInfo(url) { UseShellExecute = true });
-        }
-        catch (Exception ex)
-        {
-            Logger.Error($"Failed to open dashboard: {ex.Message}");
-        }
+        var launcher = new GatewayDashboardLauncher(
+            () => true,
+            () => null,
+            async target => await global::Windows.System.Launcher.LaunchUriAsync(new Uri(target)),
+            () => AsyncEventHandlerGuard.Run(
+                () => _windowManager?.ShowDashboardLaunchFailureAsync(() => OpenDashboard(path))
+                    ?? Task.CompletedTask,
+                new AppLogger(),
+                "Dashboard launch error"),
+            () => _appNotificationService?.Dismiss(GatewayDashboardLauncher.FailureNotificationId));
+        return launcher.OpenPreparedAsync(url);
     }
 
     // ── IAppCommands implementation ─────────────────────────────────────

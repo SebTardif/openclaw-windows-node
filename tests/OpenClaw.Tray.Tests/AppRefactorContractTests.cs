@@ -520,6 +520,12 @@ public sealed class AppRefactorContractTests
             "DashboardCredentialGate.Decide(", "DashboardPinStillMatches(pinned)",
             "pinned.SharedGatewayToken", "GatewayDashboardUrlBuilder.Build(");
         Assert.Contains("CredentialResolver.SourceSharedGatewayToken", method);
+        if (file == "App.xaml.cs")
+        {
+            Assert.Contains("LaunchPreparedDashboardAsync(", method);
+            Assert.DoesNotContain("OpenDashboardUri", method);
+            Assert.DoesNotContain("ex.Message", method);
+        }
     }
 
     [Fact]

@@ -37,6 +37,26 @@ internal sealed class GatewayDashboardLauncher(
         return true;
     }
 
+    public Task<bool> OpenPreparedAsync(string url) => OpenUrlAsync(url);
+
+    private async Task<bool> OpenUrlAsync(string url)
+    {
+        try
+        {
+            if (!await launchBrowser(url))
+                throw new InvalidOperationException("Windows did not open the Dashboard.");
+        }
+        catch (Exception ex) when (IsExpectedLaunchFailure(ex))
+        {
+            // Browser failures can include the full credential-bearing URL. Do not log them.
+            reportFailure();
+            return false;
+        }
+
+        reportOpened?.Invoke();
+        return true;
+    }
+
     private static bool IsExpectedLaunchFailure(Exception error) =>
         error is InvalidOperationException or IOException or UnauthorizedAccessException or
             ArgumentException or Win32Exception or COMException;

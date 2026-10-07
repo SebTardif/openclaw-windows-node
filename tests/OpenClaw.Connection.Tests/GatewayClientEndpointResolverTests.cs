@@ -92,6 +92,28 @@ public sealed class GatewayClientEndpointResolverTests
     }
 
     [Fact]
+    public void TryResolveDashboardEndpoint_SshRecordKeepsSavedRouteOnTheLocalForward()
+    {
+        var record = SshRecord() with
+        {
+            Url = "wss://gateway.example/mount/?view=compact#section",
+        };
+        var tunnel = UpTunnel(localPort: 45678);
+
+        var opened = GatewayClientEndpointResolver.TryResolveDashboardEndpoint(
+            record,
+            tunnel,
+            out var endpoint,
+            out var appendSharedToken,
+            listenerOwned: true);
+
+        Assert.True(opened);
+        Assert.Equal("wss://localhost:45678/mount/?view=compact#section", endpoint);
+        Assert.True(appendSharedToken);
+        Assert.DoesNotContain("gateway.example", endpoint, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
     public void TryResolveDashboardEndpoint_SshRecordRejectsDifferentSshServerPort()
     {
         var record = SshRecord(sshPort: 2222);
