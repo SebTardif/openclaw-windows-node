@@ -342,6 +342,44 @@ public sealed class ChatConversationStateTests
             "attachment-run",
             fallback.OpenedLifecycle?.Event.RunId);
     }
+
+    [Fact]
+    public void RestoreEmptyWelcomeThread_DropsFailedQueueAndStatusRow()
+    {
+        var state = new ChatConversationState(
+            ConnectionStatus.Connected,
+            lastChatState: null,
+            seedModels: null);
+        var context = new ChatProjectionContext("main", HasHandshakeSnapshot: true);
+        state.Load([new SessionInfo { Key = "main", IsMain = true }], context);
+        var admission = state.AdmitMessage(
+            "main",
+            "What can you do?",
+            "What can you do?",
+            "nonce-welcome",
+            attachments: null,
+            DateTimeOffset.UnixEpoch,
+            context);
+        Assert.NotNull(admission.Dispatch);
+
+        var failed = state.FailSend(
+            admission.Dispatch,
+            "gateway closed",
+            "gateway closed",
+            context);
+        Assert.NotNull(failed.Snapshot);
+        Assert.Contains(
+            failed.Snapshot.Timelines["main"].Entries,
+            entry => entry.Kind == ChatTimelineItemKind.User && entry.Text == "What can you do?");
+        Assert.Contains(
+            failed.Snapshot.Timelines["main"].Entries,
+            entry => entry.Kind == ChatTimelineItemKind.Status);
+
+        var restored = state.RestoreEmptyWelcomeThread("main", context);
+        Assert.Empty(restored.Timelines["main"].Entries);
+        Assert.False(restored.QueuedMessagesByThread?.TryGetValue("main", out var queued) == true
+            && queued.Count > 0);
+    }
 }
 
 public sealed class ChatResetStateTests
