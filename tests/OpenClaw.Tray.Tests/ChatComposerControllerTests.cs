@@ -544,7 +544,7 @@ public sealed class ChatComposerControllerTests
         controller.StartVoiceRecording();
         controller.StopVoiceRecording();
         var sendAccepted = await controller.SendAsync();
-        var sendCoreAccepted = await controller
+        var sendCore = await controller
             .SendCoreAsync("thread", "Title", "hello", Array.Empty<ChatAttachment>());
 
         // Zero calls reached the port, the host actions, or mutated the view model.
@@ -566,7 +566,8 @@ public sealed class ChatComposerControllerTests
         Assert.False(vm.IsSpeakerMuted);
         Assert.False(vm.IsRecording);
         Assert.False(sendAccepted);
-        Assert.False(sendCoreAccepted);
+        Assert.False(sendCore.AcceptedByLiveHost);
+        Assert.False(sendCore.FailedWhileHostLive);
     }
 
     [Fact]
@@ -1286,10 +1287,10 @@ public sealed class ChatComposerControllerTests
         resumeAfterDispose.SetResult();
 
         Exception? observed = null;
-        bool accepted = false;
+        ChatSendCoreResult result = default;
         try
         {
-            accepted = await task;
+            result = await task;
         }
         catch (Exception ex)
         {
@@ -1297,7 +1298,10 @@ public sealed class ChatComposerControllerTests
         }
 
         Assert.Null(observed);
-        Assert.False(accepted);
+        Assert.True(result.Submitted);
+        Assert.False(result.HostLive);
+        Assert.False(result.AcceptedByLiveHost);
+        Assert.False(result.FailedWhileHostLive);
         Assert.Equal(1, port.SendMessageCallCount);
     }
 
