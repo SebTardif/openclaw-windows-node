@@ -953,6 +953,14 @@ internal sealed class WindowManager : IWindowManager
         {
             _setupWindow = null;
         }
+
+        var registry = _callbacks.GetGatewayRegistry();
+        if (registry is null)
+            return;
+        if (registry.TryAdoptExternalSnapshot())
+            Logger.Info("Gateway list refreshed after setup closed.");
+        else
+            Logger.Warn("Gateway list was not refreshed after setup closed because this session has unsaved Gateway edits or the saved list could not be read.");
     }
 
     public void CloseSetup()

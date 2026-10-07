@@ -1356,7 +1356,8 @@ public sealed class AppRefactorContractTests
             "setupWindow.Closed += OnSetupClosed",
             "CompleteSetupCloseAsync(setupWindow)",
             "await setupWindow.CleanupCompleted",
-            "_setupWindow = null");
+            "_setupWindow = null",
+            "TryAdoptExternalSnapshot()");
     }
 
     [Fact]
