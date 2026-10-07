@@ -384,12 +384,12 @@ public sealed class OpenClawChatDataProvider : IChatDataProvider
         return result;
     }
 
-    public void RestoreEmptyWelcomeThread(string threadId)
+    public void RestoreFailedWelcomeSend(string threadId, string messageText)
     {
-        if (string.IsNullOrWhiteSpace(threadId))
+        if (string.IsNullOrWhiteSpace(threadId) || string.IsNullOrWhiteSpace(messageText))
             return;
 
-        Publish(_state.RestoreEmptyWelcomeThread(threadId, ProjectionContext()));
+        Publish(_state.RestoreFailedWelcomeSend(threadId, messageText, ProjectionContext()));
     }
 
     public Task<bool> CancelQueuedMessageAsync(string threadId, string queuedMessageId, CancellationToken cancellationToken = default)

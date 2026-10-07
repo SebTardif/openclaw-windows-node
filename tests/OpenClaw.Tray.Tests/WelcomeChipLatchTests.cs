@@ -51,7 +51,8 @@ public class WelcomeChipLatchTests
         Assert.Contains("WelcomeChipLatch.ClearsBecauseSendReturned", source, StringComparison.Ordinal);
         Assert.Contains("WelcomeChipLatch.ClearsBecauseSentThreadHasUserRow", source, StringComparison.Ordinal);
         Assert.Contains("sentWelcomeThread.Current", source, StringComparison.Ordinal);
-        Assert.Contains("RestoreEmptyWelcomeThread", source, StringComparison.Ordinal);
+        Assert.Contains("FailedWhileHostLive", source, StringComparison.Ordinal);
+        Assert.Contains("RestoreFailedWelcomeSend", source, StringComparison.Ordinal);
     }
 
     private static string FindRepoRoot()

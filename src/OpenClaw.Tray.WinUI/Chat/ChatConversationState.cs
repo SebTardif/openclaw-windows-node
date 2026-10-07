@@ -877,28 +877,55 @@ internal sealed class ChatConversationState
         }
     }
 
-    internal ChatDataSnapshot RestoreEmptyWelcomeThread(
+    internal ChatDataSnapshot RestoreFailedWelcomeSend(
         string threadId,
+        string messageText,
         ChatProjectionContext context)
     {
         lock (_gate)
         {
-            _queue.RemoveFailedMessages(threadId);
-            if (_timelines.TryGetValue(threadId, out var timeline)
-                && timeline.LocalNonces.Count > 0
-                && timeline.Entries.All(entry =>
-                    entry.Kind is ChatTimelineItemKind.Status or ChatTimelineItemKind.User))
+            if (!string.IsNullOrWhiteSpace(threadId) && !string.IsNullOrWhiteSpace(messageText))
             {
-                _timelines[threadId] = ChatTimelineState.Initial() with
+                _queue.RemoveFailedMessages(threadId, messageText);
+                if (_timelines.TryGetValue(threadId, out var timeline)
+                    && IsFailedWelcomeTimeline(timeline, messageText))
                 {
-                    HistoryLoaded = timeline.HistoryLoaded,
-                };
+                    _timelines[threadId] = ChatTimelineState.Initial() with
+                    {
+                        HistoryLoaded = timeline.HistoryLoaded,
+                    };
+                    if (!_queue.HasSendingMessages(threadId))
+                        _queue.ClearLocallyInitiated(threadId);
+                }
             }
 
-            if (!_queue.HasSendingMessages(threadId))
-                _queue.ClearLocallyInitiated(threadId);
             return BuildSnapshotLocked(context);
         }
+    }
+
+    private static bool IsFailedWelcomeTimeline(ChatTimelineState timeline, string messageText)
+    {
+        if (timeline.LocalNonces.Count == 0 || timeline.Entries.Count == 0)
+            return false;
+
+        var sawUser = false;
+        var sawStatus = false;
+        foreach (var entry in timeline.Entries)
+        {
+            if (entry.Kind == ChatTimelineItemKind.Status)
+            {
+                sawStatus = true;
+                continue;
+            }
+
+            if (entry.Kind != ChatTimelineItemKind.User
+                || !string.Equals(entry.Text, messageText, StringComparison.Ordinal))
+                return false;
+
+            sawUser = true;
+        }
+
+        return sawUser && sawStatus;
     }
 
     internal ChatSendFailure FailSend(
