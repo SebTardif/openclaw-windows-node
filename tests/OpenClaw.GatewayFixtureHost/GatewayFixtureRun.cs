@@ -23,6 +23,8 @@ public sealed class GatewayFixtureRun : IAsyncDisposable
     private bool _disposed;
     private string? _mcpToken;
     private JsonElement? _lastStatus;
+    private readonly GatewayScenario _scenario;
+    private readonly string? _postSetupLaunch;
 
     public FixtureGatewayServer Gateway { get; }
     public GatewayFixtureProfile Profile { get; }
@@ -37,12 +39,15 @@ public sealed class GatewayFixtureRun : IAsyncDisposable
     public bool IsRunning => _process is { HasExited: false };
     public int? AppExitCode => _process is { HasExited: true } ? _process.ExitCode : null;
 
-    private GatewayFixtureRun(FixtureGatewayServer gateway, GatewayFixtureProfile profile, string token, string appPath, string? artifactRoot)
+    private GatewayFixtureRun(FixtureGatewayServer gateway, GatewayFixtureProfile profile, string token, string appPath,
+        string? artifactRoot, GatewayScenario scenario, string? postSetupLaunch)
     {
         Gateway = gateway;
         Profile = profile;
         _gatewayToken = token;
         _appPath = appPath;
+        _scenario = scenario;
+        _postSetupLaunch = postSetupLaunch;
         ArtifactsDirectory = Path.Combine(
             Path.GetFullPath(artifactRoot ?? Path.Combine(Path.GetTempPath(), "openclaw-gateway-fixture-artifacts")),
             profile.RunId);
@@ -56,14 +61,18 @@ public sealed class GatewayFixtureRun : IAsyncDisposable
         bool allowAgentCreation = false,
         bool requireAgentSelection = false,
         bool enableNodeBrowserProxy = false,
-        bool foreignBrowserControl = false)
+        bool foreignBrowserControl = false,
+        bool allowSessionMutations = false,
+        GatewayScenario? scenario = null,
+        Func<GatewayFixtureProfile, string>? prepareSetupHandoff = null)
     {
         if (!OperatingSystem.IsWindows())
             throw new PlatformNotSupportedException("The fixture app requires a Windows desktop.");
         var executable = GatewayFixtureProfile.ValidateApp(appPath);
         var token = Convert.ToHexString(RandomNumberGenerator.GetBytes(32));
+        scenario ??= GatewayScenario.CreateBrowse(allowAgentCreation, requireAgentSelection, allowSessionMutations);
         var (gateway, control, foreign, foreignPort, foreignCountFile) = await StartGatewayAsync(
-            token, allowAgentCreation, requireAgentSelection, enableNodeBrowserProxy, foreignBrowserControl, cancellationToken);
+            token, scenario, enableNodeBrowserProxy, foreignBrowserControl, cancellationToken);
         GatewayFixtureProfile profile;
         try
         {
@@ -80,7 +89,8 @@ public sealed class GatewayFixtureRun : IAsyncDisposable
         GatewayFixtureRun run;
         try
         {
-            run = new GatewayFixtureRun(gateway, profile, token, executable, artifactRoot)
+            var handoff = prepareSetupHandoff?.Invoke(profile);
+            run = new GatewayFixtureRun(gateway, profile, token, executable, artifactRoot, scenario, handoff)
             {
                 _control = control,
                 _foreignControl = foreign,
@@ -119,8 +129,9 @@ public sealed class GatewayFixtureRun : IAsyncDisposable
         for (var attempt = 0; attempt < 3; attempt++)
         {
             McpPort = FindFreePort();
-            _process = Process.Start(Profile.CreateStartInfo(_appPath, McpPort))
+            _process = Process.Start(Profile.CreateStartInfo(_appPath, McpPort, _postSetupLaunch))
                 ?? throw new InvalidOperationException("Failed to start the fixture app.");
+            await WriteReportAsync("starting");
             try
             {
                 await WaitForMcpAsync(cancellationToken);
@@ -275,7 +286,7 @@ public sealed class GatewayFixtureRun : IAsyncDisposable
     public async Task WriteReportAsync(string outcome, Exception? failure = null)
     {
         var runtimeConfig = await File.ReadAllTextAsync(Path.ChangeExtension(_appPath, ".runtimeconfig.json"));
-        var scenario = GatewayScenario.CreateBrowse();
+        var scenario = _scenario;
         JsonElement? connectionStatus = null;
         string? diagnosticError = null;
         if (_client is not null && IsRunning)
@@ -303,8 +314,17 @@ public sealed class GatewayFixtureRun : IAsyncDisposable
             gatewayEndpoint = Gateway.Endpoint.AbsoluteUri,
             mcpEndpoint = $"http://127.0.0.1:{McpPort}/",
             appProcessId = _process?.Id,
+            appProcessStartUtc = _process?.StartTime.ToUniversalTime(),
+            appArguments = _process?.StartInfo.ArgumentList.ToArray(),
             appResponding = _process is { HasExited: false } && _process.Responding,
             profileDirectory = Profile.DataDirectory,
+            roamingRoot = Profile.RoamingRoot,
+            localRoot = Profile.LocalRoot,
+            setupDirectory = Profile.SetupDirectory,
+            fixtureProcessId = Environment.ProcessId,
+            fixtureProcessStartUtc = Process.GetCurrentProcess().StartTime.ToUniversalTime(),
+            fixtureProcessPath = Environment.ProcessPath,
+            fixtureProcessArguments = Environment.GetCommandLineArgs(),
             appStatus = _lastStatus,
             connectionStatus,
             diagnosticError,
@@ -336,8 +356,7 @@ public sealed class GatewayFixtureRun : IAsyncDisposable
 
     private static async Task<(FixtureGatewayServer Gateway, LoopbackControlHost? Control, Process? Foreign, int? ForeignPort, string? ForeignCountFile)> StartGatewayAsync(
         string token,
-        bool allowAgentCreation,
-        bool requireAgentSelection,
+        GatewayScenario scenario,
         bool enableNodeBrowserProxy,
         bool foreignBrowserControl,
         CancellationToken cancellationToken)
@@ -345,8 +364,7 @@ public sealed class GatewayFixtureRun : IAsyncDisposable
         for (var attempt = 0; attempt < 8; attempt++)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            var gateway = await FixtureGatewayServer.StartAsync(
-                GatewayScenario.CreateBrowse(allowAgentCreation, requireAgentSelection), token, cancellationToken);
+            var gateway = await FixtureGatewayServer.StartAsync(scenario, token, cancellationToken);
             if (!enableNodeBrowserProxy)
                 return (gateway, null, null, null, null);
             var controlPort = gateway.Endpoint.Port + 2;
