@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using System.Net;
 using System.Net.Sockets;
+using System.Net.WebSockets;
 using System.Text;
 using System.Text.Json;
 using OpenClaw.Connection;
@@ -98,20 +99,38 @@ internal static class DashboardCredentialHandoff
             try
             {
                 var path = context.Request.Url?.AbsolutePath ?? "";
-                var allowed = path.Equals($"/d/{Nonce}", StringComparison.Ordinal) &&
-                    Interlocked.CompareExchange(ref _delivered, 1, 0) == 0 &&
-                    await _owned();
-                if (!allowed)
+                if (!path.Equals($"/d/{Nonce}", StringComparison.Ordinal))
                 {
-                    if (path.Equals($"/d/{Nonce}", StringComparison.Ordinal))
-                        Interlocked.Exchange(ref _delivered, 1);
+                    if (!await _owned())
+                    {
+                        response.StatusCode = (int)HttpStatusCode.NotFound;
+                        response.Close();
+                        return;
+                    }
+
+                    if (context.Request.IsWebSocketRequest)
+                    {
+                        await ProxyWebSocketAsync(context);
+                        return;
+                    }
+
+                    await ProxyAsync(context);
+                    return;
+                }
+
+                var first = Interlocked.CompareExchange(ref _delivered, 1, 0) == 0 && await _owned();
+                if (!first)
+                {
+                    Interlocked.Exchange(ref _delivered, 1);
                     response.StatusCode = (int)HttpStatusCode.NotFound;
                     response.Close();
                     return;
                 }
 
+                // Stay on this listener. A later navigation to the tunnel port
+                // would hand the fragment to whoever bound that port.
                 var html = "<!doctype html><meta charset=\"utf-8\"><script>location.replace(" +
-                    JsonSerializer.Serialize(_destination) + ")</script>";
+                    JsonSerializer.Serialize(SameOriginDestination()) + ")</script>";
                 var bytes = Encoding.UTF8.GetBytes(html);
                 response.StatusCode = (int)HttpStatusCode.OK;
                 response.ContentType = "text/html; charset=utf-8";
@@ -122,6 +141,78 @@ internal static class DashboardCredentialHandoff
             catch (Exception)
             {
                 try { response.Abort(); } catch (Exception) { }
+            }
+        }
+
+        private string SameOriginDestination()
+        {
+            var destination = new Uri(_destination);
+            var local = new Uri(BrowserUrl);
+            var hash = destination.Fragment;
+            var gateway = Uri.EscapeDataString($"ws://127.0.0.1:{local.Port}/");
+            hash = string.IsNullOrEmpty(hash)
+                ? "#gatewayUrl=" + gateway
+                : hash + "&gatewayUrl=" + gateway;
+            var path = string.IsNullOrEmpty(destination.AbsolutePath) ? "/" : destination.AbsolutePath;
+            return $"http://127.0.0.1:{local.Port}{path}{destination.Query}{hash}";
+        }
+
+        private async Task ProxyAsync(HttpListenerContext context)
+        {
+            var incoming = context.Request.Url;
+            var pathAndQuery = (incoming?.PathAndQuery) ?? "/";
+            var destination = new Uri(_destination);
+            var scheme = destination.Scheme == "https" &&
+                (destination.Host is "localhost" or "127.0.0.1")
+                ? "http"
+                : destination.Scheme;
+            var upstream = new Uri($"{scheme}://{destination.Host}:{destination.Port}{pathAndQuery}");
+            using var client = new HttpClient();
+            using var request = new HttpRequestMessage(new HttpMethod(context.Request.HttpMethod), upstream);
+            using var reply = await client.SendAsync(request);
+            context.Response.StatusCode = (int)reply.StatusCode;
+            var bytes = await reply.Content.ReadAsByteArrayAsync();
+            if (reply.Content.Headers.ContentType is { } type)
+                context.Response.ContentType = type.ToString();
+            context.Response.ContentLength64 = bytes.Length;
+            await context.Response.OutputStream.WriteAsync(bytes);
+            context.Response.Close();
+        }
+
+        private async Task ProxyWebSocketAsync(HttpListenerContext context)
+        {
+            var socket = await context.AcceptWebSocketAsync(null);
+            var destination = new Uri(_destination);
+            var incoming = context.Request.Url;
+            var upstreamUri = new Uri($"ws://{destination.Host}:{destination.Port}{incoming?.PathAndQuery}");
+            using var upstream = new ClientWebSocket();
+            try
+            {
+                await upstream.ConnectAsync(upstreamUri, _lifetime.Token);
+                await Task.WhenAll(
+                    PumpAsync(socket.WebSocket, upstream),
+                    PumpAsync(upstream, socket.WebSocket));
+            }
+            catch (Exception)
+            {
+                if (socket.WebSocket.State == WebSocketState.Open)
+                    await socket.WebSocket.CloseAsync(WebSocketCloseStatus.InternalServerError, "closed", CancellationToken.None);
+            }
+        }
+
+        private static async Task PumpAsync(WebSocket from, WebSocket to)
+        {
+            var buffer = new byte[8192];
+            while (from.State == WebSocketState.Open && to.State == WebSocketState.Open)
+            {
+                var result = await from.ReceiveAsync(buffer, CancellationToken.None);
+                if (result.MessageType == WebSocketMessageType.Close)
+                {
+                    await to.CloseAsync(WebSocketCloseStatus.NormalClosure, "closed", CancellationToken.None);
+                    return;
+                }
+
+                await to.SendAsync(buffer.AsMemory(0, result.Count), result.MessageType, result.EndOfMessage, CancellationToken.None);
             }
         }
 
