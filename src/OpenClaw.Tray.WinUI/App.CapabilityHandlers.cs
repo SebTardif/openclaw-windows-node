@@ -297,14 +297,27 @@ public partial class App
                     return new { error = "Dashboard blocked because the SSH tunnel is not up." };
                 }
 
+                var publicUrl = DashboardCredentialHandoff.Start(async () =>
+                {
+                    if (!DashboardPinStillMatches(pinned))
+                        return false;
+                    var ownedNow = await IsDashboardListenerOwnedAsync(ssh);
+                    return ownedNow &&
+                        GatewayClientEndpointResolver.TryResolveDashboardEndpoint(
+                            pinned,
+                            _sshTunnelService?.CreateSnapshot(),
+                            out _,
+                            out _,
+                            ownedNow);
+                }, url);
                 return new
                 {
-                    url,
+                    url = publicUrl,
                     credentialSource = decision.CredentialSource,
                     usesSharedGatewayToken = decision.AppendToken &&
                         !pinnedIsBootstrapToken &&
                         pinnedCredentialSource == CredentialResolver.SourceSharedGatewayToken,
-                    hasTokenQuery = url.Contains("?token=", StringComparison.Ordinal) || url.Contains("&token=", StringComparison.Ordinal)
+                    hasTokenQuery = false
                 };
             }
 

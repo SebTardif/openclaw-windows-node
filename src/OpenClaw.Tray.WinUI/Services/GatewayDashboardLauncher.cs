@@ -44,7 +44,12 @@ internal sealed class GatewayDashboardLauncher(
         if (confirmReady is not null && !await confirmReady())
             return false;
 
-        return await OpenUrlAsync(url);
+        // The browser receives a loopback page with no credential. The credential
+        // is released only when that page is requested and ownership still holds.
+        var launchUrl = confirmReady is null
+            ? url
+            : DashboardCredentialHandoff.Start(confirmReady, url);
+        return await OpenUrlAsync(launchUrl);
     }
 
     private async Task<bool> OpenUrlAsync(string url)

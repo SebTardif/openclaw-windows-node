@@ -1,3 +1,5 @@
+using System.Net;
+using System.Net.Http;
 using OpenClaw.Connection;
 using OpenClaw.SetupEngine;
 using OpenClawTray.Services;
@@ -192,6 +194,25 @@ public sealed class SetupDashboardHandoffTests
         Assert.Equal(urls[0], urls[1]);
         Assert.Equal(1, failures);
         Assert.Equal(1, opened);
+    }
+
+    [Fact]
+    public async Task DashboardHandoff_HidesCredentialUntilOwnershipHoldsOnce()
+    {
+        const string destination = "https://localhost:45678/mount/?view=compact#section&token=secret";
+        var open = DashboardCredentialHandoff.Start(() => Task.FromResult(true), destination);
+        Assert.DoesNotContain("token=", open, StringComparison.OrdinalIgnoreCase);
+        using var http = new HttpClient();
+        var first = await http.GetStringAsync(open);
+        Assert.Contains("token=secret", first, StringComparison.Ordinal);
+        var denied = await http.GetAsync(open);
+        Assert.Equal(HttpStatusCode.NotFound, denied.StatusCode);
+        Assert.DoesNotContain("secret", await denied.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+
+        var closed = DashboardCredentialHandoff.Start(() => Task.FromResult(false), destination);
+        var blocked = await http.GetAsync(closed);
+        Assert.Equal(HttpStatusCode.NotFound, blocked.StatusCode);
+        Assert.DoesNotContain("secret", await blocked.Content.ReadAsStringAsync(), StringComparison.Ordinal);
     }
 
     [Fact]

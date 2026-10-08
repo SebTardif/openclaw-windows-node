@@ -2659,7 +2659,12 @@ public sealed partial class ConnectionPage : Page
             if (pinned.SshTunnel is { } launchSsh &&
                 !await SavedDashboardListenerStillOwnedAsync(pinned, launchSsh))
                 return;
-            await global::Windows.System.Launcher.LaunchUriAsync(new Uri(url));
+            var launchUrl = pinned.SshTunnel is null
+                ? url
+                : DashboardCredentialHandoff.Start(
+                    () => SavedDashboardListenerStillOwnedAsync(pinned, pinned.SshTunnel),
+                    url);
+            await global::Windows.System.Launcher.LaunchUriAsync(new Uri(launchUrl));
         }
         catch (Exception ex)
         {
