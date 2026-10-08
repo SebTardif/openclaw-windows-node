@@ -2656,12 +2656,40 @@ public sealed partial class ConnectionPage : Page
                 path: null,
                 dashboardToken,
                 appendSharedGatewayToken: appendDashboardToken);
+            if (pinned.SshTunnel is { } launchSsh &&
+                !await SavedDashboardListenerStillOwnedAsync(pinned, launchSsh))
+                return;
             await global::Windows.System.Launcher.LaunchUriAsync(new Uri(url));
         }
         catch (Exception ex)
         {
             Services.Logger.Warn($"[ConnectionPage] Failed to open saved gateway dashboard: {ex.Message}");
         }
+    }
+
+    private async Task<bool> SavedDashboardListenerStillOwnedAsync(GatewayRecord pinned, SshTunnelConfig ssh)
+    {
+        if (!CurrentApp.DashboardPinStillMatches(pinned))
+        {
+            CurrentApp.ShowTransientConnectionError(DashboardCredentialGate.PinMismatchMessage);
+            return false;
+        }
+
+        var listenerOwned = await CurrentApp.IsDashboardListenerOwnedAsync(ssh);
+        if (!listenerOwned ||
+            !GatewayClientEndpointResolver.TryResolveDashboardEndpoint(
+                pinned,
+                CurrentApp.CaptureSshTunnelSnapshot(),
+                out _,
+                out _,
+                listenerOwned))
+        {
+            CurrentApp.ShowTransientConnectionError(
+                "Dashboard blocked because the SSH tunnel is not up.");
+            return false;
+        }
+
+        return true;
     }
 
     private void OnSavedRowEdit(object sender, RoutedEventArgs e)

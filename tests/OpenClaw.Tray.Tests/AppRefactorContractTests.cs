@@ -525,6 +525,30 @@ public sealed class AppRefactorContractTests
             Assert.Contains("LaunchPreparedDashboardAsync(", method);
             Assert.DoesNotContain("OpenDashboardUri", method);
             Assert.DoesNotContain("ex.Message", method);
+            var prepared = ExtractMethod(source, "LaunchPreparedDashboardAsync");
+            Assert.Contains("ConfirmActiveDashboardListenerAsync", prepared);
+            var confirm = ExtractMethod(source, "ConfirmActiveDashboardListenerAsync");
+            Assert.Contains("IsDashboardListenerOwnedAsync(ssh)", confirm);
+            Assert.Contains("TryResolveDashboardEndpoint(", confirm);
+        }
+
+        if (file == "Pages\\ConnectionPage.xaml.cs")
+        {
+            Assert.Contains("SavedDashboardListenerStillOwnedAsync(", method);
+            var recheck = ExtractMethod(source, "SavedDashboardListenerStillOwnedAsync");
+            Assert.Contains("IsDashboardListenerOwnedAsync(ssh)", recheck);
+            var buildAt = method.IndexOf("GatewayDashboardUrlBuilder.Build(", StringComparison.Ordinal);
+            var recheckAt = method.IndexOf("SavedDashboardListenerStillOwnedAsync(", StringComparison.Ordinal);
+            var launchAt = method.IndexOf("LaunchUriAsync", StringComparison.Ordinal);
+            Assert.True(buildAt >= 0 && recheckAt > buildAt && launchAt > recheckAt);
+        }
+
+        if (file == "App.CapabilityHandlers.cs")
+        {
+            var first = method.IndexOf("IsDashboardListenerOwnedAsync(ssh)", StringComparison.Ordinal);
+            var buildAt = method.IndexOf("GatewayDashboardUrlBuilder.Build(", StringComparison.Ordinal);
+            var second = method.IndexOf("IsDashboardListenerOwnedAsync(ssh)", buildAt, StringComparison.Ordinal);
+            Assert.True(first >= 0 && buildAt > first && second > buildAt);
         }
     }
 

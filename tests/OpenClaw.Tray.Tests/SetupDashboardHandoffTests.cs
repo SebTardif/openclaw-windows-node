@@ -194,6 +194,26 @@ public sealed class SetupDashboardHandoffTests
         Assert.Equal(1, opened);
     }
 
+    [Fact]
+    public async Task OpenPrepared_RefusesBrowserWhenOwnershipRecheckFails()
+    {
+        var launches = 0;
+        var launcher = new GatewayDashboardLauncher(
+            () => true,
+            () => null,
+            _ =>
+            {
+                launches++;
+                return Task.FromResult(true);
+            },
+            () => throw new InvalidOperationException("Unexpected failure"));
+
+        Assert.False(await launcher.OpenPreparedAsync(
+            "https://localhost/control#token=secret",
+            () => Task.FromResult(false)));
+        Assert.Equal(0, launches);
+    }
+
     private sealed class StartupClock : TimeProvider
     {
         public DateTimeOffset Now { get; set; } = new(2026, 9, 25, 12, 0, 0, TimeSpan.Zero);

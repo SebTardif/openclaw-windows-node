@@ -37,7 +37,15 @@ internal sealed class GatewayDashboardLauncher(
         return true;
     }
 
-    public Task<bool> OpenPreparedAsync(string url) => OpenUrlAsync(url);
+    public async Task<bool> OpenPreparedAsync(string url, Func<Task<bool>>? confirmReady = null)
+    {
+        // The ownership check that built this URL can be stale by the time the
+        // browser starts. Refuse the launch when that check no longer holds.
+        if (confirmReady is not null && !await confirmReady())
+            return false;
+
+        return await OpenUrlAsync(url);
+    }
 
     private async Task<bool> OpenUrlAsync(string url)
     {

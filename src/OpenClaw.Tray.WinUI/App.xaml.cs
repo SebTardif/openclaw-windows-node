@@ -4212,7 +4212,39 @@ public partial class App : Application, OpenClawTray.Services.IAppCommands, IPer
                 new AppLogger(),
                 "Dashboard launch error"),
             () => _appNotificationService?.Dismiss(GatewayDashboardLauncher.FailureNotificationId));
-        return launcher.OpenPreparedAsync(url);
+        return launcher.OpenPreparedAsync(url, ConfirmActiveDashboardListenerAsync);
+    }
+
+    private async Task<bool> ConfirmActiveDashboardListenerAsync()
+    {
+        var pinned = _gatewayRegistry?.GetActive();
+        if (pinned?.SshTunnel is not { } ssh)
+            return true;
+
+        if (!DashboardPinStillMatches(pinned))
+        {
+            _toastService?.ShowToast(new ToastContentBuilder()
+                .AddText("Dashboard")
+                .AddText(DashboardCredentialGate.PinMismatchMessage));
+            return false;
+        }
+
+        var listenerOwned = await IsDashboardListenerOwnedAsync(ssh);
+        if (!listenerOwned ||
+            !GatewayClientEndpointResolver.TryResolveDashboardEndpoint(
+                pinned,
+                _sshTunnelService?.CreateSnapshot(),
+                out _,
+                out _,
+                listenerOwned))
+        {
+            _toastService?.ShowToast(new ToastContentBuilder()
+                .AddText("SSH tunnel")
+                .AddText("Dashboard blocked because the SSH tunnel is not up."));
+            return false;
+        }
+
+        return true;
     }
 
     // ── IAppCommands implementation ─────────────────────────────────────

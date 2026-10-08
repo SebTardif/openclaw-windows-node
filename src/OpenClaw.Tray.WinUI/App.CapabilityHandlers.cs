@@ -283,6 +283,19 @@ public partial class App
                     decision.AppendToken &&
                     !pinnedIsBootstrapToken &&
                     pinnedCredentialSource == CredentialResolver.SourceSharedGatewayToken);
+                var stillOwned = await IsDashboardListenerOwnedAsync(ssh);
+                if (!DashboardPinStillMatches(pinned))
+                    return new { error = DashboardCredentialGate.PinMismatchMessage };
+                if (!stillOwned ||
+                    !GatewayClientEndpointResolver.TryResolveDashboardEndpoint(
+                        pinned,
+                        _sshTunnelService?.CreateSnapshot(),
+                        out _,
+                        out _,
+                        stillOwned))
+                {
+                    return new { error = "Dashboard blocked because the SSH tunnel is not up." };
+                }
 
                 return new
                 {
