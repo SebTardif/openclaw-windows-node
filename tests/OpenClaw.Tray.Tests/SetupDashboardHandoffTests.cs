@@ -230,6 +230,17 @@ public sealed class SetupDashboardHandoffTests
             "application/javascript",
             DashboardCredentialHandoff.ReadContentType(
                 "HTTP/1.1 200 OK\r\nContent-Type: application/javascript\r\n\r\n"));
+        Assert.Equal(
+            "<script src=\"/s/abc/assets/app.js\"></script>",
+            DashboardCredentialHandoff.RewriteRootAbsolute(
+                "<script src=\"/assets/app.js\"></script>",
+                "/s/abc"));
+        Assert.Equal(
+            42,
+            WindowsTcpListenerSnapshot.MatchAcceptedProcess(
+                [(45678, 51000, 42), (51000, 45678, 7)],
+                serverPort: 45678,
+                clientPort: 51000));
         var denied = await http.GetAsync(open);
         Assert.Equal(HttpStatusCode.NotFound, denied.StatusCode);
         Assert.DoesNotContain("secret", await denied.Content.ReadAsStringAsync(), StringComparison.Ordinal);

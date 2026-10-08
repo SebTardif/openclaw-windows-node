@@ -33,6 +33,82 @@ public static class WindowsTcpListenerSnapshot
         return new(result, ipv4Complete, ipv6Complete);
     }
 
+    public static int? MatchAcceptedProcess(
+        IEnumerable<(int LocalPort, int RemotePort, int ProcessId)> rows,
+        int serverPort,
+        int clientPort)
+    {
+        foreach (var row in rows)
+        {
+            if (row.LocalPort == serverPort && row.RemotePort == clientPort)
+                return row.ProcessId;
+        }
+
+        return null;
+    }
+
+    public static int? AcceptedProcessId(int serverPort, int clientPort)
+    {
+        if (!OperatingSystem.IsWindows())
+            return null;
+
+        var rows = new List<(int LocalPort, int RemotePort, int ProcessId)>();
+        if (!CaptureConnections(rows))
+            return null;
+        return MatchAcceptedProcess(rows, serverPort, clientPort);
+    }
+
+    private static bool CaptureConnections(List<(int LocalPort, int RemotePort, int ProcessId)> rows)
+    {
+        for (var attempt = 0; attempt < 3; attempt++)
+        {
+            var bufferLength = 0;
+            var status = GetExtendedTcpTable(
+                IntPtr.Zero,
+                ref bufferLength,
+                sort: true,
+                ipVersion: AfInet,
+                tableClass: TcpTableOwnerPidConnections,
+                reserved: 0);
+            if (status != ErrorInsufficientBuffer || bufferLength <= 0)
+                return false;
+
+            var tablePtr = Marshal.AllocHGlobal(bufferLength);
+            try
+            {
+                status = GetExtendedTcpTable(
+                    tablePtr,
+                    ref bufferLength,
+                    sort: true,
+                    ipVersion: AfInet,
+                    tableClass: TcpTableOwnerPidConnections,
+                    reserved: 0);
+                if (status == ErrorInsufficientBuffer)
+                    continue;
+                if (status != ErrorSuccess)
+                    return false;
+
+                var rowCount = Marshal.ReadInt32(tablePtr);
+                var rowPtr = IntPtr.Add(tablePtr, sizeof(int));
+                var rowSize = Marshal.SizeOf<MibTcpRowOwnerPid>();
+                for (var i = 0; i < rowCount; i++)
+                {
+                    var row = Marshal.PtrToStructure<MibTcpRowOwnerPid>(rowPtr);
+                    rows.Add((ReadPort(row.LocalPort), ReadPort(row.RemotePort), unchecked((int)row.OwningProcessId)));
+                    rowPtr = IntPtr.Add(rowPtr, rowSize);
+                }
+
+                return true;
+            }
+            finally
+            {
+                Marshal.FreeHGlobal(tablePtr);
+            }
+        }
+
+        return false;
+    }
+
     public static string? GetProcessCommandLine(int processId)
     {
         if (processId <= 0)
@@ -245,6 +321,7 @@ public static class WindowsTcpListenerSnapshot
     private const int AfInet = 2;
     private const int AfInet6 = 23;
     private const int TcpTableOwnerPidListener = 3;
+    private const int TcpTableOwnerPidConnections = 4;
     private const uint ErrorSuccess = 0;
     private const uint ErrorInsufficientBuffer = 122;
 

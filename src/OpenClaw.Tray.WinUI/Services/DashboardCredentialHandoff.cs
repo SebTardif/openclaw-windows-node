@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Linq;
 using System.Net;
 using System.Net.Security;
 using System.Net.Sockets;
@@ -103,7 +104,15 @@ internal static class DashboardCredentialHandoff
                 return;
             }
 
-            if (!TrySession(path, out var session, out var upstreamPath) || !await session.Owned())
+            if (!TrySession(path, out var session, out var upstreamPath) &&
+                !TrySessionFromReferer(context.Request.Headers["Referer"], path, out session, out upstreamPath))
+            {
+                response.StatusCode = (int)HttpStatusCode.NotFound;
+                response.Close();
+                return;
+            }
+
+            if (!await session.Owned())
             {
                 response.StatusCode = (int)HttpStatusCode.NotFound;
                 response.Close();
@@ -142,6 +151,59 @@ internal static class DashboardCredentialHandoff
         session = null!;
         upstreamPath = "/";
         return false;
+    }
+
+    private static bool TrySessionFromReferer(string? referer, string requestPath, out Handoff session, out string upstreamPath)
+    {
+        session = null!;
+        upstreamPath = requestPath;
+        if (string.IsNullOrWhiteSpace(referer) || !Uri.TryCreate(referer, UriKind.Absolute, out var uri))
+            return false;
+        if (!TrySession(uri.AbsolutePath, out session, out _))
+            return false;
+        if (string.IsNullOrEmpty(upstreamPath))
+            upstreamPath = "/";
+        return true;
+    }
+
+    internal static string RewriteRootAbsolute(string html, string sessionPrefix)
+    {
+        return System.Text.RegularExpressions.Regex.Replace(
+            html,
+            "(src|href|action)=\"/(?!s/)",
+            "$1=\"" + sessionPrefix + "/",
+            System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+    }
+
+    internal static void CopySecurityHeaders(string headerText, HttpListenerResponse response)
+    {
+        string[] names =
+        [
+            "Content-Security-Policy",
+            "X-Frame-Options",
+            "X-Content-Type-Options",
+            "Referrer-Policy",
+            "Permissions-Policy",
+            "Cross-Origin-Opener-Policy",
+            "Cross-Origin-Resource-Policy",
+            "Cross-Origin-Embedder-Policy",
+        ];
+        foreach (var line in headerText.Split("\r\n"))
+        {
+            var colon = line.IndexOf(':');
+            if (colon <= 0)
+                continue;
+            var name = line[..colon].Trim();
+            if (!names.Contains(name, StringComparer.OrdinalIgnoreCase))
+                continue;
+            try
+            {
+                response.Headers[name] = line[(colon + 1)..].Trim();
+            }
+            catch (ArgumentException)
+            {
+            }
+        }
     }
 
     internal static string? ReadContentType(string headerText)
@@ -224,7 +286,11 @@ internal static class DashboardCredentialHandoff
             var pathAndQuery = upstreamPath + query;
             using var tcp = new TcpClient();
             await tcp.ConnectAsync(destination.Host, destination.Port);
-            if (!await _owned())
+            var clientPort = tcp.Client.LocalEndPoint is IPEndPoint local ? local.Port : 0;
+            var accepted = WindowsTcpListenerSnapshot.AcceptedProcessId(destination.Port, clientPort);
+            var listener = WindowsTcpListenerSnapshot.Capture().Listeners
+                .FirstOrDefault(item => item.Port == destination.Port);
+            if (accepted is null || listener is null || accepted != listener.ProcessId || !await _owned())
             {
                 context.Response.StatusCode = (int)HttpStatusCode.NotFound;
                 context.Response.Close();
@@ -251,8 +317,16 @@ internal static class DashboardCredentialHandoff
             var body = headerEnd < 0 ? payload : payload[(headerEnd + 4)..];
             context.Response.StatusCode = StatusCode(payload);
             var headerText = Encoding.ASCII.GetString(payload, 0, headerEnd < 0 ? payload.Length : headerEnd);
+            CopySecurityHeaders(headerText, context.Response);
             if (ReadContentType(headerText) is { } contentType)
+            {
                 context.Response.ContentType = contentType;
+                if (contentType.Contains("text/html", StringComparison.OrdinalIgnoreCase))
+                {
+                    var html = Encoding.UTF8.GetString(body);
+                    body = Encoding.UTF8.GetBytes(RewriteRootAbsolute(html, "/s/" + Nonce));
+                }
+            }
             context.Response.ContentLength64 = body.Length;
             await context.Response.OutputStream.WriteAsync(body);
             context.Response.Close();
@@ -268,10 +342,12 @@ internal static class DashboardCredentialHandoff
             using var upstream = new ClientWebSocket();
             var tlsHost = _tlsHost;
             upstream.Options.RemoteCertificateValidationCallback = (_, certificate, _, errors) =>
-                errors == System.Net.Security.SslPolicyErrors.None ||
-                (errors == System.Net.Security.SslPolicyErrors.RemoteCertificateNameMismatch &&
-                    certificate is System.Security.Cryptography.X509Certificates.X509Certificate2 cert &&
-                    cert.MatchesHostname(tlsHost));
+            {
+                if (certificate is not System.Security.Cryptography.X509Certificates.X509Certificate2 cert)
+                    return false;
+                var other = errors & ~System.Net.Security.SslPolicyErrors.RemoteCertificateNameMismatch;
+                return other == System.Net.Security.SslPolicyErrors.None && cert.MatchesHostname(tlsHost);
+            };
             try
             {
                 await upstream.ConnectAsync(upstreamUri, CancellationToken.None);
