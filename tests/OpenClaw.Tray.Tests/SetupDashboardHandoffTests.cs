@@ -197,6 +197,24 @@ public sealed class SetupDashboardHandoffTests
     }
 
     [Fact]
+    public void IssuedBinding_RejectsSwitchToAnotherGateway()
+    {
+        var tunnel = new SshTunnelConfig("root", "gateway.example", 18789, 45678, false, 22);
+        var issued = new GatewayRecord
+        {
+            Id = "gateway-a",
+            Url = "wss://gateway.example/mount/",
+            SharedGatewayToken = "token-a",
+            SshTunnel = tunnel,
+        };
+        var other = new GatewayRecord { Id = "gateway-b", Url = "ws://127.0.0.1:18789/" };
+
+        Assert.True(DashboardIssuedBinding.Matches(issued, tunnel, issued));
+        Assert.False(DashboardIssuedBinding.Matches(issued, tunnel, other));
+        Assert.False(DashboardIssuedBinding.Matches(issued, tunnel, null));
+    }
+
+    [Fact]
     public async Task DashboardHandoff_HidesCredentialUntilOwnershipHoldsOnce()
     {
         const string destination = "https://localhost:45678/mount/?view=compact#section&token=secret";

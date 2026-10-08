@@ -526,9 +526,10 @@ public sealed class AppRefactorContractTests
             Assert.DoesNotContain("OpenDashboardUri", method);
             Assert.DoesNotContain("ex.Message", method);
             var prepared = ExtractMethod(source, "LaunchPreparedDashboardAsync");
-            Assert.Contains("ConfirmActiveDashboardListenerAsync", prepared);
-            var confirm = ExtractMethod(source, "ConfirmActiveDashboardListenerAsync");
-            Assert.Contains("IsDashboardListenerOwnedAsync(ssh)", confirm);
+            Assert.Contains("ConfirmIssuedDashboardListenerAsync", prepared);
+            var confirm = ExtractMethod(source, "ConfirmIssuedDashboardListenerAsync");
+            Assert.Contains("DashboardIssuedBinding.Matches", confirm);
+            Assert.Contains("IsDashboardListenerOwnedAsync(issuedTunnel)", confirm);
             Assert.Contains("TryResolveDashboardEndpoint(", confirm);
         }
 

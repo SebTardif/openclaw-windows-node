@@ -4173,7 +4173,7 @@ public partial class App : Application, OpenClawTray.Services.IAppCommands, IPer
                 decision.Token,
                 decision.AppendToken &&
                 !tunnelIsBootstrapToken &&
-                tunnelCredentialSource == CredentialResolver.SourceSharedGatewayToken), path);
+                tunnelCredentialSource == CredentialResolver.SourceSharedGatewayToken), path, pinned, ssh);
             return;
         }
 
@@ -4200,7 +4200,11 @@ public partial class App : Application, OpenClawTray.Services.IAppCommands, IPer
             !isBootstrapToken && credentialSource == CredentialResolver.SourceSharedGatewayToken), path);
     }
 
-    private Task LaunchPreparedDashboardAsync(string url, string? path)
+    private Task LaunchPreparedDashboardAsync(
+        string url,
+        string? path,
+        GatewayRecord? issued = null,
+        SshTunnelConfig? issuedTunnel = null)
     {
         var launcher = new GatewayDashboardLauncher(
             () => true,
@@ -4212,16 +4216,18 @@ public partial class App : Application, OpenClawTray.Services.IAppCommands, IPer
                 new AppLogger(),
                 "Dashboard launch error"),
             () => _appNotificationService?.Dismiss(GatewayDashboardLauncher.FailureNotificationId));
-        return launcher.OpenPreparedAsync(url, ConfirmActiveDashboardListenerAsync);
+        Func<Task<bool>>? confirm = issued is not null && issuedTunnel is not null
+            ? () => ConfirmIssuedDashboardListenerAsync(issued, issuedTunnel)
+            : null;
+        return launcher.OpenPreparedAsync(url, confirm);
     }
 
-    private async Task<bool> ConfirmActiveDashboardListenerAsync()
+    private async Task<bool> ConfirmIssuedDashboardListenerAsync(
+        GatewayRecord issued,
+        SshTunnelConfig issuedTunnel)
     {
-        var pinned = _gatewayRegistry?.GetActive();
-        if (pinned?.SshTunnel is not { } ssh)
-            return true;
-
-        if (!DashboardPinStillMatches(pinned))
+        if (!DashboardIssuedBinding.Matches(issued, issuedTunnel, _gatewayRegistry?.GetActive()) ||
+            !DashboardPinStillMatches(issued))
         {
             _toastService?.ShowToast(new ToastContentBuilder()
                 .AddText("Dashboard")
@@ -4229,10 +4235,10 @@ public partial class App : Application, OpenClawTray.Services.IAppCommands, IPer
             return false;
         }
 
-        var listenerOwned = await IsDashboardListenerOwnedAsync(ssh);
+        var listenerOwned = await IsDashboardListenerOwnedAsync(issuedTunnel);
         if (!listenerOwned ||
             !GatewayClientEndpointResolver.TryResolveDashboardEndpoint(
-                pinned,
+                issued,
                 _sshTunnelService?.CreateSnapshot(),
                 out _,
                 out _,

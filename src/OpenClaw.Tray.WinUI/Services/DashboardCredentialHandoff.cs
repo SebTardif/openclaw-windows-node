@@ -3,6 +3,7 @@ using System.Net;
 using System.Net.Sockets;
 using System.Text;
 using System.Text.Json;
+using OpenClaw.Connection;
 
 namespace OpenClawTray.Services;
 
@@ -10,6 +11,14 @@ namespace OpenClawTray.Services;
 /// Serves one loopback page that does not contain the dashboard credential.
 /// The credential is written only after a fresh ownership check, and only to that response.
 /// </summary>
+internal static class DashboardIssuedBinding
+{
+    public static bool Matches(GatewayRecord issued, SshTunnelConfig issuedTunnel, GatewayRecord? active) =>
+        active is not null
+        && string.Equals(active.Id, issued.Id, StringComparison.Ordinal)
+        && active.SshTunnel == issuedTunnel;
+}
+
 internal static class DashboardCredentialHandoff
 {
     private static readonly ConcurrentDictionary<string, Handoff> Live = new();

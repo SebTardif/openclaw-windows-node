@@ -299,7 +299,8 @@ public partial class App
 
                 var publicUrl = DashboardCredentialHandoff.Start(async () =>
                 {
-                    if (!DashboardPinStillMatches(pinned))
+                    if (!DashboardIssuedBinding.Matches(pinned, ssh, _gatewayRegistry?.GetActive()) ||
+                        !DashboardPinStillMatches(pinned))
                         return false;
                     var ownedNow = await IsDashboardListenerOwnedAsync(ssh);
                     return ownedNow &&
