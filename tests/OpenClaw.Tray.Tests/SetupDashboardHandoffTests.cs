@@ -220,6 +220,7 @@ public sealed class SetupDashboardHandoffTests
         const string destination = "https://localhost:45678/mount/?view=compact#section&token=secret";
         var open = DashboardCredentialHandoff.Start(() => Task.FromResult(true), destination);
         Assert.DoesNotContain("token=", open, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains($":{DashboardCredentialHandoff.Port}/", open, StringComparison.Ordinal);
         using var http = new HttpClient();
         var first = await http.GetStringAsync(open);
         Assert.Contains("token=secret", first, StringComparison.Ordinal);
