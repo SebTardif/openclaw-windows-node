@@ -2663,7 +2663,8 @@ public sealed partial class ConnectionPage : Page
                 ? url
                 : DashboardCredentialHandoff.Start(
                     () => SavedDashboardListenerStillOwnedAsync(pinned, pinned.SshTunnel),
-                    url);
+                    url,
+                    Uri.TryCreate(pinned.Url, UriKind.Absolute, out var savedUri) ? savedUri.Host : null);
             await global::Windows.System.Launcher.LaunchUriAsync(new Uri(launchUrl));
         }
         catch (Exception ex)

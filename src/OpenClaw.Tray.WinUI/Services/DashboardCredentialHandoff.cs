@@ -29,14 +29,13 @@ internal static class DashboardCredentialHandoff
     private static readonly ConcurrentDictionary<string, Handoff> Live = new();
     private static readonly object ListenerGate = new();
     private static HttpListener? _listener;
-    private static Handoff? _active;
 
-    public static string Start(Func<Task<bool>> owned, string destination)
+    public static string Start(Func<Task<bool>> owned, string destination, string? tlsHost = null)
     {
         ArgumentNullException.ThrowIfNull(owned);
         ArgumentException.ThrowIfNullOrWhiteSpace(destination);
         EnsureListener();
-        var handoff = new Handoff(owned, destination);
+        var handoff = new Handoff(owned, destination, tlsHost);
         Live[handoff.Nonce] = handoff;
         _ = handoff.ExpireUnusedAsync();
         return handoff.BrowserUrl;
@@ -104,8 +103,7 @@ internal static class DashboardCredentialHandoff
                 return;
             }
 
-            var active = _active;
-            if (active is null || !await active.Owned())
+            if (!TrySession(path, out var session, out var upstreamPath) || !await session.Owned())
             {
                 response.StatusCode = (int)HttpStatusCode.NotFound;
                 response.Close();
@@ -114,11 +112,11 @@ internal static class DashboardCredentialHandoff
 
             if (context.Request.IsWebSocketRequest)
             {
-                await active.ProxyWebSocketAsync(context);
+                await session.ProxyWebSocketAsync(context, upstreamPath);
                 return;
             }
 
-            await active.ProxyAsync(context);
+            await session.ProxyAsync(context, upstreamPath);
         }
         catch (Exception)
         {
@@ -126,16 +124,50 @@ internal static class DashboardCredentialHandoff
         }
     }
 
+    private static bool TrySession(string path, out Handoff session, out string upstreamPath)
+    {
+        foreach (var candidate in Live.Values)
+        {
+            var prefix = "/s/" + candidate.Nonce;
+            if (!path.Equals(prefix, StringComparison.Ordinal) &&
+                !path.StartsWith(prefix + "/", StringComparison.Ordinal))
+                continue;
+            session = candidate;
+            upstreamPath = path[prefix.Length..];
+            if (string.IsNullOrEmpty(upstreamPath))
+                upstreamPath = "/";
+            return true;
+        }
+
+        session = null!;
+        upstreamPath = "/";
+        return false;
+    }
+
+    internal static string? ReadContentType(string headerText)
+    {
+        foreach (var line in headerText.Split("\r\n"))
+        {
+            const string name = "Content-Type:";
+            if (line.StartsWith(name, StringComparison.OrdinalIgnoreCase))
+                return line[name.Length..].Trim();
+        }
+
+        return null;
+    }
+
     private sealed class Handoff
     {
         private readonly Func<Task<bool>> _owned;
         private readonly string _destination;
+        private readonly string _tlsHost;
         private int _delivered;
 
-        public Handoff(Func<Task<bool>> owned, string destination)
+        public Handoff(Func<Task<bool>> owned, string destination, string? tlsHost)
         {
             _owned = owned;
             _destination = destination;
+            _tlsHost = string.IsNullOrWhiteSpace(tlsHost) ? new Uri(destination).Host : tlsHost;
             Nonce = Convert.ToHexString(Guid.NewGuid().ToByteArray());
             BrowserUrl = $"http://127.0.0.1:{Port}/d/{Nonce}";
         }
@@ -163,7 +195,6 @@ internal static class DashboardCredentialHandoff
                 return;
             }
 
-            _active = this;
             var html = "<!doctype html><meta charset=\"utf-8\"><script>location.replace(" +
                 JsonSerializer.Serialize(SameOriginDestination()) + ")</script>";
             var bytes = Encoding.UTF8.GetBytes(html);
@@ -178,18 +209,19 @@ internal static class DashboardCredentialHandoff
         {
             var destination = new Uri(_destination);
             var hash = destination.Fragment;
-            var gateway = Uri.EscapeDataString($"ws://127.0.0.1:{Port}/");
+            var gateway = Uri.EscapeDataString($"ws://127.0.0.1:{Port}/s/{Nonce}/");
             hash = string.IsNullOrEmpty(hash)
                 ? "#gatewayUrl=" + gateway
                 : hash + "&gatewayUrl=" + gateway;
             var path = string.IsNullOrEmpty(destination.AbsolutePath) ? "/" : destination.AbsolutePath;
-            return $"http://127.0.0.1:{Port}{path}{destination.Query}{hash}";
+            return $"http://127.0.0.1:{Port}/s/{Nonce}{path}{destination.Query}{hash}";
         }
 
-        public async Task ProxyAsync(HttpListenerContext context)
+        public async Task ProxyAsync(HttpListenerContext context, string upstreamPath)
         {
             var destination = new Uri(_destination);
-            var pathAndQuery = context.Request.Url?.PathAndQuery ?? "/";
+            var query = context.Request.Url?.Query ?? "";
+            var pathAndQuery = upstreamPath + query;
             using var tcp = new TcpClient();
             await tcp.ConnectAsync(destination.Host, destination.Port);
             if (!await _owned())
@@ -203,14 +235,13 @@ internal static class DashboardCredentialHandoff
             Stream stream = raw;
             if (destination.Scheme == "https")
             {
-                // The owned forward presents the gateway certificate, not a 127.0.0.1 name.
-                var ssl = new SslStream(raw, leaveInnerStreamOpen: false, (_, _, _, _) => true);
-                await ssl.AuthenticateAsClientAsync(destination.Host);
+                var ssl = new SslStream(raw, leaveInnerStreamOpen: false);
+                await ssl.AuthenticateAsClientAsync(_tlsHost);
                 stream = ssl;
             }
 
             var requestText =
-                $"{context.Request.HttpMethod} {pathAndQuery} HTTP/1.1\r\nHost: {destination.Host}\r\nConnection: close\r\n\r\n";
+                $"{context.Request.HttpMethod} {pathAndQuery} HTTP/1.1\r\nHost: {_tlsHost}\r\nConnection: close\r\n\r\n";
             var requestBytes = Encoding.ASCII.GetBytes(requestText);
             await stream.WriteAsync(requestBytes);
             using var buffer = new MemoryStream();
@@ -219,19 +250,28 @@ internal static class DashboardCredentialHandoff
             var headerEnd = FindHeaderEnd(payload);
             var body = headerEnd < 0 ? payload : payload[(headerEnd + 4)..];
             context.Response.StatusCode = StatusCode(payload);
-            context.Response.ContentType = "text/html; charset=utf-8";
+            var headerText = Encoding.ASCII.GetString(payload, 0, headerEnd < 0 ? payload.Length : headerEnd);
+            if (ReadContentType(headerText) is { } contentType)
+                context.Response.ContentType = contentType;
             context.Response.ContentLength64 = body.Length;
             await context.Response.OutputStream.WriteAsync(body);
             context.Response.Close();
         }
 
-        public async Task ProxyWebSocketAsync(HttpListenerContext context)
+        public async Task ProxyWebSocketAsync(HttpListenerContext context, string upstreamPath)
         {
             var browser = await context.AcceptWebSocketAsync(null);
             var destination = new Uri(_destination);
             var scheme = destination.Scheme == "https" ? "wss" : "ws";
-            var upstreamUri = new Uri($"{scheme}://{destination.Host}:{destination.Port}{context.Request.Url?.PathAndQuery}");
+            var query = context.Request.Url?.Query ?? "";
+            var upstreamUri = new Uri($"{scheme}://{destination.Host}:{destination.Port}{upstreamPath}{query}");
             using var upstream = new ClientWebSocket();
+            var tlsHost = _tlsHost;
+            upstream.Options.RemoteCertificateValidationCallback = (_, certificate, _, errors) =>
+                errors == System.Net.Security.SslPolicyErrors.None ||
+                (errors == System.Net.Security.SslPolicyErrors.RemoteCertificateNameMismatch &&
+                    certificate is System.Security.Cryptography.X509Certificates.X509Certificate2 cert &&
+                    cert.MatchesHostname(tlsHost));
             try
             {
                 await upstream.ConnectAsync(upstreamUri, CancellationToken.None);

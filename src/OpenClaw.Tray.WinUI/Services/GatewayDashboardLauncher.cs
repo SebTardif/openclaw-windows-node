@@ -37,7 +37,7 @@ internal sealed class GatewayDashboardLauncher(
         return true;
     }
 
-    public async Task<bool> OpenPreparedAsync(string url, Func<Task<bool>>? confirmReady = null)
+    public async Task<bool> OpenPreparedAsync(string url, Func<Task<bool>>? confirmReady = null, string? tlsHost = null)
     {
         // The ownership check that built this URL can be stale by the time the
         // browser starts. Refuse the launch when that check no longer holds.
@@ -48,7 +48,7 @@ internal sealed class GatewayDashboardLauncher(
         // is released only when that page is requested and ownership still holds.
         var launchUrl = confirmReady is null
             ? url
-            : DashboardCredentialHandoff.Start(confirmReady, url);
+            : DashboardCredentialHandoff.Start(confirmReady, url, tlsHost);
         return await OpenUrlAsync(launchUrl);
     }
 

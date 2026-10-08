@@ -4219,7 +4219,10 @@ public partial class App : Application, OpenClawTray.Services.IAppCommands, IPer
         Func<Task<bool>>? confirm = issued is not null && issuedTunnel is not null
             ? () => ConfirmIssuedDashboardListenerAsync(issued, issuedTunnel)
             : null;
-        return launcher.OpenPreparedAsync(url, confirm);
+        var tlsHost = issued is not null && Uri.TryCreate(issued.Url, UriKind.Absolute, out var issuedUri)
+            ? issuedUri.Host
+            : null;
+        return launcher.OpenPreparedAsync(url, confirm, tlsHost);
     }
 
     private async Task<bool> ConfirmIssuedDashboardListenerAsync(

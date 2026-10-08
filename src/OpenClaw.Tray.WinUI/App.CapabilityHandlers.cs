@@ -297,6 +297,9 @@ public partial class App
                     return new { error = "Dashboard blocked because the SSH tunnel is not up." };
                 }
 
+                var tlsHost = Uri.TryCreate(pinned.Url, UriKind.Absolute, out var pinnedUri)
+                    ? pinnedUri.Host
+                    : null;
                 var publicUrl = DashboardCredentialHandoff.Start(async () =>
                 {
                     if (!DashboardIssuedBinding.Matches(pinned, ssh, _gatewayRegistry?.GetActive()) ||
@@ -310,7 +313,7 @@ public partial class App
                             out _,
                             out _,
                             ownedNow);
-                }, url);
+                }, url, tlsHost);
                 return new
                 {
                     url = publicUrl,

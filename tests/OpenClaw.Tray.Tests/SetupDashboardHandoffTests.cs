@@ -224,7 +224,12 @@ public sealed class SetupDashboardHandoffTests
         using var http = new HttpClient();
         var first = await http.GetStringAsync(open);
         Assert.Contains("token=secret", first, StringComparison.Ordinal);
+        Assert.Contains("/s/", first, StringComparison.Ordinal);
         Assert.DoesNotContain("45678", first, StringComparison.Ordinal);
+        Assert.Equal(
+            "application/javascript",
+            DashboardCredentialHandoff.ReadContentType(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/javascript\r\n\r\n"));
         var denied = await http.GetAsync(open);
         Assert.Equal(HttpStatusCode.NotFound, denied.StatusCode);
         Assert.DoesNotContain("secret", await denied.Content.ReadAsStringAsync(), StringComparison.Ordinal);
