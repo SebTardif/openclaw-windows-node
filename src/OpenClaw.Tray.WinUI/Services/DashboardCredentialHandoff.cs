@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Globalization;
 using System.Linq;
 using System.Net;
 using System.Net.Security;
@@ -41,12 +42,70 @@ internal static class DashboardCredentialHandoff
         ArgumentNullException.ThrowIfNull(owned);
         ArgumentException.ThrowIfNullOrWhiteSpace(destination);
         var key = string.IsNullOrWhiteSpace(originKey) ? "default" : originKey;
-        var port = OriginPorts.GetOrAdd(key, static assigned => assigned == "default" ? Port : FreePort());
-        EnsureListener(port);
+        var port = PortFor(key);
+        try
+        {
+            EnsureListener(port);
+        }
+        catch (HttpListenerException ex)
+        {
+            throw new InvalidOperationException(
+                $"Dashboard origin 127.0.0.1:{port} is already in use. Close the program using that port and open the dashboard again.",
+                ex);
+        }
         var handoff = new Handoff(owned, destination, tlsHost, port);
         Live[handoff.Nonce] = handoff;
         _ = handoff.ExpireUnusedAsync();
         return handoff.BrowserUrl;
+    }
+
+    /// <summary>
+    /// Test override for the per-gateway origin file. Production uses the tray data directory.
+    /// </summary>
+    internal static string? OriginStorePath { get; set; }
+
+    internal static void ResetOriginsForTests() => OriginPorts.Clear();
+
+    private static int PortFor(string key)
+    {
+        if (OriginPorts.TryGetValue(key, out var cached))
+            return cached;
+
+        lock (ListenerGate)
+        {
+            if (OriginPorts.TryGetValue(key, out cached))
+                return cached;
+
+            var saved = ReadStore();
+            if (!saved.TryGetValue(key, out var port))
+            {
+                // The previous handoff used 47831 for every gateway. Keep that
+                // origin for the first gateway so its browser profile stays put.
+                // Later gateways get their own port, saved for the next process.
+                port = key == "default" || !PortTaken(Port, saved) ? Port : AllocatePort(saved);
+                saved[key] = port;
+                WriteStore(saved);
+            }
+
+            OriginPorts[key] = port;
+            return port;
+        }
+    }
+
+    private static bool PortTaken(int port, Dictionary<string, int> saved) =>
+        saved.ContainsValue(port) || OriginPorts.Values.Contains(port);
+
+    private static int AllocatePort(Dictionary<string, int> saved)
+    {
+        for (var attempt = 0; attempt < 8; attempt++)
+        {
+            var port = FreePort();
+            if (port == Port || PortTaken(port, saved))
+                continue;
+            return port;
+        }
+
+        throw new InvalidOperationException("No free loopback port is available for a dashboard origin.");
     }
 
     private static int FreePort()
@@ -56,6 +115,37 @@ internal static class DashboardCredentialHandoff
         var port = ((IPEndPoint)probe.LocalEndpoint).Port;
         probe.Stop();
         return port;
+    }
+
+    private static string StoreFilePath() =>
+        OriginStorePath ?? Path.Combine(AppIdentity.ResolveRoamingDataDirectory(), "dashboard-origins.json");
+
+    private static Dictionary<string, int> ReadStore()
+    {
+        try
+        {
+            var path = StoreFilePath();
+            if (!File.Exists(path))
+                return new Dictionary<string, int>(StringComparer.Ordinal);
+            var saved = JsonSerializer.Deserialize<Dictionary<string, int>>(File.ReadAllText(path));
+            return saved ?? new Dictionary<string, int>(StringComparer.Ordinal);
+        }
+        catch (Exception ex) when (ex is IOException or JsonException or UnauthorizedAccessException)
+        {
+            throw new InvalidOperationException("The saved dashboard origins could not be read.", ex);
+        }
+    }
+
+    private static void WriteStore(Dictionary<string, int> saved)
+    {
+        var path = StoreFilePath();
+        var directory = Path.GetDirectoryName(path);
+        if (!string.IsNullOrEmpty(directory))
+            Directory.CreateDirectory(directory);
+        var json = JsonSerializer.Serialize(saved);
+        var temp = path + "." + Guid.NewGuid().ToString("N") + ".tmp";
+        File.WriteAllText(temp, json);
+        File.Move(temp, path, overwrite: true);
     }
 
     private static void EnsureListener(int port)
@@ -106,10 +196,11 @@ internal static class DashboardCredentialHandoff
         try
         {
             var path = context.Request.Url?.AbsolutePath ?? "";
+            var requestPort = RequestPort(context);
             if (path.StartsWith("/d/", StringComparison.Ordinal))
             {
                 var nonce = path["/d/".Length..];
-                if (!Live.TryGetValue(nonce, out var handoff))
+                if (!Live.TryGetValue(nonce, out var handoff) || handoff.Port != requestPort)
                 {
                     response.StatusCode = (int)HttpStatusCode.NotFound;
                     response.Close();
@@ -120,8 +211,8 @@ internal static class DashboardCredentialHandoff
                 return;
             }
 
-            if (!TrySession(path, out var session, out var upstreamPath) &&
-                !TrySessionFromReferer(context.Request.Headers["Referer"], path, out session, out upstreamPath))
+            if (!TrySession(path, requestPort, out var session, out var upstreamPath) &&
+                !TrySessionFromReferer(context.Request.Headers["Referer"], path, requestPort, out session, out upstreamPath))
             {
                 response.StatusCode = (int)HttpStatusCode.NotFound;
                 response.Close();
@@ -149,10 +240,17 @@ internal static class DashboardCredentialHandoff
         }
     }
 
-    private static bool TrySession(string path, out Handoff session, out string upstreamPath)
+    private static int RequestPort(HttpListenerContext context) =>
+        context.Request.LocalEndPoint is IPEndPoint local
+            ? local.Port
+            : context.Request.Url?.Port ?? 0;
+
+    private static bool TrySession(string path, int requestPort, out Handoff session, out string upstreamPath)
     {
         foreach (var candidate in Live.Values)
         {
+            if (candidate.Port != requestPort)
+                continue;
             var prefix = "/s/" + candidate.Nonce;
             if (!path.Equals(prefix, StringComparison.Ordinal) &&
                 !path.StartsWith(prefix + "/", StringComparison.Ordinal))
@@ -169,17 +267,64 @@ internal static class DashboardCredentialHandoff
         return false;
     }
 
-    private static bool TrySessionFromReferer(string? referer, string requestPath, out Handoff session, out string upstreamPath)
+    private static bool TrySessionFromReferer(
+        string? referer,
+        string requestPath,
+        int requestPort,
+        out Handoff session,
+        out string upstreamPath)
     {
         session = null!;
         upstreamPath = requestPath;
         if (string.IsNullOrWhiteSpace(referer) || !Uri.TryCreate(referer, UriKind.Absolute, out var uri))
             return false;
-        if (!TrySession(uri.AbsolutePath, out session, out _))
+        if (uri.Port != requestPort)
+            return false;
+        if (!TrySession(uri.AbsolutePath, requestPort, out session, out _))
             return false;
         if (string.IsNullOrEmpty(upstreamPath))
             upstreamPath = "/";
         return true;
+    }
+
+    internal static byte[]? DecodeChunked(byte[] body)
+    {
+        var output = new MemoryStream();
+        var index = 0;
+        while (index < body.Length)
+        {
+            var lineEnd = IndexOfCrlf(body, index);
+            if (lineEnd < 0)
+                return null;
+            var sizeText = Encoding.ASCII.GetString(body, index, lineEnd - index);
+            var extension = sizeText.IndexOf(';');
+            if (extension >= 0)
+                sizeText = sizeText[..extension];
+            if (!int.TryParse(sizeText.Trim(), NumberStyles.HexNumber, CultureInfo.InvariantCulture, out var size) || size < 0)
+                return null;
+            index = lineEnd + 2;
+            if (size == 0)
+                return output.ToArray();
+            if (index + size + 2 > body.Length)
+                return null;
+            output.Write(body, index, size);
+            if (body[index + size] != '\r' || body[index + size + 1] != '\n')
+                return null;
+            index += size + 2;
+        }
+
+        return null;
+    }
+
+    private static int IndexOfCrlf(byte[] body, int start)
+    {
+        for (var i = start; i + 1 < body.Length; i++)
+        {
+            if (body[i] == '\r' && body[i + 1] == '\n')
+                return i;
+        }
+
+        return -1;
     }
 
     internal static string? ReadHeader(string headerText, string name)
@@ -275,6 +420,7 @@ internal static class DashboardCredentialHandoff
 
         public string Nonce { get; }
         public string BrowserUrl { get; }
+        public int Port => _port;
         public Task<bool> Owned() => _owned();
 
         public async Task ExpireUnusedAsync()
@@ -325,11 +471,7 @@ internal static class DashboardCredentialHandoff
             var pathAndQuery = upstreamPath + query;
             using var tcp = new TcpClient();
             await tcp.ConnectAsync(destination.Host, destination.Port);
-            var clientPort = tcp.Client.LocalEndPoint is IPEndPoint local ? local.Port : 0;
-            var accepted = WindowsTcpListenerSnapshot.AcceptedProcessId(destination.Port, clientPort);
-            var listener = WindowsTcpListenerSnapshot.Capture().Listeners
-                .FirstOrDefault(item => item.Port == destination.Port);
-            if (accepted is null || listener is null || accepted != listener.ProcessId || !await _owned())
+            if (!BackendIsOwned(tcp) || !await _owned())
             {
                 context.Response.StatusCode = (int)HttpStatusCode.NotFound;
                 context.Response.Close();
@@ -374,8 +516,21 @@ internal static class DashboardCredentialHandoff
             var payload = buffer.ToArray();
             var headerEnd = FindHeaderEnd(payload);
             var body = headerEnd < 0 ? payload : payload[(headerEnd + 4)..];
-            context.Response.StatusCode = StatusCode(payload);
             var headerText = Encoding.ASCII.GetString(payload, 0, headerEnd < 0 ? payload.Length : headerEnd);
+            if (ReadHeader(headerText, "Transfer-Encoding") is { } transfer &&
+                transfer.Contains("chunked", StringComparison.OrdinalIgnoreCase))
+            {
+                var decoded = DecodeChunked(body);
+                if (decoded is null)
+                {
+                    context.Response.StatusCode = (int)HttpStatusCode.BadGateway;
+                    context.Response.Close();
+                    return;
+                }
+
+                body = decoded;
+            }
+            context.Response.StatusCode = StatusCode(payload);
             CopySecurityHeaders(headerText, context.Response);
             if (ReadHeader(headerText, "Location") is { } location)
             {
@@ -408,11 +563,7 @@ internal static class DashboardCredentialHandoff
             var query = context.Request.Url?.Query ?? "";
             using var probe = new TcpClient();
             await probe.ConnectAsync(destination.Host, destination.Port);
-            var clientPort = probe.Client.LocalEndPoint is IPEndPoint local ? local.Port : 0;
-            var accepted = WindowsTcpListenerSnapshot.AcceptedProcessId(destination.Port, clientPort);
-            var listener = WindowsTcpListenerSnapshot.Capture().Listeners
-                .FirstOrDefault(item => item.Port == destination.Port);
-            if (accepted is null || listener is null || accepted != listener.ProcessId || !await _owned())
+            if (!BackendIsOwned(probe) || !await _owned())
             {
                 probe.Close();
                 if (browser.WebSocket.State == WebSocketState.Open)
@@ -453,6 +604,18 @@ internal static class DashboardCredentialHandoff
                 if (browser.WebSocket.State == WebSocketState.Open)
                     await browser.WebSocket.CloseAsync(WebSocketCloseStatus.InternalServerError, "closed", CancellationToken.None);
             }
+        }
+
+        private static bool BackendIsOwned(TcpClient tcp)
+        {
+            if (tcp.Client.LocalEndPoint is not IPEndPoint local ||
+                tcp.Client.RemoteEndPoint is not IPEndPoint remote)
+                return false;
+            var accepted = WindowsTcpListenerSnapshot.AcceptedProcessId(remote, local);
+            var listener = WindowsTcpListenerSnapshot.MatchListener(
+                WindowsTcpListenerSnapshot.Capture().Listeners,
+                remote);
+            return accepted is not null && listener is not null && accepted == listener.ProcessId;
         }
 
         private static async Task<bool> ReadUpgradeAcceptedAsync(Stream stream)

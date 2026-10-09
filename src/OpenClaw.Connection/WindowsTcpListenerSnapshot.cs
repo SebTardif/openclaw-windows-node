@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Net;
+using System.Net.Sockets;
 using System.Runtime.InteropServices;
 
 namespace OpenClaw.Connection;
@@ -33,32 +34,87 @@ public static class WindowsTcpListenerSnapshot
         return new(result, ipv4Complete, ipv6Complete);
     }
 
+    public readonly record struct AcceptedTcpEndpoint(
+        IPAddress LocalAddress,
+        int LocalPort,
+        IPAddress RemoteAddress,
+        int RemotePort,
+        int ProcessId);
+
     public static int? MatchAcceptedProcess(
-        IEnumerable<(int LocalPort, int RemotePort, int ProcessId)> rows,
-        int serverPort,
-        int clientPort)
+        IEnumerable<AcceptedTcpEndpoint> rows,
+        IPEndPoint server,
+        IPEndPoint client)
     {
         foreach (var row in rows)
         {
-            if (row.LocalPort == serverPort && row.RemotePort == clientPort)
+            if (row.LocalPort == server.Port &&
+                row.RemotePort == client.Port &&
+                AddressesMatch(row.LocalAddress, server.Address) &&
+                AddressesMatch(row.RemoteAddress, client.Address))
                 return row.ProcessId;
         }
 
         return null;
     }
 
-    public static int? AcceptedProcessId(int serverPort, int clientPort)
+    public static WindowsTcpListenerInfo? MatchListener(
+        IEnumerable<WindowsTcpListenerInfo> listeners,
+        IPEndPoint connected)
+    {
+        WindowsTcpListenerInfo? wildcard = null;
+        foreach (var item in listeners)
+        {
+            if (item.Port != connected.Port)
+                continue;
+            if (AddressesMatch(item.Address, connected.Address))
+                return item;
+            if (wildcard is null && IsSameFamilyWildcard(item.Address, connected.Address))
+                wildcard = item;
+        }
+
+        return wildcard;
+    }
+
+    public static int? AcceptedProcessId(IPEndPoint server, IPEndPoint client)
     {
         if (!OperatingSystem.IsWindows())
             return null;
 
-        var rows = new List<(int LocalPort, int RemotePort, int ProcessId)>();
+        var rows = new List<AcceptedTcpEndpoint>();
         if (!CaptureConnections(rows))
             return null;
-        return MatchAcceptedProcess(rows, serverPort, clientPort);
+        return MatchAcceptedProcess(rows, server, client);
     }
 
-    private static bool CaptureConnections(List<(int LocalPort, int RemotePort, int ProcessId)> rows)
+    internal static bool AddressesMatch(IPAddress left, IPAddress right)
+    {
+        if (left.Equals(right))
+            return true;
+        if (left.IsIPv4MappedToIPv6 && left.MapToIPv4().Equals(right))
+            return true;
+        if (right.IsIPv4MappedToIPv6 && right.MapToIPv4().Equals(left))
+            return true;
+        return false;
+    }
+
+    private static bool IsSameFamilyWildcard(IPAddress listener, IPAddress connected)
+    {
+        if (connected.AddressFamily == AddressFamily.InterNetwork)
+            return listener.Equals(IPAddress.Any);
+        if (connected.AddressFamily == AddressFamily.InterNetworkV6)
+            return listener.Equals(IPAddress.IPv6Any);
+        return false;
+    }
+
+    private static bool CaptureConnections(List<AcceptedTcpEndpoint> rows)
+    {
+        var ipv4 = CaptureConnectionFamily(AfInet, rows);
+        var ipv6 = CaptureConnectionFamily(AfInet6, rows);
+        return ipv4 || ipv6;
+    }
+
+    private static bool CaptureConnectionFamily(int addressFamily, List<AcceptedTcpEndpoint> rows)
     {
         for (var attempt = 0; attempt < 3; attempt++)
         {
@@ -67,7 +123,7 @@ public static class WindowsTcpListenerSnapshot
                 IntPtr.Zero,
                 ref bufferLength,
                 sort: true,
-                ipVersion: AfInet,
+                ipVersion: addressFamily,
                 tableClass: TcpTableOwnerPidConnections,
                 reserved: 0);
             if (status != ErrorInsufficientBuffer || bufferLength <= 0)
@@ -80,7 +136,7 @@ public static class WindowsTcpListenerSnapshot
                     tablePtr,
                     ref bufferLength,
                     sort: true,
-                    ipVersion: AfInet,
+                    ipVersion: addressFamily,
                     tableClass: TcpTableOwnerPidConnections,
                     reserved: 0);
                 if (status == ErrorInsufficientBuffer)
@@ -90,11 +146,32 @@ public static class WindowsTcpListenerSnapshot
 
                 var rowCount = Marshal.ReadInt32(tablePtr);
                 var rowPtr = IntPtr.Add(tablePtr, sizeof(int));
-                var rowSize = Marshal.SizeOf<MibTcpRowOwnerPid>();
+                var rowSize = addressFamily == AfInet6
+                    ? Marshal.SizeOf<MibTcp6RowOwnerPid>()
+                    : Marshal.SizeOf<MibTcpRowOwnerPid>();
                 for (var i = 0; i < rowCount; i++)
                 {
-                    var row = Marshal.PtrToStructure<MibTcpRowOwnerPid>(rowPtr);
-                    rows.Add((ReadPort(row.LocalPort), ReadPort(row.RemotePort), unchecked((int)row.OwningProcessId)));
+                    if (addressFamily == AfInet6)
+                    {
+                        var row = Marshal.PtrToStructure<MibTcp6RowOwnerPid>(rowPtr);
+                        rows.Add(new AcceptedTcpEndpoint(
+                            new IPAddress(row.LocalAddress, row.LocalScopeId),
+                            ReadPort(row.LocalPort),
+                            new IPAddress(row.RemoteAddress, row.RemoteScopeId),
+                            ReadPort(row.RemotePort),
+                            unchecked((int)row.OwningProcessId)));
+                    }
+                    else
+                    {
+                        var row = Marshal.PtrToStructure<MibTcpRowOwnerPid>(rowPtr);
+                        rows.Add(new AcceptedTcpEndpoint(
+                            new IPAddress(BitConverter.GetBytes(row.LocalAddress)),
+                            ReadPort(row.LocalPort),
+                            new IPAddress(BitConverter.GetBytes(row.RemoteAddress)),
+                            ReadPort(row.RemotePort),
+                            unchecked((int)row.OwningProcessId)));
+                    }
+
                     rowPtr = IntPtr.Add(rowPtr, rowSize);
                 }
 
