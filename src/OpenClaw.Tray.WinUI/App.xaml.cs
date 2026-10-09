@@ -4222,7 +4222,7 @@ public partial class App : Application, OpenClawTray.Services.IAppCommands, IPer
         var tlsHost = issued is not null && Uri.TryCreate(issued.Url, UriKind.Absolute, out var issuedUri)
             ? issuedUri.Host
             : null;
-        return launcher.OpenPreparedAsync(url, confirm, tlsHost);
+        return launcher.OpenPreparedAsync(url, confirm, tlsHost, issued?.Id);
     }
 
     private async Task<bool> ConfirmIssuedDashboardListenerAsync(

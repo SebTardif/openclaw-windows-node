@@ -313,7 +313,7 @@ public partial class App
                             out _,
                             out _,
                             ownedNow);
-                }, url, tlsHost);
+                }, url, tlsHost, pinned.Id);
                 return new
                 {
                     url = publicUrl,

@@ -28,30 +28,46 @@ internal static class DashboardCredentialHandoff
     public const int Port = 47831;
 
     private static readonly ConcurrentDictionary<string, Handoff> Live = new();
+    private static readonly ConcurrentDictionary<string, int> OriginPorts = new();
+    private static readonly ConcurrentDictionary<int, HttpListener> Listeners = new();
     private static readonly object ListenerGate = new();
-    private static HttpListener? _listener;
 
-    public static string Start(Func<Task<bool>> owned, string destination, string? tlsHost = null)
+    public static string Start(
+        Func<Task<bool>> owned,
+        string destination,
+        string? tlsHost = null,
+        string? originKey = null)
     {
         ArgumentNullException.ThrowIfNull(owned);
         ArgumentException.ThrowIfNullOrWhiteSpace(destination);
-        EnsureListener();
-        var handoff = new Handoff(owned, destination, tlsHost);
+        var key = string.IsNullOrWhiteSpace(originKey) ? "default" : originKey;
+        var port = OriginPorts.GetOrAdd(key, static assigned => assigned == "default" ? Port : FreePort());
+        EnsureListener(port);
+        var handoff = new Handoff(owned, destination, tlsHost, port);
         Live[handoff.Nonce] = handoff;
         _ = handoff.ExpireUnusedAsync();
         return handoff.BrowserUrl;
     }
 
-    private static void EnsureListener()
+    private static int FreePort()
+    {
+        using var probe = new TcpListener(IPAddress.Loopback, 0);
+        probe.Start();
+        var port = ((IPEndPoint)probe.LocalEndpoint).Port;
+        probe.Stop();
+        return port;
+    }
+
+    private static void EnsureListener(int port)
     {
         lock (ListenerGate)
         {
-            if (_listener is { IsListening: true })
+            if (Listeners.TryGetValue(port, out var existing) && existing.IsListening)
                 return;
             var listener = new HttpListener();
-            listener.Prefixes.Add($"http://127.0.0.1:{Port}/");
+            listener.Prefixes.Add($"http://127.0.0.1:{port}/");
             listener.Start();
-            _listener = listener;
+            Listeners[port] = listener;
             _ = ServeAsync(listener);
         }
     }
@@ -166,6 +182,27 @@ internal static class DashboardCredentialHandoff
         return true;
     }
 
+    internal static string? ReadHeader(string headerText, string name)
+    {
+        foreach (var line in headerText.Split("\r\n"))
+        {
+            var prefix = name + ":";
+            if (line.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+                return line[prefix.Length..].Trim();
+        }
+
+        return null;
+    }
+
+    internal static string RewriteLocation(string location, string sessionPrefix)
+    {
+        if (location.StartsWith(sessionPrefix, StringComparison.Ordinal))
+            return location;
+        if (location.StartsWith("/", StringComparison.Ordinal))
+            return sessionPrefix + location;
+        return location;
+    }
+
     internal static string RewriteRootAbsolute(string html, string sessionPrefix)
     {
         return System.Text.RegularExpressions.Regex.Replace(
@@ -223,15 +260,17 @@ internal static class DashboardCredentialHandoff
         private readonly Func<Task<bool>> _owned;
         private readonly string _destination;
         private readonly string _tlsHost;
+        private readonly int _port;
         private int _delivered;
 
-        public Handoff(Func<Task<bool>> owned, string destination, string? tlsHost)
+        public Handoff(Func<Task<bool>> owned, string destination, string? tlsHost, int port)
         {
             _owned = owned;
             _destination = destination;
             _tlsHost = string.IsNullOrWhiteSpace(tlsHost) ? new Uri(destination).Host : tlsHost;
+            _port = port;
             Nonce = Convert.ToHexString(Guid.NewGuid().ToByteArray());
-            BrowserUrl = $"http://127.0.0.1:{Port}/d/{Nonce}";
+            BrowserUrl = $"http://127.0.0.1:{port}/d/{Nonce}";
         }
 
         public string Nonce { get; }
@@ -271,12 +310,12 @@ internal static class DashboardCredentialHandoff
         {
             var destination = new Uri(_destination);
             var hash = destination.Fragment;
-            var gateway = Uri.EscapeDataString($"ws://127.0.0.1:{Port}/s/{Nonce}/");
+            var gateway = Uri.EscapeDataString($"ws://127.0.0.1:{_port}/s/{Nonce}/");
             hash = string.IsNullOrEmpty(hash)
                 ? "#gatewayUrl=" + gateway
                 : hash + "&gatewayUrl=" + gateway;
             var path = string.IsNullOrEmpty(destination.AbsolutePath) ? "/" : destination.AbsolutePath;
-            return $"http://127.0.0.1:{Port}/s/{Nonce}{path}{destination.Query}{hash}";
+            return $"http://127.0.0.1:{_port}/s/{Nonce}{path}{destination.Query}{hash}";
         }
 
         public async Task ProxyAsync(HttpListenerContext context, string upstreamPath)
@@ -306,10 +345,30 @@ internal static class DashboardCredentialHandoff
                 stream = ssl;
             }
 
-            var requestText =
-                $"{context.Request.HttpMethod} {pathAndQuery} HTTP/1.1\r\nHost: {_tlsHost}\r\nConnection: close\r\n\r\n";
-            var requestBytes = Encoding.ASCII.GetBytes(requestText);
-            await stream.WriteAsync(requestBytes);
+            var bodyBytes = Array.Empty<byte>();
+            if (context.Request.HasEntityBody)
+            {
+                using var incoming = new MemoryStream();
+                await context.Request.InputStream.CopyToAsync(incoming);
+                bodyBytes = incoming.ToArray();
+            }
+
+            var requestHeader = new StringBuilder();
+            requestHeader.Append($"{context.Request.HttpMethod} {pathAndQuery} HTTP/1.1\r\n");
+            requestHeader.Append($"Host: {_tlsHost}\r\n");
+            requestHeader.Append("Connection: close\r\n");
+            foreach (var name in new[] { "Cookie", "Authorization", "Content-Type", "Accept", "Accept-Language" })
+            {
+                var value = context.Request.Headers[name];
+                if (!string.IsNullOrEmpty(value))
+                    requestHeader.Append($"{name}: {value}\r\n");
+            }
+            if (bodyBytes.Length > 0)
+                requestHeader.Append($"Content-Length: {bodyBytes.Length}\r\n");
+            requestHeader.Append("\r\n");
+            await stream.WriteAsync(Encoding.ASCII.GetBytes(requestHeader.ToString()));
+            if (bodyBytes.Length > 0)
+                await stream.WriteAsync(bodyBytes);
             using var buffer = new MemoryStream();
             await stream.CopyToAsync(buffer);
             var payload = buffer.ToArray();
@@ -318,6 +377,16 @@ internal static class DashboardCredentialHandoff
             context.Response.StatusCode = StatusCode(payload);
             var headerText = Encoding.ASCII.GetString(payload, 0, headerEnd < 0 ? payload.Length : headerEnd);
             CopySecurityHeaders(headerText, context.Response);
+            if (ReadHeader(headerText, "Location") is { } location)
+            {
+                try
+                {
+                    context.Response.Headers["Location"] = RewriteLocation(location, "/s/" + Nonce);
+                }
+                catch (ArgumentException)
+                {
+                }
+            }
             if (ReadContentType(headerText) is { } contentType)
             {
                 context.Response.ContentType = contentType;
@@ -336,29 +405,45 @@ internal static class DashboardCredentialHandoff
         {
             var browser = await context.AcceptWebSocketAsync(null);
             var destination = new Uri(_destination);
-            var scheme = destination.Scheme == "https" ? "wss" : "ws";
             var query = context.Request.Url?.Query ?? "";
-            var upstreamUri = new Uri($"{scheme}://{destination.Host}:{destination.Port}{upstreamPath}{query}");
-            using var upstream = new ClientWebSocket();
-            var tlsHost = _tlsHost;
-            upstream.Options.RemoteCertificateValidationCallback = (_, certificate, _, errors) =>
+            using var probe = new TcpClient();
+            await probe.ConnectAsync(destination.Host, destination.Port);
+            var clientPort = probe.Client.LocalEndPoint is IPEndPoint local ? local.Port : 0;
+            var accepted = WindowsTcpListenerSnapshot.AcceptedProcessId(destination.Port, clientPort);
+            var listener = WindowsTcpListenerSnapshot.Capture().Listeners
+                .FirstOrDefault(item => item.Port == destination.Port);
+            if (accepted is null || listener is null || accepted != listener.ProcessId || !await _owned())
             {
-                if (certificate is not System.Security.Cryptography.X509Certificates.X509Certificate2 cert)
-                    return false;
-                var other = errors & ~System.Net.Security.SslPolicyErrors.RemoteCertificateNameMismatch;
-                return other == System.Net.Security.SslPolicyErrors.None && cert.MatchesHostname(tlsHost);
-            };
+                probe.Close();
+                if (browser.WebSocket.State == WebSocketState.Open)
+                    await browser.WebSocket.CloseAsync(WebSocketCloseStatus.PolicyViolation, "closed", CancellationToken.None);
+                return;
+            }
+
             try
             {
-                await upstream.ConnectAsync(upstreamUri, CancellationToken.None);
-                if (!await _owned())
+                Stream socketStream = probe.GetStream();
+                if (destination.Scheme == "https")
                 {
-                    upstream.Abort();
+                    var ssl = new SslStream(socketStream, leaveInnerStreamOpen: false);
+                    await ssl.AuthenticateAsClientAsync(_tlsHost);
+                    socketStream = ssl;
+                }
+
+                var key = Convert.ToBase64String(Guid.NewGuid().ToByteArray());
+                var upgrade =
+                    $"GET {upstreamPath}{query} HTTP/1.1\r\nHost: {_tlsHost}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\n\r\n";
+                await socketStream.WriteAsync(Encoding.ASCII.GetBytes(upgrade));
+                if (!await ReadUpgradeAcceptedAsync(socketStream))
+                {
                     if (browser.WebSocket.State == WebSocketState.Open)
                         await browser.WebSocket.CloseAsync(WebSocketCloseStatus.PolicyViolation, "closed", CancellationToken.None);
                     return;
                 }
 
+                using var upstream = WebSocket.CreateFromStream(
+                    socketStream,
+                    new WebSocketCreationOptions { IsServer = false });
                 await Task.WhenAll(
                     PumpAsync(browser.WebSocket, upstream),
                     PumpAsync(upstream, browser.WebSocket));
@@ -368,6 +453,28 @@ internal static class DashboardCredentialHandoff
                 if (browser.WebSocket.State == WebSocketState.Open)
                     await browser.WebSocket.CloseAsync(WebSocketCloseStatus.InternalServerError, "closed", CancellationToken.None);
             }
+        }
+
+        private static async Task<bool> ReadUpgradeAcceptedAsync(Stream stream)
+        {
+            using var header = new MemoryStream();
+            var window = new byte[4];
+            var one = new byte[1];
+            while (await stream.ReadAsync(one) > 0)
+            {
+                header.WriteByte(one[0]);
+                window[0] = window[1];
+                window[1] = window[2];
+                window[2] = window[3];
+                window[3] = one[0];
+                if (window[0] == '\r' && window[1] == '\n' && window[2] == '\r' && window[3] == '\n')
+                    break;
+                if (header.Length > 8192)
+                    return false;
+            }
+
+            var text = Encoding.ASCII.GetString(header.ToArray());
+            return text.Contains(" 101 ", StringComparison.Ordinal);
         }
 
         private static async Task PumpAsync(WebSocket from, WebSocket to)

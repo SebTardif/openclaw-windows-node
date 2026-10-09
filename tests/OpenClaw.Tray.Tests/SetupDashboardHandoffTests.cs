@@ -235,6 +235,9 @@ public sealed class SetupDashboardHandoffTests
             DashboardCredentialHandoff.RewriteRootAbsolute(
                 "<script src=\"/assets/app.js\"></script>",
                 "/s/abc"));
+        Assert.Equal("/s/abc/assets/app.js", DashboardCredentialHandoff.RewriteLocation("/assets/app.js", "/s/abc"));
+        var other = DashboardCredentialHandoff.Start(() => Task.FromResult(true), destination, originKey: "other-gateway");
+        Assert.DoesNotContain($":{DashboardCredentialHandoff.Port}/", other, StringComparison.Ordinal);
         Assert.Equal(
             42,
             WindowsTcpListenerSnapshot.MatchAcceptedProcess(
