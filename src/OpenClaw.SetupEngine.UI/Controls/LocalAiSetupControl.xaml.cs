@@ -62,6 +62,7 @@ public sealed partial class LocalAiSetupControl : UserControl
         LocalAiSetupAvailabilitySnapshot checking =
             startedAvailability ?? _localAiAvailability.StartProbe();
         ShowLocalAiAvailabilityChecking(checking);
+        LocalAiProfileSelectionText.Visibility = Visibility.Collapsed;
         SetupWindow? setupWindow = _setupWindow;
         Task<HostHardwareInfo> hardwareTask = setupWindow is not null
             ? setupWindow.GetLocalAiHardwareAsync(forceRefresh: refreshHardwareProbe)
@@ -69,6 +70,7 @@ public sealed partial class LocalAiSetupControl : UserControl
 
         string? hardwareReason = null;
         LocalInferenceEligibilityResult? eligibility = null;
+        bool canRecheckHardware = false;
         try
         {
             HostHardwareInfo hardware = await hardwareTask;
@@ -81,7 +83,12 @@ public sealed partial class LocalAiSetupControl : UserControl
             // an otherwise-capable device look unavailable and hide the badge/option; it only
             // means the configured model needs to fall back to a valid one below.
             LocalInferenceEligibilityResult deviceEligibility = LocalInferenceEligibility.Evaluate(_localAiHardware);
-            if (deviceEligibility.FailureCode == LocalInferenceEligibilityFailureCode.HardwareFactsIncomplete)
+            LocalInferenceEligibilityResult availability =
+                LocalInferenceEligibility.EvaluateForConfiguredAvailability(
+                    _localAiHardware,
+                    _config!.LocalAi.SelectedModelId,
+                    hasInstalledReceipt: _localAiRecoveryModelPinned);
+            if (availability.FailureCode == LocalInferenceEligibilityFailureCode.HardwareFactsIncomplete)
             {
                 // Incomplete facts (a partial/transient CUDA read) are inconclusive, not a
                 // definitive "this device cannot run Local AI". Report it the same way as a
@@ -96,22 +103,20 @@ public sealed partial class LocalAiSetupControl : UserControl
                 }
                 return;
             }
+            if (LocalInferenceProfileRecommendation.From(deviceEligibility) is { } recommendation)
+            {
+                LocalAiProfileSelectionText.Text = SetupLocalization.Format("LocalAi_ProfileFallback",
+                    recommendation.PreferredModelName, recommendation.SelectedModelName, recommendation.ContextTokens);
+                LocalAiProfileSelectionText.Visibility = Visibility.Visible;
+            }
             _localAiRecommendedModelId = deviceEligibility.CanInstall
                 ? deviceEligibility.Plan?.Model.Id
                 : null;
 
-            // A SKU with no recommended default (RTX Spark 32 GB) still runs an already
-            // configured model. Gate availability on that configured selection when there is
-            // one, so rerunning setup does not switch Local AI off on a working machine.
-            // _localAiRecommendedModelId stays null so nothing is labelled Recommended.
-            LocalInferenceEligibilityResult availability =
-                LocalInferenceEligibility.EvaluateForConfiguredAvailability(
-                    _localAiHardware,
-                    _config!.LocalAi.SelectedModelId);
-
             if (!availability.CanInstall || availability.Plan is null || availability.SelectedGpu is null)
             {
                 hardwareReason = DescribeLocalAiUnavailable(availability);
+                canRecheckHardware = availability.FailureCode == LocalInferenceEligibilityFailureCode.InsufficientDiskSpace;
             }
             else
             {
@@ -193,7 +198,8 @@ public sealed partial class LocalAiSetupControl : UserControl
             if (_localAiAvailability.TryApplyUnsupported(
                     checking.Generation,
                     unavailableReason,
-                    out var unavailableSnapshot))
+                    out var unavailableSnapshot,
+                    isRecoverable: canRecheckHardware))
             {
                 ShowLocalAiUnavailable(unavailableSnapshot);
             }
@@ -327,6 +333,10 @@ public sealed partial class LocalAiSetupControl : UserControl
                     reason.DetectedGigabytes is { } detected
                         ? FormatGigabytes(detected)
                         : SetupLocalization.GetString("LocalAi_Reason_UnknownMemoryAmount")),
+            LocalInferenceUnavailableReasonKind.InsufficientSystemMemory =>
+                SetupLocalization.Format("LocalAi_Reason_InsufficientSystemMemory", FormatGigabytes(reason.RequiredSystemGigabytes)),
+            LocalInferenceUnavailableReasonKind.InsufficientDiskSpace =>
+                SetupLocalization.Format("LocalAi_Reason_InsufficientDiskSpace", FormatGigabytes(reason.RequiredDiskGigabytes)),
             LocalInferenceUnavailableReasonKind.DriverTooOld =>
                 SetupLocalization.Format(
                     "LocalAi_Reason_DriverTooOld",
@@ -365,12 +375,12 @@ public sealed partial class LocalAiSetupControl : UserControl
         LocalAiUnavailableDetailsButton.Visibility =
             string.IsNullOrWhiteSpace(_localAiUnavailableReason) ? Visibility.Collapsed : Visibility.Visible;
         LocalAiAvailabilityRecoveryPanel.Visibility =
-            snapshot.IsChecking || snapshot.IsUnknown ? Visibility.Visible : Visibility.Collapsed;
+            snapshot.IsChecking || snapshot.CanRecheck ? Visibility.Visible : Visibility.Collapsed;
         LocalAiAvailabilityProgressRing.IsActive = snapshot.IsChecking;
         LocalAiAvailabilityProgressRing.Visibility =
             snapshot.IsChecking ? Visibility.Visible : Visibility.Collapsed;
         LocalAiRecheckAvailabilityButton.Visibility =
-            snapshot.IsUnknown ? Visibility.Visible : Visibility.Collapsed;
+            snapshot.CanRecheck ? Visibility.Visible : Visibility.Collapsed;
         LocalAiRecheckAvailabilityButton.IsEnabled = snapshot.CanRecheck;
     }
 
