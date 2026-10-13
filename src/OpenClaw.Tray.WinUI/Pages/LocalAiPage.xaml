@@ -13,6 +13,9 @@
                        Style="{StaticResource CaptionTextBlockStyle}"
                        Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextWrapping="Wrap"/>
 
+            <TextBlock x:Name="LocalAiProfileSelectionText" TextWrapping="Wrap" Visibility="Collapsed"
+                       AutomationProperties.AutomationId="LocalAiProfileSelectionText"
+                       AutomationProperties.LiveSetting="Polite" />
             <InfoBar x:Name="LocalAiUnavailableInfoBar"
                      x:Uid="LocalAiPage_UnavailableInfoBar"
                      Title="Local AI is not available"
@@ -107,6 +110,9 @@
                         <Button x:Name="OpenLogsButton" x:Uid="LocalAiPage_OpenLogsButton" Content="Open logs"
                                 Click="OnOpenLogs" AutomationProperties.AutomationId="LocalAiOpenLogs"/>
                     </StackPanel>
+                    <Button x:Name="ReleaseOwnershipButton" x:Uid="LocalAiPage_ReleaseOwnershipButton"
+                            Content="Release Gateway ownership" Visibility="Collapsed"
+                            Click="OnReleaseOwnership" AutomationProperties.AutomationId="LocalAiReleaseOwnership"/>
                 </StackPanel>
                 </Border>
             </ContentControl>
