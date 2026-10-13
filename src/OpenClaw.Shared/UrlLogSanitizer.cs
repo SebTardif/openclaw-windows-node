@@ -1,4 +1,5 @@
 using System;
+using System.Text;
 
 namespace OpenClaw.Shared;
 
@@ -26,7 +27,13 @@ public static class UrlLogSanitizer
 
     internal static string ReduceLoggedPath(string absolutePath)
     {
-        var path = UnescapePath(absolutePath);
+        // Unescape once so %2F, %3F, and %23 become real boundaries. The same
+        // decode turns %0A, %00, %1B, NEL, and the Unicode line separators into
+        // raw controls. Strip those before the segment cut. A newline left in
+        // this string is written by canvas logs, and the later URL regex stops
+        // at it, so the rest of the line is never redacted. One decode only:
+        // %250A stays as the characters %0A.
+        var path = StripLogControls(UnescapePath(absolutePath));
         var cut = path.IndexOfAny(['?', '#']);
         if (cut >= 0)
             path = path[..cut];
@@ -38,6 +45,22 @@ public static class UrlLogSanitizer
             return path;
         return path[..firstSlash] + "/…";
     }
+
+    // Same set as TokenSanitizer's log-injection filter: C0, DEL, NEL, U+2028, U+2029.
+    private static string StripLogControls(string value)
+    {
+        var builder = new StringBuilder(value.Length);
+        foreach (var ch in value)
+        {
+            if (!IsLogControl(ch))
+                builder.Append(ch);
+        }
+
+        return builder.Length == value.Length ? value : builder.ToString();
+    }
+
+    private static bool IsLogControl(char ch)
+        => ch <= '\u001F' || ch is '\u007F' or '\u0085' or '\u2028' or '\u2029';
 
     private static string UnescapePath(string absolutePath)
     {

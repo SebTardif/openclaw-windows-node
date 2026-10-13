@@ -642,6 +642,27 @@ public class TokenSanitizerTests
         Assert.Contains("<host>", sanitized);
     }
 
+    // UrlLogSanitizer is what canvas navigation writes. Its output is later
+    // scanned by the URL regex, which stops at a newline, so a decoded break
+    // leaves the rest of the line unfiltered.
+    [Theory]
+    [InlineData("https://example.com/a%0A[INFO]%20token=FORGED")]
+    [InlineData("https://example.com/api%0D%0Atoken=Injected")]
+    [InlineData("https://example.com/ok%00token=secret")]
+    [InlineData("https://example.com/log%1B%5B31mtoken=RED")]
+    [InlineData("https://example.com/nel%C2%85token=injected")]
+    [InlineData("https://example.com/lsep%E2%80%A8token=injected")]
+    [InlineData("https://example.com/psep%E2%80%A9token=injected")]
+    public void SanitizeLogMessage_AfterUrlLogSanitizer_DropsDecodedControls(string url)
+    {
+        var direct = UrlLogSanitizer.Sanitize(url);
+        var composed = TokenSanitizer.SanitizeLogMessage("nav " + direct + " end");
+
+        Assert.DoesNotMatch(@"[\x00-\x1F\x7F\u0085\u2028\u2029]", direct);
+        Assert.DoesNotMatch(@"[\x00-\x1F\x7F\u0085\u2028\u2029]", composed);
+        Assert.Contains("end", composed);
+    }
+
     [Theory]
     // Raw single-backslash form (already covered) plus JSON-escaped double-backslash form (what
     // DiagnosticsJsonlService writes after JsonSerializer.Serialize doubles every backslash) plus

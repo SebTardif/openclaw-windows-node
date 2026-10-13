@@ -50,6 +50,26 @@ public sealed class UrlLogSanitizerTests
         Assert.DoesNotContain("secret", sanitized, System.StringComparison.OrdinalIgnoreCase);
     }
 
+    // Percent-decoding %2F/%3F/%23 also decodes line breaks and other controls.
+    // A decoded newline in a canvas log line forges the next entry. Strip the
+    // control instead of leaving it for a later regex that stops at that break.
+    [Theory]
+    [InlineData("https://example.com/a%0A[INFO]%20FORGED", "https://example.com/a[INFO] FORGED")]
+    [InlineData("https://example.com/api%0D%0AInjected", "https://example.com/apiInjected")]
+    [InlineData("https://example.com/ok%00secret", "https://example.com/oksecret")]
+    [InlineData("https://example.com/log%1B%5B31mRED", "https://example.com/log[31mRED")]
+    [InlineData("https://example.com/col%09umn", "https://example.com/column")]
+    [InlineData("https://example.com/nel%C2%85injected", "https://example.com/nelinjected")]
+    [InlineData("https://example.com/lsep%E2%80%A8injected", "https://example.com/lsepinjected")]
+    [InlineData("https://example.com/psep%E2%80%A9injected", "https://example.com/psepinjected")]
+    [InlineData("https://example.com/ok%0A/secret-token", "https://example.com/ok/…")]
+    public void Sanitize_StripsDecodedLogControls(string input, string expected)
+    {
+        var sanitized = UrlLogSanitizer.Sanitize(input);
+        Assert.Equal(expected, sanitized);
+        Assert.DoesNotMatch(@"[\x00-\x1F\x7F\u0085\u2028\u2029]", sanitized);
+    }
+
     [Theory]
     [InlineData(null, "<empty>")]
     [InlineData("", "<empty>")]
