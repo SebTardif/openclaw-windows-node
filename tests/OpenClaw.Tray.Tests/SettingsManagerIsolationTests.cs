@@ -257,7 +257,7 @@ public sealed class SettingsManagerIsolationTests
 
             var settings = new SettingsManager(dir);
 
-            Assert.Equal("ws://127.0.0.1:18789", settings.GetEffectiveGatewayUrl());
+            Assert.Equal(AppIdentity.SetupGatewayUrl, settings.GetEffectiveGatewayUrl());
             Assert.False(settings.HasPersistedGatewayUrl);
             Assert.False(settings.HasLegacyGatewayCredentials);
             Assert.Null(settings.LegacyToken);
