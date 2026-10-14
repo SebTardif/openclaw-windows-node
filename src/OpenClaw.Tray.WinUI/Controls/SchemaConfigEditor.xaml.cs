@@ -15,11 +15,13 @@ namespace OpenClawTray.Controls;
 
 public sealed class SchemaConfigChangedEventArgs(
     Dictionary<string, object?> changes,
-    Dictionary<string, string> validationErrors)
+    Dictionary<string, string> validationErrors,
+    IReadOnlyCollection<string>? replacePaths = null)
     : EventArgs
 {
     public Dictionary<string, object?> Changes { get; } = changes;
     public Dictionary<string, string> ValidationErrors { get; } = validationErrors;
+    public IReadOnlyCollection<string> ReplacePaths { get; } = replacePaths ?? [];
 }
 
 public sealed partial class SchemaConfigEditor : UserControl
@@ -28,6 +30,7 @@ public sealed partial class SchemaConfigEditor : UserControl
     private JsonElement _config;
     private bool _loading;
     private readonly Dictionary<string, object?> _changes = new(StringComparer.Ordinal);
+    private readonly HashSet<string> _replacePaths = new(StringComparer.Ordinal);
     private readonly Dictionary<string, string> _validationErrors = new(StringComparer.Ordinal);
     private readonly Dictionary<PasswordBox, string> _keptArraySecrets = new();
     private static readonly TimeSpan PatternValidationTimeout = TimeSpan.FromMilliseconds(200);
@@ -516,7 +519,7 @@ public sealed partial class SchemaConfigEditor : UserControl
                 _changes[path] = RemovePendingValue;
                 SetValidationError(path, $"Invalid JSON: {ex.Message}", errorBlock);
             }
-            ConfigChanged?.Invoke(this, new SchemaConfigChangedEventArgs(GetChanges(), GetValidationErrors()));
+            RaiseChanged();
         };
         panel.Children.Add(textBox);
         return panel;
@@ -551,6 +554,29 @@ public sealed partial class SchemaConfigEditor : UserControl
         var confirmPanel = new StackPanel { Spacing = 6, Visibility = Visibility.Collapsed };
 
         void ShowStatus(string text) => status.Text = text;
+
+        void RestoreCommitted()
+        {
+            if (session.Decision == SensitiveArrayDecision.Preserve)
+            {
+                status.Text = "";
+                UnmarkReplacePath(path);
+                onChanged(RemovePendingValue);
+                return;
+            }
+
+            if (!session.TryRestoreCommittedEdit(out var restored))
+            {
+                AbandonSensitiveDraft(path, errorBlock);
+                return;
+            }
+
+            MarkReplacePath(path);
+            onChanged(restored);
+            ShowStatus(session.Decision == SensitiveArrayDecision.Clear
+                ? $"This {valueNoun} will be cleared on save."
+                : "Replacement is ready to save.");
+        }
 
         panel.Children.Add(new InfoBar
         {
@@ -614,6 +640,7 @@ public sealed partial class SchemaConfigEditor : UserControl
             replacePanel.Visibility = Visibility.Collapsed;
             SetValidationError(path, null, errorBlock);
             ShowStatus("Replacement is ready to save.");
+            MarkReplacePath(path);
             onChanged(replacement);
         };
         cancelReplaceButton.Click += (_, _) =>
@@ -623,19 +650,7 @@ public sealed partial class SchemaConfigEditor : UserControl
             editor.Text = "";
             replacePanel.Visibility = Visibility.Collapsed;
             SetValidationError(path, null, errorBlock);
-            if (session.Decision == SensitiveArrayDecision.Preserve)
-            {
-                status.Text = "";
-                onChanged(RemovePendingValue);
-            }
-            else if (session.Replacement is JsonElement previous)
-            {
-                onChanged(previous);
-            }
-            else
-            {
-                AbandonSensitiveDraft(path, errorBlock);
-            }
+            RestoreCommitted();
         };
         var replaceActions = new StackPanel { Orientation = Orientation.Horizontal };
         replaceActions.Children.Add(applyButton);
@@ -661,6 +676,7 @@ public sealed partial class SchemaConfigEditor : UserControl
             editor.Text = "";
             SetValidationError(path, null, errorBlock);
             ShowStatus($"This {valueNoun} will be cleared on save.");
+            MarkReplacePath(path);
             onChanged(session.EmptyReplacement());
         };
         cancelClearButton.Click += (_, _) =>
@@ -668,10 +684,7 @@ public sealed partial class SchemaConfigEditor : UserControl
             if (_loading) return;
             session.CancelClear();
             confirmPanel.Visibility = Visibility.Collapsed;
-            if (session.TryRestoreCommittedReplacement(out var previous))
-                onChanged(previous);
-            else
-                AbandonSensitiveDraft(path, errorBlock);
+            RestoreCommitted();
         };
         var confirmActions = new StackPanel { Orientation = Orientation.Horizontal };
         confirmActions.Children.Add(confirmClearButton);
@@ -748,7 +761,7 @@ public sealed partial class SchemaConfigEditor : UserControl
                 _changes[path] = RemovePendingValue;
                 SetValidationError(path, $"Invalid JSON: {ex.Message}", errorBlock);
             }
-            ConfigChanged?.Invoke(this, new SchemaConfigChangedEventArgs(GetChanges(), GetValidationErrors()));
+            RaiseChanged();
         };
         panel.Children.Add(textBox);
         return panel;
@@ -897,21 +910,30 @@ public sealed partial class SchemaConfigEditor : UserControl
             ? RemovePendingValue
             : value;
         SetValidationError(path, error, errorBlock);
-        ConfigChanged?.Invoke(this, new SchemaConfigChangedEventArgs(GetChanges(), GetValidationErrors()));
+        RaiseChanged();
     }
 
     private void RejectSensitiveDraft(string path, string? error, TextBlock errorBlock)
     {
         _changes[path] = RemovePendingValue;
         SetValidationError(path, error, errorBlock);
-        ConfigChanged?.Invoke(this, new SchemaConfigChangedEventArgs(GetChanges(), GetValidationErrors()));
+        RaiseChanged();
     }
 
     private void AbandonSensitiveDraft(string path, TextBlock errorBlock)
     {
+        UnmarkReplacePath(path);
         SetValidationError(path, null, errorBlock);
-        ConfigChanged?.Invoke(this, new SchemaConfigChangedEventArgs(GetChanges(), GetValidationErrors()));
+        RaiseChanged();
     }
+
+    private void MarkReplacePath(string path) => _replacePaths.Add(path);
+
+    private void UnmarkReplacePath(string path) => _replacePaths.Remove(path);
+
+    private void RaiseChanged() =>
+        ConfigChanged?.Invoke(this, new SchemaConfigChangedEventArgs(
+            GetChanges(), GetValidationErrors(), _replacePaths.ToArray()));
 
     private void StageDirectChange(string path, object? edited)
     {
@@ -921,7 +943,7 @@ public sealed partial class SchemaConfigEditor : UserControl
             _changes.Remove(path);
         else
             _changes[path] = edited;
-        ConfigChanged?.Invoke(this, new SchemaConfigChangedEventArgs(GetChanges(), GetValidationErrors()));
+        RaiseChanged();
     }
 
     private static int CountObjectProperties(JsonElement value) =>
@@ -1162,7 +1184,7 @@ public sealed partial class SchemaConfigEditor : UserControl
                     {
                         if (_loading) return;
                         _changes[childPath] = toggle.IsOn;
-                        ConfigChanged?.Invoke(this, new SchemaConfigChangedEventArgs(GetChanges(), GetValidationErrors()));
+                        RaiseChanged();
                     };
                     parent.Children.Add(toggle);
                     break;
@@ -1179,7 +1201,7 @@ public sealed partial class SchemaConfigEditor : UserControl
                     {
                         if (_loading) return;
                         _changes[childPath] = numBox.Value;
-                        ConfigChanged?.Invoke(this, new SchemaConfigChangedEventArgs(GetChanges(), GetValidationErrors()));
+                        RaiseChanged();
                     };
                     parent.Children.Add(numBox);
                     break;
@@ -1200,7 +1222,7 @@ public sealed partial class SchemaConfigEditor : UserControl
                             _changes[childPath] = hasExistingValue && string.IsNullOrEmpty(pwBox.Password)
                                 ? RemovePendingValue
                                 : pwBox.Password;
-                            ConfigChanged?.Invoke(this, new SchemaConfigChangedEventArgs(GetChanges(), GetValidationErrors()));
+                            RaiseChanged();
                         };
                         parent.Children.Add(pwBox);
                     }
@@ -1211,7 +1233,7 @@ public sealed partial class SchemaConfigEditor : UserControl
                         {
                             if (_loading) return;
                             _changes[childPath] = textBox.Text;
-                            ConfigChanged?.Invoke(this, new SchemaConfigChangedEventArgs(GetChanges(), GetValidationErrors()));
+                            RaiseChanged();
                         };
                         parent.Children.Add(textBox);
                     }

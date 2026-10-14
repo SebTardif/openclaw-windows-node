@@ -429,7 +429,8 @@ public sealed partial class GatewayFixtureUiTests(ITestOutputHelper output)
             Invoke(RequireLabeledButton(run, "Save Changes"));
             await run.WaitForAsync(() => Task.FromResult(
                 scenario.LastConfigPatchRaw?.Contains("hook-dummy", StringComparison.Ordinal) == true
-                && !scenario.LastConfigPatchRaw.Contains("old-hook", StringComparison.Ordinal)),
+                && !scenario.LastConfigPatchRaw.Contains("old-hook", StringComparison.Ordinal)
+                && scenario.LastConfigReplacePaths.Contains("webhookUrl", StringComparison.Ordinal)),
                 "save sent the replacement");
             await run.WaitForAsync(() => Task.FromResult(
                 scenario.ConfigGetCount > getsBeforeSave

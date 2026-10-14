@@ -334,4 +334,15 @@ internal sealed class SensitiveArrayEditSession
         value = default;
         return false;
     }
+
+    public bool TryRestoreCommittedEdit(out JsonElement value)
+    {
+        if (Decision == SensitiveArrayDecision.Clear)
+        {
+            value = EmptyReplacement();
+            return true;
+        }
+
+        return TryRestoreCommittedReplacement(out value);
+    }
 }

@@ -97,6 +97,7 @@ public sealed class GatewayScenario
     }
 
     public string? LastConfigPatchRaw { get; private set; }
+    public string LastConfigReplacePaths { get; private set; } = "";
     public int ConfigGetCount { get; private set; }
 
     /// <summary>
@@ -354,6 +355,54 @@ public sealed class GatewayScenario
         };
     }
 
+    private JsonNode? CurrentConfigNode()
+    {
+        if (!_reads.TryGetValue("config.get", out var payload) ||
+            !payload.TryGetProperty("config", out var config))
+            return null;
+        return JsonNode.Parse(config.GetRawText());
+    }
+
+    private static string[] ReadReplacePaths(JsonElement parameters)
+    {
+        if (!parameters.TryGetProperty("replacePaths", out var paths) || paths.ValueKind != JsonValueKind.Array)
+            return [];
+        return paths.EnumerateArray()
+            .Where(item => item.ValueKind == JsonValueKind.String)
+            .Select(item => item.GetString() ?? "")
+            .Where(item => item.Length > 0)
+            .ToArray();
+    }
+
+    private static JsonNode? MergeGatewayConfig(JsonNode? current, JsonElement incoming, IReadOnlyList<string> replacePaths)
+    {
+        var incomingNode = JsonNode.Parse(incoming.GetRawText());
+        return MergeGatewayNode(current, incomingNode, "", new HashSet<string>(replacePaths, StringComparer.Ordinal));
+    }
+
+    private static JsonNode? MergeGatewayNode(JsonNode? current, JsonNode? incoming, string path, HashSet<string> replacePaths)
+    {
+        if (path.Length > 0 && replacePaths.Contains(path))
+            return incoming?.DeepClone();
+        if (current is JsonObject currentObject && incoming is JsonObject incomingObject)
+        {
+            var merged = new JsonObject();
+            foreach (var property in currentObject)
+                merged[property.Key] = property.Value?.DeepClone();
+            foreach (var property in incomingObject)
+            {
+                var child = path.Length == 0 ? property.Key : path + "." + property.Key;
+                merged[property.Key] = MergeGatewayNode(currentObject[property.Key], property.Value, child, replacePaths);
+            }
+            return merged;
+        }
+
+        if (current is JsonArray && incoming is JsonArray && !JsonNode.DeepEquals(current, incoming))
+            throw new FixtureRequestException("INVALID_REQUEST", "replacePaths required for " + path);
+
+        return incoming?.DeepClone();
+    }
+
     private void StoreConfig(JsonElement config)
     {
         var hash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(config.GetRawText()))).ToLowerInvariant();
@@ -377,9 +426,12 @@ public sealed class GatewayScenario
         if (!parameters.TryGetProperty("raw", out var rawElement) || rawElement.ValueKind != JsonValueKind.String)
             throw new FixtureRequestException("INVALID_REQUEST", "config.patch requires a raw string.");
         var raw = rawElement.GetString() ?? "";
-        using var document = JsonDocument.Parse(raw);
+        var replacePaths = ReadReplacePaths(parameters);
+        using var incoming = JsonDocument.Parse(raw);
+        var merged = MergeGatewayConfig(CurrentConfigNode(), incoming.RootElement, replacePaths);
         LastConfigPatchRaw = raw;
-        StoreConfig(document.RootElement.Clone());
+        LastConfigReplacePaths = string.Join(",", replacePaths);
+        StoreConfig(JsonSerializer.SerializeToElement(merged));
         return new { ok = true };
     }
 
