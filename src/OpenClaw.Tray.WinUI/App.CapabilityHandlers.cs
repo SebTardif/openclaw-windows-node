@@ -313,7 +313,7 @@ public partial class App
                             out _,
                             out _,
                             ownedNow);
-                }, url, tlsHost, pinned.Id);
+                }, url, tlsHost, pinned.Id, DashboardCredentialHandoff.DestinationIdentity(pinned));
                 return new
                 {
                     url = publicUrl,

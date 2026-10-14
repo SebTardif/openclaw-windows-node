@@ -323,6 +323,186 @@ public sealed class SetupDashboardHandoffTests
     }
 
     [Fact]
+    public void DashboardHandoff_RetargetedSavedGatewayGetsANewOrigin()
+    {
+        using var origins = new TempDirectory("ocwn-1484-origins-");
+        DashboardCredentialHandoff.OriginStorePath = origins.Combine("origins.json");
+        DashboardCredentialHandoff.ResetOriginsForTests();
+        var tunnel = new SshTunnelConfig("root", "gateway.example", 18789, 45678, false, 22);
+        var firstRecord = new GatewayRecord
+        {
+            Id = "gateway-a",
+            Url = "wss://gateway-a.example/mount/",
+            SshTunnel = tunnel,
+        };
+        var retargeted = firstRecord with { Url = "wss://gateway-b.example/mount/" };
+        const string proxied = "http://127.0.0.1:45678/mount/";
+        var first = DashboardCredentialHandoff.Start(
+            () => Task.FromResult(true),
+            proxied,
+            originKey: firstRecord.Id,
+            destinationIdentity: DashboardCredentialHandoff.DestinationIdentity(firstRecord));
+        var second = DashboardCredentialHandoff.Start(
+            () => Task.FromResult(true),
+            proxied,
+            originKey: retargeted.Id,
+            destinationIdentity: DashboardCredentialHandoff.DestinationIdentity(retargeted));
+        Assert.NotEqual(new Uri(first).Port, new Uri(second).Port);
+
+        DashboardCredentialHandoff.ResetOriginsForTests();
+        var restored = DashboardCredentialHandoff.Start(
+            () => Task.FromResult(true),
+            proxied,
+            originKey: firstRecord.Id,
+            destinationIdentity: DashboardCredentialHandoff.DestinationIdentity(firstRecord));
+        Assert.Equal(new Uri(first).Port, new Uri(restored).Port);
+    }
+
+    [Fact]
+    public void DashboardHandoff_LegacyOriginFileDoesNotFollowARetarget()
+    {
+        using var origins = new TempDirectory("ocwn-1484-origins-");
+        var path = origins.Combine("origins.json");
+        DashboardCredentialHandoff.OriginStorePath = path;
+        DashboardCredentialHandoff.ResetOriginsForTests();
+        File.WriteAllText(path, "{\"gateway-a\":" + DashboardCredentialHandoff.Port + "}");
+        var kept = DashboardCredentialHandoff.Start(
+            () => Task.FromResult(true),
+            "https://gateway-a.example/mount/",
+            originKey: "gateway-a");
+        Assert.Equal(DashboardCredentialHandoff.Port, new Uri(kept).Port);
+        var moved = DashboardCredentialHandoff.Start(
+            () => Task.FromResult(true),
+            "https://gateway-b.example/mount/",
+            originKey: "gateway-a");
+        Assert.NotEqual(DashboardCredentialHandoff.Port, new Uri(moved).Port);
+    }
+
+    [Fact]
+    public async Task DashboardHandoff_GatewayUrlStaysOnTheSavedSession()
+    {
+        using var origins = new TempDirectory("ocwn-1484-origins-");
+        DashboardCredentialHandoff.OriginStorePath = origins.Combine("origins.json");
+        DashboardCredentialHandoff.ResetOriginsForTests();
+        const string destination = "https://gateway-a.example/mount/#section";
+        var first = DashboardCredentialHandoff.Start(() => Task.FromResult(true), destination, originKey: "gateway-a");
+        var second = DashboardCredentialHandoff.Start(() => Task.FromResult(true), destination, originKey: "gateway-a");
+        using var http = new HttpClient();
+        var firstUrl = GatewayUrlFrom(await http.GetStringAsync(first));
+        var secondUrl = GatewayUrlFrom(await http.GetStringAsync(second));
+        Assert.Equal(firstUrl, secondUrl);
+        var launchNonce = new Uri(first).AbsolutePath["/d/".Length..];
+        Assert.DoesNotContain(launchNonce, firstUrl, StringComparison.Ordinal);
+        Assert.Contains("/s/", firstUrl, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void DashboardHandoff_ResourceBaseAndCookieFollowTheSession()
+    {
+        const string session = "/s/STABLE";
+        var html = DashboardCredentialHandoff.RewriteDeclaredResourceBase(
+            "window.__OPENCLAW_CONTROL_UI_BASE_PATH__=\"/\";<base href=\"/\">",
+            session);
+        Assert.Contains("window.__OPENCLAW_CONTROL_UI_BASE_PATH__=\"/s/STABLE/\"", html, StringComparison.Ordinal);
+        Assert.Contains("<base href=\"/s/STABLE/\">", html, StringComparison.Ordinal);
+        Assert.Equal(
+            "{\"basePath\":\"/s/STABLE/openclaw/\",\"ok\":true}",
+            DashboardCredentialHandoff.RewriteDeclaredResourceBase("{\"basePath\":\"/openclaw\",\"ok\":true}", session));
+        Assert.Equal(
+            "{\"ok\":true}",
+            DashboardCredentialHandoff.RewriteDeclaredResourceBase("{\"ok\":true}", session));
+        var cookie = DashboardCredentialHandoff.AdaptSetCookie(
+            "sid=abc; Path=/; Domain=gateway.example; Secure; HttpOnly; SameSite=None",
+            session);
+        Assert.Contains("sid=abc", cookie, StringComparison.Ordinal);
+        Assert.Contains("Path=/s/STABLE", cookie, StringComparison.Ordinal);
+        Assert.Contains("HttpOnly", cookie, StringComparison.Ordinal);
+        Assert.Contains("SameSite=Lax", cookie, StringComparison.Ordinal);
+        Assert.DoesNotContain("Domain=", cookie, StringComparison.Ordinal);
+        Assert.DoesNotContain("Secure", cookie, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task DashboardHandoff_ProxiesSessionAssetsWithoutRefererAndKeepsCookies()
+    {
+        using var origins = new TempDirectory("ocwn-1484-origins-");
+        DashboardCredentialHandoff.OriginStorePath = origins.Combine("origins.json");
+        DashboardCredentialHandoff.ResetOriginsForTests();
+        using var listener = new TcpListener(IPAddress.Loopback, 0);
+        listener.Start();
+        var upstreamPort = ((IPEndPoint)listener.LocalEndpoint).Port;
+        _ = Task.Run(async () =>
+        {
+            for (var request = 0; request < 2; request++)
+            {
+                using var client = await listener.AcceptTcpClientAsync();
+                await using var stream = client.GetStream();
+                var buffer = new byte[4096];
+                var read = 0;
+                while (read < 4 || !Encoding.ASCII.GetString(buffer, 0, read).Contains("\r\n\r\n", StringComparison.Ordinal))
+                {
+                    var count = await stream.ReadAsync(buffer.AsMemory(read));
+                    if (count == 0)
+                        break;
+                    read += count;
+                }
+
+                var head = Encoding.ASCII.GetString(buffer, 0, read);
+                var htmlBody = "window.__OPENCLAW_CONTROL_UI_BASE_PATH__=\"/\";";
+                var jsonBody = "{\"basePath\":\"/\"}";
+                var response = head.Contains("GET /__openclaw/control-ui-config.json", StringComparison.Ordinal)
+                    ? "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: " + jsonBody.Length +
+                      "\r\nConnection: close\r\n\r\n" + jsonBody
+                    : "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nSet-Cookie: sid=abc; Path=/; Domain=gateway.example; Secure\r\nSet-Cookie: other=1; Path=/plugin; HttpOnly\r\nContent-Length: " +
+                      htmlBody.Length + "\r\nConnection: close\r\n\r\n" + htmlBody;
+                await stream.WriteAsync(Encoding.ASCII.GetBytes(response));
+            }
+        });
+
+        var open = DashboardCredentialHandoff.Start(
+            () => Task.FromResult(true),
+            $"http://127.0.0.1:{upstreamPort}/mount/",
+            originKey: "asset-gateway");
+        using var handler = new HttpClientHandler { UseCookies = false };
+        using var http = new HttpClient(handler);
+        var handoff = await http.GetStringAsync(open);
+        var marker = "location.replace(";
+        var start = handoff.IndexOf(marker, StringComparison.Ordinal);
+        Assert.True(start >= 0);
+        var jsonStart = start + marker.Length;
+        var jsonEnd = handoff.IndexOf(")</script>", jsonStart, StringComparison.Ordinal);
+        var sessionUrl = System.Text.Json.JsonSerializer.Deserialize<string>(handoff[jsonStart..jsonEnd]);
+        Assert.NotNull(sessionUrl);
+        var page = await http.GetAsync(sessionUrl);
+        var html = await page.Content.ReadAsStringAsync();
+        Assert.Contains("window.__OPENCLAW_CONTROL_UI_BASE_PATH__=\"/s/", html, StringComparison.Ordinal);
+        Assert.True(page.Headers.TryGetValues("Set-Cookie", out var cookies));
+        var cookieText = string.Join("\n", cookies);
+        Assert.Contains("sid=abc", cookieText, StringComparison.Ordinal);
+        Assert.Contains("other=1", cookieText, StringComparison.Ordinal);
+        Assert.DoesNotContain("Domain=", cookieText, StringComparison.Ordinal);
+        var session = new Uri(sessionUrl);
+        var slash = session.AbsolutePath.IndexOf('/', 3);
+        var sessionRoot = slash < 0 ? session.AbsolutePath : session.AbsolutePath[..slash];
+        var asset = new Uri($"http://127.0.0.1:{session.Port}{sessionRoot}/__openclaw/control-ui-config.json");
+        var config = await http.GetStringAsync(asset);
+        Assert.Contains("\"basePath\":\"/s/", config, StringComparison.Ordinal);
+        Assert.DoesNotContain("\"basePath\":\"/\"", config, StringComparison.Ordinal);
+    }
+
+    private static string GatewayUrlFrom(string page)
+    {
+        const string marker = "gatewayUrl=";
+        var start = page.IndexOf(marker, StringComparison.Ordinal);
+        Assert.True(start >= 0);
+        var value = page[(start + marker.Length)..];
+        var end = value.IndexOfAny(['&', '"', '<']);
+        if (end >= 0)
+            value = value[..end];
+        return Uri.UnescapeDataString(value);
+    }
+
+    [Fact]
     public async Task AcceptedProcessId_MatchesTheIpv6LoopbackConnection()
     {
         using var listener = new TcpListener(IPAddress.IPv6Loopback, 0);

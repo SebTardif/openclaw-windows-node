@@ -29,31 +29,39 @@ internal static class DashboardCredentialHandoff
     public const int Port = 47831;
 
     private static readonly ConcurrentDictionary<string, Handoff> Live = new();
-    private static readonly ConcurrentDictionary<string, int> OriginPorts = new();
+    private static readonly ConcurrentDictionary<string, OriginBinding> OriginPorts = new();
     private static readonly ConcurrentDictionary<int, HttpListener> Listeners = new();
     private static readonly object ListenerGate = new();
+    private static readonly JsonSerializerOptions StoreJson = new()
+    {
+        PropertyNameCaseInsensitive = true,
+    };
 
     public static string Start(
         Func<Task<bool>> owned,
         string destination,
         string? tlsHost = null,
-        string? originKey = null)
+        string? originKey = null,
+        string? destinationIdentity = null)
     {
         ArgumentNullException.ThrowIfNull(owned);
         ArgumentException.ThrowIfNullOrWhiteSpace(destination);
         var key = string.IsNullOrWhiteSpace(originKey) ? "default" : originKey;
-        var port = PortFor(key);
+        var identity = string.IsNullOrWhiteSpace(destinationIdentity)
+            ? ProxiedOriginIdentity(destination)
+            : destinationIdentity;
+        var binding = PortFor(key, identity);
         try
         {
-            EnsureListener(port);
+            EnsureListener(binding.Port);
         }
         catch (HttpListenerException ex)
         {
             throw new InvalidOperationException(
-                $"Dashboard origin 127.0.0.1:{port} is already in use. Close the program using that port and open the dashboard again.",
+                $"Dashboard origin 127.0.0.1:{binding.Port} is already in use. Close the program using that port and open the dashboard again.",
                 ex);
         }
-        var handoff = new Handoff(owned, destination, tlsHost, port);
+        var handoff = new Handoff(owned, destination, tlsHost, binding.Port, binding.Session);
         Live[handoff.Nonce] = handoff;
         _ = handoff.ExpireUnusedAsync();
         return handoff.BrowserUrl;
@@ -66,36 +74,80 @@ internal static class DashboardCredentialHandoff
 
     internal static void ResetOriginsForTests() => OriginPorts.Clear();
 
-    private static int PortFor(string key)
+    /// <summary>
+    /// Saved gateway identity, without the token. A retargeted record keeps its id
+    /// and must not keep the previous gateway's browser origin.
+    /// </summary>
+    internal static string DestinationIdentity(GatewayRecord record)
     {
-        if (OriginPorts.TryGetValue(key, out var cached))
+        ArgumentNullException.ThrowIfNull(record);
+        var saved = string.IsNullOrWhiteSpace(record.Url) ? "" : SavedUrlIdentity(record.Url);
+        if (record.SshTunnel is not { } tunnel)
+            return saved;
+        return saved + "|" + tunnel.User + "@" + tunnel.Host + ":" + tunnel.SshPort
+            + ">" + tunnel.LocalPort + ":" + tunnel.RemotePort;
+    }
+
+    private static OriginBinding PortFor(string key, string destinationIdentity)
+    {
+        var cacheKey = key + "\n" + destinationIdentity;
+        if (OriginPorts.TryGetValue(cacheKey, out var cached))
             return cached;
 
         lock (ListenerGate)
         {
-            if (OriginPorts.TryGetValue(key, out cached))
+            if (OriginPorts.TryGetValue(cacheKey, out cached))
                 return cached;
 
             var saved = ReadStore();
-            if (!saved.TryGetValue(key, out var port))
+            var match = saved.FirstOrDefault(entry =>
+                entry.Key == key && entry.Destination == destinationIdentity);
+            if (match is null)
             {
-                // The previous handoff used 47831 for every gateway. Keep that
-                // origin for the first gateway so its browser profile stays put.
-                // Later gateways get their own port, saved for the next process.
-                port = key == "default" || !PortTaken(Port, saved) ? Port : AllocatePort(saved);
-                saved[key] = port;
+                // An older file stored only the gateway id. Adopt that port for the
+                // first destination seen, then leave it so a later destination
+                // cannot inherit the same browser profile.
+                var legacy = saved.FirstOrDefault(entry =>
+                    entry.Key == key && entry.Destination.Length == 0);
+                if (legacy is not null)
+                {
+                    legacy.Destination = destinationIdentity;
+                    if (string.IsNullOrEmpty(legacy.Session))
+                        legacy.Session = NewSessionId();
+                    match = legacy;
+                    WriteStore(saved);
+                }
+            }
+
+            if (match is null)
+            {
+                var port = key == "default" || !PortTaken(Port, saved) ? Port : AllocatePort(saved);
+                match = new OriginStoreEntry
+                {
+                    Key = key,
+                    Destination = destinationIdentity,
+                    Port = port,
+                    Session = NewSessionId(),
+                };
+                saved.Add(match);
+                WriteStore(saved);
+            }
+            else if (string.IsNullOrEmpty(match.Session))
+            {
+                match.Session = NewSessionId();
                 WriteStore(saved);
             }
 
-            OriginPorts[key] = port;
-            return port;
+            cached = new OriginBinding(match.Port, match.Session);
+            OriginPorts[cacheKey] = cached;
+            return cached;
         }
     }
 
-    private static bool PortTaken(int port, Dictionary<string, int> saved) =>
-        saved.ContainsValue(port) || OriginPorts.Values.Contains(port);
+    private static bool PortTaken(int port, List<OriginStoreEntry> saved) =>
+        saved.Exists(entry => entry.Port == port) || OriginPorts.Values.Any(item => item.Port == port);
 
-    private static int AllocatePort(Dictionary<string, int> saved)
+    private static int AllocatePort(List<OriginStoreEntry> saved)
     {
         for (var attempt = 0; attempt < 8; attempt++)
         {
@@ -120,15 +172,33 @@ internal static class DashboardCredentialHandoff
     private static string StoreFilePath() =>
         OriginStorePath ?? Path.Combine(AppIdentity.ResolveRoamingDataDirectory(), "dashboard-origins.json");
 
-    private static Dictionary<string, int> ReadStore()
+    private static List<OriginStoreEntry> ReadStore()
     {
         try
         {
             var path = StoreFilePath();
             if (!File.Exists(path))
-                return new Dictionary<string, int>(StringComparer.Ordinal);
-            var saved = JsonSerializer.Deserialize<Dictionary<string, int>>(File.ReadAllText(path));
-            return saved ?? new Dictionary<string, int>(StringComparer.Ordinal);
+                return [];
+            using var doc = JsonDocument.Parse(File.ReadAllText(path));
+            if (doc.RootElement.ValueKind != JsonValueKind.Object)
+                throw new JsonException("Dashboard origin file is not an object.");
+            if (doc.RootElement.TryGetProperty("Entries", out var entries) ||
+                doc.RootElement.TryGetProperty("entries", out entries))
+            {
+                return JsonSerializer.Deserialize<OriginStoreFile>(doc.RootElement.GetRawText(), StoreJson)?.Entries ?? [];
+            }
+
+            var legacy = new List<OriginStoreEntry>();
+            foreach (var property in doc.RootElement.EnumerateObject())
+            {
+                if (property.Value.ValueKind == JsonValueKind.Number &&
+                    property.Value.TryGetInt32(out var port))
+                {
+                    legacy.Add(new OriginStoreEntry { Key = property.Name, Port = port });
+                }
+            }
+
+            return legacy;
         }
         catch (Exception ex) when (ex is IOException or JsonException or UnauthorizedAccessException)
         {
@@ -136,16 +206,47 @@ internal static class DashboardCredentialHandoff
         }
     }
 
-    private static void WriteStore(Dictionary<string, int> saved)
+    private static void WriteStore(List<OriginStoreEntry> saved)
     {
         var path = StoreFilePath();
         var directory = Path.GetDirectoryName(path);
         if (!string.IsNullOrEmpty(directory))
             Directory.CreateDirectory(directory);
-        var json = JsonSerializer.Serialize(saved);
+        var json = JsonSerializer.Serialize(new OriginStoreFile { Entries = saved }, StoreJson);
         var temp = path + "." + Guid.NewGuid().ToString("N") + ".tmp";
         File.WriteAllText(temp, json);
         File.Move(temp, path, overwrite: true);
+    }
+
+    private static string ProxiedOriginIdentity(string destination)
+    {
+        var uri = new Uri(destination);
+        return uri.Scheme + "://" + uri.IdnHost + ":" + uri.Port;
+    }
+
+    private static string SavedUrlIdentity(string savedUrl)
+    {
+        if (!Uri.TryCreate(savedUrl, UriKind.Absolute, out var saved))
+            return savedUrl;
+        var path = string.IsNullOrEmpty(saved.AbsolutePath) ? "/" : saved.AbsolutePath;
+        return saved.Scheme + "://" + saved.IdnHost + ":" + saved.Port + path;
+    }
+
+    private static string NewSessionId() => Convert.ToHexString(Guid.NewGuid().ToByteArray());
+
+    private sealed record OriginBinding(int Port, string Session);
+
+    private sealed class OriginStoreFile
+    {
+        public List<OriginStoreEntry> Entries { get; set; } = [];
+    }
+
+    private sealed class OriginStoreEntry
+    {
+        public string Key { get; set; } = "";
+        public string Destination { get; set; } = "";
+        public int Port { get; set; }
+        public string Session { get; set; } = "";
     }
 
     private static void EnsureListener(int port)
@@ -247,24 +348,34 @@ internal static class DashboardCredentialHandoff
 
     private static bool TrySession(string path, int requestPort, out Handoff session, out string upstreamPath)
     {
+        Handoff? match = null;
+        var matchedPrefix = "";
         foreach (var candidate in Live.Values)
         {
             if (candidate.Port != requestPort)
                 continue;
-            var prefix = "/s/" + candidate.Nonce;
+            var prefix = "/s/" + candidate.SessionId;
             if (!path.Equals(prefix, StringComparison.Ordinal) &&
                 !path.StartsWith(prefix + "/", StringComparison.Ordinal))
                 continue;
-            session = candidate;
-            upstreamPath = path[prefix.Length..];
-            if (string.IsNullOrEmpty(upstreamPath))
-                upstreamPath = "/";
-            return true;
+            if (match is not null && candidate.Generation < match.Generation)
+                continue;
+            match = candidate;
+            matchedPrefix = prefix;
         }
 
-        session = null!;
-        upstreamPath = "/";
-        return false;
+        if (match is null)
+        {
+            session = null!;
+            upstreamPath = "/";
+            return false;
+        }
+
+        session = match;
+        upstreamPath = path[matchedPrefix.Length..];
+        if (string.IsNullOrEmpty(upstreamPath))
+            upstreamPath = "/";
+        return true;
     }
 
     private static bool TrySessionFromReferer(
@@ -357,6 +468,111 @@ internal static class DashboardCredentialHandoff
             System.Text.RegularExpressions.RegexOptions.IgnoreCase);
     }
 
+    /// <summary>
+    /// The Control UI requests assets from the base path the Gateway declares.
+    /// That path has to include this session. Referer is not a substitute:
+    /// the Gateway sends Referrer-Policy: no-referrer, and this proxy keeps that header.
+    /// </summary>
+    internal static string RewriteDeclaredResourceBase(string body, string sessionPrefix)
+    {
+        var prefix = sessionPrefix.TrimEnd('/');
+        body = System.Text.RegularExpressions.Regex.Replace(
+            body,
+            "window\\.__OPENCLAW_CONTROL_UI_BASE_PATH__\\s*=\\s*(\"[^\"]*\"|'[^']*')",
+            match => "window.__OPENCLAW_CONTROL_UI_BASE_PATH__=" +
+                JsonSerializer.Serialize(CombineResourceBase(prefix, Unquote(match.Groups[1].Value))));
+        body = System.Text.RegularExpressions.Regex.Replace(
+            body,
+            "<base\\s+href\\s*=\\s*(\"[^\"]*\"|'[^']*')",
+            match => "<base href=" + JsonSerializer.Serialize(CombineResourceBase(prefix, Unquote(match.Groups[1].Value))),
+            System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+        return System.Text.RegularExpressions.Regex.Replace(
+            body,
+            "\"basePath\"\\s*:\\s*\"([^\"]*)\"",
+            match => "\"basePath\":" + JsonSerializer.Serialize(CombineResourceBase(prefix, match.Groups[1].Value)));
+    }
+
+    internal static string AdaptSetCookie(string setCookie, string sessionPrefix)
+    {
+        var parts = setCookie.Split(';');
+        var kept = new List<string> { parts[0].Trim() };
+        var sawPath = false;
+        foreach (var raw in parts.Skip(1))
+        {
+            var part = raw.Trim();
+            if (part.Length == 0)
+                continue;
+            var name = part.Split('=', 2)[0].Trim();
+            if (name.Equals("Domain", StringComparison.OrdinalIgnoreCase) ||
+                name.Equals("Secure", StringComparison.OrdinalIgnoreCase))
+                continue;
+            if (name.Equals("SameSite", StringComparison.OrdinalIgnoreCase) &&
+                part.Contains("None", StringComparison.OrdinalIgnoreCase))
+            {
+                kept.Add("SameSite=Lax");
+                continue;
+            }
+            if (name.Equals("Path", StringComparison.OrdinalIgnoreCase))
+            {
+                sawPath = true;
+                var value = part.Split('=', 2).Length == 2 ? part.Split('=', 2)[1].Trim() : "/";
+                kept.Add("Path=" + CookiePath(value, sessionPrefix));
+                continue;
+            }
+
+            kept.Add(part);
+        }
+
+        if (!sawPath)
+            kept.Add("Path=" + sessionPrefix.TrimEnd('/'));
+        return string.Join("; ", kept);
+    }
+
+    private static string Unquote(string literal)
+    {
+        if (literal.Length >= 2 && (literal[0] == '"' || literal[0] == '\''))
+            return literal[1..^1];
+        return literal;
+    }
+
+    private static string CombineResourceBase(string sessionPrefix, string declared)
+    {
+        var prefix = sessionPrefix.TrimEnd('/');
+        if (string.IsNullOrEmpty(declared) || declared == "/" || declared == "./")
+            return prefix + "/";
+        if (declared.StartsWith(prefix + "/", StringComparison.Ordinal) ||
+            declared.Equals(prefix, StringComparison.Ordinal))
+            return declared.EndsWith('/') ? declared : declared + "/";
+        var path = declared.StartsWith('/') ? declared : "/" + declared;
+        var combined = prefix + path.TrimEnd('/');
+        return combined + "/";
+    }
+
+    private static string CookiePath(string path, string sessionPrefix)
+    {
+        var prefix = sessionPrefix.TrimEnd('/');
+        if (string.IsNullOrEmpty(path) || path == "/")
+            return prefix;
+        if (path.StartsWith(prefix + "/", StringComparison.Ordinal) || path.Equals(prefix, StringComparison.Ordinal))
+            return path;
+        if (!path.StartsWith('/'))
+            path = "/" + path;
+        return prefix + path;
+    }
+
+    private static List<string> ReadSetCookies(string headerText)
+    {
+        var cookies = new List<string>();
+        foreach (var line in headerText.Split("\r\n"))
+        {
+            const string name = "Set-Cookie:";
+            if (line.StartsWith(name, StringComparison.OrdinalIgnoreCase))
+                cookies.Add(line[name.Length..].Trim());
+        }
+
+        return cookies;
+    }
+
     internal static void CopySecurityHeaders(string headerText, HttpListenerResponse response)
     {
         string[] names =
@@ -407,18 +623,23 @@ internal static class DashboardCredentialHandoff
         private readonly string _tlsHost;
         private readonly int _port;
         private int _delivered;
+        private static int _nextGeneration;
 
-        public Handoff(Func<Task<bool>> owned, string destination, string? tlsHost, int port)
+        public Handoff(Func<Task<bool>> owned, string destination, string? tlsHost, int port, string sessionId)
         {
             _owned = owned;
             _destination = destination;
             _tlsHost = string.IsNullOrWhiteSpace(tlsHost) ? new Uri(destination).Host : tlsHost;
             _port = port;
+            SessionId = sessionId;
+            Generation = Interlocked.Increment(ref _nextGeneration);
             Nonce = Convert.ToHexString(Guid.NewGuid().ToByteArray());
             BrowserUrl = $"http://127.0.0.1:{port}/d/{Nonce}";
         }
 
         public string Nonce { get; }
+        public string SessionId { get; }
+        public int Generation { get; }
         public string BrowserUrl { get; }
         public int Port => _port;
         public Task<bool> Owned() => _owned();
@@ -456,12 +677,15 @@ internal static class DashboardCredentialHandoff
         {
             var destination = new Uri(_destination);
             var hash = destination.Fragment;
-            var gateway = Uri.EscapeDataString($"ws://127.0.0.1:{_port}/s/{Nonce}/");
+            // The launch nonce is only the one-use /d/ page. The Control UI stores
+            // settings under gatewayUrl, including its path, so that path stays
+            // on the saved session for this destination.
+            var gateway = Uri.EscapeDataString($"ws://127.0.0.1:{_port}/s/{SessionId}/");
             hash = string.IsNullOrEmpty(hash)
                 ? "#gatewayUrl=" + gateway
                 : hash + "&gatewayUrl=" + gateway;
             var path = string.IsNullOrEmpty(destination.AbsolutePath) ? "/" : destination.AbsolutePath;
-            return $"http://127.0.0.1:{_port}/s/{Nonce}{path}{destination.Query}{hash}";
+            return $"http://127.0.0.1:{_port}/s/{SessionId}{path}{destination.Query}{hash}";
         }
 
         public async Task ProxyAsync(HttpListenerContext context, string upstreamPath)
@@ -532,11 +756,22 @@ internal static class DashboardCredentialHandoff
             }
             context.Response.StatusCode = StatusCode(payload);
             CopySecurityHeaders(headerText, context.Response);
+            var sessionPrefix = "/s/" + SessionId;
+            foreach (var cookie in ReadSetCookies(headerText))
+            {
+                try
+                {
+                    context.Response.AppendHeader("Set-Cookie", AdaptSetCookie(cookie, sessionPrefix));
+                }
+                catch (ArgumentException)
+                {
+                }
+            }
             if (ReadHeader(headerText, "Location") is { } location)
             {
                 try
                 {
-                    context.Response.Headers["Location"] = RewriteLocation(location, "/s/" + Nonce);
+                    context.Response.Headers["Location"] = RewriteLocation(location, sessionPrefix);
                 }
                 catch (ArgumentException)
                 {
@@ -545,10 +780,15 @@ internal static class DashboardCredentialHandoff
             if (ReadContentType(headerText) is { } contentType)
             {
                 context.Response.ContentType = contentType;
-                if (contentType.Contains("text/html", StringComparison.OrdinalIgnoreCase))
+                var textBody = contentType.Contains("text/html", StringComparison.OrdinalIgnoreCase) ||
+                    contentType.Contains("json", StringComparison.OrdinalIgnoreCase);
+                if (textBody)
                 {
-                    var html = Encoding.UTF8.GetString(body);
-                    body = Encoding.UTF8.GetBytes(RewriteRootAbsolute(html, "/s/" + Nonce));
+                    var text = Encoding.UTF8.GetString(body);
+                    if (contentType.Contains("text/html", StringComparison.OrdinalIgnoreCase))
+                        text = RewriteRootAbsolute(text, sessionPrefix);
+                    text = RewriteDeclaredResourceBase(text, sessionPrefix);
+                    body = Encoding.UTF8.GetBytes(text);
                 }
             }
             context.Response.ContentLength64 = body.Length;

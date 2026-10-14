@@ -2665,7 +2665,8 @@ public sealed partial class ConnectionPage : Page
                     () => SavedDashboardListenerStillOwnedAsync(pinned, pinned.SshTunnel),
                     url,
                     Uri.TryCreate(pinned.Url, UriKind.Absolute, out var savedUri) ? savedUri.Host : null,
-                    pinned.Id);
+                    pinned.Id,
+                    DashboardCredentialHandoff.DestinationIdentity(pinned));
             await global::Windows.System.Launcher.LaunchUriAsync(new Uri(launchUrl));
         }
         catch (Exception ex)
