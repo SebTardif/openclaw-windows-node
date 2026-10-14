@@ -24,7 +24,9 @@ public class OpenClawGatewayClientTests
             bool tokenIsBootstrapToken = false,
             bool bootstrapPairAsNode = false,
             string gatewayUrl = "ws://localhost:18789",
-            string? identityPath = null)
+            string? identityPath = null,
+            bool persistHandshakeDeviceTokens = true,
+            DeviceTokenReceivedEventArgs? ephemeralOperatorCredential = null)
         {
             // Isolate test identities because other test classes can construct
             // gateway clients concurrently under the same AppData root.
@@ -36,7 +38,9 @@ public class OpenClawGatewayClientTests
                 new TestLogger(),
                 tokenIsBootstrapToken,
                 bootstrapPairAsNode,
-                identityPath);
+                identityPath,
+                persistHandshakeDeviceTokens: persistHandshakeDeviceTokens,
+                ephemeralOperatorCredential: ephemeralOperatorCredential);
         }
 
         public GatewayClientTestHelper(IOpenClawLogger logger)
@@ -588,6 +592,112 @@ public class OpenClawGatewayClientTests
 
     private static string CreateTempIdentityPath() =>
         Path.Combine(Path.GetTempPath(), "OpenClawGatewayClientTests", Guid.NewGuid().ToString("N"));
+
+    private static Task ConfirmMutation(OpenClawGatewayClient client, bool delete, int timeoutMs = 10000) =>
+        delete
+            ? client.DeleteSessionConfirmedAsync("agent:test:session", client.SessionMutationConnectionEpoch!.Value, timeoutMs)
+            : client.PatchSessionConfirmedAsync("agent:test:session", new SessionPatch { Archived = true },
+                client.SessionMutationConnectionEpoch!.Value, timeoutMs);
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ConfirmedMutation_WaitsForMatchingResponseWithoutGlobalActionNoise(bool delete)
+    {
+        using var server = new LoopbackWebSocketServer();
+        using var identity = new TempDirectory("session-mutation-");
+        await server.StartAsync();
+        var helper = new GatewayClientTestHelper(gatewayUrl: server.WebSocketUrl, identityPath: identity.Path);
+        using var client = helper.Client;
+        await client.ConnectAsync();
+        helper.MarkHandshakeReady();
+        var events = 0;
+        client.SessionCommandCompleted += (_, _) => events++;
+        var task = ConfirmMutation(client, delete);
+        var request = await server.ReceiveTextAsync().WaitAsync(TimeSpan.FromSeconds(2));
+        using var frame = JsonDocument.Parse(request);
+        Assert.Equal(delete ? "sessions.delete" : "sessions.patch", frame.RootElement.GetProperty("method").GetString());
+        Assert.Equal("agent:test:session", frame.RootElement.GetProperty("params").GetProperty("key").GetString());
+        Assert.False(task.IsCompleted);
+        await server.SendTextAsync("""{"type":"res","id":"wrong-id","ok":true,"payload":{}}""");
+        // A second, correlated response serves as an ordering barrier after the unmatched response.
+        var probe = client.SendWizardRequestAsync("health");
+        var probeId = ReadRequestId(await server.ReceiveTextAsync().WaitAsync(TimeSpan.FromSeconds(2)));
+        await server.SendTextAsync(JsonSerializer.Serialize(new { type = "res", id = probeId, ok = true, payload = new { } }));
+        await probe.WaitAsync(TimeSpan.FromSeconds(2));
+        Assert.False(task.IsCompleted);
+        await server.SendTextAsync(JsonSerializer.Serialize(new
+        {
+            type = "res", id = ReadRequestId(request), ok = true,
+            payload = new { ok = true, key = "agent:test:session", deleted = true }
+        }));
+        await task.WaitAsync(TimeSpan.FromSeconds(2));
+        Assert.Equal(0, events);
+        Assert.Equal(0, helper.GetPendingRequestCount());
+    }
+
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    [InlineData(true, true)]
+    public async Task ConfirmedMutation_RejectsEnvelopeAndPayloadFailures(bool delete, bool payloadRejection)
+    {
+        using var server = new LoopbackWebSocketServer();
+        using var identity = new TempDirectory("session-mutation-");
+        await server.StartAsync();
+        var helper = new GatewayClientTestHelper(gatewayUrl: server.WebSocketUrl, identityPath: identity.Path);
+        using var client = helper.Client;
+        await client.ConnectAsync();
+        helper.MarkHandshakeReady();
+        var task = ConfirmMutation(client, delete);
+        var id = ReadRequestId(await server.ReceiveTextAsync().WaitAsync(TimeSpan.FromSeconds(2)));
+        await server.SendTextAsync(JsonSerializer.Serialize(new
+        {
+            type = "res", id, ok = payloadRejection,
+            error = new { message = "permission denied" },
+            payload = new { ok = false, reason = "permission denied" }
+        }));
+        var error = await Assert.ThrowsAsync<InvalidOperationException>(() => task);
+        Assert.Equal("permission denied", error.Message);
+        Assert.Equal(0, helper.GetPendingRequestCount());
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ConfirmedMutation_TimeoutCleansTrackingAndLateResponseCannotAccept(bool delete)
+    {
+        using var server = new LoopbackWebSocketServer();
+        using var identity = new TempDirectory("session-mutation-");
+        await server.StartAsync();
+        var helper = new GatewayClientTestHelper(gatewayUrl: server.WebSocketUrl, identityPath: identity.Path);
+        using var client = helper.Client;
+        await client.ConnectAsync();
+        helper.MarkHandshakeReady();
+        var task = ConfirmMutation(client, delete, 250);
+        var id = ReadRequestId(await server.ReceiveTextAsync().WaitAsync(TimeSpan.FromSeconds(2)));
+        await Assert.ThrowsAsync<TimeoutException>(() => task);
+        await server.SendTextAsync(JsonSerializer.Serialize(new { type = "res", id, ok = true, payload = new { } }));
+        await Assert.ThrowsAsync<TimeoutException>(() => task);
+        Assert.Equal(0, helper.GetPendingRequestCount());
+    }
+
+    [Fact]
+    public async Task ConfirmedMutation_RefusesCapturedEpochAfterConnectionChanged()
+    {
+        using var server = new LoopbackWebSocketServer();
+        using var identity = new TempDirectory("session-mutation-");
+        await server.StartAsync();
+        var helper = new GatewayClientTestHelper(gatewayUrl: server.WebSocketUrl, identityPath: identity.Path);
+        using var client = helper.Client;
+        await client.ConnectAsync();
+        helper.MarkHandshakeReady();
+        var epoch = client.SessionMutationConnectionEpoch!.Value;
+        await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            client.DeleteSessionConfirmedAsync("agent:test:session", epoch - 1));
+        Assert.Equal(0, helper.GetPendingRequestCount());
+    }
 
     [Fact]
     public async Task SendWizardRequestAsync_ResponseBeforeDispose_ReturnsPayloadAndCleansTracking()
@@ -1398,6 +1508,7 @@ public class OpenClawGatewayClientTests
                 "nonce": "old-socket",
                 "ts": 1785824000000
               }
+
             }
             """);
         await authorizationStarted.Task.WaitAsync(TimeSpan.FromSeconds(2));
@@ -1415,6 +1526,56 @@ public class OpenClawGatewayClientTests
                 System.Reflection.BindingFlags.NonPublic)!
             .GetValue(client)!;
         Assert.True(isConnected);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task AuthenticatedSigningIdentity_ComesFromConnectNotOptionalHelloEcho(bool spoofEcho)
+    {
+        using var server = new LoopbackWebSocketServer();
+        await server.StartAsync();
+        var identityPath = CreateTempIdentityPath();
+        using var client = new OpenClawGatewayClient(server.WebSocketUrl, "synthetic",
+            new TestLogger(), identityPath: identityPath);
+        var handshake = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        client.HandshakeSucceeded += (_, _) => handshake.TrySetResult();
+        await client.ConnectAsync();
+        await server.WaitForAcceptedCountAsync(1, TimeSpan.FromSeconds(2));
+        await server.SendTextAsync("""{"type":"event","event":"connect.challenge","payload":{"nonce":"schema-fixture","ts":1785824000000}}""");
+        using var connect = JsonDocument.Parse(await server.ReceiveTextAsync().WaitAsync(TimeSpan.FromSeconds(2)));
+        var signedId = connect.RootElement.GetProperty("params").GetProperty("device").GetProperty("id").GetString();
+        Assert.Null(client.AuthenticatedSigningDeviceId);
+        // HelloOkSchema + SnapshotSchema at upstream 63f1dec2 declare no device/deviceId echo.
+        var payload = System.Text.Json.Nodes.JsonNode.Parse("""
+            {"type":"hello-ok","protocol":4,"server":{"version":"2026.9.25","connId":"fixture"},
+             "features":{"methods":[],"events":[]},"snapshot":{"presence":[],"health":{},
+             "stateVersion":{"presence":0,"health":0},"uptimeMs":0,
+             "sessionDefaults":{"defaultAgentId":"main","mainKey":"main","mainSessionKey":"agent:main:main"}},
+             "auth":{"deviceToken":"authenticated-token","role":"operator","scopes":["operator.admin"]},
+             "policy":{"maxPayload":1048576,"maxBufferedBytes":1048576,"tickIntervalMs":30000}}
+            """)!;
+        if (spoofEcho) payload["deviceId"] = "not-the-signing-device";
+        await server.SendTextAsync(new System.Text.Json.Nodes.JsonObject
+        {
+            ["type"] = "res", ["id"] = connect.RootElement.GetProperty("id").GetString(),
+            ["ok"] = true, ["payload"] = payload,
+        }.ToJsonString());
+        await handshake.Task.WaitAsync(TimeSpan.FromSeconds(3));
+        Assert.True(client.IsConnectedToGateway);
+        Assert.Equal("agent:main:main", client.MainSessionKey);
+        Assert.Equal(signedId, client.AuthenticatedSigningDeviceId);
+        if (!spoofEcho) Assert.Null(client.OperatorDeviceId);
+        else Assert.Equal("not-the-signing-device", client.OperatorDeviceId);
+        var replacementPath = CreateTempIdentityPath();
+        var replacement = new DeviceIdentity(replacementPath);
+        replacement.Initialize();
+        Assert.NotEqual(signedId, replacement.DeviceId);
+        File.Copy(Path.Combine(replacementPath, "device-key-ed25519.json"),
+            Path.Combine(identityPath, "device-key-ed25519.json"), true);
+        Assert.Equal(signedId, client.AuthenticatedSigningDeviceId);
+        await client.DisconnectAsync();
+        Assert.Null(client.AuthenticatedSigningDeviceId);
     }
 
     [Fact]
@@ -1493,6 +1654,55 @@ public class OpenClawGatewayClientTests
         Assert.True(handshakeSucceeded);
         Assert.Equal("operator-token", receivedToken?.Token);
         Assert.Equal("operator", receivedToken?.Role);
+    }
+
+    [Fact]
+    public void NonpersistentBootstrapHandshake_PublishesCredentialWithoutWritingIdentity()
+    {
+        using var directory = new TempDirectory();
+        var helper = new GatewayClientTestHelper(
+            tokenIsBootstrapToken: true, identityPath: directory.Path,
+            persistHandshakeDeviceTokens: false);
+        using var client = helper.Client;
+        var path = Path.Combine(directory.Path, "device-key-ed25519.json");
+        var before = File.ReadAllBytes(path);
+        DeviceTokenReceivedEventArgs? received = null;
+        client.DeviceTokenReceived += (_, token) => received = token;
+        helper.TrackPendingRequest("ephemeral-bootstrap", "connect");
+        helper.ProcessRawMessage("""
+            {"type":"res","id":"ephemeral-bootstrap","payload":{
+              "type":"hello-ok","protocol":4,
+              "auth":{"deviceToken":"issued-operator","role":"operator","scopes":["operator.read"]}
+            }}
+            """);
+        Assert.True(client.HasHandshakeSnapshot);
+        Assert.Equal("issued-operator", received?.Token);
+        Assert.Equal(before, File.ReadAllBytes(path));
+        Assert.Null(DeviceIdentity.TryReadStoredDeviceToken(directory.Path));
+    }
+
+    [Fact]
+    public void EphemeralOperatorCredential_UsesDeviceAuthAndScopesWithoutWritingIdentity()
+    {
+        using var directory = new TempDirectory();
+        var identity = new DeviceIdentity(directory.Path);
+        identity.Initialize();
+        var path = Path.Combine(directory.Path, "device-key-ed25519.json");
+        var before = File.ReadAllBytes(path);
+        var helper = new GatewayClientTestHelper(
+            tokenIsBootstrapToken: true, identityPath: directory.Path,
+            persistHandshakeDeviceTokens: false,
+            ephemeralOperatorCredential: new("issued-operator", ["operator.read"], "operator"));
+        using var client = helper.Client;
+        var auth = helper.BuildAuthPayload();
+        Assert.Equal("issued-operator", auth["deviceToken"]);
+        Assert.False(auth.ContainsKey("bootstrapToken"));
+        Assert.False(auth.ContainsKey("token"));
+        var scopesMethod = typeof(OpenClawGatewayClient).GetMethod("GetRequestedScopes",
+            System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+        var scopes = Assert.IsType<string[]>(scopesMethod!.Invoke(client, ["operator"]));
+        Assert.Equal(["operator.read"], scopes);
+        Assert.Equal(before, File.ReadAllBytes(path));
     }
 
     [Theory]
@@ -3399,6 +3609,62 @@ public class OpenClawGatewayClientTests
         helper.ParseSessionsPayload(refreshed);
 
         Assert.Equal(expected, Assert.Single(helper.GetSessionList()).ThinkingLevel);
+    }
+
+    [Fact]
+    public void ParseSessions_ReadsPinnedUnreadArchivedAndResetsOnOmission()
+    {
+        var helper = new GatewayClientTestHelper();
+        using var client = helper.Client;
+        helper.ParseSessionsPayload(
+            """[{"key":"agent:main:main","pinned":true,"pinnedAt":1700000000000,"unread":true,"markedUnreadAt":1700000000001,"archived":false}]""");
+
+        var session = Assert.Single(helper.GetSessionList());
+        Assert.True(session.Pinned);
+        Assert.Equal(1700000000000L, session.PinnedAt);
+        Assert.True(session.Unread);
+        Assert.Equal(1700000000001L, session.MarkedUnreadAt);
+        Assert.False(session.Archived);
+
+        helper.ParseSessionsPayload("""[{"key":"agent:main:main","status":"idle"}]""");
+
+        var reset = Assert.Single(helper.GetSessionList());
+        Assert.False(reset.Pinned);
+        Assert.Null(reset.PinnedAt);
+        Assert.False(reset.Unread);
+        Assert.Null(reset.MarkedUnreadAt);
+        Assert.False(reset.Archived);
+    }
+
+    [Fact]
+    public void ParseSessions_ReadsCreatedAtAndKeepsItWhenOmitted()
+    {
+        var helper = new GatewayClientTestHelper();
+        using var client = helper.Client;
+        helper.ParseSessionsPayload("""[{"key":"agent:main:main","createdAt":1700000000000}]""");
+
+        Assert.Equal(1700000000000L, Assert.Single(helper.GetSessionList()).CreatedAt);
+
+        helper.ParseSessionsPayload("""[{"key":"agent:main:main","status":"idle"}]""");
+
+        Assert.Equal(1700000000000L, Assert.Single(helper.GetSessionList()).CreatedAt);
+    }
+
+    [Fact]
+    public void ParseDetachedSessionRows_ReturnsArchivedRowsWithoutTouchingTrackedSessions()
+    {
+        var helper = new GatewayClientTestHelper();
+        using var client = helper.Client;
+        helper.ParseSessionsPayload("""[{"key":"agent:main:active","status":"idle"}]""");
+
+        var rows = helper.Client.ParseDetachedSessionRows(
+            System.Text.Json.JsonDocument.Parse("""{"sessions":[{"key":"agent:main:old","archived":true}]}""").RootElement);
+
+        var archived = Assert.Single(rows);
+        Assert.Equal("agent:main:old", archived.Key);
+        Assert.True(archived.Archived);
+        var tracked = Assert.Single(helper.GetSessionList());
+        Assert.Equal("agent:main:active", tracked.Key);
     }
 
     [Fact]
