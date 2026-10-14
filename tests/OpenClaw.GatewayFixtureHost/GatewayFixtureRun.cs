@@ -42,8 +42,15 @@ public sealed class GatewayFixtureRun : IAsyncDisposable
         Directory.CreateDirectory(ArtifactsDirectory);
     }
 
+    public static Task<GatewayFixtureRun> StartAsync(
+        string appPath,
+        string? artifactRoot = null,
+        CancellationToken cancellationToken = default)
+        => StartAsync(appPath, null, artifactRoot, cancellationToken);
+
     public static async Task<GatewayFixtureRun> StartAsync(
         string appPath,
+        GatewayScenario? scenario,
         string? artifactRoot = null,
         CancellationToken cancellationToken = default)
     {
@@ -51,7 +58,7 @@ public sealed class GatewayFixtureRun : IAsyncDisposable
             throw new PlatformNotSupportedException("The fixture app requires a Windows desktop.");
         var executable = GatewayFixtureProfile.ValidateApp(appPath);
         var token = Convert.ToHexString(RandomNumberGenerator.GetBytes(32));
-        var gateway = await FixtureGatewayServer.StartAsync(GatewayScenario.CreateBrowse(), token, cancellationToken);
+        var gateway = await FixtureGatewayServer.StartAsync(scenario ?? GatewayScenario.CreateBrowse(), token, cancellationToken);
         GatewayFixtureProfile profile;
         try
         {
