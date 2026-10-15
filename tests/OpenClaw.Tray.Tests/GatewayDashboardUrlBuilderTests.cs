@@ -38,6 +38,31 @@ public sealed class GatewayDashboardUrlBuilderTests
     }
 
     [Fact]
+    public void Build_OwnedLoopbackKeepsSavedPathAndDropsRemoteHost()
+    {
+        var url = GatewayDashboardUrlBuilder.Build(
+            "wss://gateway.example/mount/#view=compact",
+            "custodian?onboarding=1",
+            "current",
+            appendSharedGatewayToken: true,
+            ownedLoopbackOrigin: "http://127.0.0.1:19001");
+
+        Assert.Equal("http://127.0.0.1:19001/mount/custodian?onboarding=1#view=compact&token=current", url);
+        Assert.DoesNotContain("gateway.example", url);
+    }
+
+    [Fact]
+    public void Build_RejectsNonLoopbackTunnelOrigin()
+    {
+        Assert.Throws<ArgumentException>(() => GatewayDashboardUrlBuilder.Build(
+            "wss://gateway.example/mount/",
+            null,
+            "current",
+            appendSharedGatewayToken: true,
+            ownedLoopbackOrigin: "https://gateway.example/"));
+    }
+
+    [Fact]
     public void Build_DoesNotAppendNonSharedToken()
     {
         var url = GatewayDashboardUrlBuilder.Build("ws://localhost:4317", "config", "device-token", appendSharedGatewayToken: false);

@@ -176,6 +176,43 @@ public sealed class SetupDashboardHandoffTests
     }
 
     [Fact]
+    public async Task SshRecord_OpensOwnedLoopbackAndKeepsSavedPath()
+    {
+        string? launched = null;
+        var launcher = new GatewayDashboardLauncher(
+            () => true,
+            () => new("wss://gateway.example/control/", "synthetic shared", false, CredentialResolver.SourceSharedGatewayToken),
+            url => { launched = url; return Task.FromResult(true); },
+            () => throw new InvalidOperationException("Unexpected failure"),
+            resolveBinding: () => Task.FromResult(DashboardLaunchBinding.ForTunnel(
+                new SshTunnelConfig("user", "ssh.example", 18789, 19001),
+                "http://127.0.0.1:19001")));
+
+        Assert.True(await launcher.OpenAsync("channels"));
+        Assert.Equal("http://127.0.0.1:19001/control/channels#token=synthetic%20shared", launched);
+        Assert.DoesNotContain("gateway.example", launched);
+    }
+
+    [Fact]
+    public async Task SshRecord_RefusesSavedUrlWhenForwardIsNotOwned()
+    {
+        var launches = 0;
+        var failures = 0;
+        var launcher = new GatewayDashboardLauncher(
+            () => true,
+            () => new("wss://gateway.example/control/", "secret-token", false, CredentialResolver.SourceSharedGatewayToken),
+            _ => { launches++; return Task.FromResult(true); },
+            () => failures++,
+            resolveBinding: () => Task.FromResult(DashboardLaunchBinding.ForTunnel(
+                new SshTunnelConfig("user", "ssh.example", 18789, 19001),
+                null)));
+
+        Assert.False(await launcher.OpenAsync());
+        Assert.Equal(0, launches);
+        Assert.Equal(1, failures);
+    }
+
+    [Fact]
     public async Task ExplicitDashboardRetry_KeepsRequestedPathAndClearsFailureOnlyAfterOpen()
     {
         var urls = new List<string>();

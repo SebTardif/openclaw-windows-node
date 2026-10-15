@@ -2588,12 +2588,20 @@ public sealed partial class ConnectionPage : Page
                 }
             }
 
-            var url = GatewayDashboardUrlBuilder.Build(
-                rec.Url,
-                path: null,
-                rec.SharedGatewayToken,
-                appendSharedGatewayToken: !string.IsNullOrWhiteSpace(rec.SharedGatewayToken));
-            await global::Windows.System.Launcher.LaunchUriAsync(new Uri(url));
+            var hasSharedToken = !string.IsNullOrWhiteSpace(rec.SharedGatewayToken);
+            var launcher = new GatewayDashboardLauncher(
+                () => true,
+                () => new InteractiveGatewayCredential(
+                    rec.Url,
+                    rec.SharedGatewayToken ?? "",
+                    IsBootstrapToken: false,
+                    hasSharedToken
+                        ? CredentialResolver.SourceSharedGatewayToken
+                        : CredentialResolver.SourceDeviceToken),
+                async url => await global::Windows.System.Launcher.LaunchUriAsync(new Uri(url)),
+                () => CurrentApp.ShowTransientConnectionError("Dashboard could not be opened."),
+                resolveBinding: () => CurrentApp.ResolveDashboardBindingAsync(rec));
+            await launcher.OpenAsync();
         }
         catch (Exception ex)
         {

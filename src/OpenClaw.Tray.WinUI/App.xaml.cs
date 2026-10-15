@@ -4027,12 +4027,37 @@ public partial class App : Application, OpenClawTray.Services.IAppCommands, IPer
         }, new AppLogger(), nameof(OpenNativeSetupCompletion));
     }
 
+    private bool EnsureDashboardTunnelForActiveGateway()
+    {
+        if (_gatewayRegistry?.GetActive()?.SshTunnel is not null)
+            return true;
+
+        return EnsureSshTunnelConfigured();
+    }
+
+    internal Task<DashboardLaunchBinding> ResolveDashboardBindingAsync(GatewayRecord? record)
+    {
+        if (record?.SshTunnel is not { } tunnel)
+            return Task.FromResult(DashboardLaunchBinding.Direct());
+
+        _sshTunnelService ??= new SshTunnelService(new AppLogger());
+        return WaitForDashboardBindingAsync(_sshTunnelService, tunnel);
+    }
+
+    private static async Task<DashboardLaunchBinding> WaitForDashboardBindingAsync(
+        SshTunnelService tunnelService,
+        SshTunnelConfig tunnel)
+    {
+        var origin = await tunnelService.WaitForOwnedHttpOriginAsync(tunnel, CancellationToken.None);
+        return DashboardLaunchBinding.ForTunnel(tunnel, origin);
+    }
+
     private void OpenDashboard(string? path = null)
     {
         AsyncEventHandlerGuard.Run(async () =>
         {
             var launcher = new GatewayDashboardLauncher(
-                EnsureSshTunnelConfigured,
+                EnsureDashboardTunnelForActiveGateway,
                 () => TryResolveChatCredentials(out var url, out var token, out var source, out var bootstrap)
                     ? new InteractiveGatewayCredential(url, token, bootstrap, source) : null,
                 async url => await global::Windows.System.Launcher.LaunchUriAsync(new Uri(url)),
@@ -4040,7 +4065,8 @@ public partial class App : Application, OpenClawTray.Services.IAppCommands, IPer
                     () => _windowManager?.ShowDashboardLaunchFailureAsync(
                         () => OpenDashboard(path))
                         ?? Task.CompletedTask, new AppLogger(), "Dashboard launch error"),
-                () => _appNotificationService?.Dismiss(GatewayDashboardLauncher.FailureNotificationId));
+                () => _appNotificationService?.Dismiss(GatewayDashboardLauncher.FailureNotificationId),
+                () => ResolveDashboardBindingAsync(_gatewayRegistry?.GetActive()));
             await launcher.OpenAsync(path);
         }, new AppLogger(), nameof(OpenDashboard));
     }

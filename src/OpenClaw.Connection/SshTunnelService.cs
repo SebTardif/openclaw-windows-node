@@ -165,10 +165,86 @@ public sealed class SshTunnelService : ISshTunnelManager
             new SshTunnelConfig(user, host, remotePort, localPort, includeBrowserProxyForward, sshPort),
             SshTunnelOwner.Settings);
 
-    private void EnsureStartedCore(
+    /// <summary>
+    /// Starts this gateway forward only when no other SSH generation is running,
+    /// then returns the loopback origin after that generation owns the listener.
+    /// A different running forward is left in place and yields no origin.
+    /// </summary>
+    public async Task<string?> WaitForOwnedHttpOriginAsync(
+        SshTunnelConfig config,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(config);
+        var normalized = config with { User = config.User.Trim(), Host = config.Host.Trim() };
+        if (!EnsureStartedCore(normalized, SshTunnelOwner.Settings, allowReplace: false))
+            return null;
+
+        return await ReadOwnedHttpOriginAsync(normalized, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Returns the loopback origin when the current generation already owns the listener.
+    /// Does not start or replace a tunnel.
+    /// </summary>
+    public string? TryPeekOwnedHttpOrigin(SshTunnelConfig config)
+    {
+        ArgumentNullException.ThrowIfNull(config);
+        var normalized = config with { User = config.User.Trim(), Host = config.Host.Trim() };
+        Process? process;
+        long generation;
+        int processId;
+        DateTime processStartTimeUtc;
+        lock (_stateLock)
+        {
+            if (!TryCaptureOwnedProcessLocked(
+                    normalized,
+                    out process,
+                    out generation,
+                    out processId,
+                    out processStartTimeUtc))
+            {
+                return null;
+            }
+        }
+
+        WindowsTcpListenerSnapshotResult snapshot;
+        try
+        {
+            snapshot = WindowsTcpListenerSnapshot.Capture();
+        }
+        catch (Exception ex)
+        {
+            _logger.Debug($"SSH dashboard listener inspection failed: {ex.Message}");
+            return null;
+        }
+
+        lock (_stateLock)
+        {
+            try
+            {
+                return DescribeOwnedHttpOrigin(
+                    normalized,
+                    _currentConfig,
+                    generation,
+                    _lifecycleGeneration,
+                    snapshot,
+                    processId,
+                    processStartTimeUtc,
+                    processStillCurrent: ReferenceEquals(_process, process) && IsRunningLocked());
+            }
+            catch (InvalidOperationException ex)
+            {
+                _logger.Debug($"SSH dashboard listener is not owned: {ex.Message}");
+                return null;
+            }
+        }
+    }
+
+    private bool EnsureStartedCore(
         SshTunnelConfig tunnel,
         SshTunnelOwner owner,
-        Action<SshTunnelConfig>? beforeStart = null)
+        Action<SshTunnelConfig>? beforeStart = null,
+        bool allowReplace = true)
     {
         lock (_operationLock)
         {
@@ -190,7 +266,13 @@ public sealed class SshTunnelService : ISshTunnelManager
                 {
                     _currentOwner = ResolveOwnerForReuse(_currentOwner, owner);
                     Status = TunnelStatus.Up;
-                    return;
+                    return true;
+                }
+
+                // Dashboard must not stop a different SSH generation to free the forward.
+                if (IsRunningLocked() && !allowReplace)
+                {
+                    return _currentConfig is { } current && SameGatewayForward(current, tunnel);
                 }
             }
 
@@ -201,7 +283,117 @@ public sealed class SshTunnelService : ISshTunnelManager
                 Status = TunnelStatus.Starting;
             }
             StartProcess(tunnel, owner, spec);
+            return true;
         }
+    }
+
+    private async Task<string?> ReadOwnedHttpOriginAsync(
+        SshTunnelConfig normalized,
+        CancellationToken cancellationToken)
+    {
+        Process? process;
+        long generation;
+        int processId;
+        DateTime processStartTimeUtc;
+        lock (_stateLock)
+        {
+            if (!TryCaptureOwnedProcessLocked(
+                    normalized,
+                    out process,
+                    out generation,
+                    out processId,
+                    out processStartTimeUtc))
+            {
+                return null;
+            }
+        }
+
+        try
+        {
+            await WaitForOwnedLocalListenerAsync(
+                normalized.LocalPort,
+                process!,
+                generation,
+                processId,
+                processStartTimeUtc,
+                cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex) when (ex is InvalidOperationException or TimeoutException)
+        {
+            _logger.Debug($"SSH dashboard forward did not become owned: {ex.Message}");
+            return null;
+        }
+
+        WindowsTcpListenerSnapshotResult snapshot;
+        try
+        {
+            snapshot = WindowsTcpListenerSnapshot.Capture();
+        }
+        catch (Exception ex)
+        {
+            _logger.Debug($"SSH dashboard listener inspection failed: {ex.Message}");
+            return null;
+        }
+
+        lock (_stateLock)
+        {
+            try
+            {
+                return DescribeOwnedHttpOrigin(
+                    normalized,
+                    _currentConfig,
+                    generation,
+                    _lifecycleGeneration,
+                    snapshot,
+                    processId,
+                    processStartTimeUtc,
+                    processStillCurrent: ReferenceEquals(_process, process) && IsRunningLocked());
+            }
+            catch (InvalidOperationException ex)
+            {
+                _logger.Debug($"SSH dashboard listener is not owned: {ex.Message}");
+                return null;
+            }
+        }
+    }
+
+    private bool TryCaptureOwnedProcessLocked(
+        SshTunnelConfig normalized,
+        out Process? process,
+        out long generation,
+        out int processId,
+        out DateTime processStartTimeUtc)
+    {
+        process = null;
+        generation = 0;
+        processId = 0;
+        processStartTimeUtc = default;
+        if (!IsRunningLocked() ||
+            _process is null ||
+            _currentConfig is null ||
+            !SameGatewayForward(_currentConfig, normalized))
+        {
+            return false;
+        }
+
+        try
+        {
+            processStartTimeUtc = _process.StartTime.ToUniversalTime();
+        }
+        catch (Exception ex)
+        {
+            _logger.Debug($"SSH dashboard listener inspection failed: {ex.Message}");
+            return false;
+        }
+
+        process = _process;
+        generation = _lifecycleGeneration;
+        processId = _process.Id;
+        return true;
     }
 
     public void Stop()
@@ -733,6 +925,41 @@ public sealed class SshTunnelService : ISshTunnelManager
         if (snapshot.Listeners.Any(listener =>
             listener.Port == localPort && CanServeLoopback(listener.Address)))
             throw new InvalidOperationException($"Local port {localPort} is already owned by another process.");
+    }
+
+    internal static bool SameGatewayForward(SshTunnelConfig current, SshTunnelConfig requested) =>
+        string.Equals(current.User, requested.User, StringComparison.Ordinal) &&
+        string.Equals(current.Host, requested.Host, StringComparison.Ordinal) &&
+        current.RemotePort == requested.RemotePort &&
+        current.LocalPort == requested.LocalPort &&
+        current.SshPort == requested.SshPort;
+
+    /// <summary>
+    /// Loopback origin for a dashboard only when the captured SSH generation still
+    /// owns the listener. A later generation or a foreign process yields no origin.
+    /// </summary>
+    internal static string? DescribeOwnedHttpOrigin(
+        SshTunnelConfig requested,
+        SshTunnelConfig? current,
+        long capturedGeneration,
+        long observedGeneration,
+        WindowsTcpListenerSnapshotResult snapshot,
+        int processId,
+        DateTime processStartTimeUtc,
+        bool processStillCurrent)
+    {
+        if (!processStillCurrent ||
+            current is null ||
+            capturedGeneration != observedGeneration ||
+            !SameGatewayForward(current, requested))
+        {
+            return null;
+        }
+
+        if (!ValidateListenerOwnership(snapshot, requested.LocalPort, processId, processStartTimeUtc))
+            return null;
+
+        return $"http://127.0.0.1:{requested.LocalPort}";
     }
 
     internal static bool ValidateListenerOwnership(

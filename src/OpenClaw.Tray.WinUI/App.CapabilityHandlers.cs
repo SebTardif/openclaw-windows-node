@@ -2,7 +2,6 @@ using OpenClaw.Connection;
 using OpenClaw.Chat;
 using OpenClaw.Shared;
 using OpenClaw.Shared.Capabilities;
-using OpenClawTray.Helpers;
 using OpenClawTray.Presentation;
 using OpenClawTray.Services;
 using System;
@@ -241,11 +240,15 @@ public partial class App
             if (!TryResolveChatCredentials(out var gatewayUrl, out var token, out var credentialSource, out var isBootstrapToken))
                 return new { error = "Gateway URL or credential is not configured" };
 
-            var url = GatewayDashboardUrlBuilder.Build(
-                gatewayUrl,
-                path,
-                token,
-                !isBootstrapToken && credentialSource == CredentialResolver.SourceSharedGatewayToken);
+            var record = _gatewayRegistry?.GetActive();
+            var binding = record?.SshTunnel is { } tunnel
+                ? DashboardLaunchBinding.ForTunnel(tunnel, _sshTunnelService?.TryPeekOwnedHttpOrigin(tunnel))
+                : DashboardLaunchBinding.Direct();
+            if (binding.TunnelRequired && binding.OwnedHttpOrigin is null)
+                return new { error = "Gateway tunnel is unavailable" };
+
+            var credential = new InteractiveGatewayCredential(gatewayUrl, token, isBootstrapToken, credentialSource);
+            var url = GatewayDashboardLauncher.BuildUrl(credential, path, binding.OwnedHttpOrigin);
 
             return new
             {

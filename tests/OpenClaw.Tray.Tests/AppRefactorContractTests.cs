@@ -494,10 +494,26 @@ public sealed class AppRefactorContractTests
         var method = ExtractMethod(source, "OpenDashboard");
 
         Assert.Contains("new GatewayDashboardLauncher(", method);
-        Assert.Contains("EnsureSshTunnelConfigured,", method);
+        Assert.Contains("EnsureDashboardTunnelForActiveGateway,", method);
+        Assert.Contains("ResolveDashboardBindingAsync", method);
         Assert.Contains("ShowDashboardLaunchFailureAsync", method);
         Assert.DoesNotContain("GatewayDashboardUrlBuilder.Build", method);
         Assert.DoesNotContain("Process.Start", method);
+
+        var tunnelGate = ExtractMethod(source, "EnsureDashboardTunnelForActiveGateway");
+        Assert.Contains("SshTunnel is not null", tunnelGate);
+        Assert.Contains("EnsureSshTunnelConfigured()", tunnelGate);
+
+        var root = TestRepositoryPaths.GetRepositoryRoot();
+        var savedRow = ExtractMethod(
+            File.ReadAllText(Path.Combine(root, "src", "OpenClaw.Tray.WinUI", "Pages", "ConnectionPage.xaml.cs")),
+            "OnSavedRowOpenDashboardAsync");
+        Assert.Contains("new GatewayDashboardLauncher(", savedRow);
+        Assert.DoesNotContain("GatewayDashboardUrlBuilder.Build", savedRow);
+
+        var capability = ExtractMethod(source, "WireAppCapabilityHandlers");
+        Assert.DoesNotContain("GatewayDashboardUrlBuilder.Build", capability);
+        Assert.Contains("GatewayDashboardLauncher.BuildUrl", capability);
     }
 
     [Fact]

@@ -338,6 +338,46 @@ public sealed class SshTunnelServiceTests
     }
 
     [Fact]
+    public void DescribeOwnedHttpOrigin_RequiresSameGenerationAndProcess()
+    {
+        var startedAt = new DateTime(2026, 10, 15, 1, 2, 3, DateTimeKind.Utc);
+        var requested = new SshTunnelConfig("seb", "gateway.example", 18789, 19001, SshPort: 22);
+        var current = requested with { IncludeBrowserProxyForward = true };
+        var owned = new WindowsTcpListenerSnapshotResult(
+            [
+                new WindowsTcpListenerInfo(
+                    IPAddress.Loopback,
+                    19001,
+                    4321,
+                    "ssh",
+                    @"C:\Windows\System32\OpenSSH\ssh.exe",
+                    startedAt)
+            ],
+            Ipv4Complete: true,
+            Ipv6Complete: true);
+
+        Assert.Equal(
+            "http://127.0.0.1:19001",
+            SshTunnelService.DescribeOwnedHttpOrigin(
+                requested, current, 7, 7, owned, 4321, startedAt, processStillCurrent: true));
+        Assert.Null(SshTunnelService.DescribeOwnedHttpOrigin(
+            requested, current, 7, 8, owned, 4321, startedAt, processStillCurrent: true));
+        Assert.Null(SshTunnelService.DescribeOwnedHttpOrigin(
+            requested, current with { LocalPort = 19002 }, 7, 7, owned, 4321, startedAt, processStillCurrent: true));
+        Assert.Null(SshTunnelService.DescribeOwnedHttpOrigin(
+            requested, current, 7, 7, owned, 4321, startedAt, processStillCurrent: false));
+        Assert.Throws<InvalidOperationException>(() => SshTunnelService.DescribeOwnedHttpOrigin(
+            requested,
+            current,
+            7,
+            7,
+            owned with { Listeners = [owned.Listeners[0] with { ProcessId = 9999 }] },
+            4321,
+            startedAt,
+            processStillCurrent: true));
+    }
+
+    [Fact]
     public void ListenerOwnershipChecks_FailClosedWhenSnapshotIsIncomplete()
     {
         var incomplete = new WindowsTcpListenerSnapshotResult(

@@ -11,9 +11,22 @@ internal sealed class GatewayDashboardLauncher(
     Func<InteractiveGatewayCredential?> resolveCredential,
     Func<string, Task<bool>> launchBrowser,
     Action reportFailure,
-    Action? reportOpened = null)
+    Action? reportOpened = null,
+    Func<Task<DashboardLaunchBinding>>? resolveBinding = null)
 {
     internal const string FailureNotificationId = "setup-dashboard-launch";
+
+    internal static string BuildUrl(
+        InteractiveGatewayCredential credential,
+        string? path,
+        string? ownedHttpOrigin) =>
+        GatewayDashboardUrlBuilder.Build(
+            credential.GatewayUrl,
+            path,
+            credential.Token,
+            !credential.IsBootstrapToken && credential.Source == CredentialResolver.SourceSharedGatewayToken,
+            ownedHttpOrigin);
+
     public async Task<bool> OpenAsync(string? path = null)
     {
         try
@@ -22,8 +35,12 @@ internal sealed class GatewayDashboardLauncher(
                 throw new InvalidOperationException("The Gateway tunnel is unavailable.");
             var credential = resolveCredential()
                 ?? throw new InvalidOperationException("The Gateway credential is unavailable.");
-            var url = GatewayDashboardUrlBuilder.Build(credential.GatewayUrl, path, credential.Token,
-                !credential.IsBootstrapToken && credential.Source == CredentialResolver.SourceSharedGatewayToken);
+            var binding = resolveBinding is null
+                ? DashboardLaunchBinding.Direct()
+                : await resolveBinding();
+            if (binding.TunnelRequired && string.IsNullOrWhiteSpace(binding.OwnedHttpOrigin))
+                throw new InvalidOperationException("The Gateway tunnel is unavailable.");
+            var url = BuildUrl(credential, path, binding.OwnedHttpOrigin);
             if (!await launchBrowser(url))
                 throw new InvalidOperationException("Windows did not open the Dashboard.");
         }
