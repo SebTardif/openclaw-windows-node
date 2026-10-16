@@ -1849,21 +1849,14 @@ public sealed partial class ChannelsPage : Page
         // info so the user can see *exactly* what the gateway did or didn't do.
         void ShowDiagnostic(string method, object @params, string? error, string? rawResponse)
         {
-            var parts = new List<string>
-            {
-                $"Method:   {method}",
-                $"Channel:  {channelId}",
-                $"Params:   {System.Text.Json.JsonSerializer.Serialize(@params)}",
-            };
-            if (!string.IsNullOrEmpty(error)) parts.Add($"Error:    {error}");
-            if (!string.IsNullOrEmpty(rawResponse))
-            {
-                // Trim verbose stack traces; keep first 1000 chars (plenty for diagnosis,
-                // small enough to read in the disclosure).
-                var trimmed = rawResponse.Length > 1000 ? rawResponse[..1000] + "…" : rawResponse;
-                parts.Add($"Response: {trimmed}");
-            }
-            diagnosticBody.Text = string.Join("\n", parts);
+            // The wait call still sends the image to the gateway. The
+            // selectable text does not keep that payload.
+            diagnosticBody.Text = ChannelLinkDiagnosticText.Format(
+                method,
+                channelId,
+                JsonSerializer.Serialize(@params),
+                error,
+                rawResponse);
             diagnostic.Visibility = Visibility.Visible;
         }
         void HideDiagnostic()

@@ -44,6 +44,18 @@ public sealed class ChannelsPageWebLoginRecoveryContractTests
     }
 
     [Fact]
+    public void FailedQrWait_ShowsDiagnosticTextThroughTheRedactingFormatter()
+    {
+        var source = ReadChannelsPage();
+        var show = source.IndexOf("void ShowDiagnostic(", StringComparison.Ordinal);
+        Assert.True(show >= 0, "Could not find ShowDiagnostic.");
+        var body = source.Substring(show, Math.Min(900, source.Length - show));
+
+        Assert.Contains("ChannelLinkDiagnosticText.Format", body, StringComparison.Ordinal);
+        Assert.DoesNotContain("diagnosticBody.Text = string.Join", body, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void LinkingFlow_DoesNotSurfaceRawStackTraceAsHeadline()
     {
         var source = ReadChannelsPage();
