@@ -1635,16 +1635,14 @@ public partial class OpenClawGatewayClient : WebSocketClientBase, IOperatorGatew
         }
         catch (Exception ex)
         {
-            // Sanitize before logging — the gateway sometimes echoes patched
-            // field values in validation errors, so logging ex.Message verbatim
-            // can leak secrets to the on-disk tray log (Hanselman review LOW-7).
-            // The full unsanitized message stays in ConfigPatchResult.Error so
-            // the UI banner can show it.
-            _logger.Warn($"config.patch failed: {SanitizeErrorForLog(ex.Message)}");
+            // The gateway sometimes echoes patched field values in validation
+            // errors. The log and the save banner both use the scrubbed text.
+            var scrubbed = SanitizeErrorForLog(ex.Message);
+            _logger.Warn($"config.patch failed: {scrubbed}");
             return new ConfigPatchResult
             {
                 Ok = false,
-                Error = ex.Message,
+                Error = scrubbed,
                 RawResponse = ex.ToString(),
             };
         }
@@ -1658,7 +1656,7 @@ public partial class OpenClawGatewayClient : WebSocketClientBase, IOperatorGatew
     /// gateway may put raw field values in validation errors, and the log
     /// is persistent on disk — see Hanselman review LOW-7.
     /// </summary>
-    private static string SanitizeErrorForLog(string? raw)
+    internal static string SanitizeErrorForLog(string? raw)
     {
         if (string.IsNullOrEmpty(raw)) return raw ?? "";
         const int MaxLen = 500;

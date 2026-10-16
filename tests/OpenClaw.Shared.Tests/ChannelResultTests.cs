@@ -161,4 +161,31 @@ public class ConfigPatchResultTests
         var result = new ConfigPatchResult { Ok = true };
         Assert.False(result.LooksLikeStaleBaseHash);
     }
+
+    [Fact]
+    public void SanitizeErrorForLog_RedactsChannelSecretsTheBannerWouldShow()
+    {
+        const string secret = "123456:telegram-bot-secret";
+        var scrubbed = OpenClawGatewayClient.SanitizeErrorForLog(
+            $"invalid config: {{\"botToken\":\"{secret}\",\"signingSecret\":\"slack-secret\",\"webhookUrl\":\"https://hooks.example/secret\"}}");
+
+        Assert.DoesNotContain(secret, scrubbed);
+        Assert.DoesNotContain("slack-secret", scrubbed);
+        Assert.DoesNotContain("https://hooks.example/secret", scrubbed);
+        Assert.Contains("\"botToken\":\"<redacted>\"", scrubbed);
+        Assert.Contains("\"signingSecret\":\"<redacted>\"", scrubbed);
+        Assert.Contains("\"webhookUrl\":\"<redacted>\"", scrubbed);
+        Assert.Contains("invalid config:", scrubbed);
+    }
+
+    [Fact]
+    public void SanitizeErrorForLog_KeepsAStaleBaseHashSignal()
+    {
+        var scrubbed = OpenClawGatewayClient.SanitizeErrorForLog(
+            "config patch conflict: baseHash changed {\"botToken\":\"123456:secret\"}");
+
+        var result = new ConfigPatchResult { Ok = false, Error = scrubbed };
+        Assert.True(result.LooksLikeStaleBaseHash);
+        Assert.DoesNotContain("123456:secret", scrubbed);
+    }
 }
