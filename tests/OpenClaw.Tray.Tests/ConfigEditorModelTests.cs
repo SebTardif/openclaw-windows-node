@@ -213,8 +213,10 @@ public class ConfigEditorModelTests
         Assert.Null(blocked);
     }
 
-    [Fact]
-    public void FindUneditedRedactionSentinel_BlocksEditedValueThatIsStillTheSentinel()
+    [Theory]
+    [InlineData("<redacted>")]
+    [InlineData("*****")]
+    public void FindUneditedRedactionSentinel_BlocksEditedValueThatIsStillTheSentinel(string replacement)
     {
         using var document = JsonDocument.Parse("""
         {
@@ -228,7 +230,7 @@ public class ConfigEditorModelTests
             document.RootElement,
             new Dictionary<string, object?>
             {
-                ["channels.telegram.botToken"] = "<redacted>",
+                ["channels.telegram.botToken"] = replacement,
             });
 
         var blocked = ConfigEditorModel.FindUneditedRedactionSentinel(
@@ -237,6 +239,34 @@ public class ConfigEditorModelTests
             document.RootElement);
 
         Assert.Equal("channels.telegram.botToken", blocked);
+    }
+
+    [Theory]
+    [InlineData("***")]
+    [InlineData("*****")]
+    [InlineData("********")]
+    [InlineData("<redacted>")]
+    [InlineData("[REDACTED]")]
+    [InlineData(" *** ")]
+    public void FindUneditedRedactionSentinel_AllowsDirectOrdinaryMaskLiteral(string replacement)
+    {
+        using var document = JsonDocument.Parse("""
+        { "messages": { "responsePrefix": "***" }, "enabled": true }
+        """);
+        var changes = new Dictionary<string, object?>
+        {
+            ["messages.responsePrefix"] = replacement,
+        };
+
+        var updated = ConfigEditorModel.ApplyChanges(document.RootElement, changes);
+        var blocked = ConfigEditorModel.FindUneditedRedactionSentinel(
+            updated, changes.Keys, document.RootElement);
+        var sent = ConfigEditorModel.OmitUntouchedRedactionSentinels(
+            updated, changes.Keys, document.RootElement);
+
+        Assert.Null(blocked);
+        Assert.Equal(replacement, sent.GetProperty("messages").GetProperty("responsePrefix").GetString());
+        Assert.True(sent.GetProperty("enabled").GetBoolean());
     }
 
     [Fact]

@@ -223,7 +223,7 @@ internal static class ConfigEditorModel
             // legacy placeholder is the same refusal as the parent-object edit.
             if (edited.Contains(path))
             {
-                return loadedSentinel || LoadedCredentialIsNativeMask(baseDocument, path)
+                return (loadedSentinel && IsCredentialPath(path)) || LoadedCredentialIsNativeMask(baseDocument, path)
                     ? path
                     : null;
             }
