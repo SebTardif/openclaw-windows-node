@@ -44,7 +44,11 @@ public sealed record LocalModelRunRecipe
         SpeculativeDecodingMode speculativeDecoding,
         int speculativeDraftMaxTokens,
         ModelSamplingPreset sampling,
-        PinnedArtifact? draftWeights = null)
+        PinnedArtifact? draftWeights = null,
+        int draftAttentionLayerCount = 1,
+        int? promptCacheMiB = null,
+        int? maximumContextCheckpoints = null,
+        int? draftGpuLayers = null)
     {
         if (speculativeDecoding == SpeculativeDecodingMode.DraftDFlash && draftWeights is null)
             throw new ArgumentException("Draft-flash decoding requires a pinned draft checkpoint.", nameof(draftWeights));
@@ -65,6 +69,16 @@ public sealed record LocalModelRunRecipe
         if (speculativeDraftMaxTokens < 0 ||
             (speculativeDraftMaxTokens == 0 && speculativeDecoding != SpeculativeDecodingMode.None))
             throw new ArgumentOutOfRangeException(nameof(speculativeDraftMaxTokens));
+        if (draftAttentionLayerCount <= 0)
+            throw new ArgumentOutOfRangeException(nameof(draftAttentionLayerCount));
+        if (promptCacheMiB is < 0)
+            throw new ArgumentOutOfRangeException(nameof(promptCacheMiB));
+        if (maximumContextCheckpoints is < 0)
+            throw new ArgumentOutOfRangeException(nameof(maximumContextCheckpoints));
+        if (draftGpuLayers is < 0)
+            throw new ArgumentOutOfRangeException(nameof(draftGpuLayers));
+        if (draftGpuLayers.HasValue && speculativeDecoding != SpeculativeDecodingMode.DraftDFlash)
+            throw new ArgumentException("Separate draft GPU layers require draft-flash decoding.", nameof(draftGpuLayers));
         ArgumentNullException.ThrowIfNull(sampling);
 
         BatchTokens = batchTokens;
@@ -79,6 +93,10 @@ public sealed record LocalModelRunRecipe
         SpeculativeDraftMaxTokens = speculativeDraftMaxTokens;
         Sampling = sampling;
         DraftWeights = draftWeights;
+        DraftAttentionLayerCount = draftAttentionLayerCount;
+        PromptCacheMiB = promptCacheMiB;
+        MaximumContextCheckpoints = maximumContextCheckpoints;
+        DraftGpuLayers = draftGpuLayers;
     }
 
     public int BatchTokens { get; }
@@ -94,6 +112,14 @@ public sealed record LocalModelRunRecipe
     public ModelSamplingPreset Sampling { get; }
     /// <summary>The independently pinned draft checkpoint, set only for <see cref="SpeculativeDecodingMode.DraftDFlash"/>.</summary>
     public PinnedArtifact? DraftWeights { get; }
+    /// <summary>Attention layers in the drafter, using the target's KV head geometry.</summary>
+    public int DraftAttentionLayerCount { get; }
+    /// <summary>Saved-prompt RAM budget in MiB. Zero disables it; null keeps the runtime default.</summary>
+    public int? PromptCacheMiB { get; }
+    /// <summary>Maximum serialized context checkpoints per slot, or null for the runtime default.</summary>
+    public int? MaximumContextCheckpoints { get; }
+    /// <summary>GPU layers for a separate DFlash drafter, or null for the runtime default.</summary>
+    public int? DraftGpuLayers { get; }
 }
 
 /// <summary>A downloadable GGUF model and its deterministic llama-server recipe.</summary>
@@ -149,9 +175,10 @@ public sealed record LocalInferenceRunProfile
 }
 
 /// <summary>Immutable Hugging Face model pins offered by the Windows local inference flow.</summary>
-public static class LocalModelCatalog
+public static partial class LocalModelCatalog
 {
     public const string Bonsai2ModelId = "bonsai-2-27b-ptq1-0";
+    public const string NemotronBoltModelId = "nemotron-3.5-bolt-74b-a9b-iq2-lilicorr";
     public const string Qwen38_27BModelId = "qwen3.8-27b-mtp-ud-q4-k-m";
     public const string Qwen35BModelId = "qwen3.6-35b-a3b-mtp-q4-k-m";
     public const string Qwen27BModelId = "qwen3.6-27b-mtp-q4-k-m";
@@ -351,6 +378,7 @@ public static class LocalModelCatalog
                 RuntimeFamily: BonsaiRuntimeCatalog.Family,
                 MinimumSystemMemoryBytes: 16L * 1024 * 1024 * 1024,
                 MinimumFreeDiskBytes: 8L * 1024 * 1024 * 1024),
+            CreateNemotronBolt(),
         });
 
     // Retired from new installs and never offered, recommended, or selectable.
@@ -410,7 +438,9 @@ public static class LocalModelCatalog
                         1536L * 1024 * 1024)]
                     : string.Equals(model.Id, Qwen35B_Q4KSModelId, StringComparison.Ordinal)
                     ? CreateRtxSpark48GbProfiles(model)
-                    : CreateProfiles(model))))
+                    : string.Equals(model.Id, NemotronBoltModelId, StringComparison.Ordinal)
+                        ? CreateNemotronBoltProfiles()
+                        : CreateProfiles(model))))
             .Concat(s_legacyModels
                 .Select(model => (model, profiles: Array.AsReadOnly(
                     // The retired 48GB-SKU quantization was only ever installed at that
@@ -494,6 +524,16 @@ public static class LocalModelCatalog
             ? null
             : s_legacyModels.SingleOrDefault(model =>
                 string.Equals(model.Id, id, StringComparison.OrdinalIgnoreCase)));
+
+    /// <summary>
+    /// Retains known earlier artifact pins under the same catalog id when the
+    /// receipt names their source URL. Full receipt validation is still required.
+    /// </summary>
+    public static LocalModelInfo? FindInstalled(string? id, string? modelSourceUrl) =>
+        string.Equals(id, NemotronBoltModelId, StringComparison.OrdinalIgnoreCase) &&
+        string.Equals(modelSourceUrl, s_prereleaseNemotronBolt.Weights.DownloadUri.AbsoluteUri, StringComparison.Ordinal)
+            ? s_prereleaseNemotronBolt
+            : FindInstalled(id);
 
     /// <summary>True when the id resolves only to a retired catalog entry.</summary>
     public static bool IsLegacy(string? id) => Find(id) is null && FindInstalled(id) is not null;

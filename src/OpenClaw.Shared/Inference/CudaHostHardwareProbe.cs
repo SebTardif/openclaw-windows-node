@@ -66,21 +66,23 @@ public sealed class CudaHostHardwareProbe : IHostHardwareProbe
     internal const string UnidentifiedGpuName = "NVIDIA GPU";
 
     private readonly ICudaDeviceReader _reader;
+    private readonly Func<PhysicalMemorySnapshot?> _readMemory;
 
     public CudaHostHardwareProbe()
         : this(new NvcudaDeviceReader())
     {
     }
 
-    internal CudaHostHardwareProbe(ICudaDeviceReader reader)
+    internal CudaHostHardwareProbe(ICudaDeviceReader reader, Func<PhysicalMemorySnapshot?>? readMemory = null)
     {
         _reader = reader ?? throw new ArgumentNullException(nameof(reader));
+        _readMemory = readMemory ?? PhysicalMemoryProbe.TryRead;
     }
 
     public HostHardwareInfo Probe()
     {
         PhysicalMemorySnapshot? physicalMemory = null;
-        try { physicalMemory = PhysicalMemoryProbe.TryRead(); } catch { }
+        try { physicalMemory = _readMemory(); } catch { }
 
         IReadOnlyList<GpuInfo> gpus;
         try { gpus = CaptureCudaGpus(); } catch { gpus = []; }
@@ -91,7 +93,10 @@ public sealed class CudaHostHardwareProbe : IHostHardwareProbe
             physicalMemory?.AvailableBytes,
             gpus,
             VulkanAvailable: false,
-            LocalAiDiskSpace: LocalAiDiskSpaceProbe.TryRead());
+            LocalAiDiskSpace: LocalAiDiskSpaceProbe.TryRead())
+        {
+            AvailableCommitMemoryBytes = physicalMemory?.AvailableCommitBytes,
+        };
     }
 
     private IReadOnlyList<GpuInfo> CaptureCudaGpus()

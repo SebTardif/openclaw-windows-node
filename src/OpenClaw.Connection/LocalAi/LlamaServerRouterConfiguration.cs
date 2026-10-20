@@ -27,6 +27,19 @@ public sealed record LlamaServerRouterLaunchPlan(
 
 public static class LlamaServerRouterConfiguration
 {
+    /// <summary>Resolves the exact catalog plan recorded by a validated installation receipt.</summary>
+    public static LocalInferencePlan ResolveInstalledPlan(LocalAiResolvedInstall install)
+    {
+        ArgumentNullException.ThrowIfNull(install);
+        LocalAiInstallManifest manifest = install.Manifest;
+        LlamaRuntimeVariant runtime = LlamaRuntimeCatalog.FindInstalled(manifest.RuntimeId)
+            ?? throw new InvalidDataException("The managed llama-server runtime is no longer qualified.");
+        LocalModelInfo model = LocalModelCatalog.FindInstalled(manifest.ModelCatalogId, manifest.ModelAsset.SourceUrl)
+            ?? throw new InvalidDataException("The managed local AI model is no longer qualified.");
+        return new LocalInferencePlan(runtime, model, ResolveQualifiedReceipt(manifest, runtime, model),
+            LocalInferenceModelSelectionOrigin.Explicit, manifest.SelectedGpuId);
+    }
+
     public static LlamaServerRouterLaunchPlan Build(
         LocalAiPaths paths,
         LocalAiResolvedInstall install,
@@ -64,12 +77,9 @@ public static class LlamaServerRouterConfiguration
         // FindInstalled, not Variants: an installation recorded before the last
         // runtime bump must keep launching until setup upgrades it, instead of being
         // stranded the moment the catalog moves to a newer pinned release.
-        LlamaRuntimeVariant runtime = LlamaRuntimeCatalog.FindInstalled(manifest.RuntimeId)
-            ?? throw new InvalidDataException("The managed llama-server runtime is no longer qualified.");
-        LocalModelInfo model = LocalModelCatalog.FindInstalled(manifest.ModelCatalogId)
-            ?? throw new InvalidDataException("The managed local AI model is no longer qualified.");
-
-        LocalInferenceRunProfile profile = ResolveQualifiedReceipt(manifest, runtime, model);
+        LocalInferencePlan installedPlan = ResolveInstalledPlan(install);
+        LocalModelInfo model = installedPlan.Model;
+        LocalInferenceRunProfile profile = installedPlan.Profile;
         string? draftModelPath = ResolveDraftModelPath(manifest, model, verifiedDraftModelPath);
 
         string presetPath = paths.ResolveContainedPath(
@@ -203,7 +213,7 @@ public static class LlamaServerRouterConfiguration
             : verifiedDraftModelPath;
     }
 
-    private static string BuildPreset(
+    internal static string BuildPreset(
         LocalModelInfo model,
         LocalInferenceRunProfile profile,
         string modelPath,
@@ -239,6 +249,10 @@ public static class LlamaServerRouterConfiguration
         preset.AppendLine("main-gpu = 0");
         preset.AppendLine("fit = off");
         preset.AppendLine("load-mode = dio");
+        if (recipe.PromptCacheMiB is { } cacheMiB)
+            preset.Append("cache-ram = ").AppendLine(Invariant(cacheMiB));
+        if (recipe.MaximumContextCheckpoints is { } checkpoints)
+            preset.Append("ctx-checkpoints = ").AppendLine(Invariant(checkpoints));
         switch (recipe.SpeculativeDecoding)
         {
             case SpeculativeDecodingMode.DraftMtp:
@@ -249,6 +263,8 @@ public static class LlamaServerRouterConfiguration
             case SpeculativeDecodingMode.DraftDFlash:
                 preset.AppendLine("spec-type = draft-dflash");
                 preset.Append("spec-draft-model = ").AppendLine(draftModelPath);
+                if (recipe.DraftGpuLayers is { } draftGpuLayers)
+                    preset.Append("spec-draft-ngl = ").AppendLine(Invariant(draftGpuLayers));
                 preset.Append("spec-draft-n-max = ").AppendLine(Invariant(recipe.SpeculativeDraftMaxTokens));
                 preset.AppendLine("spec-draft-backend-sampling = true");
                 break;

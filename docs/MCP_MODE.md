@@ -1,14 +1,19 @@
 # Local MCP Mode
 
-**Status:** Implemented (initial cut). See `src/OpenClaw.Shared/Mcp/`, `src/OpenClaw.Shared/Mcp/McpHttpServer.cs`, and the Settings UI MCP section.
+**Status:** Implemented. For the common development/debugging path, start with
+the [local MCP guide](../.agents/skills/windows-app-mcp/SKILL.md). This page
+describes the transport, authentication, mode matrix, and implementation contract.
 
 ## Summary
 
-The Windows tray app now ships a **local Model Context Protocol (MCP) server** alongside its existing OpenClaw gateway client. The same node capabilities the agent reaches over the OpenClaw gateway WebSocket - `system.*`, `screen.*`, `canvas.*`, `camera.*`, `location.get`, `tts.*`, `stt.*`, `device.*`, and `browser.proxy` - are advertised, on the same machine, as MCP tools over `http://127.0.0.1:8765/`. Local-only `app.*` and `app.connection.*` tools are also exposed to MCP clients for tray automation and connection/pairing workflows; those are not registered with the remote gateway node transport.
+The Windows tray app now ships a **local Model Context Protocol (MCP) server** alongside its existing OpenClaw gateway client. Node capabilities the agent reaches over the OpenClaw gateway WebSocket (`system.*`, `screen.*`, `canvas.*`, `camera.*`, `location.get`, `tts.*`, `stt.*`, and `device.*`) are advertised, on the same machine, as MCP tools over `http://127.0.0.1:8765/`. `browser.proxy` is not in that MCP-only set. `BrowserProxyActivation` registers it only when the toggle is on, a gateway client is attached, the shared gateway token is set, and the browser endpoint is verified. Local-only `app.*` and `app.connection.*` tools are also exposed to MCP clients for tray automation and connection/pairing workflows. Those are not registered with the remote gateway node transport.
 
 This means any local MCP client (Claude Desktop, Claude Code, Cursor, an MCP-aware CLI, a custom dev script) can reach into the running tray and drive Windows-native capabilities directly, without an OpenClaw gateway in the loop. The tray app can run in **MCP-only mode** with no gateway connection at all.
 
-The implementation is structured so that **adding a new node capability automatically exposes it via MCP** - no MCP-side code changes required. That is the central design constraint and the main reason we built MCP in-process rather than as a separate adapter.
+MCP and Gateway node mode share capability dispatch rather than maintaining
+separate implementations. A new command still needs registration, curated MCP
+descriptions, the shipped `winnode` reference, tests, and applicable live proof.
+Follow the [new-command checklist](../AGENTS.md#ui-mcp-and-pr-proof).
 
 ## Goals
 
@@ -92,7 +97,12 @@ The HTTP transport requires a bearer token on every request. Defense-in-depth on
 
 **On the wire.** Every request must carry `Authorization: Bearer <token>` when the server has a configured token. Missing or wrong token → `401 Unauthorized` with no body. `GET /` remains a "yes I'm here" probe after auth passes.
 
-**How users find it.** Settings → Developer Mode → MCP section shows the live token (masked, with Reveal/Copy buttons) and the storage path. For agents that read from disk (Claude Code, custom scripts), pointing them at `McpTokenPath` is preferable to embedding the token in their prompt or config - the path is stable, the token is a secret. For agents that only accept literal bearer values in config (Claude Desktop, Cursor), use Copy.
+**How users find it.** Settings > Permissions > Integrations > Local MCP Server
+shows the endpoint and status, with **Copy token** and **Copy URL** actions.
+Agents should read the selected profile's token file without printing it rather
+than placing the token in a prompt or command line. For clients that require a
+literal bearer value in configuration, use Copy token and keep that
+configuration private.
 
 ### Settings model
 
@@ -110,7 +120,9 @@ public bool EnableMcpServer { get; set; }     // run local MCP HTTP server
 | true | false | Gateway node, no MCP |
 | true | true | Gateway node + MCP |
 
-Settings UI exposes both toggles in the Advanced section, with the live MCP endpoint URL and current status (`Listening` / `Stopped - save and restart to start` / `Disabled`).
+The Local MCP Server control lives in Permissions > Integrations. Its endpoint
+and status describe the actual selected app instance. The two flags above remain
+independent; a running MCP-only listener is not evidence of Gateway pairing.
 
 A legacy `McpOnlyMode` field is migrated automatically on load and never re-written.
 
@@ -170,7 +182,7 @@ Gateway/node command groups currently include:
 - `tts.speak`, `tts.status`
 - `location.get`
 - `device.info`, `device.status`
-- `browser.proxy`
+- `browser.proxy` (omitted from `tools/list` until `BrowserProxyActivation` is `RegistrationBlock.None`: toggle on, gateway client attached, shared gateway token set, browser endpoint verified. MCP-only mode has no gateway client, so `winnode --command browser.proxy` returns `Unknown tool: browser.proxy`.)
 
 Local MCP-only app control commands currently include:
 
@@ -310,7 +322,11 @@ curl -s -X POST http://127.0.0.1:8765/ `
 ```
 
 For a simpler local CLI smoke test, run `winnode --list-tools`; it loads the
-same token file automatically.
+same token file automatically. A connection refused on port 8765 means the
+tray is not listening. Do not reinstall `winnode`. Start the tray with
+`EnableMcpServer` true, set `OPENCLAW_TRAY_DATA_DIR` for both the tray and
+`winnode`, and wait until `mcp-token.txt` exists and the port accepts a
+connection. `OPENCLAW_SKIP_UPDATE_CHECK=1` skips the startup update check.
 
 For agent-driven validation, use the repo-local skill
 `.agents/skills/openclaw-proof-validation/SKILL.md`. MCP/node changes need live
