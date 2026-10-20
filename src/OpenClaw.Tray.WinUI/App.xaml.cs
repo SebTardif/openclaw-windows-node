@@ -118,18 +118,11 @@ public partial class App : Application, OpenClawTray.Services.IAppCommands, IPer
     /// <summary>
     /// Session key that the chat surface should select on its next mount.
     /// Used when the user clicks a session from SessionsPage or a notification
-    /// while the HubWindow may not yet exist. Consumed (cleared) by ChatPage.
+    /// while Workspace may not yet exist. Consumed (cleared) by ChatPage.
     /// </summary>
     public string? PendingChatSessionKey { get; set; }
 
     public OpenClawTray.Chat.OpenClawChatDataProvider? ChatProvider => _chatCoordinator?.Provider;
-    private volatile bool _hubNativeChatSurfaceActive;
-    private volatile bool _trayNativeChatSurfaceActive;
-    internal bool IsNativeChatSurfaceActive => _hubNativeChatSurfaceActive || _trayNativeChatSurfaceActive;
-
-    internal void SetHubNativeChatSurfaceActive(bool active) => _hubNativeChatSurfaceActive = active;
-    internal void SetTrayNativeChatSurfaceActive(bool active) => _trayNativeChatSurfaceActive = active;
-
     /// <summary>
     /// Raised after the tray-wide settings have been saved (either via the
     /// SettingsPage Save button or a direct toggle from the tray menu).
@@ -637,6 +630,10 @@ public partial class App : Application, OpenClawTray.Services.IAppCommands, IPer
         // Store protocol URI for processing after setup
         _pendingProtocolUri = protocolUri;
 
+        // Updates overlay the old tree; the new binary owns this narrow, idempotent retirement.
+        foreach (var warning in LegacyMxcFiles.Cleanup(AppContext.BaseDirectory, PackageHelper.IsPackaged))
+            Logger.Warn($"Legacy MXC cleanup incomplete: {warning}");
+
         if (!AppIdentity.IsIsolated && PackageHelper.IsPackaged)
         {
             using var cleanupLogger = new OpenClaw.SetupEngine.SetupLogger(filePath: null);
@@ -697,7 +694,6 @@ public partial class App : Application, OpenClawTray.Services.IAppCommands, IPer
                 GetLocalAiRuntime: () => _localAiRuntime,
                 GetLocalAiGatewayLifecycle: () => _localAiGatewayLifecycle,
                 GetNodeService: () => _nodeService,
-                GetVoiceService: () => _nodeService?.VoiceService ?? _standaloneVoiceService,
                 GetPageActivator: () => PageActivator,
                 GetPendingChatSessionKey: () => PendingChatSessionKey,
                 GetStartupArgs: () => _startupArgs,
@@ -1036,15 +1032,6 @@ public partial class App : Application, OpenClawTray.Services.IAppCommands, IPer
             }
         }
 
-        // Pre-warm chat window (WebView2 init takes 1-3s, do it now so left-click is instant)
-        if (_settings != null &&
-            TryResolveChatCredentials(out var prewarmUrl, out var prewarmToken, out _, out var prewarmIsBootstrapToken) &&
-            !prewarmIsBootstrapToken)
-        {
-            _windowManager.PrewarmChat(new ChatWindowRequest(prewarmUrl, prewarmToken));
-            // Window is created but hidden — WebView2 initializes in the background
-        }
-
         // Start forwarded-activation listener (current-user IPC)
         await _activationRouter.StartForwardedActivationListenerAsync(this, CancellationToken.None);
 
@@ -1128,29 +1115,6 @@ public partial class App : Application, OpenClawTray.Services.IAppCommands, IPer
             return;
 
         ThemeHelper.ApplyTheme(window, _settings.AppTheme);
-    }
-
-    internal void ShowChatWindow()
-    {
-        if (_settings == null) return;
-        if (!TryResolveChatCredentials(out var url, out var token, out var credentialSource, out var isBootstrapToken))
-        {
-            ShowConnectionSettingsForPairingIssue(
-                "ChatWindow",
-                "Gateway URL or credential is not configured");
-            return;
-        }
-
-        if (isBootstrapToken)
-        {
-            ShowConnectionSettingsForPairingIssue(
-                "ChatWindow",
-                "Gateway pairing is not complete");
-            return;
-        }
-
-        Logger.Info($"[ChatWindow] Quick-chat credentials resolved from {credentialSource}");
-        _windowManager?.ShowChat(new ChatWindowRequest(url, token));
     }
 
     private void ShowCanvasWindow()
@@ -1266,7 +1230,7 @@ public partial class App : Application, OpenClawTray.Services.IAppCommands, IPer
             case "canvas": ShowCanvasWindow(); break;
             case "openchat": ShowHub("chat"); break;
             case "voice": ShowHub("voice"); break; // was: ShowVoiceOverlay()
-            case "webchat": ShowWebChat(); break;
+            case "webchat": OpenChatSession(); break;
             case "hub": ShowHub(); break;
             case "companion":
                 // If disconnected, open Connection page (status, gateways, add flow)
@@ -3270,17 +3234,6 @@ public partial class App : Application, OpenClawTray.Services.IAppCommands, IPer
         if (_settings is null || _appNotificationService is null)
             return;
 
-        if (!_settings.SystemRunSandboxEnabled)
-        {
-            _sandboxRiskProbeGeneration++;
-            _sandboxRiskProbeInFlight = false;
-            PublishSandboxRiskNotification(
-                "disabled",
-                LocalizationHelper.GetString("AppNotification_SandboxDisabled_Title"),
-                LocalizationHelper.GetString("AppNotification_SandboxDisabled_Message"));
-            return;
-        }
-
         if (_sandboxRiskAvailabilityCache is { } cachedAvailability)
             PublishSandboxRiskNotification(cachedAvailability);
         else
@@ -3291,7 +3244,7 @@ public partial class App : Application, OpenClawTray.Services.IAppCommands, IPer
 
     private void StartSandboxRiskProbeIfNeeded()
     {
-        if (_settings is not { SystemRunSandboxEnabled: true })
+        if (_settings is null)
             return;
 
         var now = DateTimeOffset.UtcNow;
@@ -3336,7 +3289,6 @@ public partial class App : Application, OpenClawTray.Services.IAppCommands, IPer
                 false,
                 false,
                 false,
-                null,
                 new[] { message },
                 probeErrored: true);
         }
@@ -3356,14 +3308,12 @@ public partial class App : Application, OpenClawTray.Services.IAppCommands, IPer
         var reasonText = availability.SystemRunSandboxUnsupportedReasons.Count > 0
             ? string.Join("  ·  ", availability.SystemRunSandboxUnsupportedReasons)
             : LocalizationHelper.GetString("AppNotification_SandboxUnavailable_DefaultReason");
-        var blockHostFallback = _settings?.SystemRunBlockHostFallbackWhenMxcUnavailable == true;
-        var mode = blockHostFallback ? "blocked" : "host-fallback";
-        var title = blockHostFallback
-            ? LocalizationHelper.GetString("AppNotification_SandboxUnavailableBlocked_Title")
-            : LocalizationHelper.GetString("AppNotification_SandboxUnavailable_Title");
-        var message = blockHostFallback
-            ? LocalizationHelper.Format("AppNotification_SandboxUnavailableBlocked_MessageFormat", reasonText)
-            : LocalizationHelper.Format("AppNotification_SandboxUnavailable_MessageFormat", reasonText);
+        var mode = availability.IsWindowsUnsupported ? "uncontained-compatibility" : "blocked";
+        var title = LocalizationHelper.GetString(availability.IsWindowsUnsupported
+            ? "SandboxPage_WindowsCompatibilityTitle" : "AppNotification_SandboxUnavailableBlocked_Title");
+        var message = availability.IsWindowsUnsupported
+            ? LocalizationHelper.GetString("SandboxPage_WindowsCompatibilityText")
+            : LocalizationHelper.Format("AppNotification_SandboxUnavailableBlocked_MessageFormat", reasonText);
 
         PublishSandboxRiskNotification(
             $"unavailable:{mode}:{reasonText}",
@@ -3533,7 +3483,7 @@ public partial class App : Application, OpenClawTray.Services.IAppCommands, IPer
         ShowStatusDetail();
     }
 
-    private void ShowWebChat(string? sessionKey = null)
+    private void OpenChatSession(string? sessionKey = null)
     {
         if (_settings == null) return;
         if (!TryResolveChatCredentials(out _, out _, out _, out var isBootstrapToken))
@@ -3552,8 +3502,7 @@ public partial class App : Application, OpenClawTray.Services.IAppCommands, IPer
             return;
         }
 
-        // Stash the session key on both App (fallback when HubWindow doesn't exist)
-        // and HubWindow (existing path) so ChatPage can pick it up after navigation.
+        // Retain the session until Workspace and its chat provider are ready.
         if (!string.IsNullOrEmpty(sessionKey))
         {
             PendingChatSessionKey = sessionKey;
@@ -4060,7 +4009,6 @@ public partial class App : Application, OpenClawTray.Services.IAppCommands, IPer
         UpdateTrayIcon();
     }
     void IAppCommands.ShowVoiceOverlay() => ShowHub("voice");
-    void IAppCommands.ShowChat() => ShowChatWindow();
     void IAppCommands.CheckForUpdates() => _ = _updateCoordinator!.CheckForUpdatesUserInitiatedAsync();
     void IAppCommands.ShowOnboarding() => _ = ShowOnboardingAsync();
     void IAppCommands.ShowLocalAiSetup() => _ = _windowManager?.ShowLocalAiSetupAsync();
@@ -4315,7 +4263,7 @@ public partial class App : Application, OpenClawTray.Services.IAppCommands, IPer
         if (_dispatcherQueue == null) return;
         _dispatcherQueue.TryEnqueue(() =>
         {
-            _windowManager?.ShowHubChatAndStartVoice();
+            _windowManager?.ShowWorkspaceChatAndStartVoice();
         });
     }
 

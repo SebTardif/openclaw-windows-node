@@ -1986,6 +1986,116 @@ public class OpenClawGatewayClientTests
         Assert.Equal(1781631273567, received.Ts);
     }
 
+    [Theory]
+    [InlineData("chat", false)]
+    [InlineData("chat", true)]
+    [InlineData("session.message", false)]
+    [InlineData("session.message", true)]
+    public void ProcessRawMessage_ChatRunId_PreservesPayloadIdentity(string eventName, bool legacy)
+    {
+        var helper = new GatewayClientTestHelper();
+        using var client = helper.Client;
+        ChatMessageInfo? received = null;
+        client.ChatMessageReceived += (_, message) => received = message;
+        var content = legacy
+            ? """
+              "role":"assistant","text":"answer","__openclaw":{"id":"message-id"}
+              """
+            : """
+              "message":{"role":"assistant","content":[{"type":"text","text":"answer"}],"runId":"not-the-envelope-run","__openclaw":{"id":"message-id"}}
+              """;
+
+        helper.ProcessRawMessage($$$"""
+        {"type":"event","event":"{{{eventName}}}","payload":{
+          "sessionKey":"main","runId":"wire-run","state":"final",{{{content}}}
+        }}
+        """);
+
+        Assert.NotNull(received);
+        Assert.Equal("wire-run", received.RunId);
+        Assert.Equal("message-id", received.OpenClawId);
+        Assert.True(received.IsFinal);
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("\"runId\":null,")]
+    [InlineData("\"runId\":123,")]
+    public void ProcessRawMessage_ChatRunId_DoesNotGuessMissingIdentity(string runProperty)
+    {
+        var helper = new GatewayClientTestHelper();
+        using var client = helper.Client;
+        ChatMessageInfo? received = null;
+        client.ChatMessageReceived += (_, message) => received = message;
+
+        helper.ProcessRawMessage($$$"""
+        {"type":"event","event":"chat","payload":{
+          {{{runProperty}}}"sessionKey":"main","state":"final",
+          "message":{"role":"assistant","content":"answer","runId":"not-an-envelope-run","__openclaw":{"id":"message-id"}}
+        }}
+        """);
+
+        Assert.NotNull(received);
+        Assert.Null(received.RunId);
+        Assert.Equal("message-id", received.OpenClawId);
+    }
+
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(false, true)]
+    [InlineData(true, false)]
+    [InlineData(true, true)]
+    public void ProcessRawMessage_ChatNotificationHonorsSynchronousSuppression(bool legacy, bool suppress)
+    {
+        var helper = new GatewayClientTestHelper();
+        using var client = helper.Client;
+        var delivered = new List<ChatMessageInfo>();
+        var notifications = new List<OpenClawNotification>();
+        client.ChatMessageReceived += (_, message) =>
+        {
+            if (suppress)
+                message.SuppressNotification();
+        };
+        client.ChatMessageReceived += (_, message) => delivered.Add(message);
+        client.NotificationReceived += (_, notification) => notifications.Add(notification);
+        var content = legacy
+            ? """
+              "role":"assistant","text":"final answer"
+              """
+            : """
+              "message":{"role":"assistant","content":"final answer"}
+              """;
+        helper.ProcessRawMessage($$$"""
+        {"type":"event","event":"chat","payload":{"sessionKey":"main","runId":"run","state":"final",{{{content}}}}}
+        """);
+        Assert.Equal(suppress, Assert.Single(delivered).IsNotificationSuppressed);
+        Assert.Equal(suppress ? 0 : 1, notifications.Count);
+        Assert.DoesNotContain("IsNotificationSuppressed", JsonSerializer.Serialize(delivered[0]), StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void ProcessRawMessage_FailedChatConsumerKeepsNotificationUnlessItVetoed(bool vetoBeforeThrow)
+    {
+        var logger = new TestLogger();
+        var helper = new GatewayClientTestHelper(logger);
+        using var client = helper.Client;
+        var notifications = new List<OpenClawNotification>();
+        client.ChatMessageReceived += (_, message) =>
+        {
+            if (vetoBeforeThrow)
+                message.SuppressNotification();
+            throw new InvalidOperationException("consumer failed");
+        };
+        client.NotificationReceived += (_, notification) => notifications.Add(notification);
+        helper.ProcessRawMessage("""
+        {"type":"event","event":"chat","payload":{"sessionKey":"main","runId":"run","state":"final","role":"assistant","text":"answer"}}
+        """);
+        Assert.Equal(vetoBeforeThrow ? 0 : 1, notifications.Count);
+        Assert.Contains(logger.Logs, log => log.Contains("ChatMessageReceived handler threw", StringComparison.Ordinal));
+    }
+
     [Fact]
     public void ProcessRawMessage_SessionMessageWithOpenClawMetadata_EmitsMessageIdentity()
     {
@@ -2692,6 +2802,104 @@ public class OpenClawGatewayClientTests
         var message = Assert.Single(history.Messages);
         Assert.Equal("msg-history-a", message.OpenClawId);
         Assert.Equal(7, message.OpenClawSeq);
+    }
+
+    [Theory]
+    [InlineData("1791257718360", 1791257718360L)]
+    [InlineData("1791257718360.176", 1791257718360L)]
+    [InlineData("-1.75", -1L)]
+    [InlineData("9223372036854775807", long.MaxValue)]
+    [InlineData("-9223372036854775808", long.MinValue)]
+    [InlineData("9223372036854775808", 42L)]
+    [InlineData("1e400", 42L)]
+    [InlineData("-1e400", 42L)]
+    [InlineData("-9223372036854777856", 42L)]
+    [InlineData("\"invalid\"", 42L)]
+    [InlineData("null", 42L)]
+    public void ParseChatHistoryPayload_TimestampPreservesIntegersAndFallsBackWhenInvalid(
+        string timestamp, long expected)
+    {
+        var helper = new GatewayClientTestHelper();
+        var history = helper.ParseChatHistoryPayload($$"""
+        {"messages":[{"role":"user","content":"Preserved","timestamp":{{timestamp}},"ts":42}]}
+        """);
+
+        var message = Assert.Single(history.Messages);
+        Assert.Equal(expected, message.Ts);
+        Assert.Equal("Preserved", message.Text);
+    }
+
+    [Fact]
+    public void ParseChatHistoryPayload_InvalidTimestampsPreserveMessageWithZeroTimestamp()
+    {
+        var helper = new GatewayClientTestHelper();
+        var history = helper.ParseChatHistoryPayload("""
+        {"messages":[{"role":"user","content":"Preserved","timestamp":1e400,"ts":-1e400}]}
+        """);
+
+        var message = Assert.Single(history.Messages);
+        Assert.Equal(0, message.Ts);
+        Assert.Equal("Preserved", message.Text);
+    }
+
+    [Fact]
+    public void ParseChatHistoryPayload_RealtimeVoiceFractionalTimestamp_PreservesMessage()
+    {
+        var helper = new GatewayClientTestHelper();
+
+        var history = helper.ParseChatHistoryPayload("""
+        {
+          "messages": [
+            {
+              "role": "user",
+              "api": "realtime",
+              "model": "realtime-voice",
+              "content": [{ "type": "text", "text": "Can you hear me?" }],
+              "timestamp": 1791257718360.176,
+              "provenance": {
+                "kind": "realtime_voice",
+                "sourceChannel": "talk"
+              },
+              "__openclaw": {
+                "id": "voice:abc:1",
+                "seq": 1
+              }
+            },
+            {
+              "role": "assistant",
+              "api": "realtime",
+              "model": "realtime-voice",
+              "content": "Yes, I can hear you.",
+              "ts": 1791257719361.992,
+              "provenance": {
+                "kind": "realtime_voice",
+                "sourceChannel": "talk"
+              },
+              "__openclaw": {
+                "id": "voice:abc:2",
+                "seq": 2
+              }
+            }
+          ]
+        }
+        """);
+
+        Assert.Collection(
+            history.Messages,
+            user =>
+            {
+                Assert.Equal("user", user.Role);
+                Assert.Equal("Can you hear me?", user.Text);
+                Assert.Equal(1791257718360, user.Ts);
+                Assert.Equal("voice:abc:1", user.OpenClawId);
+            },
+            assistant =>
+            {
+                Assert.Equal("assistant", assistant.Role);
+                Assert.Equal("Yes, I can hear you.", assistant.Text);
+                Assert.Equal(1791257719361, assistant.Ts);
+                Assert.Equal("voice:abc:2", assistant.OpenClawId);
+            });
     }
 
     [Fact]
