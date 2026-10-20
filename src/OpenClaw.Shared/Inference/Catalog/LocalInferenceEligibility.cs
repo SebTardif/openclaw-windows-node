@@ -17,6 +17,7 @@ public enum LocalInferenceEligibilityFailureCode
     CudaCapabilityTooLow = 5,
     InsufficientSystemMemory = 6,
     InsufficientDiskSpace = 7,
+    ModelNotQualifiedForDevice = 8,
 }
 
 public sealed record LocalInferenceEligibilityResult(
@@ -37,6 +38,12 @@ public sealed record LocalInferenceEligibilityResult(
     public bool CanInstall => Status is
         LocalInferenceEligibilityStatus.Eligible or
         LocalInferenceEligibilityStatus.EligibleButBusy;
+
+    /// <summary>Bolt requires a currently fitting 128K-or-larger profile before fresh selection.</summary>
+    public bool CanOffer => CanInstall &&
+        (Plan is not { } plan || !LocalInferenceQualificationPolicy.IsNemotronBolt(plan.Model) ||
+            (Status == LocalInferenceEligibilityStatus.Eligible &&
+             plan.Profile.ContextTokens >= LocalModelCatalog.ReducedContextTokens));
 }
 
 /// <summary>
@@ -112,6 +119,19 @@ public static class LocalInferenceEligibility
         return Evaluate(hardware, LocalInferenceSelector.SelectInstalled(hardware, installedModelId), installed: true);
     }
 
+    /// <summary>Rechecks an already-qualified receipt plan without selecting a different profile or adapter.</summary>
+    public static LocalInferenceEligibilityResult EvaluateRecordedProfile(
+        HostHardwareInfo hardware,
+        LocalInferencePlan recordedPlan)
+    {
+        ArgumentNullException.ThrowIfNull(hardware);
+        ArgumentNullException.ThrowIfNull(recordedPlan);
+        if (hardware.CpuArchitecture != recordedPlan.Runtime.Architecture)
+            return Unsupported(LocalInferenceEligibilityFailureCode.CatalogSelectionFailed,
+                LocalInferenceSelectionFailureCode.RuntimeUnavailable);
+        return Evaluate(hardware, LocalInferenceSelectionResult.Selected(recordedPlan), installed: true);
+    }
+
     private static LocalInferenceEligibilityResult Evaluate(
         HostHardwareInfo hardware,
         LocalInferenceSelectionResult selection,
@@ -134,7 +154,7 @@ public static class LocalInferenceEligibility
             ? hardware.NvidiaGpus.Where(gpu => string.Equals(gpu.StableId, boundId, StringComparison.Ordinal))
             : hardware.NvidiaGpus;
         CandidateAssessment? selected = candidateGpus
-            .Select(gpu => Assess(gpu, plan.Runtime, requiredMemoryBytes))
+            .Select(gpu => Assess(hardware, gpu, plan, requiredMemoryBytes))
             .OrderBy(candidate => StatusRank(candidate.Status))
             .ThenBy(candidate => DefinitivenessRank(candidate.FailureCode))
             .ThenByDescending(candidate => candidate.FreeMemoryBytes.HasValue)
@@ -184,17 +204,31 @@ public static class LocalInferenceEligibility
             selectedGpu is null ? null : LocalInferenceQualificationPolicy.GetEffectiveFreeMemoryBytes(selectedGpu));
 
     private static CandidateAssessment Assess(
+        HostHardwareInfo hardware,
         GpuInfo gpu,
-        LlamaRuntimeVariant runtime,
+        LocalInferencePlan plan,
         long requiredMemoryBytes)
     {
+        LlamaRuntimeVariant runtime = plan.Runtime;
         long totalMemoryBytes = LocalInferenceQualificationPolicy.GetEffectiveTotalMemoryBytes(gpu);
-        long? freeMemoryBytes = LocalInferenceQualificationPolicy.GetEffectiveFreeMemoryBytes(gpu);
-        if (!LocalInferenceQualificationPolicy.HasCompleteFacts(gpu))
+        long? freeMemoryBytes = LocalInferenceQualificationPolicy.GetCurrentFreeMemoryBytes(hardware, gpu, plan.Model);
+        bool isBolt = LocalInferenceQualificationPolicy.IsNemotronBolt(plan.Model);
+        if (!LocalInferenceQualificationPolicy.HasCompleteFacts(gpu) ||
+            (isBolt && (freeMemoryBytes is null || string.IsNullOrWhiteSpace(gpu.Name) ||
+                string.Equals(gpu.Name, CudaHostHardwareProbe.UnidentifiedGpuName, StringComparison.Ordinal))))
         {
             return UnsupportedCandidate(
                 gpu,
                 LocalInferenceEligibilityFailureCode.HardwareFactsIncomplete,
+                totalMemoryBytes,
+                freeMemoryBytes);
+        }
+
+        if (isBolt && !LocalInferenceQualificationPolicy.IsQualifiedBoltGpu(gpu))
+        {
+            return UnsupportedCandidate(
+                gpu,
+                LocalInferenceEligibilityFailureCode.ModelNotQualifiedForDevice,
                 totalMemoryBytes,
                 freeMemoryBytes);
         }

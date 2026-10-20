@@ -35,7 +35,6 @@ using System.Text;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
-using Updatum;
 using WinUIEx;
 using SetupCompletedEventArgs = OpenClaw.SetupEngine.UI.SetupCompletedEventArgs;
 
@@ -43,12 +42,6 @@ namespace OpenClawTray;
 
 public partial class App : Application, OpenClawTray.Services.IAppCommands, IPermissionsPageRuntimeHost
 {
-    internal static readonly UpdatumManager AppUpdater = new("openclaw", "openclaw-windows-node")
-    {
-        FetchOnlyLatestRelease = true,
-        InstallUpdateSingleFileExecutableName = "OpenClaw.Tray.WinUI",
-    };
-
     private ITrayController? _trayController;
     private IWindowManager? _windowManager;
     private GatewayConnectionManager? _connectionManager;
@@ -644,6 +637,28 @@ public partial class App : Application, OpenClawTray.Services.IAppCommands, IPer
         // Store protocol URI for processing after setup
         _pendingProtocolUri = protocolUri;
 
+        if (!AppIdentity.IsIsolated && PackageHelper.IsPackaged)
+        {
+            using var cleanupLogger = new OpenClaw.SetupEngine.SetupLogger(filePath: null);
+            try
+            {
+                if (!await OpenClaw.SetupEngine.GatewayPackageCleanup.InitializeAsync(
+                    new OpenClaw.SetupEngine.CommandRunner(cleanupLogger),
+                    AppIdentity.ResolveRoamingDataDirectory(), AppIdentity.ResolveSetupLocalDataDirectory(),
+                    preserve: error => NativeRestartAdmission.PromptPreserveGateways(error, AppIdentity.DisplayName)))
+                {
+                    Exit();
+                    return;
+                }
+            }
+            catch (Exception error) when (error is IOException or UnauthorizedAccessException or InvalidOperationException or InvalidDataException)
+            {
+                NativeRestartAdmission.Notify(error.Message, AppIdentity.DisplayName);
+                Exit();
+                return;
+            }
+        }
+
         var appUserModelIdRegistration = AppUserModelIdRegistrar.RegisterCurrentProcess(AppIdentity.AppUserModelId);
         if (appUserModelIdRegistration.Attempted && appUserModelIdRegistration.HResult < 0)
         {
@@ -706,7 +721,6 @@ public partial class App : Application, OpenClawTray.Services.IAppCommands, IPer
                     AutoStartManager.ApplySetupPreferenceAsync, ct),
                 GetSettingsStore: () => SettingsStore));
         _updateCoordinator = new UpdateCoordinator(
-            AppUpdater,
             _appState,
             _settings,
             () => _connectionManager?.OperatorClient,
@@ -814,12 +828,12 @@ public partial class App : Application, OpenClawTray.Services.IAppCommands, IPer
         // can never delay or preempt tray initialization. It only needs the
         // dispatcher + settings (created above) and failures are non-fatal.
         InitializeServiceProvider();
-        if (!_localAiGatewayLifecycle.IsNativeMode)
+        if (_localAiGatewayLifecycle.CanStartWslAutomatically)
             StartLocalAiRouterInBackground();
 
         // Initialize connection manager before setup flow.
         var credentialResolver = new CredentialResolver(DeviceIdentityFileReader.Instance);
-        var clientFactory = new GatewayClientFactory();
+        var clientFactory = new GatewayClientFactory { SupportsExecApprovals = true };
         var diagnostics = new ConnectionDiagnostics();
         var nodeConnector = new NodeConnector(appLogger, diagnostics);
         // Bridge: whenever NodeConnector creates a fresh WindowsNodeClient (initial
@@ -1840,7 +1854,7 @@ public partial class App : Application, OpenClawTray.Services.IAppCommands, IPer
         if (_settings == null || _connectionManager == null || _gatewayRegistry == null) return;
         // SSH tunnel lifecycle is now handled by the connection manager.
 
-        var gatewayUrl = _settings.GetEffectiveGatewayUrl();
+        var gatewayUrl = _settings.GetLegacyCredentialGatewayUrlOrNull();
 
         // Check registry first — it's the source of truth after initial setup
         var activeRecord = _gatewayRegistry.GetActive();
@@ -2115,7 +2129,7 @@ public partial class App : Application, OpenClawTray.Services.IAppCommands, IPer
 
         // Backfill for legacy installs that still have the identity file at the
         // root settings path while the active registry record points at that URL.
-        var effectiveUrl = _settings?.GetEffectiveGatewayUrl();
+        var effectiveUrl = _settings?.GetLegacyCredentialGatewayUrlOrNull();
         if (!string.IsNullOrWhiteSpace(effectiveUrl) &&
             string.Equals(record.Url, effectiveUrl, StringComparison.OrdinalIgnoreCase))
         {
@@ -2136,7 +2150,7 @@ public partial class App : Application, OpenClawTray.Services.IAppCommands, IPer
         if (credential != null)
             return credential;
 
-        var effectiveUrl = _settings?.GetEffectiveGatewayUrl();
+        var effectiveUrl = _settings?.GetLegacyCredentialGatewayUrlOrNull();
         if (string.IsNullOrWhiteSpace(effectiveUrl) ||
             !string.Equals(record.Url, effectiveUrl, StringComparison.OrdinalIgnoreCase))
         {
@@ -2192,7 +2206,7 @@ public partial class App : Application, OpenClawTray.Services.IAppCommands, IPer
         }
     }
 
-    private void TryMigrateLegacyGatewaySettings(string gatewayUrl, IOpenClawLogger logger)
+    private void TryMigrateLegacyGatewaySettings(string? gatewayUrl, IOpenClawLogger logger)
     {
         if (_settings == null || _gatewayRegistry == null || string.IsNullOrWhiteSpace(gatewayUrl))
         {
@@ -2406,8 +2420,12 @@ public partial class App : Application, OpenClawTray.Services.IAppCommands, IPer
                                     cancellationToken)
                                 .ConfigureAwait(false);
                     }
-                    if (_managedLocalPortProvenance is null ||
-                        GatewayRecordEditing.ResolveManagedDistroName(record) is null)
+                    if (GatewayRecordEditing.ResolveManagedDistroName(record) is null)
+                    {
+                        return FixtureLoopbackListenerOwner.IsOwnedByCurrentProcessParent(uri.Port);
+                    }
+
+                    if (_managedLocalPortProvenance is null)
                     {
                         return false;
                     }
@@ -3971,7 +3989,7 @@ public partial class App : Application, OpenClawTray.Services.IAppCommands, IPer
             _gatewayRegistry,
             SettingsManager.SettingsDirectoryPath,
             DeviceIdentityFileReader.Instance,
-            _settings.GetEffectiveGatewayUrl(),
+            _settings.GetLegacyCredentialGatewayUrlOrNull(),
             _settings.LegacyToken,
             _settings.LegacyBootstrapToken,
             (record, candidate) =>

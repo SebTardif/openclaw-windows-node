@@ -6,6 +6,34 @@ namespace OpenClaw.Tray.Tests;
 public sealed class AppRefactorContractTests
 {
     [Fact]
+    public void AutomaticLocalAiStartupRequiresPositiveWslOwnershipAdmission()
+    {
+        var source = ReadAppSources();
+        // Retire when startup can be mounted without activating real app services.
+        Assert.Contains("if (_localAiGatewayLifecycle.CanStartWslAutomatically)", source);
+        Assert.DoesNotContain("if (!_localAiGatewayLifecycle.IsNativeMode)", source);
+    }
+
+    [Fact]
+    public void Startup_InvalidCleanupDataIsReportedBeforeSettingsLoad()
+    {
+        var source = ReadAppSources();
+        var cleanup = source[source.IndexOf("GatewayPackageCleanup.InitializeAsync(", StringComparison.Ordinal)..];
+        cleanup = cleanup[..cleanup.IndexOf("var appUserModelIdRegistration", StringComparison.Ordinal)];
+
+        // Retire when packaged startup admission has an executable, WinUI-free seam.
+        Assert.Contains("InvalidDataException", cleanup);
+        AssertInOrder(cleanup, "catch (Exception error)", "NativeRestartAdmission.Notify(error.Message", "Exit();", "return;");
+
+        var root = TestRepositoryPaths.GetRepositoryRoot();
+        var owner = File.ReadAllText(Path.Combine(root, "src", "OpenClaw.SetupEngine", "GatewayPackageCleanup.cs"));
+        var worker = File.ReadAllText(Path.Combine(root, "src", "OpenClaw.SetupEngine", "GatewayPackageCleanup.ps1"));
+        Assert.Contains("RunAsync(commands, register, null, null, false, ct, preserve: keep)", owner);
+        Assert.Contains("""registration.Stderr.Contains("OPENCLAW_CLEANUP_RECEIPT_INVALID", StringComparison.Ordinal)""", owner);
+        AssertInOrder(worker, "    Assert-ValidRemovalReceipt", "    $record = if", "    if ($Preserve)", "'--unregister '");
+    }
+
+    [Fact]
     public void E2ESetupTeardown_UsesFixtureOwnedUninstallArguments()
     {
         var root = TestRepositoryPaths.GetRepositoryRoot();
@@ -26,7 +54,7 @@ public sealed class AppRefactorContractTests
         var source = ReadAppSources();
 
         Assert.Contains("new CredentialResolver", source);
-        Assert.Contains("new GatewayClientFactory", source);
+        Assert.Contains("new GatewayClientFactory { SupportsExecApprovals = true }", source);
         Assert.Contains("new NodeConnector", source);
         Assert.Contains("_connectionManager = new GatewayConnectionManager", source);
         Assert.Contains("nodeConnector.ClientCreated +=", source);
@@ -449,6 +477,37 @@ public sealed class AppRefactorContractTests
         Assert.Contains("SettingsManager.SettingsDirectoryPath", method);
         Assert.DoesNotContain("SharedGatewayToken =", method);
         Assert.DoesNotContain("BootstrapToken =", method);
+        var initializeGateway = ExtractMethod(source, "InitializeGatewayClient");
+        Assert.Contains(
+            "var gatewayUrl = _settings.GetLegacyCredentialGatewayUrlOrNull();",
+            initializeGateway);
+        Assert.Contains(
+            "_settings.GetLegacyCredentialGatewayUrlOrNull(),",
+            source);
+        Assert.Contains(
+            "_settings?.GetLegacyCredentialGatewayUrlOrNull()",
+            ExtractMethod(source, "ResolveStartupOperatorCredential"));
+        Assert.Contains(
+            "_settings?.GetLegacyCredentialGatewayUrlOrNull()",
+            ExtractMethod(source, "ResolveStartupNodeCredential"));
+    }
+
+    [Fact]
+    public void UrlLessSettings_KeepCliDefaultButUninstallValidationRemovesLegacyCredentialKeys()
+    {
+        var root = TestRepositoryPaths.GetRepositoryRoot();
+        var cli = File.ReadAllText(Path.Combine(root, "src", "OpenClaw.Cli", "Program.cs"));
+        var validator = File.ReadAllText(Path.Combine(root, "scripts", "validate-wsl-gateway-uninstall.ps1"));
+
+        Assert.Contains(
+            "return settings.GatewayUrl ?? \"ws://127.0.0.1:18789\";",
+            cli);
+        Assert.Contains(
+            "foreach ($field in @('Token', 'BootstrapToken', 'GatewayUrl'))",
+            validator);
+        Assert.Contains("$sObj.PSObject.Properties.Remove($field)", validator);
+        Assert.DoesNotContain("$sObj.$field = ''", validator);
+        Assert.DoesNotContain("$sObj.GatewayUrl = 'ws://localhost:18789'", validator);
     }
 
     [Fact]
@@ -1520,7 +1579,6 @@ public sealed class AppRefactorContractTests
         var diagnostics = File.ReadAllText(Path.Combine(root, "src", "OpenClaw.Shared", "Inference", "Catalog", "LocalInferenceEligibilityDiagnostics.cs"));
         var resources = File.ReadAllText(Path.Combine(root, "src", "OpenClaw.Tray.WinUI", "Strings", "en-us", "Resources.resw"));
 
-        Assert.Contains("LocalInferenceEligibility.Evaluate(_localAiHardware!, model.Id)", source);
         Assert.Contains("eligibility.RequiredTotalMemoryBytes", diagnostics);
         Assert.Contains("eligibility.DetectedTotalMemoryBytes", diagnostics);
         Assert.Contains("model weights, KV cache, and runtime workspace", resources);
