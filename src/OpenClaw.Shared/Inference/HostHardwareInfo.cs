@@ -83,6 +83,9 @@ public sealed record HostHardwareInfo(
     bool VulkanAvailable,
     LocalAiDiskSpaceInfo? LocalAiDiskSpace = null)
 {
+    /// <summary>Current Windows commit budget, or null when the memory query failed.</summary>
+    public long? AvailableCommitMemoryBytes { get; init; }
+
     /// <summary>
     /// The "we learned nothing" result. Qualified selectors must treat it as
     /// unsupported rather than selecting a fallback backend.

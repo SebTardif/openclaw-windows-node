@@ -47,8 +47,8 @@ internal sealed class LocalAiSetupAvailabilityCoordinator
         return true;
     }
 
-    public bool TryApplyAvailable(int generation, out LocalAiSetupAvailabilitySnapshot snapshot) =>
-        TryApply(generation, LocalAiSetupAvailabilityStatus.Available, reason: null, out snapshot);
+    public bool TryApplyAvailable(int generation, out LocalAiSetupAvailabilitySnapshot snapshot, bool isRecoverable = false) =>
+        TryApply(generation, LocalAiSetupAvailabilityStatus.Available, reason: null, out snapshot, isRecoverable);
 
     public bool TryApplyUnsupported(
         int generation,

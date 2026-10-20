@@ -39,5 +39,8 @@ public sealed record LocalManagedInferenceProfile(
         CheckHostResources(hardware, installed) == LocalInferenceEligibilityFailureCode.None &&
         hardware.Gpus.Any(gpu => gpu.Vendor == GpuVendor &&
             LocalInferenceQualificationPolicy.HasRuntimePrerequisites(gpu, Runtime) &&
-            LocalInferenceQualificationPolicy.GetEffectiveTotalMemoryBytes(gpu) >= RequiredGpuMemoryBytes);
+            LocalInferenceQualificationPolicy.GetEffectiveTotalMemoryBytes(gpu) >= RequiredGpuMemoryBytes &&
+            (installed || !LocalInferenceQualificationPolicy.IsNemotronBolt(Model) ||
+                (LocalInferenceQualificationPolicy.IsQualifiedBoltGpu(gpu) &&
+                 LocalInferenceQualificationPolicy.GetCurrentFreeMemoryBytes(hardware, gpu, Model) >= RequiredGpuMemoryBytes)));
 }
