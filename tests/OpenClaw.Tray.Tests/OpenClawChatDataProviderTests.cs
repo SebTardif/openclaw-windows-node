@@ -337,6 +337,15 @@ public class OpenClawChatDataProviderTests
     private static SessionInfo MainSession() =>
         new() { Key = "main", IsMain = true, DisplayName = "Main session", Status = "active" };
 
+    private static ChatHistoryInfo ParseHistoryPayload(JsonElement payload)
+    {
+        var parser = typeof(OpenClawGatewayClient).GetMethod(
+            "ParseChatHistory",
+            System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static);
+        Assert.NotNull(parser);
+        return Assert.IsType<ChatHistoryInfo>(parser.Invoke(null, [payload, "main"]));
+    }
+
     private static AgentEventInfo MakeAgentEvent(string stream, string json, string sessionKey = "main", string? runId = null)
     {
         var doc = JsonDocument.Parse(json);
@@ -13108,6 +13117,165 @@ public class OpenClawChatDataProviderTests
         var media = Assert.Single(provider.GetEntryMetadata("main")[entry.Id].AssistantContent!.Media);
         Assert.Equal("banner.png", media.DisplayName);
         Assert.Equal("artifact-1", media.Reference.ArtifactId);
+    }
+
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    [InlineData(true, true)]
+    public async Task LoadHistoryAsync_UserMedia_InterleavedPartsAttachOncePerMessage(
+        bool mediaFirst,
+        bool hasEnvelope)
+    {
+        using var tempDir = new TempDirectory();
+        var (bridge, provider, snapshots, _) = CreateProvider(
+            [MainSession()],
+            Path.Combine(tempDir.DirectoryPath, "tool-metadata.json"),
+            Path.Combine(tempDir.DirectoryPath, "attachment-metadata.json"),
+            Path.Combine(tempDir.DirectoryPath, "last-chat-state.json"));
+        await using var providerLifetime = provider;
+        var firstImage = new
+        {
+            type = "image",
+            mimeType = "image/png",
+            fileName = "first.png",
+            url = "media://inbound/first.png",
+        };
+        var firstText = new
+        {
+            type = "text",
+            text = hasEnvelope
+                ? "[media attached: media://inbound/first.png (image/png)]\n" +
+                    "[media attached: media://inbound/second.png (image/png)]\nBefore"
+                : "Before",
+        };
+        object[] content =
+        [
+            mediaFirst ? firstImage : (object)firstText,
+            mediaFirst ? firstText : (object)firstImage,
+            new { type = "text", text = "Between" },
+            new
+            {
+                type = "image",
+                mimeType = "image/png",
+                fileName = "second.png",
+                url = "media://inbound/second.png",
+            },
+            new { type = "text", text = "After" },
+        ];
+        var history = ParseHistoryPayload(JsonSerializer.SerializeToElement(new
+        {
+            sessionId = "session-1",
+            messages = new[]
+            {
+                new { role = "user", content, timestamp = 5_000 },
+                new { role = "user", content, timestamp = 6_000 },
+            },
+        }));
+        bridge.HistoryBehavior = _ => Task.FromResult(history);
+
+        await provider.LoadHistoryAsync("main");
+
+        var users = snapshots[^1].Timelines["main"].Entries
+            .Where(entry => entry.Kind == ChatTimelineItemKind.User)
+            .ToArray();
+        var expectedText = mediaFirst
+            ? new[] { "Before\nBetween", "After", "Before\nBetween", "After" }
+            : ["Before", "Between", "After", "Before", "Between", "After"];
+        Assert.Equal(expectedText, users.Select(entry => entry.Text));
+        var metadata = provider.GetEntryMetadata("main");
+        var attachments = users
+            .SelectMany(entry => metadata[entry.Id].Attachments!)
+            .ToArray();
+        Assert.Equal(
+            ["first.png", "second.png", "first.png", "second.png"],
+            attachments.Select(attachment => attachment.DisplayFileName));
+        Assert.All(attachments, attachment =>
+        {
+            Assert.Equal(ChatAttachmentOrigin.GatewayReference, attachment.Origin);
+            Assert.Equal("image/png", attachment.MimeType);
+            Assert.True(attachment.IsImage);
+            Assert.Null(attachment.PreviewCacheKey);
+        });
+    }
+
+    [Theory]
+    [InlineData("\n", false)]
+    [InlineData("\r", false)]
+    [InlineData("\r\n", false)]
+    [InlineData("\n", true)]
+    [InlineData("\r", true)]
+    [InlineData("\r\n", true)]
+    public async Task LoadHistoryAsync_UserMedia_MultilineCaptionRestoresMatchingLocalName(
+        string lineBreak,
+        bool flattenedCache)
+    {
+        using var tempDir = new TempDirectory();
+        var toolPath = Path.Combine(tempDir.DirectoryPath, "tool-metadata.json");
+        var attachmentPath = Path.Combine(tempDir.DirectoryPath, "attachment-metadata.json");
+        var caption = $"see this{lineBreak}photo";
+        using (var store = new ChatMetadataStore(toolPath, attachmentPath, _ => { }))
+        {
+            store.CacheAttachments(
+                "main",
+                "session-1",
+                0,
+                flattenedCache ? "see this photo" : caption,
+                [new ChatAttachment
+                {
+                    Type = "image",
+                    MimeType = "image/png",
+                    FileName = "local-photo.png",
+                    Content = Convert.ToBase64String([1]),
+                }],
+                5_000);
+        }
+        var history = ParseHistoryPayload(JsonSerializer.SerializeToElement(new
+        {
+            sessionId = "session-1",
+            messages = new[]
+            {
+                new
+                {
+                    role = "user",
+                    content = caption,
+                    timestamp = 5_000,
+                    __openclaw = new
+                    {
+                        media = new[]
+                        {
+                            new
+                            {
+                                kind = "image",
+                                contentType = "image/png",
+                                fileName = "gateway-photo.png",
+                                url = "media://inbound/gateway-photo.png",
+                            },
+                        },
+                    },
+                },
+            },
+        }));
+        var (bridge, provider, snapshots, _) = CreateProvider(
+            [MainSession()], toolPath, attachmentPath,
+            Path.Combine(tempDir.DirectoryPath, "last-chat-state.json"));
+        await using var providerLifetime = provider;
+        bridge.HistoryBehavior = _ => Task.FromResult(history);
+
+        await provider.LoadHistoryAsync("main");
+
+        var user = Assert.Single(snapshots[^1].Timelines["main"].Entries);
+        Assert.Equal(ChatTimelineItemKind.User, user.Kind);
+        Assert.Equal(caption, user.Text);
+        var attachment = Assert.Single(provider.GetEntryMetadata("main")[user.Id].Attachments!);
+        Assert.Equal(
+            flattenedCache ? ChatAttachmentOrigin.GatewayReference : ChatAttachmentOrigin.Local,
+            attachment.Origin);
+        Assert.Equal(
+            flattenedCache ? "gateway-photo.png" : "local-photo.png",
+            attachment.DisplayFileName);
+        Assert.Null(attachment.PreviewCacheKey);
     }
 
     // ── chat rubber-duck MEDIUM 4: per-message size cap ──

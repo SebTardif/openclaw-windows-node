@@ -604,8 +604,11 @@ internal sealed class ChatHistoryLoader : IDisposable
             return lookup.Match;
         }
 
+        var hasProjectedUserAttachments = false;
         foreach (var replayPart in replayParts)
         {
+            if (replayPart.IsFirstPart)
+                hasProjectedUserAttachments = false;
             var message = replayPart.Message;
             if (suppressedAbortedAssistant is not null)
             {
@@ -620,6 +623,7 @@ internal sealed class ChatHistoryLoader : IDisposable
                 ? GatewayMediaMessageProjection.Project(rawText)
                 : null;
             if (userProjection is { Attachments.Count: 0 } &&
+                !hasProjectedUserAttachments &&
                 !string.IsNullOrEmpty(rawText))
             {
                 var historyMedia = HistoryMediaPresentations(message);
@@ -628,6 +632,9 @@ internal sealed class ChatHistoryLoader : IDisposable
                     userProjection = userProjection with { Attachments = historyMedia };
                 }
             }
+            // Message-wide media must not repeat on later replay text parts.
+            if (userProjection is { Attachments.Count: > 0 })
+                hasProjectedUserAttachments = true;
             var entryMetadata = new ChatEntryMetadata(
                 message.Ts > 0
                     ? DateTimeOffset.FromUnixTimeMilliseconds(message.Ts).ToLocalTime()
