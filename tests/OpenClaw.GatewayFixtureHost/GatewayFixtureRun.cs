@@ -80,10 +80,7 @@ public sealed class GatewayFixtureRun : IAsyncDisposable
         }
         catch
         {
-            await gateway.DisposeAsync();
-            if (control is not null)
-                await control.DisposeAsync();
-            KillForeign(foreign);
+            await DisposeGatewayResourcesAsync(gateway, control, foreign, foreignCountFile);
             throw;
         }
         GatewayFixtureRun run;
@@ -102,10 +99,7 @@ public sealed class GatewayFixtureRun : IAsyncDisposable
         {
             try
             {
-                await gateway.DisposeAsync();
-                if (control is not null)
-                    await control.DisposeAsync();
-                KillForeign(foreign);
+                await DisposeGatewayResourcesAsync(gateway, control, foreign, foreignCountFile);
             }
             finally { profile.Dispose(); }
             throw;
@@ -354,44 +348,85 @@ public sealed class GatewayFixtureRun : IAsyncDisposable
         return string.IsNullOrEmpty(_mcpToken) ? text : text.Replace(_mcpToken, "[MCP credential redacted]", StringComparison.Ordinal);
     }
 
-    private static async Task<(FixtureGatewayServer Gateway, LoopbackControlHost? Control, Process? Foreign, int? ForeignPort, string? ForeignCountFile)> StartGatewayAsync(
+    internal static async Task<(FixtureGatewayServer Gateway, LoopbackControlHost? Control, Process? Foreign, int? ForeignPort, string? ForeignCountFile)> StartGatewayAsync(
         string token,
         GatewayScenario scenario,
         bool enableNodeBrowserProxy,
         bool foreignBrowserControl,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        Func<Process, string, CancellationToken, Task<bool>>? waitForForeignControlAsync = null)
     {
         for (var attempt = 0; attempt < 8; attempt++)
         {
             cancellationToken.ThrowIfCancellationRequested();
             var gateway = await FixtureGatewayServer.StartAsync(scenario, token, cancellationToken);
-            if (!enableNodeBrowserProxy)
-                return (gateway, null, null, null, null);
-            var controlPort = gateway.Endpoint.Port + 2;
-            if (controlPort is >= 1 and <= 65535 and not (8765 or 18789))
+            LoopbackControlHost? control = null;
+            Process? child = null;
+            string? countFile = null;
+            var transferred = false;
+            try
             {
-                if (foreignBrowserControl)
+                if (!enableNodeBrowserProxy)
                 {
-                    var countFile = Path.Combine(
-                        Path.GetTempPath(),
-                        $"ocwn-foreign-control-{controlPort}-{Guid.NewGuid():N}.txt");
-                    var child = StartForeignControl(controlPort, countFile);
-                    if (await WaitForFileAsync(countFile, cancellationToken))
-                        return (gateway, null, child, controlPort, countFile);
-                    try { child.Kill(entireProcessTree: true); } catch (InvalidOperationException) { }
-                    child.Dispose();
-                    TryDelete(countFile);
+                    transferred = true;
+                    return (gateway, null, null, null, null);
                 }
-                else
+                var controlPort = gateway.Endpoint.Port + 2;
+                if (controlPort is >= 1 and <= 65535 and not (8765 or 18789))
                 {
-                    var control = LoopbackControlHost.TryStart(controlPort);
-                    if (control is not null)
-                        return (gateway, control, null, null, null);
+                    if (foreignBrowserControl)
+                    {
+                        countFile = Path.Combine(
+                            Path.GetTempPath(),
+                            $"ocwn-foreign-control-{controlPort}-{Guid.NewGuid():N}.txt");
+                        child = StartForeignControl(controlPort, countFile);
+                        var ready = waitForForeignControlAsync is null
+                            ? await WaitForFileAsync(countFile, cancellationToken)
+                            : await waitForForeignControlAsync(child, countFile, cancellationToken);
+                        if (ready)
+                        {
+                            transferred = true;
+                            return (gateway, null, child, controlPort, countFile);
+                        }
+                    }
+                    else
+                    {
+                        control = LoopbackControlHost.TryStart(controlPort);
+                        if (control is not null)
+                        {
+                            transferred = true;
+                            return (gateway, control, null, null, null);
+                        }
+                    }
                 }
             }
-            await gateway.DisposeAsync();
+            finally
+            {
+                // Startup owns every resource until the caller receives the complete tuple.
+                if (!transferred)
+                    await DisposeGatewayResourcesAsync(gateway, control, child, countFile);
+            }
         }
         throw new InvalidOperationException("Could not bind a loopback browser control port beside the fixture gateway.");
+    }
+
+    internal static async Task DisposeGatewayResourcesAsync(
+        FixtureGatewayServer gateway,
+        LoopbackControlHost? control,
+        Process? foreign,
+        string? countFile)
+    {
+        try { await StopForeignAsync(foreign); }
+        finally
+        {
+            TryDelete(countFile);
+            try
+            {
+                if (control is not null)
+                    await control.DisposeAsync();
+            }
+            finally { await gateway.DisposeAsync(); }
+        }
     }
 
     private static void TryDelete(string? path)
@@ -403,17 +438,21 @@ public sealed class GatewayFixtureRun : IAsyncDisposable
         catch (UnauthorizedAccessException) { }
     }
 
-    private static void KillForeign(Process? process)
+    private static async Task StopForeignAsync(Process? process)
     {
         if (process is null)
             return;
         try
         {
-            if (!process.HasExited)
-                process.Kill(entireProcessTree: true);
+            try
+            {
+                if (!process.HasExited)
+                    process.Kill(entireProcessTree: true);
+            }
+            catch (InvalidOperationException) { }
+            await process.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(10));
         }
-        catch (InvalidOperationException) { }
-        process.Dispose();
+        finally { process.Dispose(); }
     }
 
     private static Process StartForeignControl(int port, string countFile)
@@ -479,25 +518,9 @@ public sealed class GatewayFixtureRun : IAsyncDisposable
         {
             try
             {
-                if (_foreignControl is not null)
-                {
-                    try
-                    {
-                        if (!_foreignControl.HasExited)
-                            _foreignControl.Kill(entireProcessTree: true);
-                    }
-                    catch (InvalidOperationException) { }
-                    _foreignControl.Dispose();
-                    TryDelete(ForeignControlCountFile);
-                }
-                if (_control is not null)
-                    await _control.DisposeAsync();
+                await DisposeGatewayResourcesAsync(Gateway, _control, _foreignControl, ForeignControlCountFile);
             }
-            finally
-            {
-                try { await Gateway.DisposeAsync(); }
-                finally { Profile.Dispose(); }
-            }
+            finally { Profile.Dispose(); }
         }
     }
 
@@ -506,7 +529,7 @@ public sealed class GatewayFixtureRun : IAsyncDisposable
         public McpPortCollisionException() : base("The selected MCP port belongs to another listener; retrying only the owned app.") { }
     }
 
-    private sealed class LoopbackControlHost : IAsyncDisposable
+    internal sealed class LoopbackControlHost : IAsyncDisposable
     {
         private readonly TcpListener _listener;
         private readonly CancellationTokenSource _lifetime = new();

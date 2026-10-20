@@ -1,14 +1,17 @@
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.IO;
 using System.Net;
 using System.Net.Http;
 using System.Net.Sockets;
+using System.Reflection;
 using System.Text;
 using System.Text.Json;
 using Xunit;
 using OpenClaw.Shared;
 using OpenClaw.Shared.Capabilities;
 using OpenClaw.Shared.ExecApprovals;
+using OpenClaw.TestSupport;
 
 namespace OpenClaw.Shared.Tests;
 
@@ -1437,9 +1440,13 @@ public class BrowserProxyCapabilityTests
         Assert.Contains("profile=work", requestUri);
     }
 
-    [Fact]
-    public async Task BrowserProxy_DoesNotSendTheTokenThroughTheProcessProxy()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task BrowserProxy_ProcessProxyRouting_IsIsolated(bool useDefaultHandler)
     {
+        var testHost = FindBrowserProxyTestHost();
+        using var directory = new TempDirectory();
         using var proxy = new TcpListener(IPAddress.Loopback, 0);
         using var control = new TcpListener(IPAddress.Loopback, 0);
         proxy.Start();
@@ -1448,6 +1455,7 @@ public class BrowserProxyCapabilityTests
         int controlPort = ((IPEndPoint)control.LocalEndpoint).Port;
         int gatewayPort = controlPort - 2;
         int proxyConnections = 0;
+        int controlConnections = 0;
         using var stop = new CancellationTokenSource();
         Task proxyAccepts = Task.Run(async () =>
         {
@@ -1455,71 +1463,118 @@ public class BrowserProxyCapabilityTests
             {
                 while (!stop.IsCancellationRequested)
                 {
-                    TcpClient accepted = await proxy.AcceptTcpClientAsync(stop.Token);
+                    using TcpClient accepted = await proxy.AcceptTcpClientAsync(stop.Token);
                     Interlocked.Increment(ref proxyConnections);
-                    accepted.Dispose();
+                    await using NetworkStream stream = accepted.GetStream();
+                    var buffer = new byte[4096];
+                    _ = await stream.ReadAsync(buffer, stop.Token);
+                    await stream.WriteAsync(
+                        "HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"u8.ToArray(),
+                        stop.Token);
                 }
             }
-            catch (OperationCanceledException)
+            catch (OperationCanceledException) when (stop.IsCancellationRequested)
             {
             }
-            catch (ObjectDisposedException)
+            catch (ObjectDisposedException) when (stop.IsCancellationRequested)
             {
             }
         });
         Task controlAccept = Task.Run(async () =>
         {
-            using TcpClient accepted = await control.AcceptTcpClientAsync(stop.Token);
-            await using NetworkStream stream = accepted.GetStream();
-            var buffer = new byte[4096];
-            _ = await stream.ReadAsync(buffer, stop.Token);
-            byte[] response = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 11\r\nConnection: close\r\n\r\n{\"ok\":true}"u8.ToArray();
-            await stream.WriteAsync(response, stop.Token);
+            try
+            {
+                using TcpClient accepted = await control.AcceptTcpClientAsync(stop.Token);
+                Interlocked.Increment(ref controlConnections);
+                await using NetworkStream stream = accepted.GetStream();
+                var buffer = new byte[4096];
+                _ = await stream.ReadAsync(buffer, stop.Token);
+                byte[] response = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 11\r\nConnection: close\r\n\r\n{\"ok\":true}"u8.ToArray();
+                await stream.WriteAsync(response, stop.Token);
+            }
+            catch (OperationCanceledException) when (stop.IsCancellationRequested)
+            {
+            }
         });
 
-        string? previousHttp = Environment.GetEnvironmentVariable("HTTP_PROXY");
-        string? previousAll = Environment.GetEnvironmentVariable("ALL_PROXY");
-        Environment.SetEnvironmentVariable("HTTP_PROXY", $"http://127.0.0.1:{proxyPort}");
-        Environment.SetEnvironmentVariable("ALL_PROXY", $"http://127.0.0.1:{proxyPort}");
+        var start = new ProcessStartInfo("dotnet")
+        {
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false,
+            CreateNoWindow = true
+        };
+        start.ArgumentList.Add(testHost);
+        start.ArgumentList.Add("--browser-proxy");
+        start.ArgumentList.Add(gatewayPort.ToString(System.Globalization.CultureInfo.InvariantCulture));
+        start.ArgumentList.Add(useDefaultHandler ? "default-handler" : "production");
+        foreach (var variable in new[] { "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY",
+            "http_proxy", "https_proxy", "all_proxy", "no_proxy" })
+            start.Environment.Remove(variable);
+        start.Environment["HTTP_PROXY"] = $"http://127.0.0.1:{proxyPort}";
+        start.Environment["ALL_PROXY"] = $"http://127.0.0.1:{proxyPort}";
+        start.Environment["OPENCLAW_TRAY_DATA_DIR"] = directory.Combine("data");
+        start.Environment["OPENCLAW_TRAY_APPDATA_DIR"] = directory.Combine("roaming");
+        start.Environment["OPENCLAW_TRAY_LOCALAPPDATA_DIR"] = directory.Combine("local");
+        Process? child = null;
         try
         {
-            var cap = new BrowserProxyCapability(
-                NullLogger.Instance,
-                $"ws://127.0.0.1:{gatewayPort}",
-                "secret-token");
-            var res = await cap.ExecuteAsync(new NodeInvokeRequest
-            {
-                Id = "bp-direct",
-                Command = "browser.proxy",
-                Args = Parse("""{"path":"/tabs","timeoutMs":5000}""")
-            });
-
-            await Task.Delay(200);
+            child = Process.Start(start);
+            Assert.NotNull(child);
             Console.WriteLine(
-                "browser-proxy direct gateway_port={0} control_port={1} proxy_port={2} proxy_connections={3} ok={4}",
-                gatewayPort,
-                controlPort,
-                proxyPort,
-                proxyConnections,
-                res.Ok);
-            Assert.True(res.Ok);
-            Assert.Equal(0, Volatile.Read(ref proxyConnections));
+                $"proxy-fixture pid={child.Id} start={child.StartTime.ToUniversalTime():O} " +
+                $"exe={start.FileName} args={string.Join(" ", start.ArgumentList)} " +
+                $"controlPort={controlPort} proxyPort={proxyPort} dataRoot={directory.Path}");
+            var standardOutput = child.StandardOutput.ReadToEndAsync();
+            var standardError = child.StandardError.ReadToEndAsync();
+            await child.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(20));
+            var output = await standardOutput;
+            var error = await standardError;
+            Assert.True(child.ExitCode == (useDefaultHandler ? 1 : 0),
+                $"Proxy fixture exited {child.ExitCode}: {error}\n{output}");
+            Assert.Equal(useDefaultHandler ? 1 : 0, Volatile.Read(ref proxyConnections));
+            Assert.Equal(useDefaultHandler ? 0 : 1, Volatile.Read(ref controlConnections));
         }
         finally
         {
-            Environment.SetEnvironmentVariable("HTTP_PROXY", previousHttp);
-            Environment.SetEnvironmentVariable("ALL_PROXY", previousAll);
-            stop.Cancel();
-            proxy.Stop();
-            control.Stop();
             try
             {
-                await proxyAccepts.WaitAsync(TimeSpan.FromSeconds(2));
+                if (child is not null && !child.HasExited)
+                {
+                    child.Kill(entireProcessTree: true);
+                    await child.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(10));
+                }
             }
-            catch (OperationCanceledException)
+            finally
             {
+                child?.Dispose();
+                stop.Cancel();
+                try
+                {
+                    await Task.WhenAll(proxyAccepts, controlAccept).WaitAsync(TimeSpan.FromSeconds(5));
+                }
+                finally
+                {
+                    proxy.Stop();
+                    control.Stop();
+                }
             }
         }
+    }
+
+    private static string FindBrowserProxyTestHost()
+    {
+        var root = new DirectoryInfo(AppContext.BaseDirectory);
+        while (root is not null && !File.Exists(Path.Combine(root.FullName, "openclaw-windows-node.slnx")))
+            root = root.Parent;
+        Assert.NotNull(root);
+        var configuration = Assembly.GetExecutingAssembly()
+            .GetCustomAttribute<AssemblyConfigurationAttribute>()?.Configuration;
+        Assert.False(string.IsNullOrWhiteSpace(configuration));
+        var host = Path.Combine(root.FullName, "tests", "OpenClaw.Shared.TestHost",
+            "bin", configuration, "net10.0", "OpenClaw.Shared.TestHost.dll");
+        Assert.True(File.Exists(host), $"Browser proxy test host was not built: {host}");
+        return host;
     }
 
     private sealed class CapturingHandler : HttpMessageHandler
