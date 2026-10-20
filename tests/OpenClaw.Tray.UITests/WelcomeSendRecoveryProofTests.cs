@@ -165,6 +165,7 @@ public sealed class WelcomeSendRecoveryProofTests(UIThreadFixture ui)
 #pragma warning disable CS0067
         public event EventHandler<ConnectionStatus>? StatusChanged;
         public event EventHandler<SessionInfo[]>? SessionsUpdated;
+        public event EventHandler<SessionUsageSnapshot>? SessionUsageSnapshotUpdated;
         public event EventHandler<SessionCommandResult>? SessionCommandCompleted;
         public event EventHandler<ChatMessageInfo>? ChatMessageReceived;
         public event EventHandler<AgentEventInfo>? AgentEventReceived;
