@@ -17,7 +17,13 @@ description: Invoke and troubleshoot OpenClaw Windows-node commands through the 
 
 `winnode.exe` invokes OpenClaw Windows-node commands on the local tray over a
 loopback MCP HTTP endpoint (default `http://127.0.0.1:8765/`). Enable
-**Local MCP Server** in the tray's Settings → Advanced before calling.
+**Local MCP Server** in Settings > Permissions > Integrations before calling.
+A connection refused on that port means the tray is not listening. Do not
+reinstall the CLI. Start the tray with `EnableMcpServer` true, then point
+`OPENCLAW_TRAY_DATA_DIR` at that tray's data directory so the CLI loads
+`mcp-token.txt`. `browser.proxy` stays off `tools/list` until the app has a
+gateway client, a shared token, and a verified browser endpoint. The call
+then returns `Unknown tool: browser.proxy`.
 
 This document is the agent-facing reference: every supported command, its
 argument shape, and the A2UI v0.8 JSONL grammar. It is shipped alongside
@@ -27,7 +33,7 @@ argument shape, and the A2UI v0.8 JSONL grammar. It is shipped alongside
 
 ## Invocation shape
 
-```
+```text
 winnode --command <name> [--params '<json-object>'] [--invoke-timeout <ms>] [--identity release|dev]
 winnode --list-tools [--mcp-url <url>|--mcp-port <port>] [--identity release|dev]
 ```
@@ -327,24 +333,24 @@ where `readiness` ∈ `"ready" | "initializing" | "model-downloading" | "model-n
 
 ## Text-to-speech (tts.*)
 
-Four providers - Piper (local neural via Sherpa-ONNX, default), Windows
-built-in speech, ElevenLabs (cloud), and MiniMax (cloud). Provider +
-per-provider voice are configured in tray Settings.
+Five providers - Kokoro (local neural via kokoro.cpp, default), Piper (local
+neural via Sherpa-ONNX), Windows built-in speech, ElevenLabs (cloud), and
+MiniMax (cloud). Provider + per-provider voice are configured in tray Settings.
 
 ### tts.speak
 Speak text aloud on the Windows node.
 ```
 {
   "text": "string",           // required
-  "provider": "piper|windows|elevenlabs|minimax",  // optional; omit to use TtsProvider setting
+  "provider": "kokoro|piper|windows|elevenlabs|minimax",  // optional; omit to use TtsProvider setting
   "voiceId": "string",        // optional, overrides the per-provider configured voice
   "model": "string",          // optional, cloud providers only
   "interrupt": false          // default false; true cuts off any in-progress playback
 }
 ```
 When `provider` is omitted and the configured provider isn't usable (no
-cloud API key, Piper voice not downloaded), the node falls back to Windows
-TTS so playback still happens. Explicit `provider` requests stay strict and
+cloud API key, Kokoro voice pack or Piper voice not downloaded), the node
+falls back to Windows TTS so playback still happens. Explicit `provider` requests stay strict and
 do not silently reroute. Returns `{ spoken, provider, requestedProvider, fellBack, contentType, durationMs }`
 where `provider` is the provider that actually spoke.
 
@@ -400,11 +406,15 @@ Read-only and small write operations targeting the running tray. Used
 by the command palette and by automation that wants to drive the UI.
 
 ### app.navigate
-Navigate the companion app to a specific page.
+Navigate Workspace or the Settings companion to a specific page.
+```json
+{"page": "workspace:home"}
 ```
-{"page": "home|sessions|settings|chat|voice|connection|capabilities|conversations|...""}
-```
-Returns `{ navigated, page }`.
+Returns `{ navigated, page }`. `home` and `chat` open Workspace chat;
+`workspace:notifications` opens Workspace notifications. Unprefixed routes
+such as `sessions`, `settings`, and `connection` open the Settings companion.
+Deprecated Workspace routes return Home. Unknown `workspace:` routes return
+a tool error before any window is opened or navigation is forwarded.
 
 ### app.status
 Current connection / node state.
@@ -678,6 +688,12 @@ Returns `{ result, files? }` - `files` is an array of `{ path, base64, mimeType 
 
 Requires the gateway URL to have an explicit port (e.g. `ws://localhost:8080`).
 The browser control host must be running locally on `127.0.0.1:<gatewayPort + 2>`.
+
+Listed only when `BrowserProxyActivation` is `RegistrationBlock.None`: the
+toggle is on, a gateway client is attached, the shared gateway token is set,
+and the browser endpoint is verified. MCP-only startup (`EnableMcpServer`
+true, `EnableNodeMode` false) does not attach a gateway client, so this
+command stays off `tools/list` and the call returns `Unknown tool: browser.proxy`.
 
 ---
 

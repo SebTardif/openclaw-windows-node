@@ -2580,7 +2580,7 @@ public sealed partial class ConnectionPage : Page
                     rec.SharedGatewayToken!,
                     IsBootstrapToken: false,
                     CredentialResolver.SourceSharedGatewayToken);
-                if (!provenanceService.IsStrongCredentialAllowed(rec, candidate))
+                if (CurrentApp.InteractiveEndpointAuthorizer?.IsCredentialAllowed(rec, candidate) != true)
                 {
                     CurrentApp.ShowTransientConnectionError(
                         "Dashboard blocked because the saved gateway address is not owned by the verified managed gateway.");
@@ -2919,14 +2919,16 @@ public sealed partial class ConnectionPage : Page
             error = LocalizationHelper.GetString("ConnectionPage_SshServerPortInvalid");
             return false;
         }
-        if (!int.TryParse(AddSshRemotePortBox.Text, out var remotePort) || remotePort is < 1 or > 65535)
+        var forwardPorts = SshForwardPorts.TryParse(
+            AddSshRemotePortBox.Text,
+            AddSshLocalPortBox.Text,
+            out var remotePort,
+            out var localPort);
+        if (forwardPorts != SshForwardPortParseResult.Ok)
         {
-            error = LocalizationHelper.GetString("ConnectionPage_SshRemotePortInvalid");
-            return false;
-        }
-        if (!int.TryParse(AddSshLocalPortBox.Text, out var localPort) || localPort is < 1 or > 65535)
-        {
-            error = LocalizationHelper.GetString("ConnectionPage_SshLocalPortInvalid");
+            error = forwardPorts == SshForwardPortParseResult.RemoteInvalid
+                ? LocalizationHelper.GetString("ConnectionPage_SshRemotePortInvalid")
+                : LocalizationHelper.GetString("ConnectionPage_SshLocalPortInvalid");
             return false;
         }
 

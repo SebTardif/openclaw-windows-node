@@ -86,6 +86,7 @@ public class LocalCommandRunnerTests
 /// Integration tests for LocalCommandRunner — actually executes processes.
 /// Gated by OPENCLAW_RUN_INTEGRATION=1.
 /// </summary>
+[Collection(BoundedProcessWaitCollection.Name)]
 public class LocalCommandRunnerIntegrationTests
 {
     [IntegrationFact]
@@ -192,6 +193,27 @@ public class LocalCommandRunnerIntegrationTests
 
         Assert.Equal(0, result.ExitCode);
         Assert.Contains("hello_from_test", result.Stdout);
+    }
+
+    [IntegrationFact]
+    public async Task Run_ConcurrentShortCommands_DrainBothStreamsBeforeReturning()
+    {
+        var runner = new LocalCommandRunner();
+        await Task.WhenAll(Enumerable.Range(0, 32).Select(async index =>
+        {
+            var expected = $"hello_from_test_{index}";
+            var result = await runner.RunAsync(new CommandRequest
+            {
+                Command = "echo %TEST_OPENCLAW_VAR%& echo %TEST_OPENCLAW_VAR% 1>&2",
+                Shell = "cmd",
+                TimeoutMs = 10000,
+                Env = new() { { "TEST_OPENCLAW_VAR", expected } },
+            });
+            Assert.False(result.TimedOut);
+            Assert.Equal(0, result.ExitCode);
+            Assert.Equal(expected, result.Stdout);
+            Assert.Equal(expected, result.Stderr);
+        }));
     }
 
     [IntegrationFact]

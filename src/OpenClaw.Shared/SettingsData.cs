@@ -94,8 +94,8 @@ public record class SettingsData
     public string SttModelName { get; set; } = "base";
     /// <summary>Seconds of silence before auto-submit in voice chat mode.</summary>
     public float SttSilenceTimeout { get; set; } = 2.5f;
-    /// <summary>Enable TTS playback of responses during voice sessions.</summary>
-    public bool VoiceTtsEnabled { get; set; } = true;
+    /// <summary>Opt in to automatic read-aloud of chat responses. Manual Read aloud is independent.</summary>
+    public bool VoiceTtsEnabled { get; set; } = false;
     /// <summary>Show tool-call and usage chips inline in the chat timeline.</summary>
     public bool ShowChatToolCalls { get; set; } = true;
     /// <summary>Play audio feedback chimes on listen start/stop.</summary>
@@ -111,7 +111,13 @@ public record class SettingsData
     /// provider (which is unaffected by this setting).
     /// </summary>
     public bool NodeOllamaInferenceEnabled { get; set; } = false;
-    public string TtsProvider { get; set; } = OpenClaw.Shared.Capabilities.TtsCapability.PiperProvider;
+    /// <summary>
+    /// Provider a settings file resolves to when it omits or blanks <see cref="TtsProvider"/>.
+    /// Stays Piper (the default before Kokoro) so upgrades keep their speech path; fresh installs
+    /// get Kokoro from the tray's default settings instead.
+    /// </summary>
+    public const string LegacyDefaultTtsProvider = OpenClaw.Shared.Capabilities.TtsCapability.PiperProvider;
+    public string TtsProvider { get; set; } = LegacyDefaultTtsProvider;
     /// <summary>Persisted: whether the Hub's NavigationView pane is expanded
     /// (true) or collapsed/compact (false). Default true.</summary>
     public bool HubNavPaneOpen { get; set; } = true;
@@ -134,6 +140,8 @@ public record class SettingsData
     public string? TtsMiniMaxRegion { get; set; } = "global_en";
     /// <summary>Piper voice identifier, e.g. "en_US-amy-low". Voice file is downloaded on first use.</summary>
     public string TtsPiperVoiceId { get; set; } = "en_US-amy-low";
+    /// <summary>Kokoro voice name, e.g. "af_maple". Its voice pack is downloaded from Voice Settings.</summary>
+    public string TtsKokoroVoiceId { get; set; } = OpenClaw.Shared.Audio.KokoroModelManager.DefaultVoiceId;
     /// <summary>Run the local MCP HTTP server. Independent of EnableNodeMode.</summary>
     public bool EnableMcpServer { get; set; } = false;
     /// <summary>

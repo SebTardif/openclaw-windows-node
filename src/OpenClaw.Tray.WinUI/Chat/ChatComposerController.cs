@@ -28,6 +28,7 @@ internal sealed partial class ChatComposerController : IDisposable
     private readonly ChatComposerViewModel _vm;
     private readonly IChatComposerRuntimePort _port;
     private readonly ChatComposerHostActions _hostActions;
+    private readonly ChatPlacementController? _placement;
     private readonly object _operationGate = new();
 
     /// <summary>Canceled and disposed exactly once, in <see cref="Dispose"/>. Never
@@ -56,6 +57,7 @@ internal sealed partial class ChatComposerController : IDisposable
     private int _sendOperation;
     private int _catalogOperation;
     private int _generation;
+    private long _selectionRevision;
 
     /// <summary>Controller-owned single-flight send gate, independent of the
     /// rendered/projected <see cref="ChatComposerViewModel.IsSending"/> value.
@@ -100,11 +102,13 @@ internal sealed partial class ChatComposerController : IDisposable
     public ChatComposerController(
         ChatComposerViewModel viewModel,
         IChatComposerRuntimePort port,
-        ChatComposerHostActions hostActions)
+        ChatComposerHostActions hostActions,
+        ChatPlacementController? placement = null)
     {
         _vm = viewModel ?? throw new ArgumentNullException(nameof(viewModel));
         _port = port ?? throw new ArgumentNullException(nameof(port));
         _hostActions = hostActions ?? throw new ArgumentNullException(nameof(hostActions));
+        _placement = placement;
         _lifetimeToken = _lifetimeCts.Token;
     }
     /// <summary>Binds the root's session-selection handoff exactly once. Safe to call
@@ -124,12 +128,24 @@ internal sealed partial class ChatComposerController : IDisposable
     /// <summary>Handles a session-picker selection. Reuses the same handoff delegate
     /// the lifecycle "/new" flow uses to select a freshly created session. No-ops
     /// after disposal.</summary>
-    public void SelectChannel(string threadId)
-    {
-        if (_disposed)
-            return;
+    public void SelectChannel(string threadId) => TrySelectChannel(threadId);
 
-        _selectedSessionHandoff?.Invoke(threadId);
+    internal void InvalidatePendingSessionNavigation() => _selectionRevision++;
+
+    /// <summary>Returns false until the root is ready, or after disposal, so an
+    /// external host can retain its initial-selection handoff instead.</summary>
+    internal bool TrySelectChannel(string threadId)
+    {
+        if (_disposed || _selectedSessionHandoff is null)
+            return false;
+
+        InvalidatePendingSessionNavigation();
+        _placement?.NavigateTo(threadId);
+        _selectedSessionHandoff(threadId);
+        if (_disposed)
+            return false;
+        _hostActions.SessionSelected?.Invoke(threadId);
+        return true;
     }
 
     /// <summary>Full composer send workflow: local admission first, snapshot of draft
@@ -156,7 +172,7 @@ internal sealed partial class ChatComposerController : IDisposable
         var thread = inputs.CurrentThread;
         var draft = _vm.Draft;
         var attachments = _vm.PendingAttachments;
-        var message = draft.Trim();
+        var message = draft.Trim().Replace("\r\n", "\n").Replace('\r', '\n');
         if ((message.Length == 0 && attachments.Count == 0)
             || _vm.SlashDisplay.IsLoading
             || inputs.ConnectionState != "connected")
@@ -181,8 +197,7 @@ internal sealed partial class ChatComposerController : IDisposable
 
                 if (accepted)
                 {
-                    if (ChatComposerSubmissionPolicy.ShouldClearInput(submittedRevision, _vm.DraftRevision))
-                        _vm.ClearDraft();
+                    _vm.ClearDraftIfUnchanged(submittedRevision);
                     _vm.RemoveSubmittedAttachments(attachments);
                 }
 
@@ -256,14 +271,28 @@ internal sealed partial class ChatComposerController : IDisposable
                     return false;
             }
 
+            if (command == ChatLifecycleCommandKind.New)
+                _hostActions.SessionNavigationStarting?.Invoke();
+            if (!StillLive())
+                return false;
+
+            var selectionRevision = _selectionRevision;
             var result = await _port.ExecuteLifecycleCommandAsync(threadId, command).ConfigureAwait(true);
             if (!StillLive())
                 return false;
-            if (result.Succeeded && result.NewSessionKey is { } sessionKey)
-                _selectedSessionHandoff?.Invoke(sessionKey);
+            if (result.Succeeded && result.NewSessionKey is { } sessionKey &&
+                selectionRevision == _selectionRevision)
+                TrySelectChannel(sessionKey);
             return result.Succeeded;
         }
 
+        if (_placement is not null)
+        {
+            var requiresPreparation = _placement.RequiresPreparation;
+            if (!await _placement.PrepareAsync(threadId, _lifetimeToken).ConfigureAwait(true)
+                || !StillLive() || (requiresPreparation && !_placement.IsCurrent(threadId)))
+                return false;
+        }
         var accepted = await _port.SendMessageAsync(threadId, message, attachments, _lifetimeToken).ConfigureAwait(true);
         return StillLive() && accepted;
     }
@@ -460,6 +489,24 @@ internal sealed partial class ChatComposerController : IDisposable
             cancellation = _voiceCancellation;
         }
 
+        TryCancel(cancellation);
+    }
+
+    /// <summary>Suspends hidden-host capture without accepting a late transcript
+    /// or discarding the composer's existing draft and attachments.</summary>
+    internal void CancelVoiceRecording()
+    {
+        CancellationTokenSource? cancellation;
+        lock (_operationGate)
+        {
+            if (_disposed)
+                return;
+            cancellation = _voiceCancellation;
+            _voiceCancellation = null;
+            _voiceOperation++;
+            _voiceStopOperation = 0;
+            _vm.SetRecording(false);
+        }
         TryCancel(cancellation);
     }
 
