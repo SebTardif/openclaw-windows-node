@@ -2416,6 +2416,40 @@ public class OpenClawChatDataProviderTests
     }
 
     [Fact]
+    public async Task WelcomeRecovery_EmptyHistoryRefreshKeepsErrorUntilReset()
+    {
+        var (bridge, provider, snapshots, _) = CreateProvider([MainSession()]);
+        bridge.SendBehavior = (_, _, _) => throw new InvalidOperationException("model unavailable");
+
+        await using (provider)
+        {
+            await provider.LoadAsync();
+            bridge.RaiseStatus(ConnectionStatus.Connected);
+            using var composer = new ChatComposerFactory(new Presentation.RecordingUiDispatcher()).Create(
+                provider, new(null, null, null, null, null), initialSpeakerMuted: false);
+            var result = await composer.Controller.SendCoreAsync("main", "Main session", "Say hi", []);
+            Assert.True(result.FailedWhileHostLive);
+            provider.RestoreFailedWelcomeSend("main", "Say hi", result.FailedMessageId);
+            var error = snapshots[^1].Timelines["main"].WelcomeSendError;
+            Assert.NotNull(error);
+
+            await provider.LoadHistoryAsync("main", force: true, authoritative: true);
+            Assert.Empty(snapshots[^1].Timelines["main"].Entries);
+            Assert.Equal(error, snapshots[^1].Timelines["main"].WelcomeSendError);
+
+            bridge.RaiseStatus(ConnectionStatus.Disconnected);
+            bridge.RaiseStatus(ConnectionStatus.Connected);
+            await provider.LoadHistoryAsync("main", force: true, authoritative: true);
+            Assert.Equal(error, snapshots[^1].Timelines["main"].WelcomeSendError);
+
+            var reset = await provider.ExecuteLifecycleCommandAsync("main", ChatLifecycleCommandKind.Reset);
+            Assert.True(reset.Succeeded);
+            await provider.LoadHistoryAsync("main", force: true, authoritative: true);
+            Assert.Null(snapshots[^1].Timelines["main"].WelcomeSendError);
+        }
+    }
+
+    [Fact]
     public async Task WelcomeRecovery_LifecycleStartBeforeFailedAcknowledgement_PreservesRunningPrompt()
     {
         var (bridge, provider, snapshots, _) = CreateProvider([MainSession()]);
