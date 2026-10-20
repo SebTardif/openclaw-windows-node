@@ -6,6 +6,33 @@ namespace OpenClaw.Tray.Tests;
 public sealed class AppRefactorContractTests
 {
     [Fact]
+    public void E2ESetupFixture_UsesSeparateRoamingRootThroughoutItsLifecycle()
+    {
+        var root = TestRepositoryPaths.GetRepositoryRoot();
+        var source = File.ReadAllText(Path.Combine(
+            root, "tests", "OpenClaw.E2ETests", "Setup", "E2ESetupFixture.cs"));
+
+        Assert.Contains(
+            "RoamingAppDataRoot = Path.Combine(Path.GetTempPath(), $\"openclaw-e2e-roaming-{runId}\");",
+            source);
+        Assert.Contains("Directory.CreateDirectory(RoamingAppDataRoot);", source);
+        foreach (var method in new[] { "InitializeEnabledAsync", "DisposeEnabledAsync" })
+        {
+            Assert.Contains(
+                "Environment.SetEnvironmentVariable(\"OPENCLAW_TRAY_APPDATA_DIR\", RoamingAppDataRoot);",
+                ExtractMethod(source, method));
+        }
+        Assert.Contains(
+            "psi.Environment[\"OPENCLAW_TRAY_APPDATA_DIR\"] = RoamingAppDataRoot;",
+            ExtractMethod(source, "SpawnTray"));
+        Assert.Contains(
+            "Directory.Delete(RoamingAppDataRoot, recursive: true);",
+            ExtractMethod(source, "DisposeEnabledAsync"));
+        Assert.DoesNotContain("\"OPENCLAW_TRAY_APPDATA_DIR\", DataDir", source);
+        Assert.DoesNotContain("\"OPENCLAW_TRAY_APPDATA_DIR\"] = DataDir", source);
+    }
+
+    [Fact]
     public void E2ESetupTeardown_UsesFixtureOwnedUninstallArguments()
     {
         var root = TestRepositoryPaths.GetRepositoryRoot();
@@ -2169,7 +2196,7 @@ public sealed class AppRefactorContractTests
 
     private static string ExtractMethod(string source, string methodName, string? parameterHint = null)
     {
-        var pattern = $@"(?m)^\s*(?:(?:private|protected|public|internal)\s+)?(?:static\s+)?(?:async\s+)?(?:Task(?:<[^>]+>)?|System\.Threading\.Tasks\.Task|void|bool|int|string\??|object\??|IntPtr|TrayMenuSnapshot|RollbackResult|OpenClaw\.Connection\.GatewayCredential\?|AppShutdownPlan)\s+(?:[A-Za-z0-9_]+\.)?{Regex.Escape(methodName)}\s*\(";
+        var pattern = $@"(?m)^\s*(?:(?:private|protected|public|internal)\s+)?(?:static\s+)?(?:async\s+)?(?:Task(?:<[^>]+>)?|System\.Threading\.Tasks\.Task|void|bool|int|string\??|object\??|IntPtr|Process|TrayMenuSnapshot|RollbackResult|OpenClaw\.Connection\.GatewayCredential\?|AppShutdownPlan)\s+(?:[A-Za-z0-9_]+\.)?{Regex.Escape(methodName)}\s*\(";
         var matches = Regex.Matches(source, pattern);
         Assert.True(matches.Count > 0, $"Could not find method {methodName}.");
 

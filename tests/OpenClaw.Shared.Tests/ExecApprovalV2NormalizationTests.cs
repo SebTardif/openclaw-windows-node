@@ -244,6 +244,107 @@ public class ExecApprovalV2NormalizationTests
         Assert.NotNull(bound);
     }
 
+    [Theory]
+    [InlineData("-ea")]
+    [InlineData("/ea")]
+    [InlineData("--ea")]
+    [InlineData("-EncodedArguments")]
+    [InlineData("/EncodedArguments")]
+    [InlineData("--EncodedArguments")]
+    [InlineData("-encodeda")]
+    [InlineData("-encodedarg")]
+    [InlineData("-ENCODEDARGUMENTS")]
+    public void Normalizer_PowerShellEncodedArguments_DoesNotHideInlineCommand(string option)
+    {
+        string[] argv = ["pwsh", "-NoProfile", option, "encoded-arguments", "-c", "Write-Output marker"];
+        AssertWrapper(argv, "Write-Output marker");
+        Assert.Null(ExecReusableCommandBinder.TryBind(argv, cwd: null, env: null, out var failure));
+        Assert.Equal(ExecReusableCommandBinder.BindFailure.ShellWrapper, failure);
+
+        var outcome = ExecApprovalV2Normalizer.Normalize(Req(argv));
+        Assert.True(outcome.IsResolved);
+        Assert.Null(outcome.Identity!.ReusableCommand);
+        Assert.Empty(outcome.Identity.AllowAlwaysPatterns);
+        Assert.Empty(outcome.Identity.AllowlistResolutions);
+    }
+
+    [Theory]
+    [InlineData("-e")]
+    [InlineData("-ec")]
+    [InlineData("-en")]
+    [InlineData("-enc")]
+    [InlineData("-encoded")]
+    [InlineData("-encodedc")]
+    [InlineData("-EncodedCommand")]
+    public void Normalizer_EncodedCommandSharedPrefixes_StillConsumeTheirOperand(string option)
+    {
+        AssertWrapper(["pwsh", option, "encoded-command", "-c", "Get-Date"], "Get-Date");
+    }
+
+    [Theory]
+    [InlineData("-se")]
+    [InlineData("-ser")]
+    [InlineData("-ServerMode")]
+    public void Normalizer_PwshServerModePrefixes_DoNotConsumeCommandFlag(string option)
+    {
+        AssertWrapper(["pwsh", option, "-c", "Get-Date"], "Get-Date");
+    }
+
+    [Theory]
+    [InlineData("-settings")]
+    [InlineData("-SettingsFile")]
+    public void Normalizer_PwshSettingsFile_ConsumesCommandLikeOperand(string option)
+    {
+        Assert.False(ExecShellWrapperNormalizer.Extract(
+            ["pwsh", option, "-c", "-File", "script.ps1"]).IsWrapper);
+    }
+
+    [Theory]
+    [InlineData("Write-Output marker")]
+    [InlineData("Write-Output marker; Write-Output second")]
+    [InlineData("script.ps1")]
+    public void Normalizer_WindowsPowerShellSinglePositional_IsOneTimeCommand(string command)
+    {
+        string[] argv = ["powershell.exe", "-NoProfile", command];
+        AssertWrapper(argv, command);
+        Assert.Null(ExecReusableCommandBinder.TryBind(argv, cwd: null, env: null, out var failure));
+        Assert.Equal(ExecReusableCommandBinder.BindFailure.ShellWrapper, failure);
+
+        var outcome = ExecApprovalV2Normalizer.Normalize(Req(argv));
+        Assert.True(outcome.IsResolved);
+        Assert.Null(outcome.Identity!.ReusableCommand);
+        Assert.Empty(outcome.Identity.AllowAlwaysPatterns);
+        Assert.Empty(outcome.Identity.AllowlistResolutions);
+    }
+
+    [Theory]
+    [InlineData("powershell.exe", "-File")]
+    [InlineData("powershell.exe", "-fi")]
+    [InlineData("powershell.exe", "-InputFormat", "Text", "-File")]
+    [InlineData("pwsh.exe")]
+    [InlineData("pwsh.exe", "-ea", "encoded-arguments", "-File")]
+    public void Normalizer_SingleScriptInFileMode_RemainsReusable(string executable, params string[] options)
+    {
+        var directory = Directory.CreateTempSubdirectory("exec-single-script");
+        try
+        {
+            var tool = Path.Combine(directory.FullName, executable);
+            File.WriteAllBytes(tool, [0x4D, 0x5A]);
+            var argv = new List<string> { tool, "-NoProfile" };
+            argv.AddRange(options);
+            argv.Add("script.ps1");
+
+            Assert.False(ExecShellWrapperNormalizer.Extract(argv).IsWrapper);
+            var bound = ExecReusableCommandBinder.TryBind(argv, cwd: null, env: null, out var failure);
+            Assert.Equal(ExecReusableCommandBinder.BindFailure.None, failure);
+            Assert.NotNull(bound);
+        }
+        finally
+        {
+            directory.Delete(recursive: true);
+        }
+    }
+
     [Fact]
     public void Normalizer_FishInitCommand_IsWrapper()
     {

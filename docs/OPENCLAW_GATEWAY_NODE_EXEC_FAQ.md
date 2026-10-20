@@ -521,6 +521,15 @@ a shell wrapper, interpreter, or code host, and every durable entry written by
 V2 carries an argument pattern that must match the exact argument list. A name
 catalog is not the security boundary, because renaming a binary would defeat it.
 
+Recognized inline shell commands have no reusable identity. For example,
+`pwsh -EncodedArguments <value> -c <command>` remains one-time-only: the encoded
+argument operand cannot hide the later command flag. The `-ea` alias and supported
+`-encodeda` prefixes have the same behavior. A saved rule for such an invocation
+stays on disk but does not authorize it. Explicit `-File` scripts and positional
+`pwsh` scripts can still receive argument-bound approval. Windows PowerShell
+(`powershell.exe`) treats positional text as command mode, even a lone script
+name; use explicit `-File` for the reusable script form.
+
 One narrow legacy case remains. An allowlist entry written before argument
 binding existed has neither a recorded source nor an argument pattern. Such an
 entry stays valid for an ordinary executable, but it is inert when its resolved
