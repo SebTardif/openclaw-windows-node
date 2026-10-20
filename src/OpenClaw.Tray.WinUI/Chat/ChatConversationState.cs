@@ -964,15 +964,21 @@ internal sealed class ChatConversationState
                 // recovery runs. Those checks happen before any timeline replacement.
                 if (_timelines.TryGetValue(threadId, out var timeline)
                     && !timeline.TurnActive
+                    && !_lifecycle.HasActiveRun(threadId)
                     && !_queue.HasPendingMessages(threadId)
                     && !_queue.HasSendingMessages(threadId)
                     && !_queue.HasFailedMessages(threadId)
-                    && IsFailedWelcomeTimeline(timeline, messageText))
+                    && IsFailedWelcomeTimeline(timeline, messageText)
+                    && timeline.Entries.LastOrDefault(entry =>
+                        entry.Kind == ChatTimelineItemKind.Status && entry.Tone == ChatTone.Error)
+                        is { Text: { Length: > 0 } } failure)
                 {
                     _timelines[threadId] = ChatTimelineState.Initial() with
                     {
                         HistoryLoaded = timeline.HistoryLoaded,
+                        WelcomeSendError = failure.Text,
                     };
+                    _entryMeta.Remove(threadId);
                     _queue.ClearLocallyInitiated(threadId);
                 }
             }

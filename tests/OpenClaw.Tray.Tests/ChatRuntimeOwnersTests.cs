@@ -377,6 +377,8 @@ public sealed class ChatConversationStateTests
 
         var restored = state.RestoreFailedWelcomeSend("main", "What can you do?", context);
         Assert.Empty(restored.Timelines["main"].Entries);
+        Assert.Equal("gateway closed", restored.Timelines["main"].WelcomeSendError);
+        Assert.Empty(state.GetEntryMetadata("main"));
         Assert.False(restored.QueuedMessagesByThread?.TryGetValue("main", out var queued) == true
             && queued.Count > 0);
     }

@@ -407,9 +407,22 @@ public sealed class OpenClawReactorChatRoot : Component<OpenClawReactorChatRootP
             .WithKey("chat-composer-area");
         return Grid(
             [GridSize.Star()],
-            [showWelcome ? GridSize.Auto : GridSize.Star(), showWelcome ? GridSize.Star() : GridSize.Auto],
-            showWelcome ? Empty().Grid(row: 0) : timelineElement.Grid(row: 0),
-            composerArea.Grid(row: 1))
+            [GridSize.Auto, showWelcome ? GridSize.Auto : GridSize.Star(), showWelcome ? GridSize.Star() : GridSize.Auto],
+            InfoBar()
+                .Set(bar =>
+                {
+                    bar.IsOpen = !string.IsNullOrEmpty(timeline.WelcomeSendError);
+                    bar.Visibility = bar.IsOpen ? Visibility.Visible : Visibility.Collapsed;
+                    bar.IsClosable = false;
+                    bar.Severity = InfoBarSeverity.Error;
+                    bar.Title = LocalizationHelper.GetString("Chat_Notification_SendFailed");
+                    bar.Message = timeline.WelcomeSendError ?? string.Empty;
+                })
+                .AutomationId("ChatWelcomeSendError")
+                .Margin(12, 8, 12, 0)
+                .Grid(row: 0),
+            showWelcome ? Empty().Grid(row: 1) : timelineElement.Grid(row: 1),
+            composerArea.Grid(row: 2))
             .Background(Theme.Ref("ChatCanvasBrush"))
             .HAlign(HorizontalAlignment.Stretch)
             .VAlign(VerticalAlignment.Stretch)
