@@ -133,6 +133,12 @@ public sealed class WelcomeSendRecoveryProofTests(UIThreadFixture ui)
         public SessionInfo[] GetSessionList() => [new() { Key = "main", IsMain = true, DisplayName = "Main" }];
         public ModelsListInfo? GetCurrentModelsList() => null;
         public void StartProactiveBootstrap() { }
+        public Task<ChatWelcomeCatalog?> GetWelcomeCatalogAsync(string locale) =>
+            Task.FromResult<ChatWelcomeCatalog?>(new(locale, "Welcome", "Recent chats",
+            [
+                new("capabilities", "What can you do?", " \r\nWhat can you do?\r\n "),
+                new("tour", "Give me a quick tour of OpenClaw", "Give me a quick tour of OpenClaw"),
+            ]));
         public Task<ChatSendResult> SendChatMessageForRunAsync(
             string message, string? sessionKey, string? sessionId,
             IReadOnlyList<ChatAttachment>? attachments = null, string? idempotencyKey = null)

@@ -2372,8 +2372,10 @@ public class OpenClawChatDataProviderTests
         Assert.Contains(notifications, n => n.Kind == ChatProviderNotificationKind.Error);
     }
 
-    [Fact]
-    public async Task WelcomeRecovery_RepeatedRejectionRetainsErrorUntilNextSend()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task WelcomeRecovery_RepeatedRejectionRetainsErrorUntilNextSend(bool paddedGatewayPrompt)
     {
         var (bridge, provider, snapshots, _) = CreateProvider([MainSession()]);
         var failure = new InvalidOperationException("model unavailable");
@@ -2388,14 +2390,15 @@ public class OpenClawChatDataProviderTests
 
             foreach (var suggestion in new[] { "Say hi", "What can you do?" })
             {
-                var result = await composer.Controller.SendCoreAsync("main", "Main session", suggestion, []);
+                var prompt = paddedGatewayPrompt ? $" \r\n{suggestion}\r\n " : suggestion;
+                var result = await composer.Controller.SendCoreAsync("main", "Main session", prompt, []);
                 Assert.True(result.FailedWhileHostLive);
                 Assert.NotNull(result.FailedMessageId);
                 Assert.Equal(failure.Data[OpenClawChatDataProvider.FailedSendMessageIdDataKey], result.FailedMessageId);
                 var status = Assert.Single(snapshots[^1].Timelines["main"].Entries,
                     entry => entry.Kind == ChatTimelineItemKind.Status && entry.Tone == ChatTone.Error);
 
-                provider.RestoreFailedWelcomeSend("main", suggestion, result.FailedMessageId);
+                provider.RestoreFailedWelcomeSend("main", prompt, result.FailedMessageId);
 
                 var recovered = snapshots[^1].Timelines["main"];
                 Assert.Empty(recovered.Entries);

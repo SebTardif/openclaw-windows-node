@@ -449,7 +449,7 @@ public sealed class OpenClawChatDataProvider : IChatDataProvider
 
         Publish(_state.RestoreFailedWelcomeSend(
             threadId,
-            messageText,
+            GatewayMediaMessageProjection.NormalizeEchoCorrelationText(messageText.Trim()),
             ProjectionContext(),
             failedMessageId));
     }
