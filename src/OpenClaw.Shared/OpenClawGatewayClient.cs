@@ -88,6 +88,13 @@ public partial class OpenClawGatewayClient : WebSocketClientBase, IOperatorGatew
 
     /// <summary>Set to true to skip v3 and use v2 signatures directly (for gateways that don't support v3).</summary>
     public bool UseV2Signature { get => _useV2Signature; set => _useV2Signature = value; }
+
+    /// <summary>
+    /// Opt in only when the connection has an exec-approval handler.
+    /// Headless and validation clients must not advertise an approval delivery route.
+    /// </summary>
+    public bool SupportsExecApprovals { get; init; }
+
     internal IConnectEnvelopeSigner ConnectEnvelopeSigner
     {
         get => _connectEnvelopeSigner;
@@ -2126,7 +2133,8 @@ public partial class OpenClawGatewayClient : WebSocketClientBase, IOperatorGatew
                 credential,
                 nonce,
                 _challengeTimestampMs,
-                _useV2Signature),
+                _useV2Signature,
+                SupportsExecApprovals),
             _connectEnvelopeSigner);
         var signedAt = envelope.SignedAt;
         var connectNonce = envelope.Nonce!;
