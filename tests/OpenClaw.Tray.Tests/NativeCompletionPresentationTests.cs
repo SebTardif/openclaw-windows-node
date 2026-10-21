@@ -123,9 +123,21 @@ public sealed class NativeCompletionPresentationTests
         var agentIntent = workspace[workspace.IndexOf("internal async Task StartAgentChatAsync", StringComparison.Ordinal)..];
         Assert.True(agentIntent.IndexOf("_chat.InvalidateNativeSetupForNavigation()", StringComparison.Ordinal) <
             agentIntent.IndexOf("_agentId = agent.Id", StringComparison.Ordinal));
-        var createIntent = workspace[workspace.IndexOf("private async Task NewSessionAsync()", StringComparison.Ordinal)..];
+        var newSession = workspace[workspace.IndexOf("private async Task NewSessionAsync()", StringComparison.Ordinal)..
+            workspace.IndexOf("private Task ForkSessionAsync(", StringComparison.Ordinal)];
+        Assert.Contains("await CreateAndSelectSessionAsync(", newSession);
+        var createIntent = workspace[workspace.IndexOf("private async Task CreateAndSelectSessionAsync(", StringComparison.Ordinal)..
+            workspace.IndexOf("internal void ShowInfo(", StringComparison.Ordinal)];
+        Assert.Contains("_chat.InvalidateNativeSetupForNavigation()", createIntent);
+        Assert.Contains("await client.CreateSessionAsync", createIntent);
         Assert.True(createIntent.IndexOf("_chat.InvalidateNativeSetupForNavigation()", StringComparison.Ordinal) <
             createIntent.IndexOf("await client.CreateSessionAsync", StringComparison.Ordinal));
+        var removal = chat[chat.IndexOf("internal void ClearRemovedSession(", StringComparison.Ordinal)..
+            chat.IndexOf("private void ShowRemovedSession()", StringComparison.Ordinal)];
+        Assert.Contains("InvalidateNativeSetupForNavigation();", removal);
+        Assert.DoesNotContain("_nativeSetupBinding.Invalidate();", removal);
+        Assert.True(removal.IndexOf("InvalidateNativeSetupForNavigation();", StringComparison.Ordinal) <
+            removal.IndexOf("DisposeReactorHost();", StringComparison.Ordinal));
     }
 
     [Fact]
@@ -151,7 +163,7 @@ public sealed class NativeCompletionPresentationTests
         Assert.Contains("SynchronizeNativeSetupBinding();", chat);
         Assert.Contains("ReconcileNativeSetupObserver();", chat);
         var action = chat[chat.IndexOf("private void OnNativeSetupCheckAgain", StringComparison.Ordinal)..
-            chat.IndexOf("private static string? TryComputeChatUrl", StringComparison.Ordinal)];
+            chat.IndexOf("private static InteractiveGatewayCredential? ResolveChatCredential", StringComparison.Ordinal)];
         Assert.Contains("ApplyChatSurface(\"explicit recheck\")", action);
         Assert.DoesNotContain("OnRetryChat", action);
         Assert.DoesNotContain("Initialize(", action);

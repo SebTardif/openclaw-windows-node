@@ -24,6 +24,162 @@ public sealed partial class GatewayFixtureUiTests(ITestOutputHelper output)
 {
     [GatewayFixtureUiFact]
     [Trait("Category", "GatewayFixture")]
+    public async Task HistoricalFractionalVoiceConversationRendersWithoutLoadingPlaceholder()
+    {
+        await WithAppAsync(async run =>
+        {
+            await run.InvokeAsync("app.navigate", new { page = "chat" });
+            await SelectSessionAsync(run, GatewayScenario.VoiceTitle, GatewayScenario.VoiceSessionKey);
+            await WaitUiAsync(run, () => RenderConsumedHistory(run, GatewayScenario.VoiceSessionKey)
+                && IsVisibleInTimeline(run, GatewayScenario.VoiceFinalSentinel), "visible historical fractional voice reply");
+            Assert.Null(FindText(run, "Loading messages..."));
+            var snapshot = await run.InvokeAsync("app.chat.snapshot", new { threadId = GatewayScenario.VoiceSessionKey });
+            var timeline = snapshot.GetProperty("selectedTimeline");
+            Assert.True(timeline.GetProperty("historyLoaded").GetBoolean());
+            var entries = timeline.GetProperty("entries").EnumerateArray().ToArray();
+            Assert.Equal(30, entries.Length);
+            for (var index = 0; index < entries.Length; index++)
+            {
+                var expectedText = index == 29 ? GatewayScenario.VoiceFinalSentinel : $"Fixture voice history message {index + 1:D2}.";
+                Assert.Equal(expectedText, entries[index].GetProperty("Text").GetString());
+            }
+            await File.WriteAllTextAsync(Path.Combine(run.ArtifactsDirectory, "fractional-voice-snapshot.json"), snapshot.GetRawText());
+            await CaptureIfRequestedAsync(run, "fractional-voice-history-loaded.png");
+            await SelectSessionAsync(run, GatewayScenario.MainTitle, GatewayScenario.MainSessionKey);
+            await WaitUiAsync(run, () => IsVisibleInTimeline(run, GatewayScenario.MainSentinel), "integer typed control");
+            await SelectSessionAsync(run, GatewayScenario.VoiceTitle, GatewayScenario.VoiceSessionKey);
+            await WaitUiAsync(run, () => IsVisibleInTimeline(run, GatewayScenario.VoiceFinalSentinel), "restored historical voice reply");
+            Assert.Null(FindText(run, "Loading messages..."));
+        }, scenario: GatewayScenario.CreateFractionalVoiceHistory());
+    }
+
+    [GatewayFixtureUiFact]
+    [Trait("Category", "GatewayFixture")]
+    public async Task ArchivedConversationIsRestoredFromSettingsNotSidebar()
+    {
+        await WithAppAsync(async run =>
+        {
+            await run.InvokeAsync("app.navigate", new { page = "chat" });
+            await SelectSessionAsync(run, GatewayScenario.OtherTitle, GatewayScenario.OtherSessionKey);
+            Assert.Null(FindById(run, "WorkspaceArchivedToggle"));
+            await CaptureIfRequestedAsync(run, "sidebar-without-archives.png");
+            await OpenSessionMenuAsync(run, GatewayScenario.OtherSessionKey);
+            Invoke(FindById(run, "WorkspaceSessionMenuToggleArchive")!);
+            await WaitUiAsync(run, () => FindById(run, $"WorkspaceSession:{GatewayScenario.OtherSessionKey}") is null,
+                "archived conversation hidden from sidebar");
+
+            await run.InvokeAsync("app.navigate", new { page = "sessions" });
+            await WaitUiAsync(run, () => FindById(run, "SessionsPageArchived") is not null, "Settings archive section");
+            var section = FindById(run, "SessionsPageArchived")!;
+            ScrollAncestorToBottom(section);
+            ((ExpandCollapsePattern)section.GetCurrentPattern(ExpandCollapsePattern.Pattern)).Expand();
+            var restoreId = $"SessionsPageUnarchive:{GatewayScenario.OtherSessionKey}";
+            await WaitUiAsync(run, () => FindById(run, restoreId) is not null, "archived conversation in Settings");
+            ScrollAncestorToBottom(FindById(run, restoreId)!);
+            await WaitUiAsync(run, () => FindById(run, restoreId)?.Current.IsOffscreen == false, "visible unarchive action");
+            await CaptureIfRequestedAsync(run, "settings-archived-conversation.png");
+            Invoke(FindById(run, restoreId)!);
+            await WaitUiAsync(run, () => FindById(run, restoreId) is null, "confirmed unarchive refresh");
+            await run.InvokeAsync("app.navigate", new { page = "chat" });
+            await WaitUiAsync(run, () => FindById(run, $"WorkspaceSession:{GatewayScenario.OtherSessionKey}") is not null,
+                "restored conversation returned to active sidebar");
+            await SelectSessionAsync(run, GatewayScenario.OtherTitle, GatewayScenario.OtherSessionKey);
+            Assert.Null(FindById(run, "WorkspaceArchivedToggle"));
+            Assert.True(SessionSelected(run, GatewayScenario.OtherTitle));
+        }, allowSessionMutations: true);
+    }
+
+    private static void ScrollAncestorToBottom(AutomationElement element)
+    {
+        for (AutomationElement? parent = element; parent is not null; parent = TreeWalker.ControlViewWalker.GetParent(parent))
+        {
+            if (parent.TryGetCurrentPattern(ScrollPattern.Pattern, out var pattern)
+                && ((ScrollPattern)pattern).Current.VerticallyScrollable)
+            {
+                ((ScrollPattern)pattern).SetScrollPercent(ScrollPattern.NoScroll, 100);
+                return;
+            }
+        }
+    }
+
+    [GatewayFixtureUiFact]
+    [Trait("Category", "GatewayFixture")]
+    public async Task SessionRemoval_WaitsForAcceptanceAndClearsLastMountedConversation()
+    {
+        await WithAppAsync(async run =>
+        {
+            await run.InvokeAsync("app.navigate", new { page = "chat" });
+            await SelectSessionAsync(run, GatewayScenario.OtherTitle, GatewayScenario.OtherSessionKey);
+            run.Gateway.HoldSessionMutations();
+            await OpenSessionMenuAsync(run, GatewayScenario.OtherSessionKey);
+            Invoke(FindById(run, "WorkspaceSessionMenuToggleArchive")!);
+            await run.Gateway.WaitForRequestAsync("sessions.patch", GatewayScenario.OtherSessionKey);
+            Assert.NotNull(FindById(run, "ChatComposerInput"));
+            Assert.True(SessionSelected(run, GatewayScenario.OtherTitle));
+            await CaptureIfRequestedAsync(run, "archive-pending.png");
+            run.Gateway.ReleaseSessionMutations();
+            await WaitUiAsync(run, () => FindById(run, $"WorkspaceSession:{GatewayScenario.OtherSessionKey}") is null,
+                "accepted archive removed from active rows");
+            await WaitUiAsync(run, () => SessionSelected(run, GatewayScenario.EdgeTitle),
+                "accepted archive selected the remaining conversation");
+            await WaitHistoryAsync(run, GatewayScenario.EdgeSessionKey);
+            await OpenSessionMenuAsync(run, GatewayScenario.EdgeSessionKey);
+            Invoke(FindById(run, "WorkspaceSessionMenuDelete")!);
+            await WaitUiAsync(run, () => FindButton(run, "Delete") is not null, "delete confirmation");
+            Invoke(FindButton(run, "Delete")!);
+            await WaitUiAsync(run, () => FindById(run, "WorkspaceSelectConversation") is { Current.IsOffscreen: false },
+                "explicit empty chat after last removal");
+            Assert.Null(FindById(run, "ChatComposerInput"));
+            await CaptureIfRequestedAsync(run, "last-session-removed.png");
+            if (FindById(run, "WorkspaceBack") is { Current.IsEnabled: true } back)
+            {
+                Invoke(back);
+                await WaitUiAsync(run, () => !SessionSelected(run, GatewayScenario.EdgeTitle), "history excludes removed session");
+            }
+            Assert.DoesNotContain(run.Gateway.Requests, request => request.Method == "chat.send");
+            Assert.DoesNotContain(run.Gateway.Requests, request => request.Method == "sessions.create");
+        }, allowSessionMutations: true);
+    }
+
+    [GatewayFixtureUiFact]
+    [Trait("Category", "GatewayFixture")]
+    public async Task SessionRemoval_RejectionPreservesSelectedConversationAndDraft()
+    {
+        await WithAppAsync(async run =>
+        {
+            await run.InvokeAsync("app.navigate", new { page = "chat" });
+            await SelectSessionAsync(run, GatewayScenario.OtherTitle, GatewayScenario.OtherSessionKey);
+            const string draft = "Keep this draft after rejection";
+            ((ValuePattern)FindById(run, "ChatComposerInput")!.GetCurrentPattern(ValuePattern.Pattern)).SetValue(draft);
+            await OpenSessionMenuAsync(run, GatewayScenario.OtherSessionKey);
+            Invoke(FindById(run, "WorkspaceSessionMenuToggleArchive")!);
+            await WaitUiAsync(run, () => FindText(run, "Fixture Gateway is read-only") is not null, "visible archive rejection");
+            Assert.True(SessionSelected(run, GatewayScenario.OtherTitle));
+            Assert.Equal(draft, ((ValuePattern)FindById(run, "ChatComposerInput")!.GetCurrentPattern(ValuePattern.Pattern)).Current.Value);
+            await CaptureIfRequestedAsync(run, "archive-rejected.png");
+        });
+    }
+
+    private static async Task OpenSessionMenuAsync(GatewayFixtureRun run, string key)
+    {
+        var window = AppWindows(run).First(window => window.FindFirst(TreeScope.Descendants,
+            new PropertyCondition(AutomationElement.AutomationIdProperty, $"WorkspaceSession:{key}")) is not null);
+        if (!SetForegroundWindow(new IntPtr(window.Current.NativeWindowHandle)))
+            throw new InvalidOperationException("Cannot activate the isolated Workspace for keyboard proof.");
+        var row = FindById(run, $"WorkspaceSession:{key}")!;
+        row.SetFocus();
+        await WaitUiAsync(run, () => FindById(run, $"WorkspaceSession:{key}")?.Current.HasKeyboardFocus == true,
+            "session row keyboard focus");
+        System.Windows.Forms.SendKeys.SendWait("+{F10}");
+        await WaitUiAsync(run, () => FindById(run, "WorkspaceSessionMenuToggleArchive") is not null, "session context menu");
+    }
+
+    [System.Runtime.InteropServices.DllImport("user32.dll")]
+    [return: System.Runtime.InteropServices.MarshalAs(System.Runtime.InteropServices.UnmanagedType.Bool)]
+    private static extern bool SetForegroundWindow(IntPtr window);
+
+    [GatewayFixtureUiFact]
+    [Trait("Category", "GatewayFixture")]
     public async Task OwnerFooterUsesAuthenticatedProfileAndLiveConnectionStatus()
     {
         await WithAppAsync(async run =>
@@ -252,6 +408,98 @@ public sealed partial class GatewayFixtureUiTests(ITestOutputHelper output)
 
     [GatewayFixtureUiFact]
     [Trait("Category", "GatewayFixture")]
+    public async Task ReconnectKeepsDefinitelyUnsentQueuedMessageFailedAndVisible()
+    {
+        var scenario = GatewayScenario.CreateBrowse(allowChatSend: true);
+        await WithAppAsync(async run =>
+        {
+            await run.InvokeAsync("app.navigate", new { page = "chat" });
+            await SelectSessionAsync(
+                run,
+                GatewayScenario.MainTitle,
+                GatewayScenario.MainSessionKey);
+            run.Gateway.HoldChatSends();
+
+            var activeSend = run.InvokeAsync("app.chat.send", new
+            {
+                threadId = GatewayScenario.MainSessionKey,
+                message = "active-1669-current-head"
+            });
+            await run.Gateway.WaitForRequestAsync(
+                "chat.send",
+                GatewayScenario.MainSessionKey);
+            await run.InvokeAsync("app.chat.send", new
+            {
+                threadId = GatewayScenario.MainSessionKey,
+                message = "queued-1669-current-head"
+            });
+
+            JsonElement queued = default;
+            await run.WaitForAsync(async () =>
+            {
+                var result = await run.InvokeAsync("app.chat.queue.list", new
+                {
+                    threadId = GatewayScenario.MainSessionKey
+                });
+                queued = result.GetProperty("selectedThread")
+                    .GetProperty("messages")
+                    .EnumerateArray()
+                    .SingleOrDefault(message =>
+                        message.GetProperty("text").GetString() ==
+                        "queued-1669-current-head");
+                return queued.ValueKind == JsonValueKind.Object &&
+                       queued.GetProperty("sendState").GetString() == "Queued";
+            }, "queued message visible before reconnect");
+            var queuedId = queued.GetProperty("id").GetString()!;
+            await WaitUiAsync(
+                run,
+                () => FindById(run, $"ChatQueuedMessage_{queuedId}") is not null,
+                "queued message card before reconnect");
+            await CaptureIfRequestedAsync(run, "reconnect-queued-before.png");
+
+            await run.Gateway.CloseConnectionsAsync();
+            run.Gateway.ReleaseChatSends();
+            _ = await activeSend;
+
+            await run.WaitForAsync(async () =>
+            {
+                var status = await run.InvokeAsync("app.status");
+                return status.GetProperty("operatorState").GetString() ==
+                    "Connected";
+            }, "fixture reconnect");
+            await run.WaitForAsync(async () =>
+            {
+                var result = await run.InvokeAsync("app.chat.queue.list", new
+                {
+                    threadId = GatewayScenario.MainSessionKey
+                });
+                queued = result.GetProperty("selectedThread")
+                    .GetProperty("messages")
+                    .EnumerateArray()
+                    .SingleOrDefault(message =>
+                        message.GetProperty("id").GetString() == queuedId);
+                return queued.ValueKind == JsonValueKind.Object &&
+                       queued.GetProperty("sendState").GetString() == "Failed";
+            }, "queued message failed after reconnect");
+
+            Assert.Equal(
+                "The connection dropped before the gateway accepted this message.",
+                queued.GetProperty("errorText").GetString());
+            Assert.Single(
+                run.Gateway.Requests,
+                request => request.Method == "chat.send");
+            await WaitUiAsync(
+                run,
+                () => FindById(
+                    run,
+                    $"ChatQueuedMessageRemoveFailed_{queuedId}") is not null,
+                "failed queued message remove action");
+            await CaptureIfRequestedAsync(run, "reconnect-queued-after.png");
+        }, scenario: scenario);
+    }
+
+    [GatewayFixtureUiFact]
+    [Trait("Category", "GatewayFixture")]
     public async Task LateHistoryForPreviousSessionCannotReplaceSelectedTranscript()
     {
         await WithAppAsync(async run =>
@@ -351,7 +599,7 @@ public sealed partial class GatewayFixtureUiTests(ITestOutputHelper output)
     }
 
     private async Task WithAppAsync(Func<GatewayFixtureRun, Task> test, bool allowAgentCreation = false,
-        bool requireAgentSelection = false, GatewayScenario? scenario = null,
+        bool requireAgentSelection = false, bool allowSessionMutations = false, GatewayScenario? scenario = null,
         Func<GatewayFixtureProfile, string>? prepareSetupHandoff = null)
     {
         var appPath = Environment.GetEnvironmentVariable("OPENCLAW_GATEWAY_FIXTURE_APP")
@@ -359,6 +607,7 @@ public sealed partial class GatewayFixtureUiTests(ITestOutputHelper output)
         await using var run = await GatewayFixtureRun.StartAsync(appPath,
             Environment.GetEnvironmentVariable("OPENCLAW_GATEWAY_FIXTURE_ARTIFACTS"),
             allowAgentCreation: allowAgentCreation, requireAgentSelection: requireAgentSelection,
+            allowSessionMutations: allowSessionMutations,
             scenario: scenario, prepareSetupHandoff: prepareSetupHandoff);
         output.WriteLine($"Fixture run {run.Profile.RunId}, PID {run.AppProcessId}, artifacts: {run.ArtifactsDirectory}");
         try
