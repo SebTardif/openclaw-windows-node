@@ -36,7 +36,6 @@ public sealed class ChatComposerControllerTests
             connectionState,
             false,
             thread ?? MakeThread(),
-            System.Array.Empty<ChatThread>(),
             System.Array.Empty<string>(),
             null,
             false,
@@ -53,7 +52,7 @@ public sealed class ChatComposerControllerTests
         var vm = new ChatComposerViewModel(dispatcher ?? new RecordingUiDispatcher(), initialSpeakerMuted: false);
         vm.ApplyInputs(MakeInputs());
         var port = new FakeChatComposerRuntimePort();
-        var actions = hostActions ?? new ChatComposerHostActions(null, null, null, null, null);
+        var actions = hostActions ?? new ChatComposerHostActions(null, null, null, null);
         var controller = new ChatComposerController(vm, port, actions);
         return (vm, controller, port, actions);
     }
@@ -76,7 +75,7 @@ public sealed class ChatComposerControllerTests
         vm.ApplyInputs(MakeInputs(connectionState: "disconnected"));
         vm.SetDraft("hello");
         var port = new FakeChatComposerRuntimePort();
-        var controller = new ChatComposerController(vm, port, new ChatComposerHostActions(null, null, null, null, null));
+        var controller = new ChatComposerController(vm, port, new ChatComposerHostActions(null, null, null, null));
 
         var accepted = await controller.SendAsync();
 
@@ -96,6 +95,17 @@ public sealed class ChatComposerControllerTests
         Assert.Equal(1, port.SendMessageCallCount);
         Assert.Equal(("session-1", "hello world", (IReadOnlyList<ChatAttachment>)System.Array.Empty<ChatAttachment>()), port.LastSendMessageCall);
         Assert.Equal(string.Empty, vm.Draft);
+    }
+
+    [Fact]
+    public async Task SendAsync_TextBoxLineBreaks_AreSentAsLineFeeds()
+    {
+        var (vm, controller, port, _) = MakeController();
+        vm.SetDraft("line one\rline two\r\nline three");
+
+        Assert.True(await controller.SendAsync());
+
+        Assert.Equal("line one\nline two\nline three", port.LastSendMessageCall!.Value.Message);
     }
 
     [Fact]
@@ -164,7 +174,7 @@ public sealed class ChatComposerControllerTests
 
         var sendTask = controller.SendAsync();
         var addedLater = new ChatAttachment { FileName = "added-later.png" };
-        controller.AddAttachment(addedLater);
+        controller.AddAttachments([addedLater]);
 
         port.SendMessageGate.SetResult(true);
         await sendTask;
@@ -273,18 +283,18 @@ public sealed class ChatComposerControllerTests
     }
 
     [Fact]
-    public void TrySelectChannel_RequiresLiveRootAndPreservesDraft()
+    public void TrySelectSession_RequiresLiveRootAndPreservesDraft()
     {
         var (vm, controller, _, _) = MakeController();
         vm.SetDraft("Unsent sidebar draft");
-        Assert.False(controller.TrySelectChannel("agent:main:main"));
+        Assert.False(controller.TrySelectSession("agent:main:main"));
         string? selected = null;
         controller.BindSelectionHandoff(key => selected = key);
-        Assert.True(controller.TrySelectChannel("agent:research:thread"));
+        Assert.True(controller.TrySelectSession("agent:research:thread"));
         Assert.Equal("agent:research:thread", selected);
         Assert.Equal("Unsent sidebar draft", vm.Draft);
         controller.Dispose();
-        Assert.False(controller.TrySelectChannel("agent:main:main"));
+        Assert.False(controller.TrySelectSession("agent:main:main"));
         Assert.Equal("agent:research:thread", selected);
     }
 
@@ -323,13 +333,17 @@ public sealed class ChatComposerControllerTests
         var presentation = new OpenClawTray.Presentation.SetupNativeChatPresentation();
         presentation.Bind(request);
         string mountedThread = "session-1";
-        var actions = new ChatComposerHostActions(null, null, null, null, null,
+        var actions = new ChatComposerHostActions(null, null, null, null,
             SessionNavigationStarting: () =>
             {
                 binding.Invalidate();
                 presentation.Bind(binding.Request);
             },
-            SessionSelected: key => mountedThread = key);
+            SessionSelected: (key, previous) =>
+            {
+                Assert.Equal("session-1", previous);
+                mountedThread = key;
+            });
         var (vm, controller, port, _) = MakeController(actions);
         using (controller)
         using (vm)
@@ -359,12 +373,50 @@ public sealed class ChatComposerControllerTests
         }
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task DelayedNew_RespectsLaterNavigationAndPreservesNewerDraft(bool selectAnotherSession)
+    {
+        var notifications = new List<string>();
+        var actions = new ChatComposerHostActions(null, null, null, null,
+            SessionSelected: (key, _) => notifications.Add(key));
+        var (vm, controller, port, _) = MakeController(actions);
+        using (controller)
+        using (vm)
+        {
+            var selected = "session-1";
+            controller.BindSelectionHandoff(key => selected = key);
+            vm.SetDraft("/new");
+            port.ExecuteLifecycleGate = new(TaskCreationOptions.RunContinuationsAsynchronously);
+            var send = controller.SendAsync();
+            Assert.False(send.IsCompleted);
+
+            if (selectAnotherSession)
+                Assert.True(controller.TrySelectSession("session-user-selected"));
+            else
+                controller.InvalidatePendingSessionNavigation();
+            vm.SetDraft("Newer draft");
+            port.ExecuteLifecycleGate.SetResult(new(ChatLifecycleCommandKind.New, true, "late-session"));
+
+            Assert.True(await send);
+            Assert.Equal(selectAnotherSession ? "session-user-selected" : "session-1", selected);
+            Assert.Equal(selectAnotherSession ? new[] { "session-user-selected" } : [], notifications);
+            Assert.Equal("Newer draft", vm.Draft);
+            Assert.False(vm.IsSending);
+            Assert.Equal(0, port.SendMessageCallCount);
+
+            Assert.True(controller.TrySelectSession("session-after-return"));
+            Assert.Equal("session-after-return", selected);
+        }
+    }
+
     [Fact]
     public async Task DisposedNewNavigationDoesNotNotifyHostSelection()
     {
         var selected = 0;
-        var actions = new ChatComposerHostActions(null, null, null, null, null,
-            SessionSelected: _ => selected++);
+        var actions = new ChatComposerHostActions(null, null, null, null,
+            SessionSelected: (_, _) => selected++);
         var (vm, controller, port, _) = MakeController(actions);
         using (vm)
         {
@@ -383,13 +435,13 @@ public sealed class ChatComposerControllerTests
     public void SelectionDisposedDuringRootHandoffDoesNotNotifyHost()
     {
         var notifications = 0;
-        var actions = new ChatComposerHostActions(null, null, null, null, null,
-            SessionSelected: _ => notifications++);
+        var actions = new ChatComposerHostActions(null, null, null, null,
+            SessionSelected: (_, _) => notifications++);
         var (vm, controller, _, _) = MakeController(actions);
         using (vm)
         {
             controller.BindSelectionHandoff(_ => controller.Dispose());
-            Assert.False(controller.TrySelectChannel("session-B"));
+            Assert.False(controller.TrySelectSession("session-B"));
             Assert.Equal(0, notifications);
         }
     }
@@ -401,7 +453,7 @@ public sealed class ChatComposerControllerTests
         var cleanedUp = new TaskCompletionSource();
         CancellationToken token = default;
         var actions = new ChatComposerHostActions(null, null,
-            (ct, _) => { token = ct; return capture.Task; }, null, null);
+            (ct, _) => { token = ct; return capture.Task; }, null);
         var (vm, controller, _, _) = MakeController(actions);
         using (controller)
         using (vm)
@@ -467,7 +519,6 @@ public sealed class ChatComposerControllerTests
             ConfirmResetAsync: (_, _) => { confirmResetCalls++; return Task.FromResult(true); },
             AttachmentPickerRequest: null,
             VoiceCaptureRequest: (_, _) => { voiceRequestCalls++; return Task.FromResult<string?>("x"); },
-            SettingsNavigation: null,
             SpeakerMuteChanged: _ => speakerMuteCalls++);
         var (vm, controller, port, _) = MakeController(actions);
         var handoffCalls = 0;
@@ -481,14 +532,14 @@ public sealed class ChatComposerControllerTests
         var rebindHandoffCalls = 0;
         controller.BindSelectionHandoff(_ => rebindHandoffCalls++);
 
-        controller.SelectChannel("some-thread");
+        Assert.False(controller.TrySelectSession("some-thread"));
         controller.Stop();
         controller.CancelQueuedMessage("q1");
         controller.SetModel("model-x");
         controller.ClearModel();
         controller.SetThinkingLevel("high");
         controller.RequestCommandCatalog();
-        controller.AddAttachment(new ChatAttachment { FileName = "a.png" });
+        controller.AddAttachments([new ChatAttachment { FileName = "a.png" }]);
         controller.AddAttachments(new[] { new ChatAttachment { FileName = "b.png" } });
         controller.RemoveAttachment(new ChatAttachment { FileName = "c.png" });
         controller.ToggleSpeakerMuted();
@@ -525,7 +576,7 @@ public sealed class ChatComposerControllerTests
     {
         var actions = new ChatComposerHostActions(
             ConfirmResetAsync: (_, _) => Task.FromResult(false),
-            null, null, null, null);
+            null, null, null);
         var (vm, controller, port, _) = MakeController(actions);
         vm.SetDraft("/reset");
 
@@ -540,7 +591,7 @@ public sealed class ChatComposerControllerTests
     {
         var actions = new ChatComposerHostActions(
             ConfirmResetAsync: (_, _) => Task.FromResult(true),
-            null, null, null, null);
+            null, null, null);
         var (vm, controller, port, _) = MakeController(actions);
         vm.SetDraft("/reset");
         port.ExecuteLifecycleGate = new TaskCompletionSource<ChatLifecycleCommandResult>();
@@ -558,7 +609,7 @@ public sealed class ChatComposerControllerTests
         var actions = new ChatComposerHostActions(
             ConfirmResetAsync: (_, _) => Task.FromException<bool>(
                 new InvalidOperationException("dialog failed")),
-            null, null, null, null);
+            null, null, null);
         var (vm, controller, port, _) = MakeController(actions);
         vm.SetDraft("/reset");
 
@@ -596,7 +647,7 @@ public sealed class ChatComposerControllerTests
         var confirmGate = new TaskCompletionSource<bool>();
         var actions = new ChatComposerHostActions(
             ConfirmResetAsync: (_, _) => confirmGate.Task,
-            null, null, null, null);
+            null, null, null);
         var (vm, controller, port, _) = MakeController(actions);
         vm.SetDraft("/reset");
 
@@ -799,7 +850,7 @@ public sealed class ChatComposerControllerTests
         var controller = new ChatComposerController(
             vm,
             port,
-            new ChatComposerHostActions(null, null, null, null, null));
+            new ChatComposerHostActions(null, null, null, null));
 
         controller.ClearThinkingLevel();
 
@@ -826,7 +877,6 @@ public sealed class ChatComposerControllerTests
             null,
             null,
             VoiceCaptureRequest: (_, _) => voiceGate.Task,
-            null,
             null);
         var (vm, controller, _, _) = MakeController(actions);
 
@@ -848,7 +898,6 @@ public sealed class ChatComposerControllerTests
             null,
             null,
             VoiceCaptureRequest: (ct, _) => voiceGate.Task,
-            null,
             null);
         var (vm, controller, _, _) = MakeController(actions);
         controller.StartVoiceRecording();
@@ -875,7 +924,6 @@ public sealed class ChatComposerControllerTests
                 Interlocked.Increment(ref requestCalls);
                 return Task.FromResult<string?>("unexpected");
             },
-            null,
             null);
         var (vm, controller, _, _) = MakeController(actions);
         using var hookReached = new ManualResetEventSlim();
@@ -934,7 +982,6 @@ public sealed class ChatComposerControllerTests
                 Assert.True(releaseRequest.Wait(TimeSpan.FromSeconds(5)));
                 return voiceResult.Task;
             },
-            null,
             null);
         var (vm, controller, _, _) = MakeController(actions, dispatcher);
         dispatcher.FlushPending();
@@ -989,7 +1036,6 @@ public sealed class ChatComposerControllerTests
             null,
             null,
             VoiceCaptureRequest: (_, _) => throw new InvalidOperationException("synchronous failure"),
-            null,
             null);
         var (vm, controller, _, _) = MakeController(actions);
         var cleanupCalls = 0;
@@ -1020,7 +1066,6 @@ public sealed class ChatComposerControllerTests
                     Interlocked.Increment(ref requestCalls);
                     return voiceResult.Task;
                 },
-                null,
                 null);
             var (_, controller, _, _) = MakeController(actions);
             controller.TestOnlyVoiceOperationCleanedUp = () => cleanupReached.TrySetResult();
@@ -1077,7 +1122,6 @@ public sealed class ChatComposerControllerTests
                 Interlocked.Increment(ref voiceRequestCalls);
                 return Task.FromResult<string?>(null);
             },
-            null,
             null);
         var (_, controller, port, _) = MakeController(actions);
         controller.Stop();
@@ -1090,16 +1134,21 @@ public sealed class ChatComposerControllerTests
         using var registration = port.LastStopToken!.Value.Register(() =>
         {
             callbackInvoked = true;
-            callbackWork = Task.Run(() =>
+            // Probe lock ownership without waiting for a shared thread-pool worker.
+            callbackWork = Task.Factory.StartNew(() =>
             {
                 controller.TestOnlyProbeOperationGate();
                 callbackObservedDisposed = controller.IsDisposed;
                 controller.StartVoiceRecording();
-            });
+            }, CancellationToken.None, TaskCreationOptions.LongRunning, TaskScheduler.Default);
             callbackWorkCompleted = callbackWork.Wait(TimeSpan.FromSeconds(2));
         });
 
-        var disposeTask = Task.Run(controller.Dispose);
+        var disposeTask = Task.Factory.StartNew(
+            controller.Dispose,
+            CancellationToken.None,
+            TaskCreationOptions.LongRunning,
+            TaskScheduler.Default);
         var exception = await Record.ExceptionAsync(
             async () => await disposeTask.WaitAsync(TimeSpan.FromSeconds(5)));
         if (callbackWork is not null)
@@ -1131,7 +1180,6 @@ public sealed class ChatComposerControllerTests
                 voiceToken = token;
                 return voiceResult.Task;
             },
-            null,
             null);
         var (vm, controller, _, _) = MakeController(actions);
         controller.TestOnlyVoiceOperationCleanedUp = () => cleanupReached.TrySetResult();
