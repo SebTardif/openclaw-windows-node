@@ -17,12 +17,14 @@ public sealed partial class BindingsPage : Page
     private AppState? _appState;
     private IOperatorGatewayClient? _trackedClient;
     private readonly AsyncListLoadingState _bindingsLoading = new();
+    private bool _observing;
 
     public BindingsPage()
     {
         InitializeComponent();
         Unloaded += (_, _) =>
         {
+            _observing = false;
             if (_appState != null) _appState.PropertyChanged -= OnAppStateChanged;
             if (CurrentApp.ConnectionManager != null)
                 CurrentApp.ConnectionManager.OperatorClientChanged -= OnOperatorClientChanged;
@@ -32,6 +34,7 @@ public sealed partial class BindingsPage : Page
 
     public void Initialize()
     {
+        _observing = true;
         if (_appState != null) _appState.PropertyChanged -= OnAppStateChanged;
         _appState = CurrentApp.AppState!;
         _appState.PropertyChanged += OnAppStateChanged;
@@ -175,7 +178,17 @@ public sealed partial class BindingsPage : Page
         dispatcher.TryEnqueue(() =>
         {
             if (!ReferenceEquals(_trackedClient, client)) return;
-            RecoverConnectedClient(client);
+            switch (BindingsConnectionRecovery.DecideQueued(_observing, client.IsConnectedToGateway))
+            {
+                case BindingsConnectionRecovery.Decision.Recover:
+                    RecoverConnectedClient(client);
+                    break;
+                case BindingsConnectionRecovery.Decision.ShowDisconnected:
+                    _bindingsLoading.Fail();
+                    ShowDisconnected();
+                    UpdateLoadingVisuals();
+                    break;
+            }
         });
     }
 
@@ -185,9 +198,16 @@ public sealed partial class BindingsPage : Page
         if (dispatcher == null) return;
         dispatcher.TryEnqueue(() =>
         {
+            var connected = e.NewClient is { IsConnectedToGateway: true };
+            if (BindingsConnectionRecovery.DecideQueued(_observing, connected) ==
+                BindingsConnectionRecovery.Decision.Ignore)
+            {
+                return;
+            }
+
             AttachClient(e.NewClient);
-            if (e.NewClient is { IsConnectedToGateway: true })
-                RecoverConnectedClient(e.NewClient);
+            if (connected)
+                RecoverConnectedClient(e.NewClient!);
             else
             {
                 _bindingsLoading.Fail();

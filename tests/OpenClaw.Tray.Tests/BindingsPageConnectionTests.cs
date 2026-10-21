@@ -1,7 +1,23 @@
+using OpenClawTray.Pages;
+
 namespace OpenClaw.Tray.Tests;
 
 public sealed class BindingsPageConnectionTests
 {
+    [Theory]
+    [InlineData(false, true, "Ignore")]
+    [InlineData(false, false, "Ignore")]
+    [InlineData(true, false, "ShowDisconnected")]
+    [InlineData(true, true, "Recover")]
+    public void DecideQueued_RechecksObservationAndConnection(
+        bool observing,
+        bool connected,
+        string expected)
+    {
+        var decision = BindingsConnectionRecovery.DecideQueued(observing, connected);
+        Assert.Equal(expected, decision.ToString());
+    }
+
     [Fact]
     public void ConfigRequest_RequiresAConnectedGatewayClient()
     {
