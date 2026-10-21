@@ -32,7 +32,7 @@ public sealed class PiperTextToSpeechClient : IDisposable
     private readonly string _voiceId;
     private readonly OfflineTts _tts;
     private readonly SemaphoreSlim _gate = new(1, 1);
-    private bool _disposed;
+    private volatile bool _disposed;
 
     public string VoiceId => _voiceId;
     public int SampleRate => _tts.SampleRate;
@@ -69,14 +69,14 @@ public sealed class PiperTextToSpeechClient : IDisposable
     /// </summary>
     public async Task<byte[]> GenerateWavAsync(string text, float speed = 1.0f, CancellationToken cancellationToken = default)
     {
-        if (_disposed) throw new ObjectDisposedException(nameof(PiperTextToSpeechClient));
         if (string.IsNullOrWhiteSpace(text)) throw new ArgumentException("text must be non-empty", nameof(text));
 
         await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
-            // Inference is CPU-bound — push it off the caller thread so
-            // cancellation can race the synthesis.
+            ObjectDisposedException.ThrowIf(_disposed, this);
+            // Inference is CPU-bound. Keep it on a worker so cancellation can race synthesis.
+            // The gate stays held until this call returns, so Dispose cannot free the synthesizer underneath it.
             return await Task.Run(() =>
             {
                 cancellationToken.ThrowIfCancellationRequested();
@@ -111,14 +111,25 @@ public sealed class PiperTextToSpeechClient : IDisposable
 
     public void Dispose()
     {
+        // A completed dispose must be a no-op. The semaphore stays alive so a speak
+        // that already queued on it can still observe _disposed and return.
         if (_disposed) return;
-        _disposed = true;
-        // SherpaOnnx suppresses its finalizer only after native cleanup succeeds.
-        // Suppress first so a cleanup failure cannot retry from the finalizer thread.
-        GC.SuppressFinalize(_tts);
-        // slopwatch-ignore: SW003 Cleanup is best-effort; failure cannot improve caller state and the original outcome is preserved.
-        try { _tts.Dispose(); } catch { /* swallow */ }
-        // slopwatch-ignore: SW003 Cleanup is best-effort; failure cannot improve caller state and the original outcome is preserved.
-        try { _gate.Dispose(); } catch { /* swallow */ }
+        // Wait out any speak that already holds the synthesizer. A voice change
+        // disposes this client from another call, and freeing it mid-generate crashes.
+        _gate.Wait();
+        try
+        {
+            if (_disposed) return;
+            _disposed = true;
+            // SherpaOnnx suppresses its finalizer only after native cleanup succeeds.
+            // Suppress first so a cleanup failure cannot retry from the finalizer thread.
+            GC.SuppressFinalize(_tts);
+            // slopwatch-ignore: SW003 Cleanup is best-effort; failure cannot improve caller state and the original outcome is preserved.
+            try { _tts.Dispose(); } catch { /* swallow */ }
+        }
+        finally
+        {
+            _gate.Release();
+        }
     }
 }
