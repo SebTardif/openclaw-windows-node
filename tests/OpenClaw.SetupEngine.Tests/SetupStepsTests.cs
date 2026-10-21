@@ -5165,11 +5165,7 @@ public class SetupStepsTests : IDisposable
             commands);
     }
 
-    // Bind is allowlisted in ExecuteAsync before BuildConfigCommands, so a hostile bind
-    // never reaches the script. Auth mode and reload mode are not allowlisted. The
-    // ExtraConfig gateway.reload.mode override is unvalidated and is the value that can
-    // still reach the command. Those values must be one POSIX single-quoted token.
-    // The script also exports $PATH, so wsl.exe must not see it on the bash -c argv path.
+    // Bind is allowlisted by ExecuteAsync; the builder also quotes it defensively.
     [Fact]
     public async Task ConfigureGateway_QuotesBindAndPipesScriptThroughStdin()
     {
@@ -5209,48 +5205,55 @@ public class SetupStepsTests : IDisposable
         Assert.Contains("openclaw config set gateway.bind 'loopback'", call.Command);
     }
 
-    // ExtraConfig gateway.reload.mode is not allowlisted. A value with shell
-    // metacharacters must be quoted, or the step must reject it before WSL runs.
-    // Either way the metacharacters must not change the command that runs.
-    [Fact]
-    public async Task ConfigureGateway_ExecuteAsyncQuotesOrRejectsHostileReloadMode()
+    // Exercise the direct properties, not the already-quoted ExtraConfig override.
+    [Theory]
+    [InlineData("token", "off", "'token'", "'off'")]
+    [InlineData("token';$(id); echo PWNED", "hybrid", "'token'\\'';$(id); echo PWNED'", "'hybrid'")]
+    [InlineData("token", "hybrid';$PATH; echo PWNED", "'token'", "'hybrid'\\'';$PATH; echo PWNED'")]
+    public async Task ConfigureGateway_ExecuteAsyncQuotesDirectAuthAndReloadModes(
+        string authMode,
+        string reloadMode,
+        string quotedAuthMode,
+        string quotedReloadMode)
     {
-        const string safeReload = "off";
-        const string hostileReload = "hybrid;$(id); echo PWNED";
-
         var safeRunner = new FakeCommandRunner(
             _ => Ok(),
             (_, _, _) => Ok("GATEWAY_CONFIGURED"));
         var safeResult = await new ConfigureGatewayStep().ExecuteAsync(
-            CreateReloadContext(safeRunner, safeReload),
+            CreateGatewayModesContext(safeRunner, "token", "hybrid"),
             CancellationToken.None);
         Assert.True(safeResult.IsSuccess, safeResult.Message);
         var safeCall = Assert.Single(safeRunner.WslCalls);
 
-        var hostileRunner = new FakeCommandRunner(
+        var runner = new FakeCommandRunner(
             _ => Ok(),
             (_, _, _) => Ok("GATEWAY_CONFIGURED"));
-        var hostileResult = await new ConfigureGatewayStep().ExecuteAsync(
-            CreateReloadContext(hostileRunner, hostileReload),
+        var result = await new ConfigureGatewayStep().ExecuteAsync(
+            CreateGatewayModesContext(runner, authMode, reloadMode),
             CancellationToken.None);
 
-        if (!hostileResult.IsSuccess)
-        {
-            Assert.Empty(hostileRunner.WslCalls);
-            return;
-        }
-
-        var hostileCall = Assert.Single(hostileRunner.WslCalls);
-        var quotedHostile = "'" + hostileReload + "'";
-        var quotedSafe = "'" + safeReload + "'";
-        Assert.Contains($"openclaw config set gateway.reload.mode {quotedHostile}", hostileCall.Command);
-        Assert.DoesNotContain($"openclaw config set gateway.reload.mode {hostileReload}", hostileCall.Command);
+        Assert.True(result.IsSuccess, result.Message);
+        var call = Assert.Single(runner.WslCalls);
+        Assert.True(call.InputViaStdin);
+        Assert.Contains($"openclaw config set gateway.auth.mode {quotedAuthMode}", call.Command);
+        Assert.Contains($"openclaw config set gateway.reload.mode {quotedReloadMode}", call.Command);
         Assert.Equal(
-            safeCall.Command.Replace(quotedSafe, quotedHostile, StringComparison.Ordinal),
-            hostileCall.Command);
+            safeCall.Command
+                .Replace(
+                    "openclaw config set gateway.auth.mode 'token'",
+                    $"openclaw config set gateway.auth.mode {quotedAuthMode}",
+                    StringComparison.Ordinal)
+                .Replace(
+                    "openclaw config set gateway.reload.mode 'hybrid'",
+                    $"openclaw config set gateway.reload.mode {quotedReloadMode}",
+                    StringComparison.Ordinal),
+            call.Command);
     }
 
-    private SetupContext CreateReloadContext(ICommandRunner runner, string reloadMode)
+    private SetupContext CreateGatewayModesContext(
+        ICommandRunner runner,
+        string authMode,
+        string reloadMode)
     {
         var ctx = CreateContext(
             new SetupConfig
@@ -5258,10 +5261,8 @@ public class SetupStepsTests : IDisposable
                 Gateway = new GatewayConfig
                 {
                     Bind = "loopback",
-                    ExtraConfig = new Dictionary<string, string>
-                    {
-                        ["gateway.reload.mode"] = reloadMode,
-                    },
+                    AuthMode = authMode,
+                    ReloadMode = reloadMode,
                 },
             },
             runner);
