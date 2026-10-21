@@ -2594,9 +2594,10 @@ public sealed partial class ConnectionPage : Page
                     rec.SharedGatewayToken,
                     appendSharedGatewayToken: !string.IsNullOrWhiteSpace(rec.SharedGatewayToken),
                     out var url,
-                    out var urlError))
+                    out _))
             {
-                CurrentApp.ShowTransientConnectionError(urlError);
+                CurrentApp.ShowTransientConnectionError(
+                    LocalizationHelper.GetString("ConnectionPage_InvalidUrl"));
                 return;
             }
 

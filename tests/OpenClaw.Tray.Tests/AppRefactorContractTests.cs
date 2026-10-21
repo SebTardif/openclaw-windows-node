@@ -482,6 +482,24 @@ public sealed class AppRefactorContractTests
     }
 
     [Fact]
+    public void SavedDashboard_InvalidUrl_UsesLocalizedCopy()
+    {
+        var source = File.ReadAllText(Path.Combine(
+            TestRepositoryPaths.GetRepositoryRoot(),
+            "src", "OpenClaw.Tray.WinUI", "Pages", "ConnectionPage.xaml.cs"));
+        var method = ExtractMethod(source, "OnSavedRowOpenDashboardAsync");
+
+        AssertInOrder(method,
+            "GatewayDashboardUrlBuilder.TryBuild(",
+            "out _))",
+            "CurrentApp.ShowTransientConnectionError(",
+            "LocalizationHelper.GetString(\"ConnectionPage_InvalidUrl\")",
+            "return;",
+            "Launcher.LaunchUriAsync(");
+        Assert.DoesNotContain("urlError", method);
+    }
+
+    [Fact]
     public void SshTunnelExit_RecoversActiveRegistryGatewayThroughConnectionManager()
     {
         var source = ReadAppSources();
