@@ -116,8 +116,6 @@ public record ChatThread
     public bool IsBackground { get; init; }
     public bool IsArchived { get; init; }
     public bool IsChannelSession { get; init; }
-    public bool IsVisibleInSessionPicker(string? activeThreadId) =>
-        !IsBackground || string.Equals(Id, activeThreadId, StringComparison.Ordinal);
     public ChatThreadStatus Status { get; init; }
     public ChatActivity Activity { get; init; }
     public string? Cwd { get; init; }
@@ -163,7 +161,8 @@ public record ChatTimelineItem(
     long ToolOutcomeSequence = 0,
     string? ToolRunId = null,
     long ToolLegacyTurn = 0,
-    ChatToolErrorTextQuality ToolErrorTextQuality = ChatToolErrorTextQuality.Unspecified);
+    ChatToolErrorTextQuality ToolErrorTextQuality = ChatToolErrorTextQuality.Unspecified,
+    bool IsBackgroundFinal = false);
 
 public readonly record struct ChatToolCorrelationKey(
     string? RunId,
@@ -248,6 +247,7 @@ public record ChatReasoningDeltaEvent(string Text) : ChatEvent;
 public record ChatReasoningEndEvent() : ChatEvent;
 public record ChatMessageEvent(string Text, string? ReasoningText = null, bool ReconcilePrevious = false, bool IsStreaming = false) : ChatEvent;
 public record ChatMessageDeltaEvent(string Text) : ChatEvent;
+public record ChatBackgroundFinalEvent(string Text) : ChatEvent;
 public record ChatTurnEndEvent(bool RetainToolCorrelations = true) : ChatEvent;
 public record ChatIntentEvent(string Intent) : ChatEvent;
 public record ChatToolStartEvent(

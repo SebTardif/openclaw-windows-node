@@ -36,6 +36,9 @@ public sealed partial class GatewayScenario
     public const string OtherHistoryMarker = OtherSentinel;
     public const string EdgeSentinel = "FIXTURE EDGE: shared IDs belong to this conversation only.";
     public const int LongMessageCount = 240;
+    public const string VoiceSessionKey = "agent:main:fixture-voice";
+    public const string VoiceTitle = "Fixture: historical realtime voice";
+    public const string VoiceFinalSentinel = "FIXTURE VOICE FINAL: all historical voice messages loaded.";
 
     private static readonly DateTimeOffset Epoch = new(2026, 8, 20, 12, 0, 0, TimeSpan.Zero);
     private readonly Session[] _sessions;
@@ -55,11 +58,14 @@ public sealed partial class GatewayScenario
     private readonly ContextUsageFixture? _contextUsage;
     private readonly string? _scenarioName;
     private readonly Dictionary<string, JsonObject?> _sessionChanges = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, Session> _createdSessions = new(StringComparer.Ordinal);
     private readonly List<object> _createdAgents = [];
+    private readonly Dictionary<string, string> _chatRuns = new(StringComparer.Ordinal);
     private int _chatSendCount;
 
-    public string Name => _scenarioName ?? (_contextUsage is not null ? ContextUsageFixture.Name : IsInteractive ? InteractiveName : _cronJobs is not null ? "cron-editing" : _setup is not null ? "native-setup" : _allowChatSend ? "chat-send" : _allowSessionMutations ? "session-mutations" : _allowAgentCreation ? "agent-creation" : BrowseName);
-    public int Version => 1;
+    public string Name => _scenarioName ?? (_contextUsage is not null ? ContextUsageFixture.Name : IsInteractive ? InteractiveName : _cronJobs is not null ? "cron-editing" : _setup is not null ? "native-setup" : _allowChatSend ? "chat-send" : _allowSessionMutations ? "session-mutations" : _allowAgentCreation ? "agent-creation"
+        : ContainsSession(VoiceSessionKey) ? "fractional-voice-history" : BrowseName);
+    public int Version => _allowChatSend ? 2 : 1;
     public int ProtocolVersion => GatewayProtocolContract.CurrentVersion;
     public string ContractProvenance =>
         "OpenClaw.Shared GatewayProtocolContract/OpenClawGatewayClient and Protocol/gateway-protocol-snapshot.json";
@@ -90,6 +96,7 @@ public sealed partial class GatewayScenario
         }.Concat(reads.Keys).Concat(setup is null ? [] : advertiseSetup
             ? SetupMethods : ["wizard.start", "wizard.next", "wizard.cancel", "logs.tail"])
             .Concat(cronJobs is null ? [] : ["cron.list", "cron.status", "cron.add", "cron.update"])
+            .Concat(allowSessionMutations ? ["sessions.create", "sessions.patch", "sessions.delete"] : [])
             .Order(StringComparer.Ordinal).ToArray());
         var source = JsonSerializer.Serialize(new
         {
@@ -125,6 +132,31 @@ public sealed partial class GatewayScenario
     {
         var browse = CreateBrowse();
         return new(browse._sessions, browse._reads, responder, advertiseSetup);
+    }
+
+    /// <summary>Synthetic historical Talk rows, not a recording of a user's conversation.</summary>
+    public static GatewayScenario CreateFractionalVoiceHistory()
+    {
+        var browse = CreateBrowse();
+        var texts = Enumerable.Range(1, 30)
+            .Select(number => number == 30 ? VoiceFinalSentinel : $"Fixture voice history message {number:D2}.")
+            .ToArray();
+        var voice = CreateSession(VoiceSessionKey, VoiceTitle, "main", "realtime-voice", 5, texts);
+        var messages = voice.Messages.Select((message, index) =>
+        {
+            var row = JsonNode.Parse(message.GetRawText())!.AsObject();
+            if (index >= 12)
+            {
+                row["timestamp"] = 1791257718360.176 + index * 1000;
+                row["api"] = "realtime";
+                row["model"] = "realtime-voice";
+                row["provenance"] = new JsonObject { ["kind"] = "realtime_voice", ["sourceChannel"] = "talk" };
+                if (index % 2 == 0)
+                    row["content"] = new JsonArray(new JsonObject { ["type"] = "text", ["text"] = texts[index] });
+            }
+            return JsonSerializer.SerializeToElement(row);
+        }).ToArray();
+        return new([.. browse._sessions, voice with { Messages = messages }], browse._reads);
     }
 
     public static GatewayScenario CreateBrowse(bool allowAgentCreation = false, bool requireAgentSelection = false,
@@ -306,7 +338,17 @@ public sealed partial class GatewayScenario
         return hello;
     }
 
-    internal bool ContainsSession(string key) => _sessions.Any(s => s.Key == key);
+    internal bool ContainsSession(string key)
+    {
+        lock (_sessionChanges)
+            return _sessions.Any(s => s.Key == key) || _createdSessions.ContainsKey(key);
+    }
+
+    internal bool ContainsChatRun(string sessionKey, string runId)
+    {
+        lock (_chatRuns)
+            return _chatRuns.TryGetValue(runId, out var owner) && owner == sessionKey;
+    }
 
     internal object Respond(string method, JsonElement parameters)
     {
@@ -342,15 +384,28 @@ public sealed partial class GatewayScenario
         }
         if (method == "exec.approval.resolve")
             return ResolveApproval(parameters);
+        if (_allowSessionMutations && method == "sessions.create")
+            return CreateConversation(parameters);
         if (_allowSessionMutations && method is "sessions.patch" or "sessions.delete")
             return MutateSession(method, parameters);
         if (_allowChatSend && method == "chat.send")
         {
-            return new
-            {
-                runId = $"fixture-chat-{Interlocked.Increment(ref _chatSendCount)}",
-                status = "started"
-            };
+            var sessionKey = RequiredString(parameters, "sessionKey");
+            if (!ContainsSession(sessionKey))
+                throw new FixtureRequestException("INVALID_PARAMS", "Unknown fixture session.");
+            var runId = $"fixture-chat-{Interlocked.Increment(ref _chatSendCount)}";
+            lock (_chatRuns)
+                _chatRuns.Add(runId, sessionKey);
+            return new { runId, status = "started" };
+        }
+        if (_allowChatSend && method == "chat.abort")
+        {
+            ValidateProperties(parameters, "sessionKey", "runId");
+            var sessionKey = RequiredString(parameters, "sessionKey");
+            var runId = RequiredString(parameters, "runId");
+            if (!ContainsChatRun(sessionKey, runId))
+                throw new FixtureRequestException("INVALID_PARAMS", "Chat run was not issued for this fixture session.");
+            return new { ok = true, runId };
         }
         if (IsWrite(method))
             throw new FixtureRequestException("FIXTURE_READ_ONLY", "Fixture Gateway is read-only. This operation is not executed.");
@@ -383,14 +438,14 @@ public sealed partial class GatewayScenario
         var agent = OptionalString(p, "agentId");
         if (agent is not null && agent is not ("main" or "research"))
             throw new FixtureRequestException("INVALID_PARAMS", "Unknown fixture agentId.");
-        var limit = PositiveInt(p, "limit", _sessions.Length);
+        var limit = PositiveInt(p, "limit", int.MaxValue);
         var activeMinutes = PositiveInt(p, "activeMinutes", int.MaxValue);
         foreach (var flag in new[] { "includeGlobal", "includeUnknown", "includeDerivedTitles", "includeLastMessage" })
             OptionalBoolean(p, flag);
         JsonObject[] rows;
         lock (_sessionChanges)
         {
-            rows = _sessions.Where(s => agent is null || s.AgentId == agent)
+            rows = _sessions.Concat(_createdSessions.Values).Where(s => agent is null || s.AgentId == agent)
                 .Where(s => Epoch.ToUnixTimeMilliseconds() - s.UpdatedAt <= (long)activeMinutes * 60_000)
                 .Select(s => _sessionChanges.TryGetValue(s.Key, out var changed)
                     ? changed?.DeepClone().AsObject() : JsonSerializer.SerializeToNode(s.Row)!.AsObject())
@@ -405,6 +460,24 @@ public sealed partial class GatewayScenario
             sessions = rows
         });
         return _contextUsage?.List(listing) ?? (object)listing;
+    }
+
+    private object CreateConversation(JsonElement p)
+    {
+        ValidateProperties(p, "parentSessionKey", "emitCommandHooks", "succeedsParent");
+        var parent = FindSession(RequiredString(p, "parentSessionKey"));
+        OptionalBoolean(p, "emitCommandHooks");
+        if (OptionalBoolean(p, "succeedsParent") == true)
+            throw new FixtureRequestException("INVALID_PARAMS", "The fixture only supports parallel session creation.");
+        lock (_sessionChanges)
+        {
+            var number = _createdSessions.Count + 1;
+            var key = $"agent:{parent.AgentId}:fixture-created-{number}";
+            var session = CreateSession(key, $"Fixture: new conversation {number}", parent.AgentId,
+                parent.Row.GetProperty("model").GetString()!, _sessions.Length + _createdSessions.Count, []);
+            _createdSessions.Add(key, session);
+            return new { key, sessionId = session.Id };
+        }
     }
 
     private object MutateSession(string method, JsonElement p)
@@ -528,8 +601,12 @@ public sealed partial class GatewayScenario
         return _reads[method];
     }
 
-    private Session FindSession(string key) => _sessions.FirstOrDefault(s => s.Key == key)
-        ?? throw new FixtureRequestException("INVALID_PARAMS", "Unknown fixture session key.");
+    private Session FindSession(string key)
+    {
+        lock (_sessionChanges)
+            return _sessions.FirstOrDefault(s => s.Key == key) ?? _createdSessions.GetValueOrDefault(key)
+                ?? throw new FixtureRequestException("INVALID_PARAMS", "Unknown fixture session key.");
+    }
 
     private static bool IsWrite(string method) => method is
         "chat.send" or "chat.abort" or "chat.inject" or "config.set" or "config.patch" or "config.apply"

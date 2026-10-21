@@ -51,7 +51,7 @@ public sealed class WelcomeSendRecoveryProofTests(UIThreadFixture ui)
                     provider, new(null, null, null, null, null), initialSpeakerMuted: false);
                 host = new ReactorHostControl();
                 host.Mount(_ => Component<OpenClawReactorChatRoot, OpenClawReactorChatRootProps>(
-                    new(provider, session, InitialThreadId: "main", IsCompact: width < 640)));
+                    new(provider, session, InitialThreadId: "main")));
                 surface = new Border { Width = width, Height = 720, Child = host };
                 ui.Container.Children.Add(surface);
             });

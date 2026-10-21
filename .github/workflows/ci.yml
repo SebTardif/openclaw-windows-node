@@ -244,6 +244,10 @@ jobs:
         if ($LASTEXITCODE -ne 0) { throw 'GitVersion restore failed.' }
         ./scripts/test-alpha-promotion-versioning.ps1
 
+    - name: Validate release branch GitVersion behavior
+      shell: pwsh
+      run: ./scripts/test-release-branch-versioning.ps1
+
   proof-pool-contracts:
     name: Proof-pool contracts
     runs-on: windows-latest
@@ -776,7 +780,7 @@ jobs:
     needs: [change-classification, fast-validation]
     if: ${{ !cancelled() && needs.change-classification.result == 'success' && needs.fast-validation.result == 'success' && needs.change-classification.outputs.setup_e2e == 'true' }}
     runs-on: windows-latest
-    timeout-minutes: 45
+    timeout-minutes: 25
     env:
       OPENCLAW_REPO_ROOT: ${{ github.workspace }}
       OPENCLAW_E2E_GATEWAY_VERSION: ${{ needs.change-classification.outputs.gateway_version }}
@@ -829,6 +833,7 @@ jobs:
         dotnet build tests/OpenClaw.E2ETests -c Debug -r win-x64 --no-restore
 
     - name: Run setup and connect E2E tests
+      timeout-minutes: 20
       env:
         OPENCLAW_RUN_E2E: 1
       shell: pwsh
@@ -904,6 +909,7 @@ jobs:
         dotnet build tests/OpenClaw.E2ETests -c Debug -r win-x64 --no-restore
 
     - name: Run revocation recovery E2E tests
+      timeout-minutes: 20
       env:
         OPENCLAW_RUN_E2E: 1
       shell: pwsh
@@ -979,6 +985,7 @@ jobs:
         dotnet build tests/OpenClaw.E2ETests -c Debug -r win-x64 --no-restore
 
     - name: Run network recovery E2E tests
+      timeout-minutes: 20
       env:
         OPENCLAW_RUN_E2E: 1
       shell: pwsh
