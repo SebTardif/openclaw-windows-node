@@ -2597,7 +2597,7 @@ public sealed partial class ConnectionPage : Page
                     out _))
             {
                 CurrentApp.ShowTransientConnectionError(
-                    LocalizationHelper.GetString("ConnectionPage_InvalidUrl"));
+                    LocalizationHelper.GetString("ConnectionPage_SavedDashboardInvalidAddress"));
                 return;
             }
 

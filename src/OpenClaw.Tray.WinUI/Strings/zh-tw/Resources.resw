@@ -5688,6 +5688,9 @@
   <data name="ConnectionPage_InvalidUrl" xml:space="preserve">
     <value>URL 無效</value>
   </data>
+  <data name="ConnectionPage_SavedDashboardInvalidAddress" xml:space="preserve">
+    <value>此已儲存的閘道位址無法開啟儀表板。請編輯已儲存的閘道，並使用 http、https、ws 或 wss 位址。</value>
+  </data>
   <data name="ConnectionPage_ConnectionFailed" xml:space="preserve">
     <value>連線失敗</value>
   </data>

@@ -5688,6 +5688,9 @@ Assurez-vous que la passerelle est en cours d'exécution.</value>
   <data name="ConnectionPage_InvalidUrl" xml:space="preserve">
     <value>URL invalide</value>
   </data>
+  <data name="ConnectionPage_SavedDashboardInvalidAddress" xml:space="preserve">
+    <value>Cette adresse de passerelle enregistrée ne peut pas ouvrir le tableau de bord. Modifiez la passerelle enregistrée et utilisez une adresse http, https, ws ou wss.</value>
+  </data>
   <data name="ConnectionPage_ConnectionFailed" xml:space="preserve">
     <value>Échec de la connexion</value>
   </data>

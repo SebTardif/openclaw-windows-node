@@ -5688,6 +5688,9 @@
   <data name="ConnectionPage_InvalidUrl" xml:space="preserve">
     <value>URL 无效</value>
   </data>
+  <data name="ConnectionPage_SavedDashboardInvalidAddress" xml:space="preserve">
+    <value>此已保存的网关地址无法打开仪表板。请编辑已保存的网关，并使用 http、https、ws 或 wss 地址。</value>
+  </data>
   <data name="ConnectionPage_ConnectionFailed" xml:space="preserve">
     <value>连接失败</value>
   </data>

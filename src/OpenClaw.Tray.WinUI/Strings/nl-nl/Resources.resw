@@ -5689,6 +5689,9 @@ Controleer of de gateway actief is.</value>
   <data name="ConnectionPage_InvalidUrl" xml:space="preserve">
     <value>Ongeldige URL</value>
   </data>
+  <data name="ConnectionPage_SavedDashboardInvalidAddress" xml:space="preserve">
+    <value>Dit opgeslagen gatewayadres kan het dashboard niet openen. Bewerk de opgeslagen gateway en gebruik een http-, https-, ws- of wss-adres.</value>
+  </data>
   <data name="ConnectionPage_ConnectionFailed" xml:space="preserve">
     <value>Verbinding mislukt</value>
   </data>

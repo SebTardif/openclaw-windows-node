@@ -5692,6 +5692,9 @@ Make sure the gateway is running.</value>
   <data name="ConnectionPage_InvalidUrl" xml:space="preserve">
     <value>Invalid URL</value>
   </data>
+  <data name="ConnectionPage_SavedDashboardInvalidAddress" xml:space="preserve">
+    <value>This saved gateway address cannot open the dashboard. Edit the saved gateway and use an http, https, ws, or wss address.</value>
+  </data>
   <data name="ConnectionPage_ConnectionFailed" xml:space="preserve">
     <value>Connection failed</value>
   </data>
