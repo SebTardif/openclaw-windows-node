@@ -2120,8 +2120,14 @@ public sealed class GatewayConnectionManager :
                                 ? currentRecord.RequiresV2Signature : previousRecord.RequiresV2Signature,
                         };
 
-                        // Retire only this candidate, even if a later registry CAS rejects restoration.
-                        if (_activeGatewayRecordId == recordId && _activeOperatorTunnel is not null)
+                        // Retire the tunnel this record still owns. A listener failure stops
+                        // that tunnel before this point and advances the manager generation,
+                        // leaving the start receipt behind. Keep the generation observed when
+                        // the attempt finished. A receipt that no longer matches the manager
+                        // is that stale cleanup, not a generation to adopt.
+                        if (_activeGatewayRecordId == recordId && _activeOperatorTunnel is not null &&
+                            (_tunnelManager is null ||
+                             _activeOperatorTunnel.OwnershipGeneration == _tunnelManager.OwnershipGeneration))
                         {
                             candidateTunnel = _activeOperatorTunnel;
                             observedTunnelGeneration = candidateTunnel.OwnershipGeneration;

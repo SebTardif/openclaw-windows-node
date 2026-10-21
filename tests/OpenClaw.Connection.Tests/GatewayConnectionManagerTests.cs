@@ -2488,6 +2488,56 @@ public class GatewayConnectionManagerTests : IDisposable
     }
 
     [Fact]
+    public async Task ConnectWithSharedTokenAsync_ListenerFailureAfterTunnelStartRestoresPriorLiveConnection()
+    {
+        var previousSsh = new SshTunnelConfig("old-user", "old.example", 18789, 45670);
+        var replacementSsh = new SshTunnelConfig("new-user", "new.example", 18789, 45671);
+        _registry.AddOrUpdate(new GatewayRecord
+        {
+            Id = "gw-live",
+            Url = "wss://live.example",
+            BootstrapToken = "setup-bootstrap",
+            SshTunnel = previousSsh,
+        });
+        _registry.SetActive("gw-live");
+        _resolver.OperatorCredential = new GatewayCredential(
+            "setup-bootstrap",
+            IsBootstrapToken: true,
+            CredentialResolver.SourceBootstrapToken);
+        var tunnel = new CountingTunnelManager();
+        tunnel.OwnedListenerCheckAsync = _ =>
+            Task.FromResult(tunnel.ActiveConfig?.Host != replacementSsh.Host);
+        using var manager = new GatewayConnectionManager(
+            _resolver,
+            _factory,
+            _registry,
+            NullLogger.Instance,
+            tunnelManager: tunnel);
+        await manager.ConnectAsync("gw-live");
+        _factory.CreatedClients[0].SimulateHandshake();
+        await WaitUntilAsync(
+            () => manager.CurrentSnapshot.OperatorState == RoleConnectionState.Connected);
+        var generationAfterPriorStart = tunnel.OwnershipGeneration;
+
+        var connect = manager.ConnectWithSharedTokenAsync(
+            "wss://live.example",
+            "rejected-shared-token",
+            replacementSsh);
+        await WaitUntilAsync(() => _factory.CreatedClients.Count >= 2);
+        _factory.CreatedClients[^1].SimulateHandshake();
+        var result = await connect.WaitAsync(TimeSpan.FromSeconds(10));
+
+        Assert.Equal(SetupCodeOutcome.ConnectionFailed, result.Outcome);
+        Assert.False(result.GatewayCommitted);
+        Assert.DoesNotContain("ownership changed during rollback", result.ErrorMessage ?? "");
+        Assert.Equal(previousSsh, _registry.GetById("gw-live")?.SshTunnel);
+        Assert.Equal("setup-bootstrap", _registry.GetById("gw-live")?.BootstrapToken);
+        Assert.Equal(previousSsh, tunnel.ActiveConfig);
+        Assert.Equal(RoleConnectionState.Connected, manager.CurrentSnapshot.OperatorState);
+        Assert.True(tunnel.OwnershipGeneration > generationAfterPriorStart);
+    }
+
+    [Fact]
     public async Task ConnectWithSharedTokenAsync_DeferredAuthFailureRestoresBootstrap()
     {
         _registry.AddOrUpdate(new GatewayRecord
