@@ -341,6 +341,7 @@ public sealed partial class WizardPage : Page
                         ShowError(error);
                         return;
                     }
+                    Trace.TraceWarning("Gateway wizard completed after the final done acknowledgement; the Gateway terminated its hosted TUI.");
                 }
 
                 _nativeSession?.MarkWizardCompleted();
@@ -481,6 +482,13 @@ public sealed partial class WizardPage : Page
                                 _stepType, onboarding.Answer!, WizardAnswerBuilder.ReadOptions(step))
                         }
                     };
+                _finalStepTracker.RecordAnsweredStep(
+                    _stepType,
+                    _stepId,
+                    title,
+                    hasOptions,
+                    stepIndex,
+                    _totalSteps);
                 payload = await SendWizardRequestAsync(connection, generation, "wizard.next", next,
                     timeoutMs: WizardTimeouts.ForStep(title, message, _stepId));
                 if (generation != _operationGeneration || _errorState)

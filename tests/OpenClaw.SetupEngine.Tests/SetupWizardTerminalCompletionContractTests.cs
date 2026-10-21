@@ -53,7 +53,9 @@ public sealed class SetupWizardTerminalCompletionContractTests
             apply,
             "if (!decision.MarksWizardCompleted)",
             "ShowError(error);",
-            "return;");
+            "return;",
+            "Trace.TraceWarning(\"Gateway wizard completed after the final done acknowledgement; the Gateway terminated its hosted TUI.\");",
+            "_nativeSession?.MarkWizardCompleted();");
         Assert.Contains(
             "(_nativeSession is not null || !error.Contains(\"this.prompt is not a function\", StringComparison.OrdinalIgnoreCase))",
             apply,
@@ -62,6 +64,11 @@ public sealed class SetupWizardTerminalCompletionContractTests
             apply,
             "_finalStepTracker.RecordProgressAcknowledgement();",
             "SendWizardRequestAsync(");
+        AssertInOrder(
+            apply,
+            "object next = onboarding.Action",
+            "_finalStepTracker.RecordAnsweredStep(",
+            "SendWizardRequestAsync(connection, generation, \"wizard.next\", next,");
         Assert.Contains("_finalStepTracker.ResetForNewSession();", start, StringComparison.Ordinal);
         AssertRecordsAnswerBeforeNext(sendAnswer);
         AssertInOrder(
