@@ -1909,6 +1909,9 @@ internal sealed class ChatConversationState
                 }
             }
 
+            if (ChatEventMapper.IsLifecycleStart(evt))
+                ApplyOpenedResetTerminalLocked(threadId);
+
             return new(
                 Process: true,
                 ReloadHistory: false,
@@ -2845,6 +2848,7 @@ internal sealed class ChatConversationState
                 threadId,
                 deferredAbortRunId);
         }
+        ApplyOpenedResetTerminalLocked(threadId);
         return new(
             lifecycleStart,
             allowRemoteTurn && deferredAbortCount == 0,
@@ -2858,6 +2862,29 @@ internal sealed class ChatConversationState
     {
         if (!string.IsNullOrEmpty(lifecycleStart?.RunId))
             _lifecycle.StartRun(threadId, lifecycleStart.RunId);
+    }
+
+    private void ApplyOpenedResetTerminalLocked(string threadId)
+    {
+        var terminal = _reset.TakeOpenedTerminal(threadId);
+        if (terminal is null || !ChatEventMapper.IsTerminalRunEvent(terminal))
+            return;
+
+        _reset.CompleteRun(threadId, terminal.RunId);
+        _lifecycle.RemoveAbortedRun(terminal.RunId);
+        _lifecycle.RemoveActiveRun(threadId);
+        _lifecycle.ClearThreadSuppression(threadId);
+        _queue.RemoveRunMappingByRunId(threadId, terminal.RunId);
+        if (!_queue.HasPendingMessages(threadId))
+            _queue.ClearLocallyInitiated(threadId);
+        var mapped = ChatEventMapper.Map(terminal).Event;
+        if (mapped is not null)
+        {
+            ApplyEventLocked(
+                threadId,
+                ChatContentFormatting.TruncateChatEvent(mapped),
+                metadata: null);
+        }
     }
 
     private ChatDataSnapshot BuildSnapshotLocked(ChatProjectionContext context) =>

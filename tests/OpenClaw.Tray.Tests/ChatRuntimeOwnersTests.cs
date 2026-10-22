@@ -164,6 +164,62 @@ public sealed class ChatConversationStateTests
     }
 
     [Fact]
+    public void Reset_EndBeforeEcho_DoesNotLeaveTheTurnActive()
+    {
+        var state = new ChatConversationState(
+            ConnectionStatus.Connected,
+            lastChatState: null,
+            seedModels: null);
+        var context = new ChatProjectionContext("main", HasHandshakeSnapshot: true);
+        state.Load([new SessionInfo { Key = "main", IsMain = true }], context);
+        state.ResetThread("main", context);
+        var sentAt = DateTimeOffset.UtcNow;
+        state.AdmitMessage(
+            "main",
+            "hello",
+            "hello",
+            "nonce-reset",
+            attachments: null,
+            sentAt,
+            context);
+        Assert.True(state.Snapshot(context).Timelines["main"].TurnActive);
+
+        var when = sentAt.AddSeconds(2).ToUnixTimeMilliseconds();
+        using var startDoc = JsonDocument.Parse("""{"phase":"start"}""");
+        using var endDoc = JsonDocument.Parse("""{"phase":"end"}""");
+        var start = new AgentEventInfo
+        {
+            Stream = "lifecycle",
+            SessionKey = "main",
+            RunId = "new-run",
+            Ts = when,
+            Data = startDoc.RootElement.Clone(),
+        };
+        var end = new AgentEventInfo
+        {
+            Stream = "lifecycle",
+            SessionKey = "main",
+            RunId = "new-run",
+            Ts = when + 1,
+            Data = endDoc.RootElement.Clone(),
+        };
+
+        Assert.False(state.ProcessAgentEvent(start, "main", context).Process);
+        Assert.False(state.ProcessAgentEvent(end, "main", context).Process);
+        state.GateIncomingChatMessage(
+            new ChatMessageInfo
+            {
+                SessionKey = "main",
+                Role = "user",
+                Text = "hello",
+                Ts = when + 2,
+            },
+            context);
+
+        Assert.False(state.Snapshot(context).Timelines["main"].TurnActive);
+    }
+
+    [Fact]
     public void RollbackAbortAndEndTurn_StaleGenerationDoesNotEndReplacementTurn()
     {
         var state = new ChatConversationState(
