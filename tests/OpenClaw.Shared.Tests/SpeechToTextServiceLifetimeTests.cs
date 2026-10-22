@@ -1,61 +1,166 @@
+using System.Reflection;
+using OpenClaw.Shared;
 using OpenClaw.Shared.Audio;
 
 namespace OpenClaw.Shared.Tests;
 
 public sealed class SpeechToTextServiceLifetimeTests
 {
-    [Fact]
-    public void LoadAndUnload_WaitForTheTranscriptionGateBeforeReplacingTheFactory()
+    [WhisperModelFact]
+    public async Task ReloadDuringTranscription_FinishesTheCurrentResultBeforeReplacingTheFactory()
     {
-        var source = File.ReadAllText(Path.Combine(
-            ProductionSourceFiles.FindRepoRoot(),
-            "src",
-            "OpenClaw.Shared",
-            "Audio",
-            "SpeechToTextService.cs"));
+        var modelPath = ResolveTinyModel();
+        Assert.NotNull(modelPath);
 
-        var transcribe = source.IndexOf("public async Task<List<TranscriptionResult>> TranscribeAsync", StringComparison.Ordinal);
-        var dispose = source.IndexOf("public void Dispose()", StringComparison.Ordinal);
-        Assert.True(transcribe >= 0);
-        Assert.True(dispose > transcribe);
+        var logger = new RecordingLogger();
+        var service = new SpeechToTextService(logger);
+        Task<List<TranscriptionResult>>? transcribe = null;
+        try
+        {
+            service.LoadModel(modelPath);
+            var samples = Tone(sampleRate: 16_000, seconds: 8);
+            transcribe = Task.Run(() => service.TranscribeAsync(samples, "en"));
 
-        var transcribeBody = source[transcribe..dispose];
-        AssertOccursBefore(transcribeBody, "await _gate.WaitAsync(cancellationToken);", "ObjectDisposedException.ThrowIf(_disposed, this);");
-        AssertOccursBefore(transcribeBody, "ObjectDisposedException.ThrowIf(_disposed, this);", "if (_factory == null)");
-        AssertOccursBefore(transcribeBody, "if (_factory == null)", "_factory.CreateBuilder()");
+            var gate = TranscriptionGate(service);
+            var heldGate = false;
+            var enteredDeadline = DateTime.UtcNow.AddSeconds(20);
+            while (DateTime.UtcNow < enteredDeadline)
+            {
+                if (transcribe.IsCompleted)
+                    break;
+                if (gate.CurrentCount == 0)
+                {
+                    heldGate = true;
+                    break;
+                }
 
-        var load = MethodBody(source, "public void LoadModel(string modelPath)");
-        AssertOccursBefore(load, "_gate.Wait();", "_factory = null;");
-        AssertOccursBefore(load, "_factory = null;", "previous?.Dispose();");
-        AssertOccursBefore(load, "_loadedModelPath = null;", "WhisperFactory.FromPath(modelPath);");
-        AssertOccursBefore(load, "previous?.Dispose();", "_factory = WhisperFactory.FromPath(modelPath);");
+                await Task.Delay(5);
+            }
 
-        var unload = MethodBody(source, "public void UnloadModel()");
-        AssertOccursBefore(unload, "_gate.Wait();", "_factory = null;");
-        AssertOccursBefore(unload, "_factory = null;", "previous?.Dispose();");
+            Assert.True(heldGate, transcribe.IsCompleted
+                ? "Transcription finished before the reload could overlap it."
+                : "Transcription did not acquire the gate.");
 
-        var disposeBody = source[dispose..];
-        AssertOccursBefore(disposeBody, "_gate.Wait();", "_factory = null;");
-        AssertOccursBefore(disposeBody, "_factory = null;", "previous?.Dispose();");
-        AssertOccursBefore(disposeBody, "_loadedModelPath = null;", "previous?.Dispose();");
-        AssertOccursBefore(disposeBody, "_disposed = true;", "previous?.Dispose();");
-        Assert.DoesNotContain("_gate.Dispose()", source, StringComparison.Ordinal);
+            var observedReloadWaiting = false;
+            var reloadFinishedDuringTranscription = false;
+            var reload = Task.Run(() => service.LoadModel(modelPath));
+            var overlapDeadline = DateTime.UtcNow.AddSeconds(90);
+            while (DateTime.UtcNow < overlapDeadline)
+            {
+                var transcriptionDone = transcribe.IsCompleted;
+                var reloadDone = reload.IsCompleted;
+                if (!transcriptionDone && !reloadDone)
+                    observedReloadWaiting = true;
+                if (!transcriptionDone && reloadDone)
+                {
+                    reloadFinishedDuringTranscription = true;
+                    break;
+                }
+
+                if (transcriptionDone)
+                    break;
+
+                await Task.Delay(20);
+            }
+
+            Exception? transcriptionError = null;
+            List<TranscriptionResult>? segments = null;
+            try
+            {
+                segments = await transcribe;
+            }
+            catch (Exception ex)
+            {
+                transcriptionError = ex;
+            }
+
+            Exception? reloadError = null;
+            try
+            {
+                await reload.WaitAsync(TimeSpan.FromSeconds(60));
+            }
+            catch (Exception ex)
+            {
+                reloadError = ex;
+            }
+
+            var loads = logger.Infos.Count(line =>
+                line.StartsWith("Whisper model loaded:", StringComparison.Ordinal));
+            Assert.True(
+                observedReloadWaiting
+                && !reloadFinishedDuringTranscription
+                && transcriptionError is null
+                && reloadError is null
+                && segments is not null
+                && loads == 2,
+                "reloadFinishedDuring=" + reloadFinishedDuringTranscription
+                + "; waited=" + observedReloadWaiting
+                + "; loads=" + loads
+                + "; transcription=" + Describe(transcriptionError)
+                + "; reload=" + Describe(reloadError));
+        }
+        finally
+        {
+            if (transcribe is not null)
+            {
+                try
+                {
+                    await transcribe;
+                }
+                catch (Exception)
+                {
+                }
+            }
+
+            service.Dispose();
+        }
     }
 
-    private static string MethodBody(string source, string signature)
+    internal static string? ResolveTinyModel()
     {
-        var start = source.IndexOf(signature, StringComparison.Ordinal);
-        Assert.True(start >= 0, signature);
-        var next = source.IndexOf("public ", start + signature.Length, StringComparison.Ordinal);
-        Assert.True(next > start);
-        return source[start..next];
+        var configured = Environment.GetEnvironmentVariable("OPENCLAW_WHISPER_TEST_MODEL");
+        if (string.IsNullOrWhiteSpace(configured) || !File.Exists(configured))
+            return null;
+        return configured;
     }
 
-    private static void AssertOccursBefore(string source, string first, string second)
+    private static SemaphoreSlim TranscriptionGate(SpeechToTextService service)
     {
-        var firstIndex = source.IndexOf(first, StringComparison.Ordinal);
-        var secondIndex = source.IndexOf(second, StringComparison.Ordinal);
-        Assert.True(firstIndex >= 0, $"Missing expected source fragment: {first}");
-        Assert.True(secondIndex > firstIndex, $"Expected '{first}' before '{second}'.");
+        var field = typeof(SpeechToTextService).GetField(
+            "_gate",
+            BindingFlags.Instance | BindingFlags.NonPublic);
+        var gate = field?.GetValue(service) as SemaphoreSlim;
+        Assert.NotNull(gate);
+        return gate;
+    }
+
+    private static float[] Tone(int sampleRate, int seconds)
+    {
+        var samples = new float[sampleRate * seconds];
+        for (var i = 0; i < samples.Length; i++)
+            samples[i] = (float)(0.2 * Math.Sin(2 * Math.PI * 220 * i / sampleRate));
+        return samples;
+    }
+
+    private static string Describe(Exception? error) =>
+        error is null ? "ok" : error.GetType().Name + ": " + error.Message;
+
+    private sealed class RecordingLogger : IOpenClawLogger
+    {
+        public List<string> Infos { get; } = new();
+
+        public void Info(string message) => Infos.Add(message);
+        public void Debug(string message) { }
+        public void Warn(string message) { }
+        public void Error(string message, Exception? ex = null) { }
+    }
+}
+
+internal sealed class WhisperModelFactAttribute : FactAttribute
+{
+    public WhisperModelFactAttribute()
+    {
+        if (SpeechToTextServiceLifetimeTests.ResolveTinyModel() is null)
+            Skip = "Set OPENCLAW_WHISPER_TEST_MODEL to a ggml model file.";
     }
 }
