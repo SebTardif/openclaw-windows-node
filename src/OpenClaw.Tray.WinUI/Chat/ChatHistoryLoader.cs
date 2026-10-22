@@ -46,7 +46,8 @@ internal sealed class ChatHistoryLoader : IDisposable
 
     private readonly record struct PendingReload(
         ChatHistoryCommitToken Token,
-        bool Replacement);
+        bool Replacement,
+        bool Authoritative);
 
     private const int MaxRetries = 3;
     private static readonly TimeSpan RetryDelay = TimeSpan.FromSeconds(2);
@@ -64,6 +65,7 @@ internal sealed class ChatHistoryLoader : IDisposable
         new(StringComparer.Ordinal);
     private readonly Dictionary<string, ChatHistoryCommitToken> _replacementPending =
         new(StringComparer.Ordinal);
+    private readonly HashSet<string> _forcePending = new(StringComparer.Ordinal);
     private readonly Dictionary<ChatHistoryCommitToken, int> _retryCounts = new();
     private CancellationTokenSource _generationCancellation = new();
     private long _appliedStateGeneration;
@@ -120,6 +122,7 @@ internal sealed class ChatHistoryLoader : IDisposable
                 return Task.CompletedTask;
             _authoritativePending.Remove(threadId);
             _replacementPending.Remove(threadId);
+            _forcePending.Remove(threadId);
             foreach (var retryToken in _retryCounts.Keys
                          .Where(candidate => string.Equals(
                              candidate.ThreadId,
@@ -158,6 +161,7 @@ internal sealed class ChatHistoryLoader : IDisposable
                 _inFlight.Clear();
                 _authoritativePending.Clear();
                 _replacementPending.Clear();
+                _forcePending.Clear();
                 _retryCounts.Clear();
                 _state.ActivateHistoryGeneration(transition.HistoryGeneration);
             }
@@ -179,6 +183,7 @@ internal sealed class ChatHistoryLoader : IDisposable
                 _replacementPending,
                 threadId,
                 resetGeneration);
+            _forcePending.Remove(threadId);
             foreach (var token in _retryCounts.Keys
                          .Where(candidate => string.Equals(
                              candidate.ThreadId,
@@ -216,6 +221,7 @@ internal sealed class ChatHistoryLoader : IDisposable
             _inFlight.Clear();
             _authoritativePending.Clear();
             _replacementPending.Clear();
+            _forcePending.Clear();
             _retryCounts.Clear();
         }
         cancellation.Cancel();
@@ -273,6 +279,10 @@ internal sealed class ChatHistoryLoader : IDisposable
                         _authoritativePending[threadId] =
                             _state.CaptureHistoryToken(threadId);
                     }
+                }
+                else if (force)
+                {
+                    _forcePending.Add(threadId);
                 }
                 return;
             }
@@ -443,7 +453,7 @@ internal sealed class ChatHistoryLoader : IDisposable
                     threadId,
                     force: true,
                     CancellationToken.None,
-                    authoritative: !pending.Replacement,
+                    authoritative: pending.Authoritative,
                     expectedToken: pending.Token,
                     replacement: pending.Replacement,
                     supersedeReplacement: false);
@@ -468,7 +478,7 @@ internal sealed class ChatHistoryLoader : IDisposable
                 threadId,
                 force: true,
                 CancellationToken.None,
-                authoritative: !pending.Replacement,
+                authoritative: pending.Authoritative,
                 expectedToken: pending.Token,
                 replacement: pending.Replacement,
                 supersedeReplacement: false)
@@ -1010,11 +1020,29 @@ internal sealed class ChatHistoryLoader : IDisposable
                 return;
             if (_replacementPending.Remove(threadId, out var replacementToken))
             {
-                pendingReload = new(replacementToken, Replacement: true);
+                _forcePending.Remove(threadId);
+                pendingReload = new(
+                    replacementToken,
+                    Replacement: true,
+                    Authoritative: false);
                 return;
             }
             if (_authoritativePending.Remove(threadId, out var authoritativeToken))
-                pendingReload = new(authoritativeToken, Replacement: false);
+            {
+                _forcePending.Remove(threadId);
+                pendingReload = new(
+                    authoritativeToken,
+                    Replacement: false,
+                    Authoritative: true);
+                return;
+            }
+            if (_forcePending.Remove(threadId))
+            {
+                pendingReload = new(
+                    _state.CaptureHistoryToken(threadId),
+                    Replacement: false,
+                    Authoritative: false);
+            }
         }
     }
 

@@ -1319,6 +1319,35 @@ public class OpenClawChatDataProviderTests
     }
 
     [Fact]
+    public async Task ForcedHistoryReload_WhileLoadIsInFlight_RunsAfterThatLoad()
+    {
+        var (bridge, provider, _, _) = CreateProvider([MainSession()]);
+        var firstHistory = new TaskCompletionSource<ChatHistoryInfo>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        bridge.HistoryBehavior = key =>
+            bridge.RequestedHistoryKeys.Count == 1
+                ? firstHistory.Task
+                : Task.FromResult(new ChatHistoryInfo { SessionKey = key ?? "" });
+
+        await using (provider)
+        {
+            bridge.RaiseStatus(ConnectionStatus.Connected);
+            var firstLoad = provider.LoadHistoryAsync("main", force: true);
+            await WaitForConditionAsync(() => bridge.RequestedHistoryKeys.Count == 1);
+            Assert.Single(bridge.RequestedHistoryKeys);
+
+            await provider.LoadHistoryAsync("main", force: true);
+            Assert.Single(bridge.RequestedHistoryKeys);
+
+            firstHistory.SetResult(new ChatHistoryInfo { SessionKey = "main" });
+            await firstLoad;
+            await WaitForConditionAsync(() => bridge.RequestedHistoryKeys.Count == 2);
+
+            Assert.Equal(2, bridge.RequestedHistoryKeys.Count);
+        }
+    }
+
+    [Fact]
     public async Task LiveCompactionMessage_PreservesStructuredMetadata()
     {
         var (bridge, provider, snapshots, _) = CreateProvider([MainSession()]);
