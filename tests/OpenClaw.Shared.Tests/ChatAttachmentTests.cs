@@ -138,4 +138,27 @@ public class ChatAttachmentTests
     {
         Assert.Equal(10L * 1024 * 1024, ChatAttachment.MaxSizeBytes);
     }
+
+    [Fact]
+    public void ExceedsDecodedPixelBudget_RejectsABitmapThatDecodesPastTheCap()
+    {
+        var width = (uint)(ChatAttachment.MaxSizeBytes / 4) + 1;
+        Assert.True(ChatAttachment.ExceedsDecodedPixelBudget(width, 1, bytesPerPixel: 4));
+    }
+
+    [Fact]
+    public void ExceedsDecodedPixelBudget_AcceptsABitmapAtTheCap()
+    {
+        var width = (uint)(ChatAttachment.MaxSizeBytes / 4);
+        Assert.False(ChatAttachment.ExceedsDecodedPixelBudget(width, 1, bytesPerPixel: 4));
+    }
+
+    [Fact]
+    public void ExceedsDecodedPixelBudget_RejectsAMultiplyThatDoesNotFit()
+    {
+        Assert.True(ChatAttachment.ExceedsDecodedPixelBudget(
+            uint.MaxValue,
+            uint.MaxValue,
+            bytesPerPixel: 4));
+    }
 }

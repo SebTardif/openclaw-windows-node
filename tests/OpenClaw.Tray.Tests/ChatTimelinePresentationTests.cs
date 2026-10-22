@@ -468,6 +468,26 @@ public sealed class ChatTimelinePresentationTests
     }
 
     [Fact]
+    public void ClipboardPaste_ChecksThePixelBudgetBeforeDecoding()
+    {
+        var source = File.ReadAllText(Path.Combine(
+            TestRepositoryPaths.GetRepositoryRoot(),
+            "src",
+            "OpenClaw.Tray.WinUI",
+            "Chat",
+            "ChatComposerControllerClipboard.cs"));
+        var start = source.IndexOf(
+            "private async Task<ChatAttachment?> TryReadImageFromClipboardAsync(",
+            StringComparison.Ordinal);
+        var decode = source.IndexOf("GetSoftwareBitmapAsync()", start, StringComparison.Ordinal);
+        var encodedCap = source.IndexOf("output.Size", start, StringComparison.Ordinal);
+        Assert.True(start >= 0 && decode > start && encodedCap > decode);
+        var beforeDecode = source[start..decode];
+        Assert.Contains("input.Size > (ulong)ChatAttachment.MaxSizeBytes", beforeDecode);
+        Assert.Contains("ChatAttachment.ExceedsDecodedPixelBudget(", beforeDecode);
+    }
+
+    [Fact]
     public void ChatComposerContextMenuState_ProjectsNativeCommandVisibility()
     {
         Assert.Equal(

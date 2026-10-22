@@ -15,6 +15,27 @@ public sealed class ChatAttachment
     /// <summary>Maximum attachment size in bytes (10 MB).</summary>
     public const long MaxSizeBytes = 10 * 1024 * 1024;
 
+    /// <summary>
+    /// True when an uncompressed bitmap of these dimensions would pass
+    /// <see cref="MaxSizeBytes"/> before any encoded file is produced.
+    /// A zero dimension is an empty frame and does not exceed the cap.
+    /// </summary>
+    public static bool ExceedsDecodedPixelBudget(uint width, uint height, int bytesPerPixel)
+    {
+        if (bytesPerPixel <= 0)
+            return true;
+        if (width == 0 || height == 0)
+            return false;
+
+        var bytesPerPixel64 = (ulong)bytesPerPixel;
+        var rowBytes = (ulong)width * bytesPerPixel64;
+        if (rowBytes / bytesPerPixel64 != width)
+            return true;
+        if ((ulong)height > ulong.MaxValue / rowBytes)
+            return true;
+        return rowBytes * height > (ulong)MaxSizeBytes;
+    }
+
     [JsonPropertyName("type")]
     public string Type { get; init; } = "file";
 

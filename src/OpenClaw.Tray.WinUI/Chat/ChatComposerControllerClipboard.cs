@@ -135,8 +135,21 @@ internal sealed partial class ChatComposerController
     {
         var streamRef = await bitmapTask.ConfigureAwait(true);
         using var input = await streamRef.OpenReadAsync().AsTask(cancellationToken).ConfigureAwait(true);
+        if (input.Size > (ulong)ChatAttachment.MaxSizeBytes)
+            return null;
+
         var decoder = await global::Windows.Graphics.Imaging.BitmapDecoder.CreateAsync(input)
             .AsTask(cancellationToken).ConfigureAwait(true);
+        var bytesPerPixel = BytesPerDecodedPixel(decoder.BitmapPixelFormat);
+        if (ChatAttachment.ExceedsDecodedPixelBudget(decoder.PixelWidth, decoder.PixelHeight, bytesPerPixel)
+            || ChatAttachment.ExceedsDecodedPixelBudget(
+                decoder.OrientedPixelWidth,
+                decoder.OrientedPixelHeight,
+                bytesPerPixel))
+        {
+            return null;
+        }
+
         using var bitmap = await decoder.GetSoftwareBitmapAsync().AsTask(cancellationToken).ConfigureAwait(true);
         using var output = new global::Windows.Storage.Streams.InMemoryRandomAccessStream();
         var encoder = await global::Windows.Graphics.Imaging.BitmapEncoder.CreateAsync(
@@ -166,4 +179,13 @@ internal sealed partial class ChatComposerController
             SizeBytes = size,
         };
     }
+
+    private static int BytesPerDecodedPixel(
+        global::Windows.Graphics.Imaging.BitmapPixelFormat format) => format switch
+    {
+        global::Windows.Graphics.Imaging.BitmapPixelFormat.Rgba16 => 8,
+        global::Windows.Graphics.Imaging.BitmapPixelFormat.Gray16 => 2,
+        global::Windows.Graphics.Imaging.BitmapPixelFormat.Gray8 => 1,
+        _ => 4,
+    };
 }
