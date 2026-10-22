@@ -163,9 +163,8 @@ public sealed partial class UsagePage : Page
 
     private void RequestRefresh(IOperatorGatewayClient client)
     {
-        _ = client.RequestUsageAsync();
-        _ = client.RequestUsageCostAsync(_currentPeriodDays);
         _ = client.RequestUsageStatusAsync();
+        _ = client.RequestUsageCostAsync(_currentPeriodDays);
     }
 
     private void OnOpenConnectionClick(object sender, RoutedEventArgs e)
@@ -204,19 +203,6 @@ public sealed partial class UsagePage : Page
         if (!ShouldApplyUsageCost(cost))
             return;
 
-        // The Windows tray fires usage.cost twice per refresh: once via
-        // RequestUsageAsync() (always days=30) and once directly via the
-        // selector (currently 7 or 30). If the gateway ignores the `days`
-        // request param or only replies to one of the two, the page used to
-        // reject the response that didn't match _currentPeriodDays and the
-        // spinner ran forever. Accept whatever days the server returns and,
-        // when the selector is out of sync, silently snap it to that period
-        // so the header isn't lying about what data the user sees.
-        if (cost.Days > 0 && cost.Days != _currentPeriodDays)
-        {
-            SyncSelectorToServerDays(cost.Days);
-        }
-
         _lastAppliedUsageCostUpdatedAtUtc = cost.UpdatedAt;
         ConnectionInfoBar.IsOpen = false;
         TotalCostText.Text = $"${cost.Totals.TotalCost:F2}";
@@ -233,25 +219,7 @@ public sealed partial class UsagePage : Page
 
     private bool ShouldApplyUsageCost(GatewayCostUsageInfo cost)
     {
-        return UsageCostApplicationPolicy.ShouldApply(
-            cost.Days,
-            _currentPeriodDays,
-            _dailyCostLoading.HasLoaded);
-    }
-
-    private void SyncSelectorToServerDays(int days)
-    {
-        // Only the two SelectorBar items are valid targets; ignore anything
-        // else (e.g. server-defaulted 14 days) and just keep the user's pick.
-        if (days != 7 && days != 30) return;
-        _currentPeriodDays = days;
-        var target = days == 30 ? Period30DaysItem : Period7DaysItem;
-        if (!ReferenceEquals(PeriodSelector.SelectedItem, target))
-        {
-            PeriodSelector.SelectionChanged -= OnPeriodSelectionChanged;
-            try { PeriodSelector.SelectedItem = target; }
-            finally { PeriodSelector.SelectionChanged += OnPeriodSelectionChanged; }
-        }
+        return UsageCostApplicationPolicy.ShouldApply(cost.Days, _currentPeriodDays);
     }
 
     public void UpdateUsageStatus(GatewayUsageStatusInfo status)
