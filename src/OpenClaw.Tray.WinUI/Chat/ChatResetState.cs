@@ -39,6 +39,10 @@ internal sealed class ChatResetState
         _pendingLocalSubmissions = new();
     private readonly Dictionary<string, List<PendingLifecycleStart>>
         _pendingLifecycleStarts = new();
+    private readonly Dictionary<string, Dictionary<string, AgentEventInfo>>
+        _pendingTerminals = new(StringComparer.Ordinal);
+    private AgentEventInfo? _openedTerminal;
+    private string? _openedTerminalThread;
     private readonly Dictionary<string, AcceptedLifecycleFloor>
         _acceptedLifecycleFloors = new();
     private readonly HashSet<string> _remoteBackfillInFlight = new();
@@ -48,7 +52,8 @@ internal sealed class ChatResetState
 
     private readonly record struct PendingLifecycleStart(
         AgentEventInfo Event,
-        long Sequence);
+        long Sequence,
+        AgentEventInfo? Terminal = null);
 
     private sealed record PendingLocalSubmission(
         string Id,
@@ -90,6 +95,12 @@ internal sealed class ChatResetState
         _localEchoSequences.Remove(threadId);
         _pendingLocalSubmissions.Remove(threadId);
         _pendingLifecycleStarts.Remove(threadId);
+        _pendingTerminals.Remove(threadId);
+        if (string.Equals(_openedTerminalThread, threadId, StringComparison.Ordinal))
+        {
+            _openedTerminal = null;
+            _openedTerminalThread = null;
+        }
         _acceptedLifecycleFloors.Remove(threadId);
         _remoteBackfillInFlight.Remove(threadId);
         _remoteUserSeen.Remove(threadId);
@@ -383,6 +394,7 @@ internal sealed class ChatResetState
                 evt,
                 _lifecycleStartSequence + 1))
         {
+            StageOpenedTerminal(threadId, TerminalForRun(threadId, evt.RunId));
             OpenGate(threadId, evt);
             return new(false, false, evt);
         }
@@ -395,12 +407,18 @@ internal sealed class ChatResetState
             {
                 BufferLifecycleStart(threadId, evt);
             }
+            else if (ChatEventMapper.IsTerminalRunEvent(evt))
+            {
+                RememberResetTerminal(threadId, evt);
+            }
             Logger.Debug(
                 $"[ResetGate] Pre-cutoff agent event thread='{threadId}' stream='{evt.Stream}' runPresent={!string.IsNullOrEmpty(evt.RunId)} localProof={hasLocalProof} buffered={IsResetLifecycleCandidate(evt) && hasLocalProof} timestampDeltaMs={TimestampDeltaFromCutoff(threadId, eventTimestamp)}");
             return new(true, false, null);
         }
         if (IsResetLifecycleCandidate(evt))
             BufferLifecycleStart(threadId, evt);
+        else if (ChatEventMapper.IsTerminalRunEvent(evt))
+            RememberResetTerminal(threadId, evt);
         return new(true, false, null);
     }
 
@@ -679,7 +697,8 @@ internal sealed class ChatResetState
         }
         pending.Add(new PendingLifecycleStart(
             evt,
-            ++_lifecycleStartSequence));
+            ++_lifecycleStartSequence,
+            TerminalForRun(threadId, evt.RunId)));
         if (pending.Count > 8)
             pending.RemoveRange(0, pending.Count - 8);
     }
@@ -733,6 +752,7 @@ internal sealed class ChatResetState
 
             var selected = pending[selectedIndex];
             pending.RemoveAt(selectedIndex);
+            StageOpenedTerminal(threadId, selected.Terminal);
             OpenGate(
                 threadId,
                 selected.Event,
@@ -761,6 +781,7 @@ internal sealed class ChatResetState
                 continue;
             }
             pending.RemoveAt(index);
+            StageOpenedTerminal(threadId, start.Terminal);
             OpenGate(
                 threadId,
                 start.Event,
@@ -813,6 +834,7 @@ internal sealed class ChatResetState
         AgentEventInfo evt,
         long? acceptedEchoTimestampMs = null)
     {
+        _pendingTerminals.Remove(threadId);
         _awaitingUserMessage.Remove(threadId);
         _remoteUserSeen.Remove(threadId);
         _localSendWithoutRunVersions.Remove(threadId);
@@ -853,6 +875,67 @@ internal sealed class ChatResetState
             if (accepted.Count == 0)
                 _acceptedRunIds.Remove(threadId);
         }
+    }
+
+    internal AgentEventInfo? TakeOpenedTerminal(string threadId)
+    {
+        if (!string.Equals(_openedTerminalThread, threadId, StringComparison.Ordinal))
+            return null;
+        var terminal = _openedTerminal;
+        _openedTerminal = null;
+        _openedTerminalThread = null;
+        return terminal;
+    }
+
+    private void RememberResetTerminal(string threadId, AgentEventInfo evt)
+    {
+        if (string.IsNullOrEmpty(evt.RunId))
+            return;
+        if (!_pendingTerminals.TryGetValue(threadId, out var byRun))
+        {
+            byRun = new Dictionary<string, AgentEventInfo>(StringComparer.Ordinal);
+            _pendingTerminals[threadId] = byRun;
+        }
+        byRun[evt.RunId] = evt;
+        if (!_pendingLifecycleStarts.TryGetValue(threadId, out var pending))
+            return;
+        for (var index = 0; index < pending.Count; index++)
+        {
+            if (!string.Equals(
+                    pending[index].Event.RunId,
+                    evt.RunId,
+                    StringComparison.Ordinal))
+            {
+                continue;
+            }
+            pending[index] = pending[index] with { Terminal = evt };
+        }
+    }
+
+    private AgentEventInfo? TerminalForRun(string threadId, string? runId)
+    {
+        if (string.IsNullOrEmpty(runId) ||
+            !_pendingTerminals.TryGetValue(threadId, out var byRun) ||
+            !byRun.TryGetValue(runId, out var terminal))
+        {
+            return null;
+        }
+        return terminal;
+    }
+
+    private void StageOpenedTerminal(string threadId, AgentEventInfo? terminal)
+    {
+        if (terminal is null)
+        {
+            if (string.Equals(_openedTerminalThread, threadId, StringComparison.Ordinal))
+            {
+                _openedTerminal = null;
+                _openedTerminalThread = null;
+            }
+            return;
+        }
+        _openedTerminal = terminal;
+        _openedTerminalThread = threadId;
     }
 
     private static bool IsResetLifecycleCandidate(
