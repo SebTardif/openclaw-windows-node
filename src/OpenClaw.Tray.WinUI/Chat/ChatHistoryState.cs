@@ -474,7 +474,13 @@ internal sealed class ChatHistoryState
             {
                 continue;
             }
-            if (entry.Presentation?.StreamItemId is null &&
+            // Optimistic rows have no gateway id or sequence yet. A row that
+            // already has either is a distinct echo, even when the text matches.
+            var lacksGatewayIdentity =
+                string.IsNullOrEmpty(metadata?.GatewayMessageId) &&
+                metadata?.OpenClawSeq is null;
+            if (lacksGatewayIdentity &&
+                entry.Presentation?.StreamItemId is null &&
                 metadata?.Timestamp is { } timestamp &&
                 timestamp != default &&
                 contentTimestamps.TryGetValue(
