@@ -178,7 +178,11 @@ public sealed partial class BindingsPage : Page
         dispatcher.TryEnqueue(() =>
         {
             if (!ReferenceEquals(_trackedClient, client)) return;
-            switch (BindingsConnectionRecovery.DecideQueued(_observing, client.IsConnectedToGateway))
+            var connected = client.IsConnectedToGateway;
+            // A queued Connecting or Disconnected callback can run after the client has reconnected.
+            // Only the Connected event recovers, so one reconnect requests the config once.
+            if (connected && status != ConnectionStatus.Connected) return;
+            switch (BindingsConnectionRecovery.DecideQueued(_observing, connected))
             {
                 case BindingsConnectionRecovery.Decision.Recover:
                     RecoverConnectedClient(client);

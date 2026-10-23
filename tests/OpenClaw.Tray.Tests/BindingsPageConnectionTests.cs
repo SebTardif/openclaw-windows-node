@@ -47,6 +47,33 @@ public sealed class BindingsPageConnectionTests
         }
     }
 
+    [Fact]
+    public void QueuedReconnectEvents_RequestConfigOnce()
+    {
+        var client = DispatchProxy.Create<IOperatorGatewayClient, BindingsGatewayProxy>();
+        var gateway = (BindingsGatewayProxy)client;
+        Application.Current = new OpenClawTray.App { GatewayClient = client };
+        var page = new BindingsPage();
+        try
+        {
+            page.Initialize();
+
+            // Both events are queued before the UI thread runs, so each callback sees the reconnected client.
+            gateway.SetStatus(ConnectionStatus.Connecting);
+            gateway.SetStatus(ConnectionStatus.Connected);
+            page.DispatcherQueue.Drain();
+
+            Assert.Equal(1, gateway.ConfigRequests);
+            Assert.Equal(Visibility.Visible, page.LoadingState.Visibility);
+            Assert.False(page.ConnectionInfoBar.IsOpen);
+        }
+        finally
+        {
+            page.Unload();
+            Application.Current = null;
+        }
+    }
+
     public class BindingsGatewayProxy : DispatchProxy
     {
         public bool Connected { get; private set; }
