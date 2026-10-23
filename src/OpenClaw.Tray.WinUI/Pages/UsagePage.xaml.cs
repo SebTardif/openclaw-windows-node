@@ -22,6 +22,7 @@ public sealed partial class UsagePage : Page
     private readonly AsyncListLoadingState _providerLoading = new();
     private readonly AsyncListLoadingState _dailyCostLoading = new();
     private readonly UsageRangeWarning _rangeWarning = new();
+    private bool _hasMatchingUsageCost;
     private DateTime _lastAppliedUsageCostUpdatedAtUtc = DateTime.MinValue;
 
     private const string DailyEmptyMessage = "No daily usage for this period";
@@ -153,6 +154,7 @@ public sealed partial class UsagePage : Page
     private void RecoverConnectedClient(IOperatorGatewayClient client)
     {
         _rangeWarning.Clear();
+        _hasMatchingUsageCost = false;
         ConnectionInfoBar.IsOpen = false;
         if (!_dailyCostLoading.HasLoaded) _dailyCostLoading.BeginInitialRefresh();
         else _dailyCostLoading.BeginRefresh();
@@ -202,7 +204,7 @@ public sealed partial class UsagePage : Page
         if (cost.UpdatedAt < _lastAppliedUsageCostUpdatedAtUtc)
             return;
 
-        switch (UsageCostApplicationPolicy.Decide(cost.Days, _currentPeriodDays, _dailyCostLoading.HasLoaded))
+        switch (UsageCostApplicationPolicy.Decide(cost.Days, _currentPeriodDays, _hasMatchingUsageCost))
         {
             case UsageCostApplicationPolicy.Decision.Ignore:
                 return;
@@ -212,6 +214,7 @@ public sealed partial class UsagePage : Page
         }
 
         _lastAppliedUsageCostUpdatedAtUtc = cost.UpdatedAt;
+        _hasMatchingUsageCost = true;
         _rangeWarning.Clear();
         ConnectionInfoBar.IsOpen = false;
         TotalCostText.Text = $"${cost.Totals.TotalCost:F2}";
@@ -234,6 +237,7 @@ public sealed partial class UsagePage : Page
     private void StopForUnsupportedRange(GatewayCostUsageInfo cost)
     {
         _lastAppliedUsageCostUpdatedAtUtc = cost.UpdatedAt;
+        _hasMatchingUsageCost = false;
         _rangeWarning.Show();
         ConnectionInfoBar.Title = LocalizationHelper.GetString("UsagePage_UnsupportedRange.Title");
         ConnectionInfoBar.Message = string.Format(
@@ -274,6 +278,7 @@ public sealed partial class UsagePage : Page
         _currentPeriodDays = days;
         _lastAppliedUsageCostUpdatedAtUtc = DateTime.MinValue;
         _rangeWarning.Clear();
+        _hasMatchingUsageCost = false;
         ConnectionInfoBar.IsOpen = false;
         DailyListView.ItemsSource = null;
         TotalCostText.Text = "—";

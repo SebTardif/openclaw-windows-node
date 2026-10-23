@@ -94,5 +94,12 @@ public sealed class UsageCostApplicationPolicyTests
         Assert.True(statusStart >= 0 && statusEnd > statusStart);
         var status = source[statusStart..statusEnd];
         Assert.Contains("_rangeWarning.ProviderStatusMayCloseTheBar()", status, StringComparison.Ordinal);
+        var costStart = source.IndexOf("public void UpdateUsageCost(", StringComparison.Ordinal);
+        var costEnd = source.IndexOf("private bool ShouldApplyUsageCost(", costStart, StringComparison.Ordinal);
+        Assert.True(costStart >= 0 && costEnd > costStart);
+        var cost = source[costStart..costEnd];
+        Assert.Contains("Decide(cost.Days, _currentPeriodDays, _hasMatchingUsageCost)", cost, StringComparison.Ordinal);
+        Assert.DoesNotContain("_dailyCostLoading.HasLoaded", cost, StringComparison.Ordinal);
+        Assert.Contains("_hasMatchingUsageCost = false", source, StringComparison.Ordinal);
     }
 }
