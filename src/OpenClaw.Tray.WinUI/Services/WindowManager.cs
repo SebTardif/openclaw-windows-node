@@ -896,10 +896,15 @@ internal sealed class WindowManager : IWindowManager
         var registry = _callbacks.GetGatewayRegistry();
         if (registry is null)
             return;
-        if (registry.TryAdoptExternalSnapshot())
-            Logger.Info("Gateway list refreshed after setup closed.");
-        else
+        var before = registry.GetActive();
+        if (!registry.TryAdoptExternalSnapshot())
+        {
             Logger.Warn("Gateway list was not refreshed after setup closed because this session has unsaved Gateway edits or the saved list could not be read.");
+            return;
+        }
+
+        Logger.Info("Gateway list refreshed after setup closed.");
+        await ReconcileSetupConnectionAsync(before, registry.GetActive());
     }
 
     public void CloseSetup()
