@@ -21,6 +21,7 @@ public sealed partial class UsagePage : Page
     private int _currentPeriodDays = 7;
     private readonly AsyncListLoadingState _providerLoading = new();
     private readonly AsyncListLoadingState _dailyCostLoading = new();
+    private readonly UsageRangeWarning _rangeWarning = new();
     private DateTime _lastAppliedUsageCostUpdatedAtUtc = DateTime.MinValue;
 
     private const string DailyEmptyMessage = "No daily usage for this period";
@@ -151,6 +152,7 @@ public sealed partial class UsagePage : Page
 
     private void RecoverConnectedClient(IOperatorGatewayClient client)
     {
+        _rangeWarning.Clear();
         ConnectionInfoBar.IsOpen = false;
         if (!_dailyCostLoading.HasLoaded) _dailyCostLoading.BeginInitialRefresh();
         else _dailyCostLoading.BeginRefresh();
@@ -210,6 +212,7 @@ public sealed partial class UsagePage : Page
         }
 
         _lastAppliedUsageCostUpdatedAtUtc = cost.UpdatedAt;
+        _rangeWarning.Clear();
         ConnectionInfoBar.IsOpen = false;
         TotalCostText.Text = $"${cost.Totals.TotalCost:F2}";
         TokenCountText.Text = FormatLargeNumber(cost.Totals.TotalTokens);
@@ -231,6 +234,7 @@ public sealed partial class UsagePage : Page
     private void StopForUnsupportedRange(GatewayCostUsageInfo cost)
     {
         _lastAppliedUsageCostUpdatedAtUtc = cost.UpdatedAt;
+        _rangeWarning.Show();
         ConnectionInfoBar.Title = LocalizationHelper.GetString("UsagePage_UnsupportedRange.Title");
         ConnectionInfoBar.Message = string.Format(
             LocalizationHelper.GetString("UsagePage_UnsupportedRange.Message"),
@@ -243,7 +247,8 @@ public sealed partial class UsagePage : Page
 
     public void UpdateUsageStatus(GatewayUsageStatusInfo status)
     {
-        ConnectionInfoBar.IsOpen = false;
+        if (_rangeWarning.ProviderStatusMayCloseTheBar())
+            ConnectionInfoBar.IsOpen = false;
         ProviderCountText.Text = status.Providers.Count.ToString();
         ProviderListView.ItemsSource = status.Providers.Select(p => new ProviderRow
         {
@@ -268,6 +273,8 @@ public sealed partial class UsagePage : Page
         if (days == _currentPeriodDays) return;
         _currentPeriodDays = days;
         _lastAppliedUsageCostUpdatedAtUtc = DateTime.MinValue;
+        _rangeWarning.Clear();
+        ConnectionInfoBar.IsOpen = false;
         DailyListView.ItemsSource = null;
         TotalCostText.Text = "—";
         TokenCountText.Text = "—";
@@ -311,6 +318,7 @@ public sealed partial class UsagePage : Page
 
     private void ShowDisconnected()
     {
+        _rangeWarning.Clear();
         ConnectionInfoBar.Title = LocalizationHelper.GetString("UsagePage_GatewayDisconnected.Title");
         ConnectionInfoBar.Message = LocalizationHelper.GetString("UsagePage_GatewayDisconnected.Message");
         ConnectionInfoBar.Severity = InfoBarSeverity.Warning;

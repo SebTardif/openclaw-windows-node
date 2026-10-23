@@ -42,6 +42,33 @@ public sealed class UsageCostApplicationPolicyTests
     }
 
     [Fact]
+    public void RangeWarning_StaysUpWhenProviderStatusArrivesAfterTheCost()
+    {
+        var warning = new UsageRangeWarning();
+        warning.Show();
+        Assert.False(warning.ProviderStatusMayCloseTheBar());
+    }
+
+    [Fact]
+    public void RangeWarning_LetsProviderStatusCloseTheBarBeforeTheCostArrives()
+    {
+        var warning = new UsageRangeWarning();
+        Assert.True(warning.ProviderStatusMayCloseTheBar());
+        warning.Show();
+        Assert.True(warning.IsVisible);
+    }
+
+    [Fact]
+    public void RangeWarning_ClearLetsTheNextProviderStatusCloseTheBar()
+    {
+        var warning = new UsageRangeWarning();
+        warning.Show();
+        warning.Clear();
+        Assert.False(warning.IsVisible);
+        Assert.True(warning.ProviderStatusMayCloseTheBar());
+    }
+
+    [Fact]
     public void Decide_IgnoresALaterMismatchedResponse()
     {
         Assert.Equal(
@@ -62,5 +89,10 @@ public sealed class UsageCostApplicationPolicyTests
         Assert.DoesNotContain("RequestUsageAsync(", refresh, StringComparison.Ordinal);
         Assert.Contains("RequestUsageCostAsync(_currentPeriodDays)", refresh, StringComparison.Ordinal);
         Assert.DoesNotContain("SyncSelectorToServerDays", source, StringComparison.Ordinal);
+        var statusStart = source.IndexOf("public void UpdateUsageStatus(", StringComparison.Ordinal);
+        var statusEnd = source.IndexOf("private void OnPeriodSelectionChanged", statusStart, StringComparison.Ordinal);
+        Assert.True(statusStart >= 0 && statusEnd > statusStart);
+        var status = source[statusStart..statusEnd];
+        Assert.Contains("_rangeWarning.ProviderStatusMayCloseTheBar()", status, StringComparison.Ordinal);
     }
 }

@@ -26,7 +26,22 @@ internal static class UsageCostApplicationPolicy
 
         // A later payload for another period must not replace the selection.
         // The first completed response may be the only range an older gateway
-        // returns. Stop loading so the selector can move to that range.
+        // returns. Stop loading and leave the selected period in place.
         return hasLoaded ? Decision.Ignore : Decision.StopForUnsupportedRange;
     }
+}
+
+/// <summary>
+/// The unsupported-range warning outlives a provider-status payload.
+/// Status often arrives on its own schedule and must not hide that warning.
+/// </summary>
+internal sealed class UsageRangeWarning
+{
+    public bool IsVisible { get; private set; }
+
+    public void Show() => IsVisible = true;
+
+    public void Clear() => IsVisible = false;
+
+    public bool ProviderStatusMayCloseTheBar() => !IsVisible;
 }
