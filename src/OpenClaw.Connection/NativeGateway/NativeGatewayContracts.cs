@@ -32,7 +32,22 @@ public sealed record IsolatedGatewayStatus(
     IReadOnlyList<IsolatedGatewayListener> Listeners,
     string? SessionState = null,
     string? ReadinessState = null,
-    string? ReadinessReason = null);
+    string? ReadinessReason = null)
+{
+    /// <summary>Display-safe summary: lifecycle states are validated sets; a reason is kept only when it is a token-shaped code.</summary>
+    public string Describe()
+    {
+        var text = $"gateway {State}, session {SessionState ?? "unreported"}, readiness {ReadinessState ?? "unreported"}";
+        return ReadinessReason is { } reason && IsReasonCode(reason) ? $"{text} ({reason})" : text;
+    }
+
+    private static bool IsReasonCode(string value) =>
+        value.Length is > 0 and <= 64 && value[0] != '-' &&
+        value.All(c => c is (>= 'a' and <= 'z') or (>= '0' and <= '9') or '-');
+}
+
+/// <summary>The package's redacted diagnostics ZIP as reported by <c>clawctl collect-logs --json</c>.</summary>
+public sealed record NativeGatewayDiagnosticsBundle(string? Path, string Included, IReadOnlyList<string> Notes);
 
 /// <summary>No matching trusted package is registered. Other validation failures are not install requests.</summary>
 public sealed class NativeGatewayPackageNotInstalledException : InvalidOperationException
@@ -80,6 +95,11 @@ public interface INativeGatewayRuntime : IAsyncDisposable
         await EnsureRunningAsync(record, cancellationToken).ConfigureAwait(false);
     }
     Task StopAsync(CancellationToken cancellationToken);
+    /// <summary>
+    /// Hands a verified Gateway to its next owner without stopping it. Runtimes whose Gateway
+    /// cannot outlive this owner stop instead.
+    /// </summary>
+    Task ReleaseAsync(CancellationToken cancellationToken) => StopAsync(cancellationToken);
     Task<GatewayEndpointProvenance> InspectAsync(GatewayRecord record, CancellationToken cancellationToken);
     /// <summary>Fresh ownership inspection without starting or waiting for a lifecycle operation. Busy runtimes deny handoff.</summary>
     GatewayEndpointProvenance Inspect(GatewayRecord record);
