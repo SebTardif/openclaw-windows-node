@@ -200,8 +200,14 @@ public sealed partial class UsagePage : Page
         if (cost.UpdatedAt < _lastAppliedUsageCostUpdatedAtUtc)
             return;
 
-        if (!ShouldApplyUsageCost(cost))
-            return;
+        switch (UsageCostApplicationPolicy.Decide(cost.Days, _currentPeriodDays, _dailyCostLoading.HasLoaded))
+        {
+            case UsageCostApplicationPolicy.Decision.Ignore:
+                return;
+            case UsageCostApplicationPolicy.Decision.StopForUnsupportedRange:
+                StopForUnsupportedRange(cost);
+                return;
+        }
 
         _lastAppliedUsageCostUpdatedAtUtc = cost.UpdatedAt;
         ConnectionInfoBar.IsOpen = false;
@@ -220,6 +226,19 @@ public sealed partial class UsagePage : Page
     private bool ShouldApplyUsageCost(GatewayCostUsageInfo cost)
     {
         return UsageCostApplicationPolicy.ShouldApply(cost.Days, _currentPeriodDays);
+    }
+
+    private void StopForUnsupportedRange(GatewayCostUsageInfo cost)
+    {
+        _lastAppliedUsageCostUpdatedAtUtc = cost.UpdatedAt;
+        ConnectionInfoBar.Title = LocalizationHelper.GetString("UsagePage_UnsupportedRange.Title");
+        ConnectionInfoBar.Message = string.Format(
+            LocalizationHelper.GetString("UsagePage_UnsupportedRange.Message"),
+            cost.Days);
+        ConnectionInfoBar.Severity = InfoBarSeverity.Warning;
+        ConnectionInfoBar.IsOpen = true;
+        _dailyCostLoading.Complete(0);
+        UpdateDailyCostLoadingVisuals();
     }
 
     public void UpdateUsageStatus(GatewayUsageStatusInfo status)

@@ -34,11 +34,19 @@ public sealed class UsageCostApplicationPolicyTests
     }
 
     [Fact]
-    public void ShouldApply_RejectsLaterMismatchedResponse()
+    public void Decide_StopsLoadingWhenTheFirstResponseUsesAnotherRange()
     {
-        Assert.False(UsageCostApplicationPolicy.ShouldApply(
-            responseDays: 30,
-            selectedPeriodDays: 7));
+        Assert.Equal(
+            UsageCostApplicationPolicy.Decision.StopForUnsupportedRange,
+            UsageCostApplicationPolicy.Decide(responseDays: 30, selectedPeriodDays: 7, hasLoaded: false));
+    }
+
+    [Fact]
+    public void Decide_IgnoresALaterMismatchedResponse()
+    {
+        Assert.Equal(
+            UsageCostApplicationPolicy.Decision.Ignore,
+            UsageCostApplicationPolicy.Decide(responseDays: 30, selectedPeriodDays: 7, hasLoaded: true));
     }
 
     [Fact]

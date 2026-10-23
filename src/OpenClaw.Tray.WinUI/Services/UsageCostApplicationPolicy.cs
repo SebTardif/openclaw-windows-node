@@ -2,6 +2,13 @@ namespace OpenClawTray.Services;
 
 internal static class UsageCostApplicationPolicy
 {
+    internal enum Decision
+    {
+        Apply,
+        Ignore,
+        StopForUnsupportedRange,
+    }
+
     public static bool ShouldApply(int responseDays, int selectedPeriodDays)
     {
         if (responseDays <= 0)
@@ -9,8 +16,17 @@ internal static class UsageCostApplicationPolicy
 
         // The gateway can compute the requested range inclusively (for example,
         // 8 for a 7-day request). Allow +/-1 so valid responses are not dropped.
-        // A 30-day payload must not replace a 7-day selection, including the
-        // first payload. The page asks for the selected period itself.
         return Math.Abs(responseDays - selectedPeriodDays) <= 1;
+    }
+
+    public static Decision Decide(int responseDays, int selectedPeriodDays, bool hasLoaded)
+    {
+        if (ShouldApply(responseDays, selectedPeriodDays))
+            return Decision.Apply;
+
+        // A later payload for another period must not replace the selection.
+        // The first completed response may be the only range an older gateway
+        // returns. Stop loading so the selector can move to that range.
+        return hasLoaded ? Decision.Ignore : Decision.StopForUnsupportedRange;
     }
 }
