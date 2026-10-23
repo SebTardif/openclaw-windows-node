@@ -172,7 +172,7 @@ public sealed partial class BindingsPage : Page
 
     private void OnClientStatusChanged(object? sender, ConnectionStatus status)
     {
-        if (sender is not IOperatorGatewayClient client || !client.IsConnectedToGateway) return;
+        if (sender is not IOperatorGatewayClient client) return;
         var dispatcher = DispatcherQueue;
         if (dispatcher == null) return;
         dispatcher.TryEnqueue(() =>

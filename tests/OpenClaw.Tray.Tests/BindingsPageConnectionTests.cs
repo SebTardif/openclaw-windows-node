@@ -1,9 +1,85 @@
 using OpenClawTray.Pages;
+using Microsoft.UI.Xaml;
+using OpenClaw.Shared;
+using System.Reflection;
 
 namespace OpenClaw.Tray.Tests;
 
 public sealed class BindingsPageConnectionTests
 {
+    [Theory]
+    [InlineData(ConnectionStatus.Disconnected)]
+    [InlineData(ConnectionStatus.Error)]
+    public void RecoveryThenSameClientDrop_ClearsLoadingAndShowsDisconnected(ConnectionStatus droppedStatus)
+    {
+        var client = DispatchProxy.Create<IOperatorGatewayClient, BindingsGatewayProxy>();
+        var gateway = (BindingsGatewayProxy)client;
+        Application.Current = new OpenClawTray.App { GatewayClient = client };
+        var page = new BindingsPage();
+        try
+        {
+            page.Initialize();
+            Assert.Equal(Visibility.Collapsed, page.LoadingState.Visibility);
+            Assert.True(page.ConnectionInfoBar.IsOpen);
+
+            gateway.SetStatus(ConnectionStatus.Connected);
+            Assert.Equal(0, gateway.ConfigRequests);
+            page.DispatcherQueue.Drain();
+            Assert.Equal(1, gateway.ConfigRequests);
+            Assert.Equal(Visibility.Visible, page.LoadingState.Visibility);
+            Assert.False(page.ConnectionInfoBar.IsOpen);
+
+            // No config response is delivered before the same client loses its socket.
+            gateway.SetStatus(droppedStatus);
+            page.DispatcherQueue.Drain();
+
+            Assert.Equal(Visibility.Collapsed, page.LoadingState.Visibility);
+            Assert.True(page.ConnectionInfoBar.IsOpen);
+            Assert.Equal("BindingsPage_GatewayDisconnected.Title", page.ConnectionInfoBar.Title);
+            Assert.False(page.RefreshButton.IsEnabled);
+            Assert.Equal(1, gateway.ConfigRequests);
+        }
+        finally
+        {
+            page.Unload();
+            Assert.Null(gateway.StatusChanged);
+            Application.Current = null;
+        }
+    }
+
+    public class BindingsGatewayProxy : DispatchProxy
+    {
+        public bool Connected { get; private set; }
+        public int ConfigRequests { get; private set; }
+        public EventHandler<ConnectionStatus>? StatusChanged { get; private set; }
+
+        public void SetStatus(ConnectionStatus status)
+        {
+            Connected = status == ConnectionStatus.Connected;
+            StatusChanged?.Invoke(this, status);
+        }
+
+        protected override object? Invoke(MethodInfo? method, object?[]? args)
+        {
+            switch (method?.Name)
+            {
+                case "get_IsConnectedToGateway":
+                    return Connected;
+                case "add_StatusChanged":
+                    StatusChanged += (EventHandler<ConnectionStatus>)args![0]!;
+                    return null;
+                case "remove_StatusChanged":
+                    StatusChanged -= (EventHandler<ConnectionStatus>)args![0]!;
+                    return null;
+                case "RequestConfigAsync":
+                    ConfigRequests++;
+                    return Task.CompletedTask;
+                default:
+                    throw new NotSupportedException(method?.Name);
+            }
+        }
+    }
+
     [Theory]
     [InlineData(false, true, "Ignore")]
     [InlineData(false, false, "Ignore")]
