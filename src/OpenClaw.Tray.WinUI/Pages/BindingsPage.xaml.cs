@@ -8,6 +8,8 @@ using System;
 using System.Collections.Generic;
 using System.ComponentModel;
 using System.Text.Json;
+using System.Threading;
+using System.Threading.Tasks;
 
 namespace OpenClawTray.Pages;
 
@@ -18,6 +20,9 @@ public sealed partial class BindingsPage : Page
     private IOperatorGatewayClient? _trackedClient;
     private readonly AsyncListLoadingState _bindingsLoading = new();
     private bool _observing;
+    private int _configGeneration;
+    private CancellationTokenSource? _configTimeout;
+    private bool _configFailureVisible;
 
     public BindingsPage()
     {
@@ -25,6 +30,7 @@ public sealed partial class BindingsPage : Page
         Unloaded += (_, _) =>
         {
             _observing = false;
+            EndConfigWatch();
             if (_appState != null) _appState.PropertyChanged -= OnAppStateChanged;
             if (CurrentApp.ConnectionManager != null)
                 CurrentApp.ConnectionManager.OperatorClientChanged -= OnOperatorClientChanged;
@@ -68,6 +74,7 @@ public sealed partial class BindingsPage : Page
         }
         else
         {
+            EndConfigWatch();
             _bindingsLoading.Fail();
             ShowDisconnected();
             UpdateLoadingVisuals();
@@ -82,7 +89,8 @@ public sealed partial class BindingsPage : Page
         switch (e.PropertyName)
         {
             case nameof(AppState.Config):
-                if (_appState!.Config.HasValue) UpdateConfig(_appState.Config.Value);
+                if (_appState!.Config.HasValue)
+                    UpdateConfig(_appState.Config.Value);
                 break;
         }
     }
@@ -112,10 +120,18 @@ public sealed partial class BindingsPage : Page
         }
         catch (Exception ex)
         {
+            EndConfigWatch();
             _bindingsLoading.Fail();
             ShowLoadFailure(ex);
             UpdateLoadingVisuals();
             return;
+        }
+
+        EndConfigWatch();
+        if (_configFailureVisible)
+        {
+            _configFailureVisible = false;
+            ConnectionInfoBar.IsOpen = false;
         }
 
         if (bindings.Count == 0)
@@ -142,6 +158,7 @@ public sealed partial class BindingsPage : Page
         }
         else
         {
+            EndConfigWatch();
             _bindingsLoading.Fail();
             ShowDisconnected();
             UpdateLoadingVisuals();
@@ -151,7 +168,75 @@ public sealed partial class BindingsPage : Page
     private void RequestConfig(IOperatorGatewayClient client)
     {
         ConnectionInfoBar.IsOpen = false;
+        _configFailureVisible = false;
+        var generation = BeginConfigWatch();
+        _ = ObserveConfigDeadlineAsync(generation);
         _ = client.RequestConfigAsync();
+    }
+
+    private int BeginConfigWatch()
+    {
+        _configTimeout?.Cancel();
+        _configTimeout?.Dispose();
+        _configTimeout = new CancellationTokenSource();
+        return ++_configGeneration;
+    }
+
+    private void EndConfigWatch()
+    {
+        _configGeneration++;
+        _configTimeout?.Cancel();
+        _configTimeout?.Dispose();
+        _configTimeout = null;
+    }
+
+    private async Task ObserveConfigDeadlineAsync(int generation)
+    {
+        var timeout = _configTimeout;
+        if (timeout == null)
+            return;
+
+        try
+        {
+            await Task.Delay(BindingsConfigLoadDeadline.CurrentMilliseconds, timeout.Token).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is OperationCanceledException or ObjectDisposedException)
+        {
+            return;
+        }
+
+        var dispatcher = DispatcherQueue;
+        if (dispatcher == null)
+            return;
+
+        dispatcher.TryEnqueue(() =>
+        {
+            if (!_observing || generation != _configGeneration || !_bindingsLoading.IsRefreshing)
+                return;
+
+            EndConfigWatch();
+            _bindingsLoading.Fail();
+            ShowConfigRequestFailure();
+            UpdateLoadingVisuals();
+        });
+    }
+
+    private void OnConfigGetFailed(object? sender, EventArgs e)
+    {
+        var dispatcher = DispatcherQueue;
+        if (dispatcher == null)
+            return;
+
+        dispatcher.TryEnqueue(() =>
+        {
+            if (!_observing || !ReferenceEquals(_trackedClient, sender) || !_bindingsLoading.IsRefreshing)
+                return;
+
+            EndConfigWatch();
+            _bindingsLoading.Fail();
+            ShowConfigRequestFailure();
+            UpdateLoadingVisuals();
+        });
     }
 
     private void AttachClient(IOperatorGatewayClient? client)
@@ -160,13 +245,17 @@ public sealed partial class BindingsPage : Page
         DetachClient();
         _trackedClient = client;
         if (_trackedClient != null)
+        {
             _trackedClient.StatusChanged += OnClientStatusChanged;
+            _trackedClient.ConfigGetFailed += OnConfigGetFailed;
+        }
     }
 
     private void DetachClient()
     {
         if (_trackedClient == null) return;
         _trackedClient.StatusChanged -= OnClientStatusChanged;
+        _trackedClient.ConfigGetFailed -= OnConfigGetFailed;
         _trackedClient = null;
     }
 
@@ -188,6 +277,7 @@ public sealed partial class BindingsPage : Page
                     RecoverConnectedClient(client);
                     break;
                 case BindingsConnectionRecovery.Decision.ShowDisconnected:
+                    EndConfigWatch();
                     _bindingsLoading.Fail();
                     ShowDisconnected();
                     UpdateLoadingVisuals();
@@ -214,6 +304,7 @@ public sealed partial class BindingsPage : Page
                 RecoverConnectedClient(e.NewClient!);
             else
             {
+                EndConfigWatch();
                 _bindingsLoading.Fail();
                 ShowDisconnected();
                 UpdateLoadingVisuals();
@@ -247,8 +338,18 @@ public sealed partial class BindingsPage : Page
 
     private void ShowLoadFailure(Exception ex)
     {
+        _configFailureVisible = false;
         ConnectionInfoBar.Title = LocalizationHelper.GetString("BindingsPage_CouldNotLoadBindings");
         ConnectionInfoBar.Message = ex.Message;
+        ConnectionInfoBar.Severity = InfoBarSeverity.Error;
+        ConnectionInfoBar.IsOpen = true;
+    }
+
+    private void ShowConfigRequestFailure()
+    {
+        _configFailureVisible = true;
+        ConnectionInfoBar.Title = LocalizationHelper.GetString("BindingsPage_CouldNotLoadBindings");
+        ConnectionInfoBar.Message = LocalizationHelper.GetString("BindingsPage_ConfigRequestFailed.Message");
         ConnectionInfoBar.Severity = InfoBarSeverity.Error;
         ConnectionInfoBar.IsOpen = true;
     }

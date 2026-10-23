@@ -26,6 +26,12 @@ public interface IOperatorGatewayClient
     event EventHandler<JsonElement>? CronRunsUpdated;
     event EventHandler<JsonElement>? SkillsStatusUpdated;
     event EventHandler<JsonElement>? ConfigUpdated;
+    /// <summary>
+    /// <c>config.get</c> was not sent, or the gateway rejected it.
+    /// The event carries no payload. A listener that is waiting for
+    /// <see cref="ConfigUpdated"/> should stop waiting.
+    /// </summary>
+    event EventHandler? ConfigGetFailed { add { } remove { } }
     event EventHandler<JsonElement>? ConfigSchemaUpdated;
     event EventHandler<AgentEventInfo>? AgentEventReceived;
     event EventHandler<PairingListInfo>? NodePairListUpdated;

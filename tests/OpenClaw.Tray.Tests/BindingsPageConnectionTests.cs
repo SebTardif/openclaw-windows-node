@@ -1,5 +1,6 @@
 using OpenClawTray.Pages;
 using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Controls;
 using OpenClaw.Shared;
 using System.Reflection;
 
@@ -74,11 +75,80 @@ public sealed class BindingsPageConnectionTests
         }
     }
 
+    [Fact]
+    public void ConfigGetRejected_ClearsTheSpinnerAndEnablesRefresh()
+    {
+        var client = DispatchProxy.Create<IOperatorGatewayClient, BindingsGatewayProxy>();
+        var gateway = (BindingsGatewayProxy)client;
+        gateway.FailConfigGet = true;
+        Application.Current = new OpenClawTray.App { GatewayClient = client };
+        var page = new BindingsPage();
+        try
+        {
+            page.Initialize();
+            gateway.SetStatus(ConnectionStatus.Connected);
+            page.DispatcherQueue.Drain();
+
+            Assert.Equal(1, gateway.ConfigRequests);
+            Assert.Equal(Visibility.Collapsed, page.LoadingState.Visibility);
+            Assert.True(page.ConnectionInfoBar.IsOpen);
+            Assert.Equal("BindingsPage_CouldNotLoadBindings", page.ConnectionInfoBar.Title);
+            Assert.Equal("BindingsPage_ConfigRequestFailed.Message", page.ConnectionInfoBar.Message);
+            Assert.Equal(InfoBarSeverity.Error, page.ConnectionInfoBar.Severity);
+            Assert.True(page.RefreshButton.IsEnabled);
+
+            using var config = System.Text.Json.JsonDocument.Parse("""{"bindings":[]}""");
+            page.UpdateConfig(config.RootElement);
+            Assert.False(page.ConnectionInfoBar.IsOpen);
+            Assert.True(page.RefreshButton.IsEnabled);
+        }
+        finally
+        {
+            page.Unload();
+            Assert.Null(gateway.ConfigGetFailed);
+            Application.Current = null;
+        }
+    }
+
+    [Fact(Timeout = 5000)]
+    public async Task ConfigGetSilence_ClearsTheSpinnerWhenTheDeadlineExpires()
+    {
+        var previous = BindingsConfigLoadDeadline.OverrideMilliseconds;
+        BindingsConfigLoadDeadline.OverrideMilliseconds = 30;
+        var client = DispatchProxy.Create<IOperatorGatewayClient, BindingsGatewayProxy>();
+        var gateway = (BindingsGatewayProxy)client;
+        Application.Current = new OpenClawTray.App { GatewayClient = client };
+        var page = new BindingsPage();
+        try
+        {
+            page.Initialize();
+            gateway.SetStatus(ConnectionStatus.Connected);
+            page.DispatcherQueue.Drain();
+            Assert.Equal(Visibility.Visible, page.LoadingState.Visibility);
+
+            await Task.Delay(80);
+            page.DispatcherQueue.Drain();
+
+            Assert.Equal(Visibility.Collapsed, page.LoadingState.Visibility);
+            Assert.True(page.ConnectionInfoBar.IsOpen);
+            Assert.Equal("BindingsPage_ConfigRequestFailed.Message", page.ConnectionInfoBar.Message);
+            Assert.True(page.RefreshButton.IsEnabled);
+        }
+        finally
+        {
+            page.Unload();
+            BindingsConfigLoadDeadline.OverrideMilliseconds = previous;
+            Application.Current = null;
+        }
+    }
+
     public class BindingsGatewayProxy : DispatchProxy
     {
         public bool Connected { get; private set; }
+        public bool FailConfigGet { get; set; }
         public int ConfigRequests { get; private set; }
         public EventHandler<ConnectionStatus>? StatusChanged { get; private set; }
+        public EventHandler? ConfigGetFailed { get; private set; }
 
         public void SetStatus(ConnectionStatus status)
         {
@@ -98,13 +168,33 @@ public sealed class BindingsPageConnectionTests
                 case "remove_StatusChanged":
                     StatusChanged -= (EventHandler<ConnectionStatus>)args![0]!;
                     return null;
+                case "add_ConfigGetFailed":
+                    ConfigGetFailed += (EventHandler)args![0]!;
+                    return null;
+                case "remove_ConfigGetFailed":
+                    ConfigGetFailed -= (EventHandler)args![0]!;
+                    return null;
                 case "RequestConfigAsync":
                     ConfigRequests++;
+                    if (FailConfigGet)
+                        ConfigGetFailed?.Invoke(this, EventArgs.Empty);
                     return Task.CompletedTask;
                 default:
                     throw new NotSupportedException(method?.Name);
             }
         }
+    }
+
+    [Theory]
+    [InlineData(null, 15_000)]
+    [InlineData("", 15_000)]
+    [InlineData("0", 15_000)]
+    [InlineData("-4", 15_000)]
+    [InlineData("nope", 15_000)]
+    [InlineData("250", 250)]
+    public void ConfigLoadDeadline_UsesAPositiveOverrideOrTheDefault(string? environmentValue, int expected)
+    {
+        Assert.Equal(expected, BindingsConfigLoadDeadline.ResolveMilliseconds(environmentValue));
     }
 
     [Theory]
