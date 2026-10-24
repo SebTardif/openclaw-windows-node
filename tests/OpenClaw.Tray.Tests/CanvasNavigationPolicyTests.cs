@@ -41,4 +41,29 @@ public class CanvasNavigationPolicyTests
     {
         Assert.Equal(allowed, CanvasNavigationPolicy.IsNavigationTargetAllowed(url));
     }
+
+    [Theory]
+    [InlineData(CanvasBearerSource.Document, "same-origin", null, null, true)]
+    [InlineData(CanvasBearerSource.None, "same-origin", null, null, true)]
+    [InlineData(CanvasBearerSource.Document, "none", null, null, true)]
+    [InlineData(CanvasBearerSource.Document, "same-site", null, null, false)]
+    [InlineData(CanvasBearerSource.Document, "cross-site", null, null, false)]
+    [InlineData(CanvasBearerSource.Document, "SAME-SITE", null, null, false)]
+    [InlineData(CanvasBearerSource.ServiceWorker, "same-origin", null, null, false)]
+    [InlineData(CanvasBearerSource.SharedWorker, "same-origin", null, null, false)]
+    [InlineData(CanvasBearerSource.Other, "same-origin", null, null, false)]
+    [InlineData(CanvasBearerSource.Document, null, "document", "navigate", true)]
+    [InlineData(CanvasBearerSource.Document, null, "iframe", "navigate", false)]
+    [InlineData(CanvasBearerSource.Document, null, null, null, false)]
+    public void MayAttachGatewayBearer_RequiresExactOriginOrTopLevelNavigation(
+        CanvasBearerSource source,
+        string? fetchSite,
+        string? fetchDestination,
+        string? fetchMode,
+        bool allowed)
+    {
+        Assert.Equal(
+            allowed,
+            CanvasNavigationPolicy.MayAttachGatewayBearer(source, fetchSite, fetchDestination, fetchMode));
+    }
 }

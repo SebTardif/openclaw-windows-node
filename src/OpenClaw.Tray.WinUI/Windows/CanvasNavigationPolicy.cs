@@ -73,4 +73,56 @@ public static class CanvasNavigationPolicy
 
         return !DangerousUrlPattern.IsMatch(url);
     }
+
+    /// <summary>
+    /// Whether a WebView request may receive the gateway bearer.
+    /// Same-site is not same-origin: a frame on another port or host of the
+    /// same site must not inherit the bearer. A top-level navigation is the
+    /// only case that may omit an exact same-origin fetch site.
+    /// </summary>
+    public static bool MayAttachGatewayBearer(
+        CanvasBearerSource source,
+        string? fetchSite,
+        string? fetchDestination,
+        string? fetchMode)
+    {
+        if (source is CanvasBearerSource.SharedWorker or CanvasBearerSource.ServiceWorker)
+            return false;
+
+        if (source is not (CanvasBearerSource.Document or CanvasBearerSource.None))
+            return false;
+
+        var site = NormalizeFetchMetadata(fetchSite);
+        if (site is "cross-site" or "same-site")
+            return false;
+
+        if (site is "same-origin" or "none")
+            return true;
+
+        if (site is not null)
+            return false;
+
+        return IsTopLevelDocumentNavigation(fetchDestination, fetchMode);
+    }
+
+    private static bool IsTopLevelDocumentNavigation(string? fetchDestination, string? fetchMode) =>
+        NormalizeFetchMetadata(fetchDestination) == "document"
+        && NormalizeFetchMetadata(fetchMode) == "navigate";
+
+    private static string? NormalizeFetchMetadata(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+            return null;
+
+        return value.Trim().ToLowerInvariant();
+    }
+}
+
+public enum CanvasBearerSource
+{
+    Other,
+    Document,
+    None,
+    SharedWorker,
+    ServiceWorker,
 }

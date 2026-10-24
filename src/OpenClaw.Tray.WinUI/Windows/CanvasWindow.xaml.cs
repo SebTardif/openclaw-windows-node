@@ -450,27 +450,28 @@ public sealed partial class CanvasWindow : WindowEx
         }
     }
 
-    // All-source interception also delivers frame and worker requests. The
-    // bearer stays on the document. A cross-site frame, and any shared or
-    // service worker, must not receive it just because the destination is
-    // the trusted gateway.
-    private static bool MayReceiveGatewayBearer(CoreWebView2WebResourceRequestedEventArgs args)
-    {
-        var kind = args.RequestedSourceKind;
-        if (kind is CoreWebView2WebResourceRequestSourceKinds.SharedWorker
-            or CoreWebView2WebResourceRequestSourceKinds.ServiceWorker)
-            return false;
+    // All-source interception also delivers frame and worker requests.
+    // The bearer stays on the exact gateway origin and on a top-level
+    // document navigation. A same-site frame is a different origin.
+    private static bool MayReceiveGatewayBearer(CoreWebView2WebResourceRequestedEventArgs args) =>
+        CanvasNavigationPolicy.MayAttachGatewayBearer(
+            ToBearerSource(args.RequestedSourceKind),
+            FetchHeader(args, "Sec-Fetch-Site"),
+            FetchHeader(args, "Sec-Fetch-Dest"),
+            FetchHeader(args, "Sec-Fetch-Mode"));
 
-        if (args.Request.Headers.Contains("Sec-Fetch-Site")
-            && string.Equals(
-                args.Request.Headers.GetHeader("Sec-Fetch-Site"),
-                "cross-site",
-                StringComparison.OrdinalIgnoreCase))
-            return false;
+    private static CanvasBearerSource ToBearerSource(CoreWebView2WebResourceRequestSourceKinds kind) =>
+        kind switch
+        {
+            CoreWebView2WebResourceRequestSourceKinds.Document => CanvasBearerSource.Document,
+            CoreWebView2WebResourceRequestSourceKinds.None => CanvasBearerSource.None,
+            CoreWebView2WebResourceRequestSourceKinds.SharedWorker => CanvasBearerSource.SharedWorker,
+            CoreWebView2WebResourceRequestSourceKinds.ServiceWorker => CanvasBearerSource.ServiceWorker,
+            _ => CanvasBearerSource.Other,
+        };
 
-        return kind is CoreWebView2WebResourceRequestSourceKinds.Document
-            or CoreWebView2WebResourceRequestSourceKinds.None;
-    }
+    private static string? FetchHeader(CoreWebView2WebResourceRequestedEventArgs args, string name) =>
+        args.Request.Headers.Contains(name) ? args.Request.Headers.GetHeader(name) : null;
     
     private void ConfigureBlockedNavigationResponses(CoreWebView2 coreWebView2)
     {

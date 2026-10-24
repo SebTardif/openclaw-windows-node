@@ -34,10 +34,7 @@ public class TrayMenuWindowMarkupTests
         Assert.Contains("_gatewayToken = null", source);
         Assert.Contains("_trustedGatewayOrigin = null", source);
         Assert.Contains("IsUriForOrigin(args.Request.Uri, trustedOrigin)", source);
-        Assert.Contains("MayReceiveGatewayBearer(args)", source);
-        Assert.Contains("RequestedSourceKind", source);
-        Assert.Contains("Sec-Fetch-Site", source);
-        Assert.Contains("cross-site", source);
+        Assert.Contains("CanvasNavigationPolicy.MayAttachGatewayBearer(", source);
         Assert.DoesNotContain("WebResourceRequested += (", source);
     }
 
