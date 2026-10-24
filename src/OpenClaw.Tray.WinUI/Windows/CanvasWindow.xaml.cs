@@ -319,6 +319,7 @@ public sealed partial class CanvasWindow : WindowEx
             // Handle navigation events
             ConfigureBlockedNavigationResponses(CanvasWebView.CoreWebView2);
             CanvasWebView.CoreWebView2.NavigationStarting += OnNavigationStarting;
+            CanvasWebView.CoreWebView2.FrameNavigationStarting += OnNavigationStarting;
             CanvasWebView.CoreWebView2.NewWindowRequested += OnNewWindowRequested;
             CanvasWebView.CoreWebView2.NavigationCompleted += OnNavigationCompleted;
             
@@ -400,7 +401,7 @@ public sealed partial class CanvasWindow : WindowEx
 
         _webResourceRequestedFilter = $"{_trustedGatewayOrigin}/*";
         _webResourceRequestedHandler = OnGatewayWebResourceRequested;
-        coreWebView2.AddWebResourceRequestedFilter(_webResourceRequestedFilter, CoreWebView2WebResourceContext.All);
+        AddResourceFilter(coreWebView2, _webResourceRequestedFilter);
         coreWebView2.WebResourceRequested += _webResourceRequestedHandler;
         Logger.Info("[Canvas] WebView2 auth header injection configured for gateway requests");
     }
@@ -415,10 +416,23 @@ public sealed partial class CanvasWindow : WindowEx
 
         if (!string.IsNullOrEmpty(_webResourceRequestedFilter))
         {
-            coreWebView2.RemoveWebResourceRequestedFilter(_webResourceRequestedFilter, CoreWebView2WebResourceContext.All);
+            RemoveResourceFilter(coreWebView2, _webResourceRequestedFilter);
             _webResourceRequestedFilter = null;
         }
     }
+
+    // The two-argument filter misses cross-origin frames and workers.
+    private static void AddResourceFilter(CoreWebView2 coreWebView2, string filter) =>
+        coreWebView2.AddWebResourceRequestedFilter(
+            filter,
+            CoreWebView2WebResourceContext.All,
+            CoreWebView2WebResourceRequestSourceKinds.All);
+
+    private static void RemoveResourceFilter(CoreWebView2 coreWebView2, string filter) =>
+        coreWebView2.RemoveWebResourceRequestedFilter(
+            filter,
+            CoreWebView2WebResourceContext.All,
+            CoreWebView2WebResourceRequestSourceKinds.All);
 
     private void OnGatewayWebResourceRequested(CoreWebView2 sender, CoreWebView2WebResourceRequestedEventArgs args)
     {
@@ -438,11 +452,11 @@ public sealed partial class CanvasWindow : WindowEx
         if (_blockedNavigationHandler != null)
         {
             coreWebView2.WebResourceRequested -= _blockedNavigationHandler;
-            coreWebView2.RemoveWebResourceRequestedFilter("*", CoreWebView2WebResourceContext.All);
+            RemoveResourceFilter(coreWebView2, "*");
         }
 
         _blockedNavigationHandler = OnBlockedNavigationRequested;
-        coreWebView2.AddWebResourceRequestedFilter("*", CoreWebView2WebResourceContext.All);
+        AddResourceFilter(coreWebView2, "*");
         coreWebView2.WebResourceRequested += _blockedNavigationHandler;
     }
 
@@ -536,10 +550,11 @@ public sealed partial class CanvasWindow : WindowEx
             if (_blockedNavigationHandler != null)
             {
                 CanvasWebView.CoreWebView2.WebResourceRequested -= _blockedNavigationHandler;
-                CanvasWebView.CoreWebView2.RemoveWebResourceRequestedFilter("*", CoreWebView2WebResourceContext.All);
+                RemoveResourceFilter(CanvasWebView.CoreWebView2, "*");
                 _blockedNavigationHandler = null;
             }
             CanvasWebView.CoreWebView2.NavigationStarting -= OnNavigationStarting;
+            CanvasWebView.CoreWebView2.FrameNavigationStarting -= OnNavigationStarting;
             CanvasWebView.CoreWebView2.NewWindowRequested -= OnNewWindowRequested;
             CanvasWebView.CoreWebView2.NavigationCompleted -= OnNavigationCompleted;
         }
