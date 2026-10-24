@@ -13,9 +13,7 @@ namespace OpenClawTray.Services;
 internal sealed record TrayControllerCallbacks(
     Func<TrayMenuSnapshot> CaptureMenuSnapshot,
     Func<TrayStateSnapshot> CaptureIconSnapshot,
-    Func<bool> IsOperatorConnected,
     Action ShowChat,
-    Action ShowConnection,
     Action<string> DispatchMenuAction,
     Action<Window> ApplyTheme,
     Func<bool> IsDispatcherAvailable,
@@ -49,7 +47,15 @@ internal sealed class TrayController : ITrayController
         InitializeTrayMenuWindow();
 
         var iconPath = StatusBadgeIconFactory.GetBadgedIconPath(ConnectionStatusAccent.Neutral);
-        _trayIcon = new TrayIcon(1, iconPath, BuildTrayTooltip());
+        try
+        {
+            _trayIcon = new TrayIcon(1, iconPath, BuildTrayTooltip());
+        }
+        catch (NotImplementedException error)
+        {
+            Logger.Warn($"Tray icon is unavailable on this desktop: {error.Message}");
+            return;
+        }
         _trayIconCoordinator = new TrayIconCoordinator(
             _trayIcon,
             _callbacks.HasThreadAccess,
@@ -166,10 +172,7 @@ internal sealed class TrayController : ITrayController
         if (_isClosing || _disposed)
             return;
 
-        if (_callbacks.IsOperatorConnected())
-            _callbacks.ShowChat();
-        else
-            _callbacks.ShowConnection();
+        _callbacks.ShowChat();
     }
 
     private void OnTrayContextMenu(TrayIcon sender, TrayIconEventArgs args) => ShowMenu();

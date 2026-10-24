@@ -41,6 +41,24 @@ public sealed record PipelineResult(
     };
 }
 
+public sealed class SetupPipelineSettlementException : AggregateException
+{
+    public PipelineResult? OriginalResult { get; }
+    public Exception? RunFailure { get; }
+    public Exception SettlementFailure { get; }
+
+    public SetupPipelineSettlementException(PipelineResult? result, Exception? runFailure, Exception settlementFailure)
+        : base(
+            $"Setup result: {(runFailure is null ? $"{result?.Outcome}; step '{result?.FailedStepId}'; {result?.Message}" : runFailure.Message)}. " +
+            $"Gateway settlement failed: {settlementFailure.Message}",
+            runFailure is null ? [settlementFailure] : [runFailure, settlementFailure])
+    {
+        OriginalResult = result;
+        RunFailure = runFailure;
+        SettlementFailure = settlementFailure;
+    }
+}
+
 // ─── Pipeline Events ───
 
 public sealed record StepProgressEvent(string StepId, string DisplayName, StepOutcome? Outcome, TimeSpan? Elapsed);
@@ -62,6 +80,21 @@ public static class SetupStepFactory
     [
         new RunGatewayWizardStep(),
         new WindowsNodeBootstrapContextStep(),
+    ];
+
+    /// <summary>
+    /// Artifact-only native acquisition. The caller retains exact Gateway admission
+    /// and continues through a separately authorized Use action afterward. This never starts a listener,
+    /// loads a model, publishes a provider, or creates/restarts a Gateway.
+    /// </summary>
+    public static List<SetupStep> BuildNativeLocalAiAcquisitionSteps() =>
+    [
+        new PreflightOsStep(),
+        new PreflightLocalAiHardwareStep(),
+        new ReconcileLocalAiInstallationStep(),
+        new AcquireLocalAiRuntimeStep(),
+        new AcquireLocalAiModelStep(),
+        new PersistLocalAiManifestStep(),
     ];
 
     public static List<SetupStep> BuildLocalAiRecoverySteps() =>
@@ -133,6 +166,20 @@ public static class SetupStepFactory
 
 public sealed class SetupPipeline
 {
+    public static async Task<PipelineResult> RunWithSettlementAsync(
+        Func<Task<PipelineResult>> run, Func<PipelineResult?, Task> settle)
+    {
+        PipelineResult? result = null;
+        Exception? failure = null;
+        try { result = await run(); }
+        catch (Exception error) { failure = error; }
+        try { await settle(result); }
+        catch (Exception error) { throw new SetupPipelineSettlementException(result, failure, error); }
+        if (failure is not null)
+            System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(failure).Throw();
+        return result!;
+    }
+
     private readonly List<SetupStep> _steps;
     private readonly List<SetupStep> _completedSteps = new();
     private readonly bool? _rollbackOnFailureOverride;

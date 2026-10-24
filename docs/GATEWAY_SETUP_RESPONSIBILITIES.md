@@ -4,9 +4,17 @@ Research snapshot: **2026-09-16**. This records the Gateway packaging assessment
 and its comparison with WSL provisioning, so future integration work does not
 duplicate existing owners.
 
-The native Companion integration described here is work in this branch, not a
-claim that it has shipped. It runs ordinary Windows user processes, not MXC
-isolated sessions. Packaging findings refer to
+**Historical evidence, not the current implementation contract.** The
+same-user proof and proposed future MXC integration below describe the
+2026-09-16 state. Current source uses the Gateway package's versioned
+`isolated-session` contract, agent-owned config and package-owned
+`gateway-service` lifecycle; Companion uses the package-qualified `openclaw`
+alias for device listing and exact-request approval after checking the
+agent-owned config. Listener process-sequence evidence is required for
+Companion credential handoff, but not for baseline Gateway health/status. See
+[current native architecture](ARCHITECTURE.md#native-gateway-msix-lifecycle-and-shared-wizard-handoffs)
+and [onboarding](ONBOARDING_WIZARD.md#native-gateway-msix-isolated-or-legacy).
+Packaging findings below refer to
 [`openclaw-windows-packaging` at `3a0491c`](https://github.com/openclaw/openclaw-windows-packaging/tree/3a0491cf8790a3336d118486b66aeaa04dba7ba7).
 The supplied `0.0.0.0` ARM64 proof package is older and must not be assumed to
 provide current source's bundled-Node preparation behavior. This assessment used
@@ -338,14 +346,14 @@ Companion owns the WSL environment's lifecycle end to end. It delegates Gateway
 installation, onboarding and service commands to upstream OpenClaw, while WSL
 and systemd provide execution and service management.
 
-| Responsibility | Current WSL path | Native Gateway MSIX path in this branch |
+| Responsibility | WSL path in this snapshot | Same-user native proof in this snapshot |
 |---|---|---|
 | Check host prerequisites | **Companion:** OS, WSL readiness, virtualization and port checks. | **Companion:** actual MXC session-capability probe for recommendation, then package/alias checks. This does not provision an isolated session. |
 | Provision isolated environment | **Companion:** creates the app-owned WSL distro. | **Not implemented:** MSIX installation does not create an isolated session. |
 | Create workload identity | **Companion:** creates a Linux user inside the distro. | **Not implemented:** runs as the signed-in Windows user. |
 | Configure environment restrictions | **Companion:** writes `wsl.conf`, configures automount/interop and validates lockdown. | **Not implemented for MXC sessions.** |
 | Install Node and Gateway payload | **Companion orchestrates the upstream installer** inside WSL. | **Packaging owns payload delivery; `clawctl setup` prepares bundled Node** in current packaging source. |
-| Acquire missing Gateway package | Not applicable. | **Companion:** automatically opens the [Gateway Microsoft Store listing](https://apps.microsoft.com/detail/9nv70lv3d6xc?hl=en-US&gl=US) once, then waits up to five minutes for validated current-user registration. Store owns package selection/consent/signature/deployment; cancellation only stops Companion's wait. Exact Store and existing development identities are accepted, but duplicate registrations fail and saved profiles stay pinned to their family. |
+| Acquire missing Gateway package | Not applicable. | **Companion:** after explicit review consent, invokes current-user WinGet once to install Store product `9NV70LV3D6XC` from `msstore`, silently and with package/source agreements accepted. Installation and validated registration share a five-minute deadline. Store owns package selection/signature/deployment; cancellation stops the WinGet request but Windows may finish deployment. Failures show retry/repair guidance, not a manual Store-page fallback. Exact Store and existing development identities are accepted, but duplicate registrations fail and saved profiles stay pinned to their family. |
 | Select Windows capabilities and permissions | **Shared `CapabilitiesPage`:** profiles, toggles and Windows permission checks. | **The same page**, with native review instead of WSL/Local AI/Tailscale provisioning. Selected Gateway commands are applied before validation; only node/capability flags are merged into Companion settings. |
 | Prepare Gateway configuration | **Companion:** configures endpoint/auth and optional integrations. | **Companion:** prepares a dedicated profile; packaged CLI consumes it. |
 | Provider/model onboarding | **Upstream OpenClaw wizard**, rendered by the shared WinUI `WizardPage`. | **The same `WizardPage` and upstream `wizard.start/next/cancel`**, over a verified native runtime endpoint. No separate TUI or provider UI. |
@@ -379,7 +387,7 @@ Local source references:
 - `src\OpenClaw.SetupEngine\RunGatewayWizardStep.cs`: Gateway onboarding delegation.
 - [Connection architecture](CONNECTION_ARCHITECTURE.md): ongoing managed-local
   WSL supervision and repair.
-- [Native setup documentation](ONBOARDING_WIZARD.md#native-gateway-msix-not-isolated):
+- [Native setup documentation](ONBOARDING_WIZARD.md#native-gateway-msix-isolated-or-legacy):
   the branch's non-isolated native implementation.
 
 ## Decided ownership and persistence for MXC sessions
@@ -414,7 +422,7 @@ Companion must:
 
 Do not independently implement account creation or session teardown in both
 repositories. OS eligibility alone does not make the Gateway session-isolated. The
-[planned setup recommendation policy](ONBOARDING_WIZARD.md#planned-mxc-native-gateway-recommendation-policy)
+[historical setup recommendation policy](ONBOARDING_WIZARD.md#historical-mxc-recommendation-requirements)
 requires a working session integration before recommending it as isolated.
 
 ## Verified MXC 0.8 contract and implementation blockers

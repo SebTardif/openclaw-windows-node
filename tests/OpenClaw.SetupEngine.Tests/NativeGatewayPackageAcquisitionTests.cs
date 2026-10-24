@@ -7,15 +7,24 @@ public sealed class NativeGatewayPackageAcquisitionTests
     private static readonly NativeGatewayPackage Package = new(
         "OpenClawFoundation.OpenClawGateway_123456789abcd", "1.0.0.0", @"qualified\openclaw.exe", @"qualified\clawctl.exe");
 
-    [Fact]
-    public async Task PresentPackage_DoesNotOpenInstallerOrReportWaiting()
+    [Theory]
+    [InlineData("OpenClawFoundation.OpenClawGateway", true)]
+    [InlineData("OpenClawFoundation.OpenClawGateway-patch", false)]
+    [InlineData("OpenClaw.Gateway", false)]
+    public async Task PresentPackage_RefreshesStoreAndPreservesDevelopmentPackages(string name, bool refresh)
     {
-        var resolver = new Resolver(_ => Task.FromResult(Package));
+        var package = Package with { PackageFamilyName = name + "_test" };
+        var updated = package with { Version = "2.0.0.0" };
+        var installed = false;
+        var waiting = false;
+        var resolver = new Resolver(_ => Task.FromResult(installed ? updated : package));
         var actual = await NativeGatewayPackageAcquisition.EnsureAsync(resolver,
-            _ => throw new InvalidOperationException("Must not install"),
-            () => throw new InvalidOperationException("Must not wait"));
-        Assert.Same(Package, actual);
-        Assert.Equal(1, resolver.Calls);
+            _ => { installed = true; return Task.CompletedTask; },
+            () => waiting = true);
+        Assert.Same(refresh ? updated : package, actual);
+        Assert.Equal(refresh, installed);
+        Assert.Equal(refresh, waiting);
+        Assert.Equal(refresh ? 2 : 1, resolver.Calls);
     }
 
     [Fact]
@@ -67,10 +76,10 @@ public sealed class NativeGatewayPackageAcquisitionTests
     }
 
     [Fact]
-    public async Task StoreLaunchFailure_StopsImmediately()
+    public async Task InstallationFailure_StopsImmediately()
     {
         var resolver = new Resolver(_ => Missing());
-        var failure = new InvalidOperationException("Store listing could not be opened");
+        var failure = new InvalidOperationException("WinGet installation failed");
         var actual = await Assert.ThrowsAsync<InvalidOperationException>(() =>
             NativeGatewayPackageAcquisition.EnsureAsync(resolver, _ => throw failure,
                 () => throw new InvalidOperationException("Must not wait")));
@@ -128,6 +137,82 @@ public sealed class NativeGatewayPackageAcquisitionTests
         Assert.Equal(1, resolver.Calls);
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task CancellationOrDeadline_ReachesRunningInstaller(bool timeout)
+    {
+        using var cancellation = new CancellationTokenSource();
+        var started = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var cancelled = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var resolver = new Resolver(_ => Missing());
+        var acquisition = NativeGatewayPackageAcquisition.EnsureAsync(resolver, async ct =>
+        {
+            started.SetResult();
+            try
+            {
+                await Task.Delay(Timeout.InfiniteTimeSpan, ct);
+            }
+            finally
+            {
+                if (ct.IsCancellationRequested)
+                    cancelled.TrySetResult();
+            }
+        }, () => throw new Xunit.Sdk.XunitException("Must not verify a cancelled installation"),
+            cancellationToken: cancellation.Token,
+            timeout: timeout ? TimeSpan.FromMilliseconds(100) : TimeSpan.FromMinutes(1));
+        await started.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        if (!timeout)
+            cancellation.Cancel();
+
+        if (timeout)
+            await Assert.ThrowsAsync<TimeoutException>(() => acquisition);
+        else
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => acquisition);
+        await cancelled.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.Equal(1, resolver.Calls);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task CancellationOrDeadline_AwaitsInstallerCleanup(bool timeout)
+    {
+        using var cancellation = new CancellationTokenSource();
+        var cleaningUp = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var allowCleanup = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var resolver = new Resolver(_ => Missing());
+        var acquisition = NativeGatewayPackageAcquisition.EnsureAsync(resolver, async ct =>
+        {
+            try
+            {
+                await Task.Delay(Timeout.InfiniteTimeSpan, ct);
+            }
+            finally
+            {
+                cleaningUp.SetResult();
+                await allowCleanup.Task;
+            }
+        }, cancellationToken: cancellation.Token,
+            timeout: timeout ? TimeSpan.FromMilliseconds(100) : TimeSpan.FromMinutes(1));
+        if (!timeout)
+            cancellation.Cancel();
+        try
+        {
+            await cleaningUp.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            Assert.False(acquisition.IsCompleted);
+        }
+        finally
+        {
+            allowCleanup.SetResult();
+        }
+        if (timeout)
+            await Assert.ThrowsAsync<TimeoutException>(() => acquisition);
+        else
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => acquisition);
+        Assert.Equal(1, resolver.Calls);
+    }
+
     [Fact]
     public async Task ResolverCancellation_IsNotAnInstallRequest()
     {
@@ -152,17 +237,15 @@ public sealed class NativeGatewayPackageAcquisitionTests
 
         Assert.Equal(1, installerCalls);
         Assert.True(resolver.Calls >= 2);
-        Assert.Contains("Complete installation from Microsoft Store", exception.Message);
+        Assert.Contains("Check WinGet and Microsoft Store access", exception.Message);
         Assert.Contains("retry native setup", exception.Message);
     }
 
-    [Theory]
-    [InlineData(false)]
-    [InlineData(true)]
-    public async Task Timeout_BoundsUnresponsiveResolverAndInstaller(bool duringInstall)
+    [Fact]
+    public async Task Timeout_BoundsUnresponsiveResolver()
     {
         var pending = new TaskCompletionSource<NativeGatewayPackage>(TaskCreationOptions.RunContinuationsAsynchronously);
-        var resolver = new Resolver(_ => duringInstall ? Missing() : pending.Task);
+        var resolver = new Resolver(_ => pending.Task);
         var installerCalls = 0;
         await Assert.ThrowsAsync<TimeoutException>(() =>
             NativeGatewayPackageAcquisition.EnsureAsync(resolver, _ =>
@@ -170,7 +253,7 @@ public sealed class NativeGatewayPackageAcquisitionTests
                 installerCalls++;
                 return pending.Task;
             }, timeout: TimeSpan.FromMilliseconds(100)));
-        Assert.Equal(duringInstall ? 1 : 0, installerCalls);
+        Assert.Equal(0, installerCalls);
         Assert.Equal(1, resolver.Calls);
     }
 

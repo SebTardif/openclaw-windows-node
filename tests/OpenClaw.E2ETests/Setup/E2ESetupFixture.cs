@@ -36,6 +36,7 @@ public sealed class E2ESetupFixture : IAsyncLifetime
     /// Set as OPENCLAW_TRAY_DATA_DIR env var.
     /// </summary>
     public string DataDir { get; }
+    public string RoamingAppDataRoot { get; }
     public string LocalAppDataRoot { get; }
 
     public int McpPort { get; private set; }
@@ -68,6 +69,7 @@ public sealed class E2ESetupFixture : IAsyncLifetime
         {
             _distroName = "OpenClawE2E-disabled";
             DataDir = string.Empty;
+            RoamingAppDataRoot = string.Empty;
             LocalAppDataRoot = string.Empty;
             ArtifactDir = string.Empty;
             _configPath = string.Empty;
@@ -88,7 +90,9 @@ public sealed class E2ESetupFixture : IAsyncLifetime
                 runId)
             : Path.Combine(Path.GetTempPath(), $"openclaw-e2e-{runId}");
         LocalAppDataRoot = Path.Combine(Path.GetTempPath(), $"openclaw-e2e-localappdata-{runId}");
+        RoamingAppDataRoot = Path.Combine(Path.GetTempPath(), $"openclaw-e2e-roaming-{runId}");
         Directory.CreateDirectory(DataDir);
+        Directory.CreateDirectory(RoamingAppDataRoot);
         Directory.CreateDirectory(LocalAppDataRoot);
 
         // Artifact dir under repo TestResults — persists after cleanup for CI upload
@@ -139,7 +143,7 @@ public sealed class E2ESetupFixture : IAsyncLifetime
         var setupLogPath = Path.Combine(ArtifactDir, "setup-engine.jsonl");
 
         Environment.SetEnvironmentVariable("OPENCLAW_TRAY_DATA_DIR", DataDir);
-        Environment.SetEnvironmentVariable("OPENCLAW_TRAY_APPDATA_DIR", DataDir);
+        Environment.SetEnvironmentVariable("OPENCLAW_TRAY_APPDATA_DIR", RoamingAppDataRoot);
         Environment.SetEnvironmentVariable("OPENCLAW_TRAY_LOCALAPPDATA_DIR", LocalAppDataRoot);
 
         var setupArguments = new List<string>
@@ -206,7 +210,9 @@ public sealed class E2ESetupFixture : IAsyncLifetime
 
         // ── Phase 4: Wait for gateway connection to reach Ready ──
         Log("Phase 4: Waiting for tray gateway connection...");
-        await WaitForConnectionReady();
+        await WaitForConnectionReadyAsync(
+            timeout: null,
+            protocolMismatchResultPath: Environment.GetEnvironmentVariable("OPENCLAW_E2E_PROTOCOL_MISMATCH_RESULT"));
         await WaitForNodeListReady();
         Log("Phase 4 complete: tray fully connected and node list populated.");
     }
@@ -238,7 +244,7 @@ public sealed class E2ESetupFixture : IAsyncLifetime
         var uninstallLogPath = Path.Combine(ArtifactDir, "uninstall-engine.jsonl");
 
         Environment.SetEnvironmentVariable("OPENCLAW_TRAY_DATA_DIR", DataDir);
-        Environment.SetEnvironmentVariable("OPENCLAW_TRAY_APPDATA_DIR", DataDir);
+        Environment.SetEnvironmentVariable("OPENCLAW_TRAY_APPDATA_DIR", RoamingAppDataRoot);
         Environment.SetEnvironmentVariable("OPENCLAW_TRAY_LOCALAPPDATA_DIR", LocalAppDataRoot);
 
         try
@@ -260,6 +266,8 @@ public sealed class E2ESetupFixture : IAsyncLifetime
         catch (Exception ex) { Log($"Warning: temp dir cleanup failed: {ex.Message}"); }
         try { Directory.Delete(LocalAppDataRoot, recursive: true); }
         catch (Exception ex) { Log($"Warning: temp local appdata cleanup failed: {ex.Message}"); }
+        try { Directory.Delete(RoamingAppDataRoot, recursive: true); }
+        catch (Exception ex) { Log($"Warning: temp roaming appdata cleanup failed: {ex.Message}"); }
 
         Log("Teardown complete.");
     }
@@ -506,7 +514,10 @@ public sealed class E2ESetupFixture : IAsyncLifetime
     /// both roles' FSMs to reach Connected, but the node service reports its
     /// own connected state directly — use that as the reliable signal.
     /// </summary>
-    public async Task WaitForConnectionReady(TimeSpan? timeout = null)
+    public Task WaitForConnectionReady(TimeSpan? timeout = null) =>
+        WaitForConnectionReadyAsync(timeout, protocolMismatchResultPath: null);
+
+    private async Task WaitForConnectionReadyAsync(TimeSpan? timeout, string? protocolMismatchResultPath)
     {
         var deadline = DateTime.UtcNow.Add(timeout ?? TimeSpan.FromSeconds(90));
         string lastStatus = "unknown";
@@ -536,8 +547,14 @@ public sealed class E2ESetupFixture : IAsyncLifetime
                 // Accept Connected or Ready when node is confirmed connected+paired
                 if ((lastStatus is "Ready" or "Connected") && lastNodeConnected && lastNodePaired)
                     return;
+
+                // Only initialization may record this outcome. A later recovery/test
+                // failure must never inherit a protocol-mismatch exception receipt.
+                if (!string.IsNullOrWhiteSpace(protocolMismatchResultPath))
+                    E2EProtocolMismatchResult.ThrowIfDetected(
+                        root, Path.Combine(DataDir, "openclaw-tray.log"), protocolMismatchResultPath);
             }
-            catch (Exception ex)
+            catch (Exception ex) when (ex is not E2EProtocolMismatchException)
             {
                 Log($"Connection poll error: {ex.Message}");
             }
@@ -612,7 +629,7 @@ public sealed class E2ESetupFixture : IAsyncLifetime
             RedirectStandardError = true,
         };
         psi.Environment["OPENCLAW_TRAY_DATA_DIR"] = DataDir;
-        psi.Environment["OPENCLAW_TRAY_APPDATA_DIR"] = DataDir;
+        psi.Environment["OPENCLAW_TRAY_APPDATA_DIR"] = RoamingAppDataRoot;
         psi.Environment["OPENCLAW_TRAY_LOCALAPPDATA_DIR"] = LocalAppDataRoot;
         psi.Environment["OPENCLAW_MCP_PORT"] = McpPort.ToString();
         psi.Environment["OPENCLAW_SUPPRESS_EXTERNAL_BROWSER"] = "1";
@@ -714,8 +731,7 @@ public sealed class E2ESetupFixture : IAsyncLifetime
 
     public (string GatewayUrl, string? SharedGatewayToken, string ActiveId) ReadActiveGatewayRecord()
     {
-        var gatewaysPath = Path.Combine(DataDir, "gateways.json");
-        using var doc = JsonDocument.Parse(File.ReadAllText(gatewaysPath));
+        using var doc = GatewayRegistryFile.Read(DataDir);
         var root = doc.RootElement;
         var activeId = TryGetPropertyIgnoreCase(root, "ActiveId", out var activeIdElement)
             ? activeIdElement.GetString()
@@ -773,8 +789,7 @@ public sealed class E2ESetupFixture : IAsyncLifetime
             nodeToken.ValueKind == JsonValueKind.String &&
             !string.IsNullOrWhiteSpace(nodeToken.GetString());
 
-        var gatewaysPath = Path.Combine(DataDir, "gateways.json");
-        using var gatewaysDoc = JsonDocument.Parse(File.ReadAllText(gatewaysPath));
+        using var gatewaysDoc = GatewayRegistryFile.Read(DataDir);
         var hasBootstrapToken = false;
         if (TryGetPropertyIgnoreCase(gatewaysDoc.RootElement, "Gateways", out var gatewaysElement) &&
             gatewaysElement.ValueKind == JsonValueKind.Array)

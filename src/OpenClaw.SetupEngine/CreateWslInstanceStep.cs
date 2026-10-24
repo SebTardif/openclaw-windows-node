@@ -17,12 +17,6 @@ namespace OpenClaw.SetupEngine;
 public sealed class CreateWslInstanceStep : SetupStep
 {
     private static readonly TimeSpan DistroVersionVerificationTimeout = TimeSpan.FromMinutes(1);
-    private static readonly TimeSpan[] FreshDistroListTimeouts =
-    [
-        TimeSpan.FromSeconds(15),
-        TimeSpan.FromSeconds(30),
-        TimeSpan.FromSeconds(60),
-    ];
     private static readonly TimeSpan[] FreshDistroProbeTimeouts =
     [
         TimeSpan.FromSeconds(30),
@@ -32,15 +26,35 @@ public sealed class CreateWslInstanceStep : SetupStep
 
     private readonly record struct FreshDistroVerification(StepResult Result, bool PreserveRegistration);
 
+    private enum FreshDistroListOutcome
+    {
+        Registered,
+        CompletedWithoutDistro,
+        ListDidNotComplete,
+    }
+
+    private readonly IWslRegistrationInspector _registrationInspector;
+    private bool _createdRegistrationThisAttempt;
     private bool _preserveRegistrationOnRollback;
 
     public override string Id => "wsl-create";
     public override string DisplayName => "Create WSL instance";
     public override bool CanRetry => false;
 
+    public CreateWslInstanceStep()
+        : this(new WindowsWslRegistrationInspector())
+    {
+    }
+
+    internal CreateWslInstanceStep(IWslRegistrationInspector registrationInspector)
+    {
+        _registrationInspector = registrationInspector ?? throw new ArgumentNullException(nameof(registrationInspector));
+    }
+
     public override async Task<StepResult> ExecuteAsync(SetupContext ctx, CancellationToken ct)
     {
         _preserveRegistrationOnRollback = false;
+        _createdRegistrationThisAttempt = false;
         var distro = ctx.DistroName!;
         var baseDistro = ctx.Config.BaseDistro.Trim();
 
@@ -87,6 +101,7 @@ public sealed class CreateWslInstanceStep : SetupStep
 
         Directory.CreateDirectory(Path.GetDirectoryName(installPath)!);
 
+        _createdRegistrationThisAttempt = true;
         var installArgs = WslInstallSupport.BuildDirectInstallArgs(baseDistro, distro, installPath);
         ctx.Logger.Info($"Installing fresh WSL distro with arguments: {string.Join(' ', installArgs)}");
         var install = await ctx.Commands.RunAsync(
@@ -101,6 +116,8 @@ public sealed class CreateWslInstanceStep : SetupStep
             return StepResult.Fail(
                 $"Fresh WSL install failed for '{distro}' from '{baseDistro}' (exit {install.ExitCode}): {FirstNonEmpty(install.Stderr, install.Stdout)}{cleanupError}");
         }
+
+        await GatewayPackageCleanup.RegisterAsync(ctx.Commands, distro, installPath, ct: ct);
 
         var verify = await VerifyFreshDistro(ctx, distro, installPath, ct);
         if (!verify.Result.IsSuccess)
@@ -147,41 +164,20 @@ public sealed class CreateWslInstanceStep : SetupStep
 
     private static async Task<FreshDistroVerification> VerifyFreshDistro(SetupContext ctx, string distro, string installPath, CancellationToken ct)
     {
-        CommandResult? list = null;
-        for (var attempt = 0; attempt < FreshDistroListTimeouts.Length; attempt++)
-        {
-            list = await ctx.Commands.RunAsyncAllowingInheritedPipeHandleEscape(
-                WslConstants.WslExePath,
-                ["--list", "--quiet"],
-                FreshDistroListTimeouts[attempt],
-                ct: ct);
-            if (list.ExitCode == 0 && !list.TimedOut)
-                break;
-
-            if (attempt < FreshDistroListTimeouts.Length - 1)
-            {
-                ctx.Logger.Warn(
-                    $"Fresh WSL distro '{distro}' registration list was not ready " +
-                    $"(attempt {attempt + 1}/{FreshDistroListTimeouts.Length}, exit {list.ExitCode}); retrying.");
-            }
-        }
-
-        if (list is not { ExitCode: 0, TimedOut: false } completedList)
+        // wsl.exe can stall on --list right after --install while the service finishes
+        // registering the new distro, so retry with escalating timeouts like the root probe.
+        // A timed-out or failed list is not proof the new distro is absent.
+        var registration = await ProbeFreshDistroRegistrationAsync(ctx, distro, ct);
+        if (registration != FreshDistroListOutcome.Registered)
         {
             var environmentIssue = await PreflightWslStep.DetectEnvironmentIssueAsync(ctx, ct);
-            var baseMessage = $"Fresh WSL install could not list distros after installing '{distro}'.";
+            var listNeverCompleted = registration == FreshDistroListOutcome.ListDidNotComplete;
+            var baseMessage = listNeverCompleted
+                ? $"Fresh WSL install could not list distros after installing '{distro}'."
+                : $"Fresh WSL install did not register expected distro '{distro}'.";
             return new FreshDistroVerification(
                 StepResult.Fail(environmentIssue != null ? $"{baseMessage} {environmentIssue}" : baseMessage),
-                PreserveRegistration: true);
-        }
-
-        if (!WslInstallSupport.ContainsDistro(completedList.Stdout, distro))
-        {
-            var environmentIssue = await PreflightWslStep.DetectEnvironmentIssueAsync(ctx, ct);
-            var baseMessage = $"Fresh WSL install did not register expected distro '{distro}'.";
-            return new FreshDistroVerification(
-                StepResult.Fail(environmentIssue != null ? $"{baseMessage} {environmentIssue}" : baseMessage),
-                PreserveRegistration: false);
+                PreserveRegistration: listNeverCompleted);
         }
 
         var verbose = await ctx.Commands.RunAsyncAllowingInheritedPipeHandleEscape(
@@ -236,7 +232,40 @@ public sealed class CreateWslInstanceStep : SetupStep
             PreserveRegistration: false);
     }
 
-    private static async Task<string> CleanupPartialInstall(
+    private static async Task<FreshDistroListOutcome> ProbeFreshDistroRegistrationAsync(
+        SetupContext ctx,
+        string distro,
+        CancellationToken ct)
+    {
+        var sawCompletedOmission = false;
+        for (var attempt = 0; attempt < FreshDistroProbeTimeouts.Length; attempt++)
+        {
+            var list = await ctx.Commands.RunAsyncAllowingInheritedPipeHandleEscape(
+                WslConstants.WslExePath,
+                ["--list", "--quiet"],
+                FreshDistroProbeTimeouts[attempt],
+                ct: ct);
+            var listCompleted = list.ExitCode == 0 && !list.TimedOut;
+            if (listCompleted && WslInstallSupport.ContainsDistro(list.Stdout, distro))
+                return FreshDistroListOutcome.Registered;
+
+            if (listCompleted)
+                sawCompletedOmission = true;
+
+            if (attempt < FreshDistroProbeTimeouts.Length - 1)
+            {
+                ctx.Logger.Warn(
+                    $"Fresh WSL distro '{distro}' was not listed yet (exit={list.ExitCode}, " +
+                    $"attempt {attempt + 1}/{FreshDistroProbeTimeouts.Length}); retrying.");
+            }
+        }
+
+        return sawCompletedOmission
+            ? FreshDistroListOutcome.CompletedWithoutDistro
+            : FreshDistroListOutcome.ListDidNotComplete;
+    }
+
+    private async Task<string> CleanupPartialInstall(
         SetupContext ctx,
         string distro,
         string installPath,
@@ -254,7 +283,7 @@ public sealed class CreateWslInstanceStep : SetupStep
         var distroExists = registrationStateKnown && WslInstallSupport.ContainsDistro(list.Stdout, distro);
         var canDeleteInstallPath = registrationStateKnown && !distroExists;
 
-        if (preserveRegistration && (!registrationStateKnown || distroExists))
+        if (!ctx.IsUninstalling && preserveRegistration && (!registrationStateKnown || distroExists))
         {
             ctx.Logger.Warn(
                 $"Leaving WSL distro '{distro}' in place because the post-install distro list did not complete.");
@@ -266,14 +295,39 @@ public sealed class CreateWslInstanceStep : SetupStep
 
             canDeleteInstallPath = false;
         }
+        else if (ctx.IsUninstalling)
+        {
+            if (!(registrationStateKnown && !distroExists))
+                canDeleteInstallPath = await TryUnregisterPartialInstall(ctx, distro, cleanupErrors, ct);
+        }
         else if (!registrationStateKnown)
         {
-            ctx.Logger.Warn($"Partial install cleanup could not list WSL distros (exit {list.ExitCode}); attempting best-effort unregister for '{distro}' before deleting app-owned files");
-            canDeleteInstallPath = await TryUnregisterPartialInstall(ctx, distro, cleanupErrors, ct);
+            ctx.Logger.Warn($"Partial install cleanup could not list WSL distros (exit {list.ExitCode}); refusing to unregister '{distro}'");
+        }
+        else if (distroExists && _createdRegistrationThisAttempt)
+        {
+            if (!ManagedDistroOwnership.HasRegisteredDistroEvidence(
+                    ctx.DataDir,
+                    ctx.LocalDataDir,
+                    distro,
+                    installPath,
+                    _registrationInspector,
+                    out var registrationFailure))
+            {
+                ctx.Logger.Warn(
+                    $"Refusing to unregister '{distro}' because the live WSL registration is not this install: {registrationFailure}");
+                cleanupErrors.Add(
+                    $"refusing to unregister '{distro}' because the live WSL registration is not this install: {registrationFailure}");
+            }
+            else
+            {
+                canDeleteInstallPath = await TryUnregisterPartialInstall(ctx, distro, cleanupErrors, ct);
+            }
         }
         else if (distroExists)
         {
-            canDeleteInstallPath = await TryUnregisterPartialInstall(ctx, distro, cleanupErrors, ct);
+            ctx.Logger.Warn($"Refusing to unregister '{distro}' because this install did not create it");
+            cleanupErrors.Add($"refusing to unregister '{distro}' because this install did not create it");
         }
 
         if (!canDeleteInstallPath)
@@ -351,6 +405,15 @@ public sealed class CreateWslInstanceStep : SetupStep
 
         if (!DistroInstallPathPolicy.TryGetManagedInstallPath(ctx.LocalDataDir, distro, out var vhdDir, out var pathError))
             throw new IOException($"[Uninstall] Refusing WSL rollback filesystem cleanup: {pathError}");
+
+        // Execute's partial cleanup is reached only after creation starts; pipeline
+        // rollback also runs when Execute refuses pre-existing state.
+        if (!ctx.IsUninstalling && !_createdRegistrationThisAttempt)
+        {
+            ctx.Logger.Warn(
+                $"Preserving WSL distro '{distro}', install path, ownership marker, and parent directory because this attempt did not start creating it.");
+            return;
+        }
 
         var preserveRegistration = _preserveRegistrationOnRollback;
         _preserveRegistrationOnRollback = false;

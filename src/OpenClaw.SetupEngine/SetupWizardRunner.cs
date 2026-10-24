@@ -108,8 +108,22 @@ public sealed class SetupWizardRunner
 
     internal void MarkReloadSuspended() => _reloadSuspended = true;
 
+    internal static bool ShouldReplaceOperatorDeviceId(
+        bool usingWizardIdentity,
+        string? currentOperatorDeviceId)
+    {
+        if (usingWizardIdentity)
+            return true;
+
+        return string.IsNullOrWhiteSpace(currentOperatorDeviceId);
+    }
+
     internal async Task<StepResult> SuspendReloadModeAsync()
     {
+        var invalidUser = RejectInvalidLinuxUser();
+        if (invalidUser is not null)
+            return invalidUser;
+
         try
         {
             // PATH prefix references $PATH. Pipe the script so wsl.exe cannot expand it on argv.
@@ -118,6 +132,7 @@ public sealed class SetupWizardRunner
                 $"{_ctx.WslPathPrefix} && openclaw config set gateway.reload.mode off",
                 TimeSpan.FromSeconds(15),
                 // This bounded handoff must finish so we know whether restoration is required.
+                // Stdin keeps the username and $PATH out of the wsl.exe argument vector.
                 ct: CancellationToken.None,
                 inputViaStdin: true);
             if (result.ExitCode != 0)
@@ -144,6 +159,10 @@ public sealed class SetupWizardRunner
 
     private async Task<StepResult> RunCoreAsync(CancellationToken ct)
     {
+        var invalidUser = RejectInvalidLinuxUser();
+        if (invalidUser is not null)
+            return invalidUser;
+
         var registry = new GatewayRegistry(_ctx.DataDir, logger: new SetupOpenClawLogger(_ctx.Logger));
         registry.Load();
 
@@ -181,9 +200,10 @@ public sealed class SetupWizardRunner
         _ctx.SharedGatewayToken ??= record.SharedGatewayToken;
         _ctx.BootstrapToken ??= record.BootstrapToken;
 
-        if (string.IsNullOrWhiteSpace(storedDeviceToken)
+        var usingWizardIdentity = string.IsNullOrWhiteSpace(storedDeviceToken)
             && !string.IsNullOrWhiteSpace(record.SharedGatewayToken)
-            && string.Equals(credential, record.SharedGatewayToken, StringComparison.Ordinal))
+            && string.Equals(credential, record.SharedGatewayToken, StringComparison.Ordinal);
+        if (usingWizardIdentity)
             identityPath = Path.Combine(identityPath, "setup-wizard");
 
         var wsLogger = new SetupOpenClawLogger(_ctx.Logger);
@@ -199,6 +219,11 @@ public sealed class SetupWizardRunner
             var provenanceCheck = await PairOperatorStep.EnsurePairingEndpointTrustedAsync(_ctx, ct);
             if (provenanceCheck is not null)
                 return provenanceCheck;
+            var requestBaseline = await ApprovalRequestHelper.CapturePendingRequestBaselineAsync(
+                _ctx,
+                ApprovalRequestKind.Device,
+                ct);
+            _ctx.CurrentDeviceApprovalBaseline = requestBaseline;
             client = CreateWizardClient(credential, identityPath, wsLogger);
             var connection = await PairOperatorStep.WaitForConnectionOrPairing(
                 client,
@@ -209,10 +234,25 @@ public sealed class SetupWizardRunner
             if (connection == PairOperatorStep.ConnectionOutcome.PairingRequired && _ctx.Config.AutoApprovePairing)
             {
                 _ctx.Logger.Info("Wizard operator pairing required — auto-approving");
+                var requestId = client.PairingRequiredRequestId;
+                if (ShouldReplaceOperatorDeviceId(usingWizardIdentity, _ctx.OperatorDeviceId))
+                {
+                    try
+                    {
+                        var identity = new DeviceIdentity(identityPath);
+                        identity.Initialize();
+                        _ctx.OperatorDeviceId = identity.DeviceId;
+                    }
+                    catch (DeviceIdentityLoadException ex)
+                    {
+                        return SetupIdentityFailure.Terminal(_ctx, "wizard operator pairing", ex);
+                    }
+                }
+
                 await client.DisconnectAsync();
                 client.Dispose();
 
-                var approval = await PairOperatorStep.AutoApprovePairing(_ctx, ct);
+                var approval = await PairOperatorStep.AutoApprovePairing(_ctx, requestId, ct);
                 if (!approval.IsSuccess)
                     return approval;
 
@@ -614,6 +654,10 @@ public sealed class SetupWizardRunner
 
     internal async Task<StepResult> RestoreReloadModeAsync()
     {
+        var invalidUser = RejectInvalidLinuxUser();
+        if (invalidUser is not null)
+            return invalidUser;
+
         var reloadMode = ConfigureGatewayStep.GetEffectiveReloadMode(_ctx.Config.Gateway);
         try
         {
@@ -790,6 +834,16 @@ public sealed class SetupWizardRunner
                 $"Gateway startup migrations still own the state directory while restoring reload mode; retrying in {delay.TotalMilliseconds:0} ms (attempt {attempt + 1})");
             await _restorationDelayAsync(delay, CancellationToken.None);
         }
+    }
+
+    private StepResult? RejectInvalidLinuxUser()
+    {
+        var user = _ctx.Config.Wsl.User;
+        if (WslConfig.IsValidLinuxUserName(user))
+            return null;
+
+        return StepResult.Terminal(
+            $"Invalid WSL user '{user}'. Use a Linux username matching [a-z_][a-z0-9_-]{{0,31}}.");
     }
 
     internal static bool IsStartupMigrationLeaseContention(CommandResult result) =>

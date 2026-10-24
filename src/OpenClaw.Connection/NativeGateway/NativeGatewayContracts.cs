@@ -5,7 +5,49 @@ public sealed record NativeGatewayPackage(
     string PackageFamilyName,
     string Version,
     string OpenClawAliasPath,
-    string ClawCtlAliasPath);
+    string ClawCtlAliasPath)
+{
+    public NativeGatewayContract Contract { get; init; }
+}
+
+public enum NativeGatewayContract
+{
+    Unknown,
+    Legacy,
+    IsolatedSessionV1
+}
+
+/// <summary>A safe-to-display failure of the qualified Gateway integration contract.</summary>
+public sealed class NativeGatewayContractException(string message) : InvalidOperationException(message);
+
+public sealed record IsolatedGatewayConfiguration(int Port, string Token);
+
+public sealed record IsolatedGatewayListener(
+    int Port, int ProcessId, DateTime ProcessStartTimeUtc, ulong SequenceNumber);
+
+public sealed record IsolatedGatewayStatus(
+    string State,
+    int? Port,
+    string? AgentUserSid,
+    IReadOnlyList<IsolatedGatewayListener> Listeners,
+    string? SessionState = null,
+    string? ReadinessState = null,
+    string? ReadinessReason = null)
+{
+    /// <summary>Display-safe summary: lifecycle states are validated sets; a reason is kept only when it is a token-shaped code.</summary>
+    public string Describe()
+    {
+        var text = $"gateway {State}, session {SessionState ?? "unreported"}, readiness {ReadinessState ?? "unreported"}";
+        return ReadinessReason is { } reason && IsReasonCode(reason) ? $"{text} ({reason})" : text;
+    }
+
+    private static bool IsReasonCode(string value) =>
+        value.Length is > 0 and <= 64 && value[0] != '-' &&
+        value.All(c => c is (>= 'a' and <= 'z') or (>= '0' and <= '9') or '-');
+}
+
+/// <summary>The package's redacted diagnostics ZIP as reported by <c>clawctl collect-logs --json</c>.</summary>
+public sealed record NativeGatewayDiagnosticsBundle(string? Path, string Included, IReadOnlyList<string> Notes);
 
 /// <summary>No matching trusted package is registered. Other validation failures are not install requests.</summary>
 public sealed class NativeGatewayPackageNotInstalledException : InvalidOperationException
@@ -40,13 +82,24 @@ public interface INativeGatewayPackageResolver
 }
 
 /// <summary>
-/// Owns a non-isolated native gateway's process lifetime, not its installation or persisted state.
+/// Owns native gateway runtime handoffs, not its installation or persisted state.
 /// Ensure is an explicit start/retry request; Stop and Dispose never schedule subsequent restarts.
 /// </summary>
 public interface INativeGatewayRuntime : IAsyncDisposable
 {
     Task EnsureRunningAsync(GatewayRecord record, CancellationToken cancellationToken);
+    /// <summary>Explicit user-requested restart, unlike Stop which only detaches owned starts.</summary>
+    async Task RestartAsync(GatewayRecord record, CancellationToken cancellationToken)
+    {
+        await StopAsync(cancellationToken).ConfigureAwait(false);
+        await EnsureRunningAsync(record, cancellationToken).ConfigureAwait(false);
+    }
     Task StopAsync(CancellationToken cancellationToken);
+    /// <summary>
+    /// Hands a verified Gateway to its next owner without stopping it. Runtimes whose Gateway
+    /// cannot outlive this owner stop instead.
+    /// </summary>
+    Task ReleaseAsync(CancellationToken cancellationToken) => StopAsync(cancellationToken);
     Task<GatewayEndpointProvenance> InspectAsync(GatewayRecord record, CancellationToken cancellationToken);
     /// <summary>Fresh ownership inspection without starting or waiting for a lifecycle operation. Busy runtimes deny handoff.</summary>
     GatewayEndpointProvenance Inspect(GatewayRecord record);

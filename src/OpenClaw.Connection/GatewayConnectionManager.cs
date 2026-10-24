@@ -71,6 +71,7 @@ public sealed class GatewayConnectionManager :
         _endpointProvenanceProbe;
     private readonly Func<ISshTunnelManager> _validationTunnelFactory;
     private readonly TimeSpan _credentialHandoffTimeout;
+    private readonly TimeProvider _credentialHandoffTimeProvider;
     private readonly TimeSpan _manualSshRestartTimeout;
     private readonly TimeSpan _manualSshRestartCleanupTimeout;
     private readonly SemaphoreSlim _transitionSemaphore = new(1, 1);
@@ -134,7 +135,8 @@ public sealed class GatewayConnectionManager :
         TimeSpan? credentialHandoffTimeout = null,
         TimeSpan? manualSshRestartTimeout = null,
         TimeSpan? manualSshRestartCleanupTimeout = null,
-        INativeGatewayRuntime? nativeGatewayRuntime = null)
+        INativeGatewayRuntime? nativeGatewayRuntime = null,
+        TimeProvider? credentialHandoffTimeProvider = null)
     {
         _credentialResolver = credentialResolver ?? throw new ArgumentNullException(nameof(credentialResolver));
         _clientFactory = clientFactory ?? throw new ArgumentNullException(nameof(clientFactory));
@@ -151,6 +153,7 @@ public sealed class GatewayConnectionManager :
         _endpointProvenanceProbe = endpointProvenanceProbe;
         _validationTunnelFactory = validationTunnelFactory ?? (() => new SshTunnelService(_logger));
         _credentialHandoffTimeout = credentialHandoffTimeout ?? TimeSpan.FromSeconds(5);
+        _credentialHandoffTimeProvider = credentialHandoffTimeProvider ?? TimeProvider.System;
         _manualSshRestartTimeout = manualSshRestartTimeout ?? TimeSpan.FromSeconds(35);
         _manualSshRestartCleanupTimeout =
             manualSshRestartCleanupTimeout ?? TimeSpan.FromSeconds(5);
@@ -215,18 +218,43 @@ public sealed class GatewayConnectionManager :
     internal OpenClawGatewayClient? ConcreteOperatorClient => _activeLifecycle?.DataClient;
     public ConnectionDiagnostics Diagnostics => _diagnostics;
 
+    internal async Task<OpenClawGatewayClient> RequireNativeSetupClientAsync(
+        GatewayRecord expected, CancellationToken ct)
+    {
+        var client = ConcreteOperatorClient;
+        void RequireCurrent()
+        {
+            var active = _registry.GetActive();
+            if (_disposed || client is null || !ReferenceEquals(client, ConcreteOperatorClient) ||
+                !client.IsConnectedToGateway || !client.HasHandshakeSnapshot ||
+                CurrentSnapshot.GatewayId != expected.Id ||
+                CurrentSnapshot.OperatorState != RoleConnectionState.Connected ||
+                active?.NativePackageFamilyName is null ||
+                GatewayDashboardBinding.Capture(active) != GatewayDashboardBinding.Capture(expected))
+                throw new InvalidOperationException("The native Gateway connection is not ready for setup verification.");
+        }
+        RequireCurrent();
+        var authorization = await NativeGatewayEndpointSecurity.AuthorizeAsync(_nativeGatewayRuntime, expected, ct);
+        RequireCurrent();
+        if (!authorization.Allowed)
+            throw new InvalidOperationException(authorization.Detail);
+        return client!;
+    }
+
     // ─── Lifecycle ───
 
-    public async Task ConnectAsync(string? gatewayId = null)
+    public Task ConnectAsync(string? gatewayId = null) => ConnectAsync(gatewayId, CancellationToken.None);
+
+    public async Task ConnectAsync(string? gatewayId, CancellationToken cancellationToken)
     {
         ThrowIfDisposed();
-        await _transitionSemaphore.WaitAsync();
+        await _transitionSemaphore.WaitAsync(cancellationToken);
         try
         {
             var targetId = gatewayId ?? _registry.ActiveGatewayId;
             if (targetId is not null)
                 SetGatewayConnectionIntent(targetId, shouldBeConnected: true);
-            await ConnectCoreAsync(gatewayId, "connect");
+            await ConnectCoreAsync(gatewayId, "connect", cancellationToken);
         }
         finally
         {
@@ -1048,6 +1076,19 @@ public sealed class GatewayConnectionManager :
             _logger.Warn($"[ConnMgr] Tunnel stop failed after {operation}: {ex.Message}");
             _diagnostics.Record("tunnel", $"SSH tunnel stop failed after {operation}", ex.Message);
         }
+    }
+
+    public async Task<bool> DisconnectIfCurrentAsync(GatewayConnectionSnapshot expected)
+    {
+        ThrowIfDisposed();
+        await _transitionSemaphore.WaitAsync();
+        try
+        {
+            if (!ReferenceEquals(CurrentSnapshot, expected)) return false;
+            await DisconnectCoreAsync();
+            return true;
+        }
+        finally { _transitionSemaphore.Release(); }
     }
 
     public async Task DisconnectAsync()
@@ -1980,6 +2021,24 @@ public sealed class GatewayConnectionManager :
         }
     }
 
+    public Task<SetupCodeResult> ValidateConnectionAsync(
+        GatewayRecord candidate, GatewayValidationIdentity identity,
+        CancellationToken cancellationToken = default)
+    {
+        ThrowIfDisposed();
+        var excludedPorts = new HashSet<int>();
+        if (_tunnelManager?.ActiveConfig is { } active)
+        {
+            excludedPorts.Add(active.LocalPort);
+            if (active.IncludeBrowserProxyForward)
+                excludedPorts.Add(active.LocalPort + 2);
+        }
+        return new GatewayConnectionValidator(
+            _credentialResolver, _validationTunnelFactory,
+            AuthorizeValidationCredentialHandshakeAsync, _logger)
+            .ValidateAsync(candidate, identity, excludedPorts, cancellationToken);
+    }
+
     internal OpenClawGatewayClient CreateSharedTokenValidationClient(
         string gatewayUrl,
         string token,
@@ -1991,39 +2050,12 @@ public sealed class GatewayConnectionManager :
     {
         var diagLogger = new DiagnosticTeeLogger(_logger, _diagnostics);
         expectedTunnelOwnershipGeneration ??= validationTunnel?.OwnershipGeneration;
-        var client = new OpenClawGatewayClient(
-            gatewayUrl,
-            token,
-            diagLogger,
-            tokenIsBootstrapToken: false,
-            bootstrapPairAsNode: false,
-            identityPath: identityDir,
-            ignoreStoredDeviceToken: true,
-            persistHandshakeDeviceTokens: false)
-        {
-            UseV2Signature =
-                validationRecord.IsLocal || validationRecord.RequiresV2Signature
-        };
-        // This is a one-shot validation client. A reconnect would reuse the strong shared token after
-        // ownership may have changed; fail the validation instead and let the caller retry from a new
-        // provenance preflight.
-        client.ReconnectAuthorizationAsync = _ => Task.FromResult(
-            new ReconnectAuthorizationResult(
-                false,
-                GatewayErrorKind.Auth,
-                "Shared-token validation is one-shot."));
-        client.HandshakeAuthorizationAsync = cancellationToken =>
-            AuthorizeValidationCredentialHandshakeAsync(
-                validationRecord,
-                new GatewayCredential(
-                    token,
-                    IsBootstrapToken: false,
-                    CredentialResolver.SourceSharedGatewayToken),
-                validationTunnel,
-                validationTunnelConfig,
-                expectedTunnelOwnershipGeneration,
-                cancellationToken);
-        return client;
+        var credential = new GatewayCredential(token, false, CredentialResolver.SourceSharedGatewayToken);
+        return GatewayConnectionValidator.CreateClient(
+            gatewayUrl, credential, identityDir, validationRecord, diagLogger,
+            cancellationToken => AuthorizeValidationCredentialHandshakeAsync(
+                validationRecord, credential, validationTunnel, validationTunnelConfig,
+                expectedTunnelOwnershipGeneration, cancellationToken));
     }
 
     internal static async Task<ReconnectAuthorizationResult> AuthorizeValidationTunnelHandshakeAsync(
@@ -2221,7 +2253,11 @@ public sealed class GatewayConnectionManager :
                   _endpointProvenanceProbe is not null
                     ? await _endpointProvenanceProbe(activeRecord, CancellationToken.None).ConfigureAwait(false)
                     : null;
-            var unexpectedManagedLocalOwner =
+            bool nativeInspectionUnavailable = activeRecord?.NativePackageFamilyName is not null &&
+                provenance is not null && NativeGatewayEndpointSecurity.IsInspectionUnavailable(provenance);
+            if (nativeInspectionUnavailable)
+                failureKind = GatewayErrorKind.Network;
+            var unexpectedManagedLocalOwner = !nativeInspectionUnavailable &&
                 provenance?.Kind is GatewayEndpointProvenanceKind.ConflictingOpenClawGateway
                     or GatewayEndpointProvenanceKind.UnknownListener;
 
@@ -2373,6 +2409,8 @@ public sealed class GatewayConnectionManager :
                 (await _nativeGatewayRuntime.InspectAsync(record, cancellationToken).ConfigureAwait(false)).Kind ==
                     GatewayEndpointProvenanceKind.ExpectedManagedGateway;
         }
+        if (!GatewayCredentialRecoveryPolicy.IsTransportSafe(record, allowUnmanagedLoopback: true))
+            return false;
         if (GatewayRecordEditing.IsLoopbackEndpoint(record.Url))
         {
             if (record.IsLocal || GatewayRecordEditing.ResolveManagedDistroName(record) is not null)
@@ -2394,11 +2432,7 @@ public sealed class GatewayConnectionManager :
                         cancellationToken)
                     .ConfigureAwait(false);
         }
-        if (string.IsNullOrWhiteSpace(record.Url))
-            return false;
-        return Uri.TryCreate(record.Url, UriKind.Absolute, out var uri) &&
-            (string.Equals(uri.Scheme, "wss", StringComparison.OrdinalIgnoreCase) ||
-             string.Equals(uri.Scheme, "https", StringComparison.OrdinalIgnoreCase));
+        return true;
     }
 
     private async Task<EndpointCredentialAuthorization> AuthorizeCredentialForEndpointAsync(
@@ -2497,7 +2531,9 @@ public sealed class GatewayConnectionManager :
         CancellationToken handshakeCancellationToken,
         string role)
     {
-        using var timeoutCts = new CancellationTokenSource(_credentialHandoffTimeout);
+        var budget = expectedRecord.NativePackageFamilyName is not null
+            ? NativeGatewayEndpointSecurity.CredentialHandoffTimeout : _credentialHandoffTimeout;
+        using var timeoutCts = new CancellationTokenSource(budget, _credentialHandoffTimeProvider);
         using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(
             operationCancellationToken,
             handshakeCancellationToken,
@@ -2577,7 +2613,9 @@ public sealed class GatewayConnectionManager :
             return new ReconnectAuthorizationResult(
                 false,
                 GatewayErrorKind.Network,
-                $"Timed out re-verifying the owned SSH listener before the {role} credential handoff.");
+                expectedRecord.NativePackageFamilyName is not null
+                    ? $"Timed out starting or re-verifying the owned native Gateway before the {role} credential handoff."
+                    : $"Timed out re-verifying the owned SSH listener before the {role} credential handoff.");
         }
     }
 
