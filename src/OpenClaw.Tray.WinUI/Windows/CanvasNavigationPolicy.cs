@@ -105,12 +105,14 @@ public static class CanvasNavigationPolicy
         if (site is not null)
             return false;
 
-        // Some loads omit Sec-Fetch-Site. A top-level navigation sends
-        // Upgrade-Insecure-Requests. A same-origin fetch has a referer on
-        // this origin. A same-site frame's referer is a different host.
+        // Sec-Fetch-Site is missing. Upgrade-Insecure-Requests is also sent
+        // for an iframe navigation, so it counts only when no other host
+        // referred the request. A same-origin fetch has a matching referer.
+        if (!string.IsNullOrWhiteSpace(referer))
+            return RefererMatchesRequest(referer, requestUri);
+
         return upgradeInsecureRequests
-            || IsTopLevelDocumentNavigation(fetchDestination, fetchMode)
-            || RefererMatchesRequest(referer, requestUri);
+            || IsTopLevelDocumentNavigation(fetchDestination, fetchMode);
     }
 
     private static bool RefererMatchesRequest(string? referer, string? requestUri)

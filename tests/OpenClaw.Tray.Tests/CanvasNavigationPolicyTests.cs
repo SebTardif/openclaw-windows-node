@@ -74,6 +74,14 @@ public class CanvasNavigationPolicyTests
             CanvasBearerSource.Document, null, null, null, upgradeInsecureRequests: true));
         Assert.False(CanvasNavigationPolicy.MayAttachGatewayBearer(
             CanvasBearerSource.Document, "same-site", null, null, upgradeInsecureRequests: true));
+        Assert.False(CanvasNavigationPolicy.MayAttachGatewayBearer(
+            CanvasBearerSource.Document,
+            null,
+            null,
+            null,
+            upgradeInsecureRequests: true,
+            referer: "http://frame.example:59731/",
+            requestUri: "http://gw.example:61562/from-iframe"));
         Assert.True(CanvasNavigationPolicy.MayAttachGatewayBearer(
             CanvasBearerSource.Document,
             null,
