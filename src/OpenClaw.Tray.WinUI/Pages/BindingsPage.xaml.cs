@@ -8,7 +8,6 @@ using System;
 using System.Collections.Generic;
 using System.ComponentModel;
 using System.Text.Json;
-using System.Threading;
 using System.Threading.Tasks;
 
 namespace OpenClawTray.Pages;
@@ -21,7 +20,6 @@ public sealed partial class BindingsPage : Page
     private readonly AsyncListLoadingState _bindingsLoading = new();
     private bool _observing;
     private int _configGeneration;
-    private CancellationTokenSource? _configTimeout;
     private bool _configFailureVisible;
 
     public BindingsPage()
@@ -63,9 +61,8 @@ public sealed partial class BindingsPage : Page
             UpdateLoadingVisuals();
         }
 
-        // A non-null client can still be disconnected. RequestConfigAsync
-        // returns without a config event until the handshake is ready, so
-        // the loading state would stay up.
+        // A non-null client can still be disconnected. Wait until the
+        // handshake is ready so this page's own config.get can finish.
         var client = CurrentApp.GatewayClient;
         AttachClient(client);
         if (client is { IsConnectedToGateway: true })
@@ -170,58 +167,34 @@ public sealed partial class BindingsPage : Page
         ConnectionInfoBar.IsOpen = false;
         _configFailureVisible = false;
         var generation = BeginConfigWatch();
-        _ = ObserveConfigDeadlineAsync(generation);
-        _ = client.RequestConfigAsync();
+        _ = LoadConfigAsync(client, generation);
     }
 
-    private int BeginConfigWatch()
-    {
-        _configTimeout?.Cancel();
-        _configTimeout?.Dispose();
-        _configTimeout = new CancellationTokenSource();
-        return ++_configGeneration;
-    }
+    private int BeginConfigWatch() => ++_configGeneration;
 
-    private void EndConfigWatch()
-    {
-        _configGeneration++;
-        _configTimeout?.Cancel();
-        _configTimeout?.Dispose();
-        _configTimeout = null;
-    }
+    private void EndConfigWatch() => _configGeneration++;
 
-    private async Task ObserveConfigDeadlineAsync(int generation)
+    private async Task LoadConfigAsync(IOperatorGatewayClient client, int generation)
     {
-        var timeout = _configTimeout;
-        if (timeout == null)
-            return;
-
         try
         {
-            await Task.Delay(BindingsConfigLoadDeadline.CurrentMilliseconds, timeout.Token).ConfigureAwait(false);
+            var payload = await client.SendWizardRequestAsync(
+                "config.get",
+                parameters: null,
+                timeoutMs: BindingsConfigLoadDeadline.CurrentMilliseconds).ConfigureAwait(false);
+            ApplyConfigLoad(client, generation, payload, failed: false);
         }
-        catch (Exception ex) when (ex is OperationCanceledException or ObjectDisposedException)
+        catch (Exception)
         {
-            return;
+            ApplyConfigLoad(client, generation, default, failed: true);
         }
-
-        var dispatcher = DispatcherQueue;
-        if (dispatcher == null)
-            return;
-
-        dispatcher.TryEnqueue(() =>
-        {
-            if (!_observing || generation != _configGeneration || !_bindingsLoading.IsRefreshing)
-                return;
-
-            EndConfigWatch();
-            _bindingsLoading.Fail();
-            ShowConfigRequestFailure();
-            UpdateLoadingVisuals();
-        });
     }
 
-    private void OnConfigGetFailed(object? sender, EventArgs e)
+    private void ApplyConfigLoad(
+        IOperatorGatewayClient client,
+        int generation,
+        JsonElement payload,
+        bool failed)
     {
         var dispatcher = DispatcherQueue;
         if (dispatcher == null)
@@ -229,13 +202,25 @@ public sealed partial class BindingsPage : Page
 
         dispatcher.TryEnqueue(() =>
         {
-            if (!_observing || !ReferenceEquals(_trackedClient, sender) || !_bindingsLoading.IsRefreshing)
+            if (!_observing || generation != _configGeneration || !ReferenceEquals(_trackedClient, client))
                 return;
 
-            EndConfigWatch();
-            _bindingsLoading.Fail();
-            ShowConfigRequestFailure();
-            UpdateLoadingVisuals();
+            if (failed)
+            {
+                if (!_bindingsLoading.IsRefreshing)
+                    return;
+
+                EndConfigWatch();
+                _bindingsLoading.Fail();
+                ShowConfigRequestFailure();
+                UpdateLoadingVisuals();
+                return;
+            }
+
+            if (_appState != null)
+                _appState.Config = payload;
+            else
+                UpdateConfig(payload);
         });
     }
 
@@ -245,17 +230,13 @@ public sealed partial class BindingsPage : Page
         DetachClient();
         _trackedClient = client;
         if (_trackedClient != null)
-        {
             _trackedClient.StatusChanged += OnClientStatusChanged;
-            _trackedClient.ConfigGetFailed += OnConfigGetFailed;
-        }
     }
 
     private void DetachClient()
     {
         if (_trackedClient == null) return;
         _trackedClient.StatusChanged -= OnClientStatusChanged;
-        _trackedClient.ConfigGetFailed -= OnConfigGetFailed;
         _trackedClient = null;
     }
 

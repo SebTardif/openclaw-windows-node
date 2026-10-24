@@ -281,7 +281,6 @@ public partial class OpenClawGatewayClient : WebSocketClientBase, IOperatorGatew
     public event EventHandler<JsonElement>? CronRunsUpdated;
     public event EventHandler<JsonElement>? SkillsStatusUpdated;
     public event EventHandler<JsonElement>? ConfigUpdated;
-    public event EventHandler? ConfigGetFailed;
     public event EventHandler<JsonElement>? ConfigSchemaUpdated;
 
     /// <summary>
@@ -1645,16 +1644,7 @@ public partial class OpenClawGatewayClient : WebSocketClientBase, IOperatorGatew
 
     public async Task RequestConfigAsync()
     {
-        try
-        {
-            if (!await SendTrackedRequestAsync("config.get").ConfigureAwait(false))
-                ConfigGetFailed?.Invoke(this, EventArgs.Empty);
-        }
-        catch (Exception ex)
-        {
-            _logger.Warn($"config.get request failed: {ex.Message}");
-            ConfigGetFailed?.Invoke(this, EventArgs.Empty);
-        }
+        await SendTrackedRequestAsync("config.get");
     }
 
     public async Task RequestConfigSchemaAsync()
@@ -3069,9 +3059,6 @@ public partial class OpenClawGatewayClient : WebSocketClientBase, IOperatorGatew
                 Error = message
             });
         }
-
-        if (string.Equals(method, "config.get", StringComparison.Ordinal))
-            ConfigGetFailed?.Invoke(this, EventArgs.Empty);
 
         _logger.Warn($"{method} failed: {message}");
     }

@@ -22,34 +22,17 @@ internal static class BindingsConnectionRecovery
 }
 
 /// <summary>
-/// How long Bindings waits for a connected <c>config.get</c> before it
-/// gives up. <see cref="EnvironmentVariableName"/> overrides the default.
+/// How long one Bindings <c>config.get</c> waits for its own reply.
 /// </summary>
 internal static class BindingsConfigLoadDeadline
 {
     internal const int DefaultMilliseconds = 15_000;
-    internal const string EnvironmentVariableName = "OPENCLAW_BINDINGS_CONFIG_TIMEOUT_MS";
 
-    /// <summary>Test seam. A positive value replaces the environment and the default.</summary>
+    /// <summary>Test seam. A positive value replaces the default for that process.</summary>
     internal static int? OverrideMilliseconds { get; set; }
-
-    internal static int ResolveMilliseconds(string? environmentValue)
-    {
-        if (int.TryParse(
-                environmentValue,
-                System.Globalization.NumberStyles.Integer,
-                System.Globalization.CultureInfo.InvariantCulture,
-                out var parsed)
-            && parsed > 0)
-        {
-            return parsed;
-        }
-
-        return DefaultMilliseconds;
-    }
 
     internal static int CurrentMilliseconds =>
         OverrideMilliseconds is int overridden && overridden > 0
             ? overridden
-            : ResolveMilliseconds(Environment.GetEnvironmentVariable(EnvironmentVariableName));
+            : DefaultMilliseconds;
 }
