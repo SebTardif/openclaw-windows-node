@@ -458,7 +458,10 @@ public sealed partial class CanvasWindow : WindowEx
             ToBearerSource(args.RequestedSourceKind),
             FetchHeader(args, "Sec-Fetch-Site"),
             FetchHeader(args, "Sec-Fetch-Dest"),
-            FetchHeader(args, "Sec-Fetch-Mode"));
+            FetchHeader(args, "Sec-Fetch-Mode"),
+            FetchHeader(args, "Upgrade-Insecure-Requests") is not null,
+            FetchHeader(args, "Referer"),
+            args.Request.Uri);
 
     private static CanvasBearerSource ToBearerSource(CoreWebView2WebResourceRequestSourceKinds kind) =>
         kind switch

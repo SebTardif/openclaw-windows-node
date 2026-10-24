@@ -84,7 +84,10 @@ public static class CanvasNavigationPolicy
         CanvasBearerSource source,
         string? fetchSite,
         string? fetchDestination,
-        string? fetchMode)
+        string? fetchMode,
+        bool upgradeInsecureRequests = false,
+        string? referer = null,
+        string? requestUri = null)
     {
         if (source is CanvasBearerSource.SharedWorker or CanvasBearerSource.ServiceWorker)
             return false;
@@ -102,7 +105,23 @@ public static class CanvasNavigationPolicy
         if (site is not null)
             return false;
 
-        return IsTopLevelDocumentNavigation(fetchDestination, fetchMode);
+        // Some loads omit Sec-Fetch-Site. A top-level navigation sends
+        // Upgrade-Insecure-Requests. A same-origin fetch has a referer on
+        // this origin. A same-site frame's referer is a different host.
+        return upgradeInsecureRequests
+            || IsTopLevelDocumentNavigation(fetchDestination, fetchMode)
+            || RefererMatchesRequest(referer, requestUri);
+    }
+
+    private static bool RefererMatchesRequest(string? referer, string? requestUri)
+    {
+        if (!Uri.TryCreate(referer, UriKind.Absolute, out var refererUri)
+            || !Uri.TryCreate(requestUri, UriKind.Absolute, out var request))
+            return false;
+
+        return string.Equals(refererUri.Scheme, request.Scheme, StringComparison.OrdinalIgnoreCase)
+            && string.Equals(refererUri.Host, request.Host, StringComparison.OrdinalIgnoreCase)
+            && refererUri.Port == request.Port;
     }
 
     private static bool IsTopLevelDocumentNavigation(string? fetchDestination, string? fetchMode) =>

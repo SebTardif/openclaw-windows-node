@@ -66,4 +66,27 @@ public class CanvasNavigationPolicyTests
             allowed,
             CanvasNavigationPolicy.MayAttachGatewayBearer(source, fetchSite, fetchDestination, fetchMode));
     }
+
+    [Fact]
+    public void MayAttachGatewayBearer_AllowsMissingMetadataOnlyForTopLevelNavigation()
+    {
+        Assert.True(CanvasNavigationPolicy.MayAttachGatewayBearer(
+            CanvasBearerSource.Document, null, null, null, upgradeInsecureRequests: true));
+        Assert.False(CanvasNavigationPolicy.MayAttachGatewayBearer(
+            CanvasBearerSource.Document, "same-site", null, null, upgradeInsecureRequests: true));
+        Assert.True(CanvasNavigationPolicy.MayAttachGatewayBearer(
+            CanvasBearerSource.Document,
+            null,
+            null,
+            null,
+            referer: "http://gw.example:61562/doc",
+            requestUri: "http://gw.example:61562/from-doc"));
+        Assert.False(CanvasNavigationPolicy.MayAttachGatewayBearer(
+            CanvasBearerSource.Document,
+            null,
+            null,
+            null,
+            referer: "http://frame.example:59731/",
+            requestUri: "http://gw.example:61562/from-same-site"));
+    }
 }
