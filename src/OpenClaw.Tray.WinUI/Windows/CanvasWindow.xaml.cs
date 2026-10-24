@@ -441,10 +441,35 @@ public sealed partial class CanvasWindow : WindowEx
         if (string.IsNullOrEmpty(trustedOrigin) || string.IsNullOrEmpty(token))
             return;
 
+        if (!MayReceiveGatewayBearer(args))
+            return;
+
         if (IsUriForOrigin(args.Request.Uri, trustedOrigin))
         {
             args.Request.Headers.SetHeader("Authorization", $"Bearer {token}");
         }
+    }
+
+    // All-source interception also delivers frame and worker requests. The
+    // bearer stays on the document. A cross-site frame, and any shared or
+    // service worker, must not receive it just because the destination is
+    // the trusted gateway.
+    private static bool MayReceiveGatewayBearer(CoreWebView2WebResourceRequestedEventArgs args)
+    {
+        var kind = args.RequestedSourceKind;
+        if (kind is CoreWebView2WebResourceRequestSourceKinds.SharedWorker
+            or CoreWebView2WebResourceRequestSourceKinds.ServiceWorker)
+            return false;
+
+        if (args.Request.Headers.Contains("Sec-Fetch-Site")
+            && string.Equals(
+                args.Request.Headers.GetHeader("Sec-Fetch-Site"),
+                "cross-site",
+                StringComparison.OrdinalIgnoreCase))
+            return false;
+
+        return kind is CoreWebView2WebResourceRequestSourceKinds.Document
+            or CoreWebView2WebResourceRequestSourceKinds.None;
     }
     
     private void ConfigureBlockedNavigationResponses(CoreWebView2 coreWebView2)
