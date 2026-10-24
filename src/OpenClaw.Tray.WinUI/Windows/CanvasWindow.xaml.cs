@@ -459,7 +459,6 @@ public sealed partial class CanvasWindow : WindowEx
             FetchHeader(args, "Sec-Fetch-Site"),
             FetchHeader(args, "Sec-Fetch-Dest"),
             FetchHeader(args, "Sec-Fetch-Mode"),
-            FetchHeader(args, "Upgrade-Insecure-Requests") is not null,
             FetchHeader(args, "Referer"),
             args.Request.Uri);
 

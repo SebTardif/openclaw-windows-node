@@ -85,7 +85,6 @@ public static class CanvasNavigationPolicy
         string? fetchSite,
         string? fetchDestination,
         string? fetchMode,
-        bool upgradeInsecureRequests = false,
         string? referer = null,
         string? requestUri = null)
     {
@@ -106,13 +105,14 @@ public static class CanvasNavigationPolicy
             return false;
 
         // Sec-Fetch-Site is missing. Upgrade-Insecure-Requests is also sent
-        // for an iframe navigation, so it counts only when no other host
-        // referred the request. A same-origin fetch has a matching referer.
+        // for an iframe, including one that suppresses Referer, so it is not
+        // a top-level signal. A same-origin fetch has a matching referer.
+        // A metadata-free navigation is top-level only when fetch dest and
+        // mode say so.
         if (!string.IsNullOrWhiteSpace(referer))
             return RefererMatchesRequest(referer, requestUri);
 
-        return upgradeInsecureRequests
-            || IsTopLevelDocumentNavigation(fetchDestination, fetchMode);
+        return IsTopLevelDocumentNavigation(fetchDestination, fetchMode);
     }
 
     private static bool RefererMatchesRequest(string? referer, string? requestUri)

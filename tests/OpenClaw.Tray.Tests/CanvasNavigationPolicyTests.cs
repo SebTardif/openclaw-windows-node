@@ -70,16 +70,17 @@ public class CanvasNavigationPolicyTests
     [Fact]
     public void MayAttachGatewayBearer_AllowsMissingMetadataOnlyForTopLevelNavigation()
     {
-        Assert.True(CanvasNavigationPolicy.MayAttachGatewayBearer(
-            CanvasBearerSource.Document, null, null, null, upgradeInsecureRequests: true));
         Assert.False(CanvasNavigationPolicy.MayAttachGatewayBearer(
-            CanvasBearerSource.Document, "same-site", null, null, upgradeInsecureRequests: true));
+            CanvasBearerSource.Document, null, null, null));
+        Assert.True(CanvasNavigationPolicy.MayAttachGatewayBearer(
+            CanvasBearerSource.Document, null, "document", "navigate"));
+        Assert.False(CanvasNavigationPolicy.MayAttachGatewayBearer(
+            CanvasBearerSource.Document, "same-site", null, null));
         Assert.False(CanvasNavigationPolicy.MayAttachGatewayBearer(
             CanvasBearerSource.Document,
             null,
             null,
             null,
-            upgradeInsecureRequests: true,
             referer: "http://frame.example:59731/",
             requestUri: "http://gw.example:61562/from-iframe"));
         Assert.True(CanvasNavigationPolicy.MayAttachGatewayBearer(
