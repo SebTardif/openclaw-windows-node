@@ -150,6 +150,43 @@ public sealed class BindingsPageConnectionTests
     }
 
     [Fact(Timeout = 5000)]
+    public async Task EarlierGlobalConfig_DoesNotDiscardTheCurrentBindingsResponse()
+    {
+        var client = DispatchProxy.Create<IOperatorGatewayClient, BindingsGatewayProxy>();
+        var gateway = (BindingsGatewayProxy)client;
+        gateway.AutoTimeout = false;
+        var app = new OpenClawTray.App { GatewayClient = client };
+        Application.Current = app;
+        var page = new BindingsPage();
+        try
+        {
+            gateway.SetStatus(ConnectionStatus.Connected);
+            page.Initialize();
+            Assert.Equal(1, gateway.ConfigRequests);
+
+            // An earlier config.get from another page completes while Bindings is waiting.
+            app.AppState.Config = EmptyBindings();
+            Assert.True(page.SingleAgentInfoBar.IsOpen);
+
+            using var current = JsonDocument.Parse(
+                """{"bindings":[{"agentId":"support","match":{"channel":"telegram"}}]}""");
+            gateway.CompleteOldest(current.RootElement.Clone());
+            await WaitForUi(page, () => page.BindingsList.ItemsSource != null);
+
+            Assert.NotNull(page.BindingsList.ItemsSource);
+            Assert.Equal(Visibility.Visible, page.BindingsList.Visibility);
+            Assert.False(page.SingleAgentInfoBar.IsOpen);
+            Assert.Equal("support", app.AppState.Config!.Value.GetProperty("bindings")[0].GetProperty("agentId").GetString());
+            Assert.True(page.RefreshButton.IsEnabled);
+        }
+        finally
+        {
+            page.Unload();
+            Application.Current = null;
+        }
+    }
+
+    [Fact(Timeout = 5000)]
     public async Task ConfigGetSilence_ClearsTheSpinnerWhenTheDeadlineExpires()
     {
         var previous = BindingsConfigLoadDeadline.OverrideMilliseconds;

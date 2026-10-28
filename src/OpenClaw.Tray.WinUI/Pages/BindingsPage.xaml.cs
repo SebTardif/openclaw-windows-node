@@ -117,14 +117,12 @@ public sealed partial class BindingsPage : Page
         }
         catch (Exception ex)
         {
-            EndConfigWatch();
             _bindingsLoading.Fail();
             ShowLoadFailure(ex);
             UpdateLoadingVisuals();
             return;
         }
 
-        EndConfigWatch();
         if (_configFailureVisible)
         {
             _configFailureVisible = false;
@@ -217,6 +215,9 @@ public sealed partial class BindingsPage : Page
                 return;
             }
 
+            // Other pages can publish config while this request is pending.
+            // Rendering their snapshot must not discard this request's newer reply.
+            EndConfigWatch();
             if (_appState != null)
                 _appState.Config = payload;
             else
