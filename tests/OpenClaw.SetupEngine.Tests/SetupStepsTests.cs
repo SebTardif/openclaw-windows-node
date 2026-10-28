@@ -3572,8 +3572,9 @@ public class SetupStepsTests : IDisposable
         Assert.Equal(StepOutcome.Failed, result.Outcome);
         Assert.Contains("could not list distros after installing 'OpenClawGateway'", result.Message);
         Assert.DoesNotContain("did not register expected distro", result.Message);
-        Assert.Contains("left distro 'OpenClawGateway' registered", result.Message);
-        Assert.Contains("skipped deleting app-owned install path", result.Message);
+        Assert.True(ManagedDistroOwnership.HasPathBoundMarkerEvidence(
+            ctx.LocalDataDir,
+            "OpenClawGateway"));
         Assert.Equal(5, quietLists);
         Assert.True(File.Exists(Path.Combine(installPath, "ext4.vhdx")));
         Assert.DoesNotContain(commands.Calls, call => call.Arguments.Contains("--unregister"));
@@ -3640,9 +3641,70 @@ public class SetupStepsTests : IDisposable
         Assert.Equal(PipelineOutcome.Failed, result.Outcome);
         Assert.Equal("wsl-create", result.FailedStepId);
         Assert.Contains("could not list distros after installing 'OpenClawGateway'", result.Message);
-        Assert.Contains("left distro 'OpenClawGateway' registered", result.Message);
+        Assert.DoesNotContain("Refusing unsafe WSL rollback cleanup", result.Message);
         Assert.True(File.Exists(Path.Combine(installPath, "ext4.vhdx")));
+        Assert.True(ManagedDistroOwnership.HasPathBoundMarkerEvidence(
+            ctx.LocalDataDir,
+            "OpenClawGateway"));
         Assert.Equal(6, quietLists);
+        Assert.DoesNotContain(commands.Calls, call => call.Arguments.Contains("--unregister"));
+        Assert.DoesNotContain(commands.Calls, call => call.Arguments.Contains("--terminate"));
+    }
+
+    [Fact]
+    public async Task SetupPipeline_PreservesFreshDistroWhenFinalPostInstallListTimesOutAfterOmission()
+    {
+        var quietLists = 0;
+        var installPath = "";
+        var commands = new FakeCommandRunner(args =>
+        {
+            if (args.SequenceEqual(["--list", "--quiet"]))
+            {
+                quietLists++;
+                return quietLists switch
+                {
+                    1 => Ok(""),
+                    2 => Ok(""),
+                    3 => new CommandResult(-1, "", "", TimeSpan.FromSeconds(30), TimedOut: true),
+                    4 => new CommandResult(-1, "", "", TimeSpan.FromSeconds(60), TimedOut: true),
+                    _ => Ok("OpenClawGateway\n"),
+                };
+            }
+
+            if (args.Contains("--install"))
+            {
+                Directory.CreateDirectory(installPath);
+                File.WriteAllText(Path.Combine(installPath, "ext4.vhdx"), "partial");
+                return Ok("Installing Ubuntu-24.04\n");
+            }
+
+            if (args.SequenceEqual(["--status"]))
+                return Ok("Default Version: 2\n");
+            if (args.SequenceEqual(["--terminate", "OpenClawGateway"]) ||
+                args.SequenceEqual(["--unregister", "OpenClawGateway"]))
+                return Ok();
+
+            return Fail($"unexpected args: {string.Join(' ', args)}");
+        });
+        var ctx = CreateContext(
+            new SetupConfig { RollbackOnFailure = true },
+            commands);
+        installPath = Path.Combine(ctx.LocalDataDir, "wsl", "OpenClawGateway");
+        var pipeline = new SetupPipeline([
+            new CreateWslInstanceStep(FakeWslRegistrationInspector.Found(installPath)),
+        ]);
+
+        var result = await pipeline.RunAsync(ctx);
+
+        Assert.Equal(PipelineOutcome.Failed, result.Outcome);
+        Assert.Equal("wsl-create", result.FailedStepId);
+        Assert.Contains("could not list distros after installing 'OpenClawGateway'", result.Message);
+        Assert.DoesNotContain("Refusing unsafe WSL rollback cleanup", result.Message);
+        Assert.Equal(6, quietLists);
+        Assert.True(File.Exists(Path.Combine(installPath, "ext4.vhdx")));
+        Assert.True(ManagedDistroOwnership.HasPathBoundMarkerEvidence(
+            ctx.LocalDataDir,
+            "OpenClawGateway"));
         Assert.DoesNotContain(commands.Calls, call => call.Arguments.Contains("--unregister"));
         Assert.DoesNotContain(commands.Calls, call => call.Arguments.Contains("--terminate"));
     }

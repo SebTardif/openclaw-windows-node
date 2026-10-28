@@ -237,7 +237,7 @@ public sealed class CreateWslInstanceStep : SetupStep
         string distro,
         CancellationToken ct)
     {
-        var sawCompletedOmission = false;
+        var lastListCompletedWithoutDistro = false;
         for (var attempt = 0; attempt < FreshDistroProbeTimeouts.Length; attempt++)
         {
             var list = await ctx.Commands.RunAsyncAllowingInheritedPipeHandleEscape(
@@ -249,8 +249,7 @@ public sealed class CreateWslInstanceStep : SetupStep
             if (listCompleted && WslInstallSupport.ContainsDistro(list.Stdout, distro))
                 return FreshDistroListOutcome.Registered;
 
-            if (listCompleted)
-                sawCompletedOmission = true;
+            lastListCompletedWithoutDistro = listCompleted;
 
             if (attempt < FreshDistroProbeTimeouts.Length - 1)
             {
@@ -260,7 +259,7 @@ public sealed class CreateWslInstanceStep : SetupStep
             }
         }
 
-        return sawCompletedOmission
+        return lastListCompletedWithoutDistro
             ? FreshDistroListOutcome.CompletedWithoutDistro
             : FreshDistroListOutcome.ListDidNotComplete;
     }
@@ -273,6 +272,7 @@ public sealed class CreateWslInstanceStep : SetupStep
         bool preserveRegistration = false)
     {
         var cleanupErrors = new List<string>();
+        var preserveOwnershipMarker = false;
         var installPathExists = Directory.Exists(installPath) || File.Exists(installPath);
         var list = await ctx.Commands.RunAsyncAllowingInheritedPipeHandleEscape(
             WslConstants.WslExePath,
@@ -289,8 +289,7 @@ public sealed class CreateWslInstanceStep : SetupStep
                 $"Leaving WSL distro '{distro}' in place because the post-install distro list did not complete.");
             if (distroExists)
             {
-                cleanupErrors.Add(
-                    $"left distro '{distro}' registered because the post-install distro list did not complete");
+                preserveOwnershipMarker = true;
             }
 
             canDeleteInstallPath = false;
@@ -338,7 +337,7 @@ public sealed class CreateWslInstanceStep : SetupStep
                     $"could not confirm whether distro '{distro}' is still registered: {FirstNonEmpty(list.Stderr, list.Stdout)}");
             }
 
-            if (installPathExists)
+            if (installPathExists && !preserveOwnershipMarker)
             {
                 cleanupErrors.Add(
                     $"skipped deleting app-owned install path '{installPath}' until distro '{distro}' is confirmed unregistered");
@@ -353,10 +352,14 @@ public sealed class CreateWslInstanceStep : SetupStep
 
         if (cleanupErrors.Count == 0)
         {
-            ManagedDistroOwnership.DeleteMarker(
-                ctx.LocalDataDir,
-                distro,
-                installPath);
+            if (!preserveOwnershipMarker)
+            {
+                ManagedDistroOwnership.DeleteMarker(
+                    ctx.LocalDataDir,
+                    distro,
+                    installPath);
+            }
+
             return "";
         }
 
