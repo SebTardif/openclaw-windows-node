@@ -14,6 +14,21 @@ public sealed partial class GatewayFixtureProtocolTests
 {
     private static readonly TimeSpan Deadline = TimeSpan.FromSeconds(20);
 
+    [Fact]
+    public async Task Browse_AdvertisesReadOnlyEmptyQuestionsForStartup()
+    {
+        var token = CreateToken();
+        await using var server = await FixtureGatewayServer.StartAsync(GatewayScenario.CreateBrowse(), token);
+        await using var connected = await ConnectedClient.OpenAsync(server, token);
+
+        var result = await connected.Client.ListQuestionsAsync();
+        Assert.True(result.IsSupported);
+        Assert.Empty(result.Questions);
+        Assert.Contains("question.list", connected.Client.AdvertisedServerMethods);
+        Assert.DoesNotContain("question.resolve", connected.Client.AdvertisedServerMethods);
+        Assert.Empty(server.UnexpectedRequests);
+    }
+
     [Theory]
     [InlineData(false)]
     [InlineData(true)]

@@ -98,6 +98,10 @@ Opt into the existing fixture UI lane and screenshot flag for native captures.
 This is automatic native-test evidence, not Computer Use observation or proof of
 real provider, pairing, or node invocation.
 
+Browse-based scenarios advertise and answer the startup `question.list` read
+with an empty synthetic `questions` array. Question mutations remain confined
+to the opt-in interactive scenario.
+
 The host is `tests\OpenClaw.GatewayFixtureHost`, a plain .NET console app, not a
 test container. The request-driven server and scenario live in
 `tests\OpenClaw.TestSupport\Gateway`. Repeated reads and different request
