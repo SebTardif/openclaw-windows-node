@@ -27,6 +27,9 @@ public sealed class GatewayFixtureRun : IAsyncDisposable
     private readonly string? _postSetupLaunch;
 
     public FixtureGatewayServer Gateway { get; }
+    public FixtureGatewayServer? SecondaryGateway { get; private set; }
+    public string? SecondaryGatewayId { get; private set; }
+    private string? _secondaryScenarioSha256;
     public GatewayFixtureProfile Profile { get; }
     public McpClient Client => _client ?? throw new InvalidOperationException("Fixture MCP is not ready.");
     public string ArtifactsDirectory { get; }
@@ -64,7 +67,8 @@ public sealed class GatewayFixtureRun : IAsyncDisposable
         bool foreignBrowserControl = false,
         bool allowSessionMutations = false,
         GatewayScenario? scenario = null,
-        Func<GatewayFixtureProfile, string>? prepareSetupHandoff = null)
+        Func<GatewayFixtureProfile, string>? prepareSetupHandoff = null,
+        GatewayScenario? secondaryScenario = null)
     {
         if (!OperatingSystem.IsWindows())
             throw new PlatformNotSupportedException("The fixture app requires a Windows desktop.");
@@ -73,14 +77,26 @@ public sealed class GatewayFixtureRun : IAsyncDisposable
         scenario ??= GatewayScenario.CreateBrowse(allowAgentCreation, requireAgentSelection, allowSessionMutations);
         var (gateway, control, foreign, foreignPort, foreignCountFile) = await StartGatewayAsync(
             token, scenario, enableNodeBrowserProxy, foreignBrowserControl, cancellationToken);
-        GatewayFixtureProfile profile;
+        GatewayFixtureProfile? profile = null;
+        FixtureGatewayServer? secondaryGateway = null;
+        string? secondaryGatewayId = null;
         try
         {
             profile = new GatewayFixtureProfile(gateway.Endpoint, token, enableNodeBrowserProxy);
+            if (secondaryScenario is not null)
+            {
+                secondaryGateway = await FixtureGatewayServer.StartAsync(secondaryScenario, token);
+                secondaryGatewayId = profile.AddGateway(secondaryGateway.Endpoint, token, "Fixture Usage B");
+            }
         }
         catch
         {
-            await DisposeGatewayResourcesAsync(gateway, control, foreign, foreignCountFile);
+            try
+            {
+                try { if (secondaryGateway is not null) await secondaryGateway.DisposeAsync(); }
+                finally { await DisposeGatewayResourcesAsync(gateway, control, foreign, foreignCountFile); }
+            }
+            finally { profile?.Dispose(); }
             throw;
         }
         GatewayFixtureRun run;
@@ -92,14 +108,18 @@ public sealed class GatewayFixtureRun : IAsyncDisposable
                 _control = control,
                 _foreignControl = foreign,
                 _foreignControlPort = foreignPort,
-                ForeignControlCountFile = foreignCountFile
+                ForeignControlCountFile = foreignCountFile,
+                SecondaryGateway = secondaryGateway,
+                SecondaryGatewayId = secondaryGatewayId,
+                _secondaryScenarioSha256 = secondaryScenario?.Sha256
             };
         }
         catch
         {
             try
             {
-                await DisposeGatewayResourcesAsync(gateway, control, foreign, foreignCountFile);
+                try { if (secondaryGateway is not null) await secondaryGateway.DisposeAsync(); }
+                finally { await DisposeGatewayResourcesAsync(gateway, control, foreign, foreignCountFile); }
             }
             finally { profile.Dispose(); }
             throw;
@@ -307,6 +327,9 @@ public sealed class GatewayFixtureRun : IAsyncDisposable
             architecture = RuntimeInformation.ProcessArchitecture.ToString(),
             runtimeConfiguration = JsonSerializer.Deserialize<JsonElement>(runtimeConfig),
             gatewayEndpoint = Gateway.Endpoint.AbsoluteUri,
+            secondaryGatewayEndpoint = SecondaryGateway?.Endpoint.AbsoluteUri,
+            secondaryGatewayId = SecondaryGatewayId,
+            secondaryScenarioSha256 = _secondaryScenarioSha256,
             mcpEndpoint = $"http://127.0.0.1:{McpPort}/",
             appProcessId = _process?.Id,
             appProcessStartUtc = _process?.StartTime.ToUniversalTime(),
@@ -333,6 +356,13 @@ public sealed class GatewayFixtureRun : IAsyncDisposable
             Gateway.Requests.Select(request => Redact(JsonSerializer.Serialize(request))));
         await File.WriteAllLinesAsync(Path.Combine(ArtifactsDirectory, "gateway-events.jsonl"),
             Gateway.Events.Select(item => JsonSerializer.Serialize(item)));
+        if (SecondaryGateway is { } secondary)
+        {
+            await File.WriteAllLinesAsync(Path.Combine(ArtifactsDirectory, "gateway-b-requests.jsonl"),
+                secondary.Requests.Select(request => Redact(JsonSerializer.Serialize(request))));
+            await File.WriteAllLinesAsync(Path.Combine(ArtifactsDirectory, "gateway-b-events.jsonl"),
+                secondary.Events.Select(item => JsonSerializer.Serialize(item)));
+        }
         foreach (var file in new[] { "crash.log", "openclaw-tray.log" })
         {
             var source = Path.Combine(Profile.DataDirectory, file);
@@ -521,7 +551,8 @@ public sealed class GatewayFixtureRun : IAsyncDisposable
         {
             try
             {
-                await DisposeGatewayResourcesAsync(Gateway, _control, _foreignControl, ForeignControlCountFile);
+                try { if (SecondaryGateway is not null) await SecondaryGateway.DisposeAsync(); }
+                finally { await DisposeGatewayResourcesAsync(Gateway, _control, _foreignControl, ForeignControlCountFile); }
             }
             finally { Profile.Dispose(); }
         }

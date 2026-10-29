@@ -76,6 +76,28 @@ request sequence. Use it to verify that Usage keeps cached seven-day totals
 truthful, unlocks period selection when a later response mismatches, and
 displays thirty-day totals only after the user selects that period.
 
+For gateway ownership proof, use `-Scenario usage-period-switch`. It registers
+two synthetic loopback Gateways in the same disposable profile. The initial
+Gateway A returns seven days and `$7.00`. Switch to **Fixture Usage B** through
+Connection settings, then return to Usage. B initially returns thirty days and
+`$300.00`, including for seven-day requests: Usage must show the requested-range
+warning, not A's totals, keep 7 Days selected, and finish loading. Selecting
+30 Days explicitly shows `$300.00`. Returning to 7 Days or reopening Usage must
+not resurrect A's cache. Enter `seven` in the fixture host console to enable B's
+seven-day `$70.00` response, then select 30 Days followed by 7 Days. B's timestamp
+is one day older than A's, so the matching result must still apply after the
+gateway ownership reset. The control changes only synthetic server responses,
+not application state. `stop`, Ctrl+C, or the duration bound disposes both
+servers and the isolated profile. Reports retain both endpoints and separate
+`gateway-b-requests.jsonl` / `gateway-b-events.jsonl` logs.
+
+The existing native `GatewayFixtureUiTests` owner also covers this sequence in
+`UsagePeriodSwitch_ClearsPreviousGatewayAndAcceptsOlderMatchingSnapshot`. It
+uses the mounted Connection action and Usage selector, not a production bypass.
+Opt into the existing fixture UI lane and screenshot flag for native captures.
+This is automatic native-test evidence, not Computer Use observation or proof of
+real provider, pairing, or node invocation.
+
 The host is `tests\OpenClaw.GatewayFixtureHost`, a plain .NET console app, not a
 test container. The request-driven server and scenario live in
 `tests\OpenClaw.TestSupport\Gateway`. Repeated reads and different request

@@ -14,7 +14,7 @@ internal static class Program
             return await ListenForControlAsync(int.Parse(args[1]), args[2]);
         if (args.Length == 0 || args.Contains("--help"))
         {
-            Console.WriteLine("Usage: dotnet OpenClaw.GatewayFixtureHost.dll --app <built-app.exe> [--scenario multi-session-browse|chat-interactive|context-usage-snapshots|usage-period-legacy] [--interaction <name>] [--artifacts <directory>] [--duration-seconds <1..86400>] [--browser-proxy] [--browser-proxy-foreign]");
+            Console.WriteLine("Usage: dotnet OpenClaw.GatewayFixtureHost.dll --app <built-app.exe> [--scenario multi-session-browse|chat-interactive|context-usage-snapshots|usage-period-legacy|usage-period-switch] [--interaction <name>] [--artifacts <directory>] [--duration-seconds <1..86400>] [--browser-proxy] [--browser-proxy-foreign]");
             Console.WriteLine("Starts a synthetic Gateway and an isolated real app. Ctrl+C stops only this run.");
             return args.Length == 0 ? 2 : 0;
         }
@@ -60,7 +60,7 @@ internal static class Program
             Console.Error.WriteLine("--app is required. The installed app is never selected implicitly.");
             return 2;
         }
-        if (scenarioName is not (GatewayScenario.BrowseName or GatewayScenario.InteractiveName or ContextUsageFixture.Name or UsagePeriodFixture.Name))
+        if (scenarioName is not (GatewayScenario.BrowseName or GatewayScenario.InteractiveName or ContextUsageFixture.Name or UsagePeriodFixture.Name or UsagePeriodFixture.SwitchName))
         {
             Console.Error.WriteLine("Unknown fixture scenario.");
             return 2;
@@ -71,7 +71,14 @@ internal static class Program
         try
         {
             var usage = scenarioName == ContextUsageFixture.Name ? new ContextUsageFixture() : null;
-            var usagePeriod = scenarioName == UsagePeriodFixture.Name ? new UsagePeriodFixture() : null;
+            var usagePeriod = scenarioName switch
+            {
+                UsagePeriodFixture.Name => new UsagePeriodFixture(),
+                UsagePeriodFixture.SwitchName => new UsagePeriodFixture(UsagePeriodFixture.GatewayMode.A),
+                _ => null
+            };
+            var usageB = scenarioName == UsagePeriodFixture.SwitchName
+                ? new UsagePeriodFixture(UsagePeriodFixture.GatewayMode.B) : null;
             var scenario = usage is not null
                 ? GatewayScenario.CreateContextUsage(usage)
                 : usagePeriod is not null
@@ -83,11 +90,18 @@ internal static class Program
                 appPath, artifacts, stop.Token,
                 enableNodeBrowserProxy: enableNodeBrowserProxy,
                 foreignBrowserControl: foreignBrowserControl,
-                scenario: scenario);
+                scenario: scenario,
+                secondaryScenario: usageB is null ? null : GatewayScenario.CreateUsagePeriod(usageB));
             if (interaction is not null) run.Gateway.Interactive!.Playback.Select(interaction);
             await run.InvokeAsync("app.navigate", new { page = "chat" });
             Console.WriteLine($"Fixture ready. App PID: {run.AppProcessId}");
             Console.WriteLine($"Gateway: {run.Gateway.Endpoint}");
+            if (run.SecondaryGateway is { } secondary)
+            {
+                Console.WriteLine($"Gateway B: {secondary.Endpoint} (Connection settings: Fixture Usage B)");
+                Console.WriteLine("A returns seven days/$7. B initially returns thirty days/$300, even for seven-day requests.");
+                Console.WriteLine("Switch through Connection settings. Enter 'seven' here to enable B's older seven-day/$70 response, then select 30 Days followed by 7 Days. 'stop' ends this run.");
+            }
             if (run.BrowserControlPort is { } controlPort)
                 Console.WriteLine($"Browser control: http://127.0.0.1:{controlPort}/ owner={(run.ForeignControlCountFile is null ? "parent" : "child")}");
             if (run.ForeignControlCountFile is { } countFile)
@@ -110,6 +124,8 @@ internal static class Program
                 Console.WriteLine("After those replies, enter host console commands: missing-total, lower800, lower600, delayed1200. 'stop' ends this run.");
                 controls = Task.Run(() => ReadUsageControlsAsync(run, usage, stop));
             }
+            if (usageB is not null)
+                controls = Task.Run(() => ReadUsagePeriodControlsAsync(usageB, stop));
             if (durationSeconds is { } seconds)
                 stop.CancelAfter(TimeSpan.FromSeconds(seconds));
             try
@@ -233,6 +249,26 @@ internal static class Program
                 usage.SelectListing(listing.Value);
                 await run.Gateway.NotifySessionsChangedAsync(stop.Token);
                 Console.WriteLine($"Requested {ContextUsageFixture.Title(listing.Value)}.");
+            }
+        }
+        catch (OperationCanceledException) when (stop.IsCancellationRequested) { }
+    }
+
+    private static async Task ReadUsagePeriodControlsAsync(UsagePeriodFixture usage,
+        CancellationTokenSource stop)
+    {
+        try
+        {
+            while (!stop.IsCancellationRequested &&
+                await Console.In.ReadLineAsync(stop.Token) is { } command)
+            {
+                if (command == "stop") { stop.Cancel(); return; }
+                if (command == "seven")
+                {
+                    usage.EnableMatchingSevenDays();
+                    Console.WriteLine("B now returns seven days/$70 for seven-day requests. No app state was changed.");
+                }
+                else Console.WriteLine("Unknown fixture control. Use 'seven' or 'stop'.");
             }
         }
         catch (OperationCanceledException) when (stop.IsCancellationRequested) { }

@@ -64,7 +64,7 @@ public sealed partial class GatewayScenario
     private int _chatSendCount;
     private readonly UsagePeriodFixture? _usagePeriod;
 
-    public string Name => _contextUsage is not null ? ContextUsageFixture.Name : _usagePeriod is not null ? UsagePeriodFixture.Name : IsInteractive ? InteractiveName : _cronJobs is not null ? "cron-editing" : _setup is not null ? "native-setup" : _allowChatSend ? "chat-send" : _allowSessionMutations ? "session-mutations" : _allowAgentCreation ? "agent-creation"
+    public string Name => _contextUsage is not null ? ContextUsageFixture.Name : _usagePeriod is not null ? _usagePeriod.ScenarioName : IsInteractive ? InteractiveName : _cronJobs is not null ? "cron-editing" : _setup is not null ? "native-setup" : _allowChatSend ? "chat-send" : _allowSessionMutations ? "session-mutations" : _allowAgentCreation ? "agent-creation"
         : ContainsSession(VoiceSessionKey) ? "fractional-voice-history" : BrowseName;
     public int Version => _allowChatSend ? 2 : 1;
     public int ProtocolVersion => GatewayProtocolContract.CurrentVersion;
@@ -104,6 +104,7 @@ public sealed partial class GatewayScenario
         var source = JsonSerializer.Serialize(new
         {
             Name, Version, ProtocolVersion, ContractProvenance, publishedModelCatalog,
+            usagePeriodMode = usagePeriod?.Mode.ToString(),
             sessions = sessions.Select(s => new { s.Row, s.Messages }), reads, cronJobs
         });
         Sha256 = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(source))).ToLowerInvariant();
@@ -627,7 +628,7 @@ public sealed partial class GatewayScenario
         ValidateProperties(p, "days");
         var days = PositiveInt(p, "days", 30);
         if (_usagePeriod is not null)
-            return _usagePeriod.Cost();
+            return _usagePeriod.Cost(days);
         return new
         {
             updatedAt = Epoch.ToUnixTimeMilliseconds(), days, daily = Array.Empty<object>(),

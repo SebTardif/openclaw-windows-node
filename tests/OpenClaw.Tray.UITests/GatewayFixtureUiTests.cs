@@ -639,7 +639,7 @@ public sealed partial class GatewayFixtureUiTests(ITestOutputHelper output)
 
     private async Task WithAppAsync(Func<GatewayFixtureRun, Task> test, bool allowAgentCreation = false,
         bool requireAgentSelection = false, bool allowSessionMutations = false, GatewayScenario? scenario = null,
-        Func<GatewayFixtureProfile, string>? prepareSetupHandoff = null)
+        Func<GatewayFixtureProfile, string>? prepareSetupHandoff = null, GatewayScenario? secondaryScenario = null)
     {
         var appPath = Environment.GetEnvironmentVariable("OPENCLAW_GATEWAY_FIXTURE_APP")
             ?? throw new InvalidOperationException("Set OPENCLAW_GATEWAY_FIXTURE_APP to the freshly built app. No installed-app fallback is allowed.");
@@ -647,7 +647,7 @@ public sealed partial class GatewayFixtureUiTests(ITestOutputHelper output)
             Environment.GetEnvironmentVariable("OPENCLAW_GATEWAY_FIXTURE_ARTIFACTS"),
             allowAgentCreation: allowAgentCreation, requireAgentSelection: requireAgentSelection,
             allowSessionMutations: allowSessionMutations,
-            scenario: scenario, prepareSetupHandoff: prepareSetupHandoff);
+            scenario: scenario, prepareSetupHandoff: prepareSetupHandoff, secondaryScenario: secondaryScenario);
         output.WriteLine($"Fixture run {run.Profile.RunId}, PID {run.AppProcessId}, artifacts: {run.ArtifactsDirectory}");
         try
         {
@@ -656,6 +656,7 @@ public sealed partial class GatewayFixtureUiTests(ITestOutputHelper output)
             await Task.Run(() => test(run)).WaitAsync(TimeSpan.FromSeconds(150)).ConfigureAwait(false);
             run.EnsureRunning();
             Assert.Empty(run.Gateway.UnexpectedRequests);
+            if (run.SecondaryGateway is { } secondary) Assert.Empty(secondary.UnexpectedRequests);
             var crashLog = Path.Combine(run.Profile.DataDirectory, "crash.log");
             Assert.False(File.Exists(crashLog) && new FileInfo(crashLog).Length > 0, "The real app wrote a crash log.");
             await run.WriteReportAsync("passed");
@@ -815,12 +816,14 @@ public sealed partial class GatewayFixtureUiTests(ITestOutputHelper output)
         }, description);
     }
 
-    private static Task CaptureIfRequestedAsync(GatewayFixtureRun run, string name)
+    private static Task CaptureIfRequestedAsync(GatewayFixtureRun run, string name,
+        params AutomationElement[] assertedElements)
     {
         if (Environment.GetEnvironmentVariable("OPENCLAW_GATEWAY_FIXTURE_SCREENSHOTS") != "1")
             return Task.CompletedTask;
         OwnedWindowCapture.Save(run, AppWindows(run).OrderByDescending(window =>
-            window.Current.BoundingRectangle.Width * window.Current.BoundingRectangle.Height).First(), name);
+            window.Current.BoundingRectangle.Width * window.Current.BoundingRectangle.Height).First(), name,
+            assertedElements);
         return Task.CompletedTask;
     }
 }

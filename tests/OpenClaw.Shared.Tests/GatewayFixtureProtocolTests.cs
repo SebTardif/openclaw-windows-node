@@ -512,6 +512,37 @@ public sealed partial class GatewayFixtureProtocolTests
     }
 
     [Fact]
+    public async Task UsagePeriodSwitch_SeparateGatewaysReturnMismatchThenOlderMatchingSnapshot()
+    {
+        var token = CreateToken();
+        var second = new UsagePeriodFixture(UsagePeriodFixture.GatewayMode.B);
+        await using var a = await FixtureGatewayServer.StartAsync(
+            GatewayScenario.CreateUsagePeriod(new UsagePeriodFixture(UsagePeriodFixture.GatewayMode.A)), token);
+        await using var b = await FixtureGatewayServer.StartAsync(GatewayScenario.CreateUsagePeriod(second), token);
+        await using var firstClient = await ConnectedClient.OpenAsync(a, token);
+        await using var secondClient = await ConnectedClient.OpenAsync(b, token);
+
+        var seed = await firstClient.Client.SendWizardRequestAsync("usage.cost", new { days = 7 });
+        Assert.Equal(7, seed.GetProperty("days").GetInt32());
+        Assert.Equal(7, seed.GetProperty("totals").GetProperty("totalCost").GetDouble());
+
+        var mismatch = await secondClient.Client.SendWizardRequestAsync("usage.cost", new { days = 7 });
+        Assert.Equal(30, mismatch.GetProperty("days").GetInt32());
+        Assert.Equal(300, mismatch.GetProperty("totals").GetProperty("totalCost").GetDouble());
+        var selected = await secondClient.Client.SendWizardRequestAsync("usage.cost", new { days = 30 });
+        Assert.Equal(30, selected.GetProperty("days").GetInt32());
+        Assert.Equal(300, selected.GetProperty("totals").GetProperty("totalCost").GetDouble());
+
+        second.EnableMatchingSevenDays();
+        var matching = await secondClient.Client.SendWizardRequestAsync("usage.cost", new { days = 7 });
+        Assert.Equal(7, matching.GetProperty("days").GetInt32());
+        Assert.Equal(70, matching.GetProperty("totals").GetProperty("totalCost").GetDouble());
+        Assert.True(matching.GetProperty("updatedAt").GetInt64() < seed.GetProperty("updatedAt").GetInt64());
+        var unchanged = await firstClient.Client.SendWizardRequestAsync("usage.cost", new { days = 7 });
+        Assert.Equal(7, unchanged.GetProperty("totals").GetProperty("totalCost").GetDouble());
+    }
+
+    [Fact]
     public async Task RealClient_SupportingReadsUseTypedModelsAndConsistentConfiguration()
     {
         var token = CreateToken();
