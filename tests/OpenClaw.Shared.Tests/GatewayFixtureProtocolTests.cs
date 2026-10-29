@@ -32,6 +32,52 @@ public sealed partial class GatewayFixtureProtocolTests
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
+    public async Task ReadOnlyScenarios_ReturnEmptyChannelAndScopedSkillStatus(bool nativeSetup)
+    {
+        var scenario = nativeSetup
+            ? GatewayScenario.CreateNativeSetup((method, _) =>
+                throw new InvalidOperationException($"Unexpected setup operation: {method}"))
+            : GatewayScenario.CreateBrowse();
+        var token = CreateToken();
+        await using var server = await FixtureGatewayServer.StartAsync(scenario, token);
+        await using var connected = await ConnectedClient.OpenAsync(server, token);
+        var channels = await connected.Client.GetChannelsStatusAsync();
+        Assert.NotNull(channels);
+        Assert.Empty(channels.Channels);
+        Assert.Empty(channels.ChannelOrder);
+        foreach (var agent in new[] { "main", "research" })
+        {
+            var skills = await connected.Client.SendWizardRequestAsync("skills.status", new { agentId = agent });
+            Assert.Empty(skills.GetProperty("skills").EnumerateArray());
+        }
+        Assert.Empty(server.UnexpectedRequests);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ReadOnlyScenarios_ListEmptyQuestionsThroughRealClient(bool nativeSetup)
+    {
+        var scenario = nativeSetup
+            ? GatewayScenario.CreateNativeSetup((method, _) =>
+                throw new InvalidOperationException($"Unexpected setup operation: {method}"))
+            : GatewayScenario.CreateBrowse();
+        var token = CreateToken();
+        await using var server = await FixtureGatewayServer.StartAsync(scenario, token);
+        await using var connected = await ConnectedClient.OpenAsync(server, token);
+        var result = await connected.Client.ListQuestionsAsync().WaitAsync(Deadline);
+        Assert.True(result.IsSupported);
+        Assert.Empty(result.Questions);
+        Assert.DoesNotContain("question.resolve", scenario.ReadMethods);
+        var error = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            connected.Client.SendWizardRequestAsync("question.list", new { unexpected = true }));
+        Assert.Contains("Unsupported fixture request parameter", error.Message);
+        Assert.Empty(server.UnexpectedRequests);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
     public async Task SessionCreation_IsOptInResponseBoundAndPreservesParent(bool allow)
     {
         var token = CreateToken();
@@ -706,6 +752,11 @@ public sealed partial class GatewayFixtureProtocolTests
     [InlineData("usage.cost", """{"days":"seven"}""", "positive integer")]
     [InlineData("projects.list", """{"unexpected":true}""", "Unsupported fixture request parameter")]
     [InlineData("environments.list", """{"unexpected":true}""", "Unsupported fixture request parameter")]
+    [InlineData("channels.status", """{"probe":"yes"}""", "must be a boolean")]
+    [InlineData("channels.status", """{"timeoutMs":-1}""", "positive integer")]
+    [InlineData("channels.status", """{"unexpected":true}""", "Unsupported fixture request parameter")]
+    [InlineData("skills.status", """{"agentId":"unknown"}""", "Unknown fixture agentId")]
+    [InlineData("skills.status", """{"unexpected":true}""", "Unsupported fixture request parameter")]
     public async Task RealClient_InvalidOrUnknownParametersFailExplicitly(string method, string json, string message)
     {
         var token = CreateToken();
@@ -729,6 +780,7 @@ public sealed partial class GatewayFixtureProtocolTests
     [InlineData("config.apply")]
     [InlineData("node.invoke")]
     [InlineData("projects.add")]
+    [InlineData("skills.install")]
     public async Task RealClient_WritesAreRejectedWithoutChangingScenario(string method)
     {
         var token = CreateToken();

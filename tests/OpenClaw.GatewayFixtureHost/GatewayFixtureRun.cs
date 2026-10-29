@@ -25,6 +25,7 @@ public sealed class GatewayFixtureRun : IAsyncDisposable
     private JsonElement? _lastStatus;
     private readonly GatewayScenario _scenario;
     private readonly string? _postSetupLaunch;
+    private readonly bool _postSetupRestart;
 
     public FixtureGatewayServer Gateway { get; }
     public FixtureGatewayServer? SecondaryGateway { get; private set; }
@@ -50,7 +51,7 @@ public sealed class GatewayFixtureRun : IAsyncDisposable
     }
 
     private GatewayFixtureRun(FixtureGatewayServer gateway, GatewayFixtureProfile profile, string token, string appPath,
-        string? artifactRoot, GatewayScenario scenario, string? postSetupLaunch)
+        string? artifactRoot, GatewayScenario scenario, string? postSetupLaunch, bool postSetupRestart)
     {
         Gateway = gateway;
         Profile = profile;
@@ -58,6 +59,7 @@ public sealed class GatewayFixtureRun : IAsyncDisposable
         _appPath = appPath;
         _scenario = scenario;
         _postSetupLaunch = postSetupLaunch;
+        _postSetupRestart = postSetupRestart;
         ArtifactsDirectory = Path.Combine(
             Path.GetFullPath(artifactRoot ?? Path.Combine(Path.GetTempPath(), "openclaw-gateway-fixture-artifacts")),
             profile.RunId);
@@ -75,6 +77,8 @@ public sealed class GatewayFixtureRun : IAsyncDisposable
         bool allowSessionMutations = false,
         GatewayScenario? scenario = null,
         Func<GatewayFixtureProfile, string>? prepareSetupHandoff = null,
+        bool postSetupRestart = false,
+        Action? releasePendingResponses = null,
         GatewayScenario? secondaryScenario = null)
     {
         if (!OperatingSystem.IsWindows())
@@ -110,7 +114,7 @@ public sealed class GatewayFixtureRun : IAsyncDisposable
         try
         {
             var handoff = prepareSetupHandoff?.Invoke(profile);
-            run = new GatewayFixtureRun(gateway, profile, token, executable, artifactRoot, scenario, handoff)
+            run = new GatewayFixtureRun(gateway, profile, token, executable, artifactRoot, scenario, handoff, postSetupRestart)
             {
                 _control = control,
                 _foreignControl = foreign,
@@ -139,6 +143,7 @@ public sealed class GatewayFixtureRun : IAsyncDisposable
         }
         catch (Exception ex)
         {
+            releasePendingResponses?.Invoke();
             try { await run.WriteReportAsync("startup-failed", ex); }
             finally { await run.DisposeAsync(); }
             throw;
@@ -150,7 +155,7 @@ public sealed class GatewayFixtureRun : IAsyncDisposable
         for (var attempt = 0; attempt < 3; attempt++)
         {
             McpPort = FindFreePort();
-            _process = Process.Start(Profile.CreateStartInfo(_appPath, McpPort, _postSetupLaunch))
+            _process = Process.Start(Profile.CreateStartInfo(_appPath, McpPort, _postSetupLaunch, _postSetupRestart))
                 ?? throw new InvalidOperationException("Failed to start the fixture app.");
             await WriteReportAsync("starting");
             try
