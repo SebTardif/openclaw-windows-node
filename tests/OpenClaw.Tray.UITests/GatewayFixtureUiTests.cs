@@ -821,9 +821,13 @@ public sealed partial class GatewayFixtureUiTests(ITestOutputHelper output)
     {
         if (Environment.GetEnvironmentVariable("OPENCLAW_GATEWAY_FIXTURE_SCREENSHOTS") != "1")
             return Task.CompletedTask;
-        OwnedWindowCapture.Save(run, AppWindows(run).OrderByDescending(window =>
-            window.Current.BoundingRectangle.Width * window.Current.BoundingRectangle.Height).First(), name,
-            assertedElements);
+        var windows = AppWindows(run);
+        var owner = assertedElements.Length == 0
+            ? windows.OrderByDescending(window =>
+                window.Current.BoundingRectangle.Width * window.Current.BoundingRectangle.Height).First()
+            : windows.First(window => window.FindAll(TreeScope.Descendants, Condition.TrueCondition)
+                .Cast<AutomationElement>().Any(element => Automation.Compare(element, assertedElements[0])));
+        OwnedWindowCapture.Save(run, owner, name, assertedElements);
         return Task.CompletedTask;
     }
 }
