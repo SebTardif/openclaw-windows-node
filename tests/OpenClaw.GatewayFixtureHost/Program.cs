@@ -14,7 +14,7 @@ internal static class Program
             return await ListenForControlAsync(int.Parse(args[1]), args[2]);
         if (args.Length == 0 || args.Contains("--help"))
         {
-            Console.WriteLine("Usage: dotnet OpenClaw.GatewayFixtureHost.dll --app <built-app.exe> [--scenario multi-session-browse|chat-interactive|context-usage-snapshots] [--interaction <name>] [--artifacts <directory>] [--duration-seconds <1..86400>] [--browser-proxy] [--browser-proxy-foreign]");
+            Console.WriteLine("Usage: dotnet OpenClaw.GatewayFixtureHost.dll --app <built-app.exe> [--scenario multi-session-browse|chat-interactive|context-usage-snapshots|usage-period-legacy] [--interaction <name>] [--artifacts <directory>] [--duration-seconds <1..86400>] [--browser-proxy] [--browser-proxy-foreign]");
             Console.WriteLine("Starts a synthetic Gateway and an isolated real app. Ctrl+C stops only this run.");
             return args.Length == 0 ? 2 : 0;
         }
@@ -60,7 +60,7 @@ internal static class Program
             Console.Error.WriteLine("--app is required. The installed app is never selected implicitly.");
             return 2;
         }
-        if (scenarioName is not (GatewayScenario.BrowseName or GatewayScenario.InteractiveName or ContextUsageFixture.Name))
+        if (scenarioName is not (GatewayScenario.BrowseName or GatewayScenario.InteractiveName or ContextUsageFixture.Name or UsagePeriodFixture.Name))
         {
             Console.Error.WriteLine("Unknown fixture scenario.");
             return 2;
@@ -71,7 +71,12 @@ internal static class Program
         try
         {
             var usage = scenarioName == ContextUsageFixture.Name ? new ContextUsageFixture() : null;
-            var scenario = usage is null ? GatewayScenario.LoadBuiltin(scenarioName) : GatewayScenario.CreateContextUsage(usage);
+            var usagePeriod = scenarioName == UsagePeriodFixture.Name ? new UsagePeriodFixture() : null;
+            var scenario = usage is not null
+                ? GatewayScenario.CreateContextUsage(usage)
+                : usagePeriod is not null
+                    ? GatewayScenario.CreateUsagePeriod(usagePeriod)
+                    : GatewayScenario.LoadBuiltin(scenarioName);
             if (interaction is not null && (!scenario.IsInteractive || !FixturePlayback.Scenarios.Contains(interaction)))
                 throw new ArgumentException("--interaction requires chat-interactive and a supported interaction name.");
             await using var run = await GatewayFixtureRun.StartAsync(
@@ -93,8 +98,10 @@ internal static class Program
             Console.WriteLine(scenario.IsInteractive
                 ? "Synthetic interactive Gateway. No provider or host command executes. Type help for fixture controls."
                 : usage is null
-                    ? "Synthetic read-only Gateway. Use Chat, Sessions, Settings and Configuration. Ctrl+C stops this run."
-                : $"Synthetic usage scenario. Select '{ContextUsageFixture.Title(ContextUsageListing.Initial)}' under Fixture Main.");
+                    ? usagePeriod is null
+                        ? "Synthetic read-only Gateway. Use Chat, Sessions, Settings and Configuration. Ctrl+C stops this run."
+                        : "Synthetic legacy usage-period scenario. Open Usage to see the cached seven-day total and range recovery."
+                    : $"Synthetic usage scenario. Select '{ContextUsageFixture.Title(ContextUsageListing.Initial)}' under Fixture Main.");
             var input = new StringBuilder();
             Task? controls = null;
             if (usage is not null)

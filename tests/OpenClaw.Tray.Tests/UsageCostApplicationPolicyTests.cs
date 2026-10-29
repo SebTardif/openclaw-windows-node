@@ -42,38 +42,22 @@ public sealed class UsageCostApplicationPolicyTests
     }
 
     [Fact]
-    public void RangeWarning_StaysUpWhenProviderStatusArrivesAfterTheCost()
-    {
-        var warning = new UsageRangeWarning();
-        warning.Show();
-        Assert.False(warning.ProviderStatusMayCloseTheBar());
-    }
-
-    [Fact]
-    public void RangeWarning_LetsProviderStatusCloseTheBarBeforeTheCostArrives()
-    {
-        var warning = new UsageRangeWarning();
-        Assert.True(warning.ProviderStatusMayCloseTheBar());
-        warning.Show();
-        Assert.True(warning.IsVisible);
-    }
-
-    [Fact]
-    public void RangeWarning_ClearLetsTheNextProviderStatusCloseTheBar()
-    {
-        var warning = new UsageRangeWarning();
-        warning.Show();
-        warning.Clear();
-        Assert.False(warning.IsVisible);
-        Assert.True(warning.ProviderStatusMayCloseTheBar());
-    }
-
-    [Fact]
     public void Decide_IgnoresALaterMismatchedResponse()
     {
         Assert.Equal(
             UsageCostApplicationPolicy.Decision.Ignore,
             UsageCostApplicationPolicy.Decide(responseDays: 30, selectedPeriodDays: 7, hasLoaded: true));
+    }
+
+    [Fact]
+    public void Decide_AppliesTheGatewayRangeAfterTheUserSelectsIt()
+    {
+        Assert.Equal(
+            UsageCostApplicationPolicy.Decision.StopForUnsupportedRange,
+            UsageCostApplicationPolicy.Decide(responseDays: 30, selectedPeriodDays: 7, hasLoaded: false));
+        Assert.Equal(
+            UsageCostApplicationPolicy.Decision.Apply,
+            UsageCostApplicationPolicy.Decide(responseDays: 30, selectedPeriodDays: 30, hasLoaded: false));
     }
 
     [Fact]
@@ -89,17 +73,30 @@ public sealed class UsageCostApplicationPolicyTests
         Assert.DoesNotContain("RequestUsageAsync(", refresh, StringComparison.Ordinal);
         Assert.Contains("RequestUsageCostAsync(_currentPeriodDays)", refresh, StringComparison.Ordinal);
         Assert.DoesNotContain("SyncSelectorToServerDays", source, StringComparison.Ordinal);
+        Assert.Contains(
+            "_appState?.UsageCost != null && ShouldApplyUsageCost(_appState.UsageCost)",
+            source,
+            StringComparison.Ordinal);
         var statusStart = source.IndexOf("public void UpdateUsageStatus(", StringComparison.Ordinal);
         var statusEnd = source.IndexOf("private void OnPeriodSelectionChanged", statusStart, StringComparison.Ordinal);
         Assert.True(statusStart >= 0 && statusEnd > statusStart);
         var status = source[statusStart..statusEnd];
-        Assert.Contains("_rangeWarning.ProviderStatusMayCloseTheBar()", status, StringComparison.Ordinal);
+        Assert.Contains("if (!_isUnsupportedRangeWarningVisible)", status, StringComparison.Ordinal);
         var costStart = source.IndexOf("public void UpdateUsageCost(", StringComparison.Ordinal);
-        var costEnd = source.IndexOf("private bool ShouldApplyUsageCost(", costStart, StringComparison.Ordinal);
+        var costEnd = source.IndexOf("public void UpdateUsageStatus(", costStart, StringComparison.Ordinal);
         Assert.True(costStart >= 0 && costEnd > costStart);
         var cost = source[costStart..costEnd];
         Assert.Contains("Decide(cost.Days, _currentPeriodDays, _hasMatchingUsageCost)", cost, StringComparison.Ordinal);
+        Assert.Contains("_isUnsupportedRangeWarningVisible = true", cost, StringComparison.Ordinal);
+        Assert.Contains("_dailyCostLoading.Complete(_dailyCostLoading.ItemCount)", cost, StringComparison.Ordinal);
         Assert.DoesNotContain("_dailyCostLoading.HasLoaded", cost, StringComparison.Ordinal);
         Assert.Contains("_hasMatchingUsageCost = false", source, StringComparison.Ordinal);
+        var recoveryStart = source.IndexOf("private void RecoverConnectedClient(", StringComparison.Ordinal);
+        var recoveryEnd = source.IndexOf("private void RequestRefresh(", recoveryStart, StringComparison.Ordinal);
+        Assert.True(recoveryStart >= 0 && recoveryEnd > recoveryStart);
+        Assert.DoesNotContain(
+            "_hasMatchingUsageCost = false",
+            source[recoveryStart..recoveryEnd],
+            StringComparison.Ordinal);
     }
 }

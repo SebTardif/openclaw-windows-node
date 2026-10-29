@@ -21,7 +21,7 @@ public sealed partial class UsagePage : Page
     private int _currentPeriodDays = 7;
     private readonly AsyncListLoadingState _providerLoading = new();
     private readonly AsyncListLoadingState _dailyCostLoading = new();
-    private readonly UsageRangeWarning _rangeWarning = new();
+    private bool _isUnsupportedRangeWarningVisible;
     private bool _hasMatchingUsageCost;
     private DateTime _lastAppliedUsageCostUpdatedAtUtc = DateTime.MinValue;
 
@@ -153,8 +153,7 @@ public sealed partial class UsagePage : Page
 
     private void RecoverConnectedClient(IOperatorGatewayClient client)
     {
-        _rangeWarning.Clear();
-        _hasMatchingUsageCost = false;
+        _isUnsupportedRangeWarningVisible = false;
         ConnectionInfoBar.IsOpen = false;
         if (!_dailyCostLoading.HasLoaded) _dailyCostLoading.BeginInitialRefresh();
         else _dailyCostLoading.BeginRefresh();
@@ -207,6 +206,8 @@ public sealed partial class UsagePage : Page
         switch (UsageCostApplicationPolicy.Decide(cost.Days, _currentPeriodDays, _hasMatchingUsageCost))
         {
             case UsageCostApplicationPolicy.Decision.Ignore:
+                _dailyCostLoading.Complete(_dailyCostLoading.ItemCount);
+                UpdateDailyCostLoadingVisuals();
                 return;
             case UsageCostApplicationPolicy.Decision.StopForUnsupportedRange:
                 StopForUnsupportedRange(cost);
@@ -215,7 +216,7 @@ public sealed partial class UsagePage : Page
 
         _lastAppliedUsageCostUpdatedAtUtc = cost.UpdatedAt;
         _hasMatchingUsageCost = true;
-        _rangeWarning.Clear();
+        _isUnsupportedRangeWarningVisible = false;
         ConnectionInfoBar.IsOpen = false;
         TotalCostText.Text = $"${cost.Totals.TotalCost:F2}";
         TokenCountText.Text = FormatLargeNumber(cost.Totals.TotalTokens);
@@ -238,7 +239,7 @@ public sealed partial class UsagePage : Page
     {
         _lastAppliedUsageCostUpdatedAtUtc = cost.UpdatedAt;
         _hasMatchingUsageCost = false;
-        _rangeWarning.Show();
+        _isUnsupportedRangeWarningVisible = true;
         ConnectionInfoBar.Title = LocalizationHelper.GetString("UsagePage_UnsupportedRange.Title");
         ConnectionInfoBar.Message = string.Format(
             LocalizationHelper.GetString("UsagePage_UnsupportedRange.Message"),
@@ -251,7 +252,7 @@ public sealed partial class UsagePage : Page
 
     public void UpdateUsageStatus(GatewayUsageStatusInfo status)
     {
-        if (_rangeWarning.ProviderStatusMayCloseTheBar())
+        if (!_isUnsupportedRangeWarningVisible)
             ConnectionInfoBar.IsOpen = false;
         ProviderCountText.Text = status.Providers.Count.ToString();
         ProviderListView.ItemsSource = status.Providers.Select(p => new ProviderRow
@@ -277,7 +278,7 @@ public sealed partial class UsagePage : Page
         if (days == _currentPeriodDays) return;
         _currentPeriodDays = days;
         _lastAppliedUsageCostUpdatedAtUtc = DateTime.MinValue;
-        _rangeWarning.Clear();
+        _isUnsupportedRangeWarningVisible = false;
         _hasMatchingUsageCost = false;
         ConnectionInfoBar.IsOpen = false;
         DailyListView.ItemsSource = null;
@@ -323,7 +324,7 @@ public sealed partial class UsagePage : Page
 
     private void ShowDisconnected()
     {
-        _rangeWarning.Clear();
+        _isUnsupportedRangeWarningVisible = false;
         ConnectionInfoBar.Title = LocalizationHelper.GetString("UsagePage_GatewayDisconnected.Title");
         ConnectionInfoBar.Message = LocalizationHelper.GetString("UsagePage_GatewayDisconnected.Message");
         ConnectionInfoBar.Severity = InfoBarSeverity.Warning;

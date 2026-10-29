@@ -476,6 +476,42 @@ public sealed partial class GatewayFixtureProtocolTests
     }
 
     [Fact]
+    public async Task UsagePeriodLegacyScenario_PreservesMatchingCacheAndReturnsMismatchedThenSupportedTotals()
+    {
+        var token = CreateToken();
+        await using var server = await FixtureGatewayServer.StartAsync(
+            GatewayScenario.CreateUsagePeriod(new UsagePeriodFixture()), token);
+        using var identity = CreateIdentity();
+        using var client = new OpenClawGatewayClient(
+            server.Endpoint.AbsoluteUri, token, NullLogger.Instance, identityPath: identity.Path,
+            ignoreStoredDeviceToken: true, persistHandshakeDeviceTokens: false);
+        var costs = System.Threading.Channels.Channel.CreateUnbounded<GatewayCostUsageInfo>();
+        client.UsageCostUpdated += (_, cost) => costs.Writer.TryWrite(cost);
+        try
+        {
+            await client.ConnectAsync();
+            using var deadline = new CancellationTokenSource(Deadline);
+            var cached = await costs.Reader.ReadAsync(deadline.Token);
+            Assert.Equal(7, cached.Days);
+            Assert.Equal(7, cached.Totals.TotalCost);
+
+            await client.RequestUsageCostAsync(7);
+            var mismatched = await costs.Reader.ReadAsync(deadline.Token);
+            Assert.Equal(30, mismatched.Days);
+            Assert.Equal(30, mismatched.Totals.TotalCost);
+
+            await client.RequestUsageCostAsync(30);
+            var selected = await costs.Reader.ReadAsync(deadline.Token);
+            Assert.Equal(30, selected.Days);
+            Assert.Equal(30, selected.Totals.TotalCost);
+        }
+        finally
+        {
+            await client.DisconnectAsync();
+        }
+    }
+
+    [Fact]
     public async Task RealClient_SupportingReadsUseTypedModelsAndConsistentConfiguration()
     {
         var token = CreateToken();

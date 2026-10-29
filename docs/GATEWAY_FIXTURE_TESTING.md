@@ -5,7 +5,7 @@ E2E. It runs the real Windows app, Gateway client, chat provider, history loader
 and native UI against a deterministic loopback WebSocket server. There is no AI,
 WSL Gateway, provider account, real pairing, or live-network fallback.
 
-The same `multi-session-browse` scenario powers interactive exploration and
+The `multi-session-browse` scenario powers interactive exploration and
 automated tests. Its five sessions include an empty conversation, distinct
 session identities and titles, and 240 mixed-height messages with an explicit
 final-message marker. Supporting model, agent, health, usage and configuration
@@ -67,6 +67,13 @@ and delayed completion on Notifications. A newer page navigation fences the
 pending selection: returning Home retains the original conversation, while the
 created session remains available for explicit sidebar selection. No provider, transcript file, or real
 Gateway is involved; other mutations and unsupported creation parameters still fail.
+
+The opt-in `usage-period-legacy` scenario returns a matching seven-day cache
+for the Gateway's first cost request, then simulates an older Gateway that
+returns thirty-day totals regardless of the requested period. Use it to verify
+that Usage keeps the seven-day cache truthful, unlocks period selection when a
+later response mismatches, and displays the thirty-day totals only after
+selecting that period.
 
 The host is `tests\OpenClaw.GatewayFixtureHost`, a plain .NET console app, not a
 test container. The request-driven server and scenario live in

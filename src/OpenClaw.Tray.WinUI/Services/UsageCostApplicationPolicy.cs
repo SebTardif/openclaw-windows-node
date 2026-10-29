@@ -30,18 +30,3 @@ internal static class UsageCostApplicationPolicy
         return hasLoaded ? Decision.Ignore : Decision.StopForUnsupportedRange;
     }
 }
-
-/// <summary>
-/// The unsupported-range warning outlives a provider-status payload.
-/// Status often arrives on its own schedule and must not hide that warning.
-/// </summary>
-internal sealed class UsageRangeWarning
-{
-    public bool IsVisible { get; private set; }
-
-    public void Show() => IsVisible = true;
-
-    public void Clear() => IsVisible = false;
-
-    public bool ProviderStatusMayCloseTheBar() => !IsVisible;
-}
