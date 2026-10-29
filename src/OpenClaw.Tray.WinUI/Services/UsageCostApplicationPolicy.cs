@@ -6,6 +6,7 @@ internal static class UsageCostApplicationPolicy
     {
         Apply,
         Ignore,
+        IgnoreStale,
         StopForUnsupportedRange,
     }
 
@@ -28,5 +29,21 @@ internal static class UsageCostApplicationPolicy
         // The first completed response may be the only range an older gateway
         // returns. Stop loading and leave the selected period in place.
         return hasLoaded ? Decision.Ignore : Decision.StopForUnsupportedRange;
+    }
+
+    public static Decision Decide(
+        int responseDays,
+        int selectedPeriodDays,
+        bool hasLoaded,
+        DateTime updatedAt,
+        DateTime lastAppliedUpdatedAt)
+    {
+        var rangeDecision = Decide(responseDays, selectedPeriodDays, hasLoaded);
+        if (rangeDecision != Decision.Apply)
+            return rangeDecision;
+
+        return updatedAt < lastAppliedUpdatedAt
+            ? Decision.IgnoreStale
+            : Decision.Apply;
     }
 }

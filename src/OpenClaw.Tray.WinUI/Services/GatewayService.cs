@@ -357,7 +357,7 @@ internal sealed class GatewayService
                 details: $"{usageCost.Totals.TotalTokens:N0} tokens");
         }
 
-        EnqueueModelUpdate(() => _state.UsageCost = usageCost);
+        EnqueueModelUpdate(() => _state.UpdateUsageCost(usageCost));
     }
 
     internal void OnGatewaySelfUpdated(object? sender, GatewaySelfInfo gatewaySelf)

@@ -476,7 +476,7 @@ public sealed partial class GatewayFixtureProtocolTests
     }
 
     [Fact]
-    public async Task UsagePeriodLegacyScenario_PreservesMatchingCacheAndReturnsMismatchedThenSupportedTotals()
+    public async Task UsagePeriodLegacyScenario_ReturnsSeedThenMismatchedAndSupportedTotals()
     {
         var token = CreateToken();
         await using var server = await FixtureGatewayServer.StartAsync(

@@ -68,12 +68,13 @@ pending selection: returning Home retains the original conversation, while the
 created session remains available for explicit sidebar selection. No provider, transcript file, or real
 Gateway is involved; other mutations and unsupported creation parameters still fail.
 
-The opt-in `usage-period-legacy` scenario returns a matching seven-day cache
-for the Gateway's first cost request, then simulates an older Gateway that
-returns thirty-day totals regardless of the requested period. Use it to verify
-that Usage keeps the seven-day cache truthful, unlocks period selection when a
-later response mismatches, and displays the thirty-day totals only after
-selecting that period.
+The opt-in `usage-period-legacy` scenario returns a synthetic seven-day seed on
+the first cost response, then returns thirty-day totals for every later request.
+The seed deliberately lets the UI exercise a matching cache followed by a
+mismatched range; it is not a faithful simulation of every legacy Gateway
+request sequence. Use it to verify that Usage keeps cached seven-day totals
+truthful, unlocks period selection when a later response mismatches, and
+displays thirty-day totals only after the user selects that period.
 
 The host is `tests\OpenClaw.GatewayFixtureHost`, a plain .NET console app, not a
 test container. The request-driven server and scenario live in

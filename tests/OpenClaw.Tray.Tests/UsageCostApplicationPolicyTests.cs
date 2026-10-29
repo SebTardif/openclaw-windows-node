@@ -61,6 +61,55 @@ public sealed class UsageCostApplicationPolicyTests
     }
 
     [Fact]
+    public void Decide_AppliesOlderMatchingRangeAfterNewerUnsupportedRange()
+    {
+        var lastApplied = DateTime.MinValue;
+
+        Assert.Equal(
+            UsageCostApplicationPolicy.Decision.StopForUnsupportedRange,
+            UsageCostApplicationPolicy.Decide(
+                responseDays: 30,
+                selectedPeriodDays: 7,
+                hasLoaded: false,
+                updatedAt: new DateTime(2026, 1, 21),
+                lastAppliedUpdatedAt: lastApplied));
+        Assert.Equal(
+            UsageCostApplicationPolicy.Decision.Apply,
+            UsageCostApplicationPolicy.Decide(
+                responseDays: 7,
+                selectedPeriodDays: 7,
+                hasLoaded: false,
+                updatedAt: new DateTime(2026, 1, 20),
+                lastAppliedUpdatedAt: lastApplied));
+    }
+
+    [Fact]
+    public void Decide_CompletesRefreshForOlderMismatchedRangeAfterMatchingCache()
+    {
+        Assert.Equal(
+            UsageCostApplicationPolicy.Decision.Ignore,
+            UsageCostApplicationPolicy.Decide(
+                responseDays: 30,
+                selectedPeriodDays: 7,
+                hasLoaded: true,
+                updatedAt: new DateTime(2026, 1, 19),
+                lastAppliedUpdatedAt: new DateTime(2026, 1, 20)));
+    }
+
+    [Fact]
+    public void Decide_IgnoresOlderMatchingRangeWithoutCompletingRefresh()
+    {
+        Assert.Equal(
+            UsageCostApplicationPolicy.Decision.IgnoreStale,
+            UsageCostApplicationPolicy.Decide(
+                responseDays: 7,
+                selectedPeriodDays: 7,
+                hasLoaded: true,
+                updatedAt: new DateTime(2026, 1, 19),
+                lastAppliedUpdatedAt: new DateTime(2026, 1, 20)));
+    }
+
+    [Fact]
     public void UsagePage_DoesNotRequestFixed30DayCostOrMoveTheSelector()
     {
         var source = File.ReadAllText(Path.Combine(
@@ -73,10 +122,10 @@ public sealed class UsageCostApplicationPolicyTests
         Assert.DoesNotContain("RequestUsageAsync(", refresh, StringComparison.Ordinal);
         Assert.Contains("RequestUsageCostAsync(_currentPeriodDays)", refresh, StringComparison.Ordinal);
         Assert.DoesNotContain("SyncSelectorToServerDays", source, StringComparison.Ordinal);
-        Assert.Contains(
-            "_appState?.UsageCost != null && ShouldApplyUsageCost(_appState.UsageCost)",
-            source,
-            StringComparison.Ordinal);
+        Assert.Contains("_appState?.UsageCost is { } latestCost", source, StringComparison.Ordinal);
+        Assert.Contains("ShouldApplyUsageCost(latestCost)", source, StringComparison.Ordinal);
+        Assert.Contains("_appState?.GetUsageCostForPeriod(_currentPeriodDays)", source, StringComparison.Ordinal);
+        Assert.Contains("_appState?.GetUsageCostForPeriod(days)", source, StringComparison.Ordinal);
         var statusStart = source.IndexOf("public void UpdateUsageStatus(", StringComparison.Ordinal);
         var statusEnd = source.IndexOf("private void OnPeriodSelectionChanged", statusStart, StringComparison.Ordinal);
         Assert.True(statusStart >= 0 && statusEnd > statusStart);
@@ -86,11 +135,25 @@ public sealed class UsageCostApplicationPolicyTests
         var costEnd = source.IndexOf("public void UpdateUsageStatus(", costStart, StringComparison.Ordinal);
         Assert.True(costStart >= 0 && costEnd > costStart);
         var cost = source[costStart..costEnd];
-        Assert.Contains("Decide(cost.Days, _currentPeriodDays, _hasMatchingUsageCost)", cost, StringComparison.Ordinal);
+        Assert.Contains("cost.UpdatedAt", cost, StringComparison.Ordinal);
+        Assert.Contains("_lastAppliedUsageCostUpdatedAtUtc", cost, StringComparison.Ordinal);
         Assert.Contains("_isUnsupportedRangeWarningVisible = true", cost, StringComparison.Ordinal);
+        Assert.Contains("OpenConnectionButton.Visibility = Visibility.Collapsed", cost, StringComparison.Ordinal);
         Assert.Contains("_dailyCostLoading.Complete(_dailyCostLoading.ItemCount)", cost, StringComparison.Ordinal);
-        Assert.DoesNotContain("_dailyCostLoading.HasLoaded", cost, StringComparison.Ordinal);
+        Assert.Contains("Decision.IgnoreStale", cost, StringComparison.Ordinal);
         Assert.Contains("_hasMatchingUsageCost = false", source, StringComparison.Ordinal);
+        Assert.Contains(
+            "bool showEmpty = !_isUnsupportedRangeWarningVisible",
+            source,
+            StringComparison.Ordinal);
+        var unsupportedStart = source.IndexOf("private void StopForUnsupportedRange(", StringComparison.Ordinal);
+        var unsupportedEnd = source.IndexOf("public void UpdateUsageStatus(", unsupportedStart, StringComparison.Ordinal);
+        Assert.True(unsupportedStart >= 0 && unsupportedEnd > unsupportedStart);
+        Assert.DoesNotContain(
+            "_lastAppliedUsageCostUpdatedAtUtc",
+            source[unsupportedStart..unsupportedEnd],
+            StringComparison.Ordinal);
+        Assert.Contains("OpenConnectionButton.Visibility = Visibility.Visible", source, StringComparison.Ordinal);
         var recoveryStart = source.IndexOf("private void RecoverConnectedClient(", StringComparison.Ordinal);
         var recoveryEnd = source.IndexOf("private void RequestRefresh(", recoveryStart, StringComparison.Ordinal);
         Assert.True(recoveryStart >= 0 && recoveryEnd > recoveryStart);

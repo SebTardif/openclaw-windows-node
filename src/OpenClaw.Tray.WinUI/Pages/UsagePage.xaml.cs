@@ -76,9 +76,16 @@ public sealed partial class UsagePage : Page
         // Only apply cached cost data when its period matches the current
         // selection — otherwise the daily list briefly shows e.g. 30-day
         // data while the selector reads "7 Days".
-        if (_appState?.UsageCost != null && ShouldApplyUsageCost(_appState.UsageCost))
+        var cachedCost = _appState?.GetUsageCostForPeriod(_currentPeriodDays);
+        if (cachedCost == null &&
+            _appState?.UsageCost is { } latestCost &&
+            ShouldApplyUsageCost(latestCost))
         {
-            UpdateUsageCost(_appState.UsageCost);
+            cachedCost = latestCost;
+        }
+        if (cachedCost != null)
+        {
+            UpdateUsageCost(cachedCost);
             _dailyCostLoading.BeginRefresh();
         }
         else
@@ -200,12 +207,15 @@ public sealed partial class UsagePage : Page
 
     public void UpdateUsageCost(GatewayCostUsageInfo cost)
     {
-        if (cost.UpdatedAt < _lastAppliedUsageCostUpdatedAtUtc)
-            return;
-
-        switch (UsageCostApplicationPolicy.Decide(cost.Days, _currentPeriodDays, _hasMatchingUsageCost))
+        switch (UsageCostApplicationPolicy.Decide(
+            cost.Days,
+            _currentPeriodDays,
+            _hasMatchingUsageCost,
+            cost.UpdatedAt,
+            _lastAppliedUsageCostUpdatedAtUtc))
         {
             case UsageCostApplicationPolicy.Decision.Ignore:
+            case UsageCostApplicationPolicy.Decision.IgnoreStale:
                 _dailyCostLoading.Complete(_dailyCostLoading.ItemCount);
                 UpdateDailyCostLoadingVisuals();
                 return;
@@ -237,9 +247,9 @@ public sealed partial class UsagePage : Page
 
     private void StopForUnsupportedRange(GatewayCostUsageInfo cost)
     {
-        _lastAppliedUsageCostUpdatedAtUtc = cost.UpdatedAt;
         _hasMatchingUsageCost = false;
         _isUnsupportedRangeWarningVisible = true;
+        OpenConnectionButton.Visibility = Visibility.Collapsed;
         ConnectionInfoBar.Title = LocalizationHelper.GetString("UsagePage_UnsupportedRange.Title");
         ConnectionInfoBar.Message = string.Format(
             LocalizationHelper.GetString("UsagePage_UnsupportedRange.Message"),
@@ -284,7 +294,22 @@ public sealed partial class UsagePage : Page
         DailyListView.ItemsSource = null;
         TotalCostText.Text = "—";
         TokenCountText.Text = "—";
-        _dailyCostLoading.BeginInitialRefresh();
+        var cachedCost = _appState?.GetUsageCostForPeriod(days);
+        if (cachedCost == null &&
+            _appState?.UsageCost is { } latestCost &&
+            ShouldApplyUsageCost(latestCost))
+        {
+            cachedCost = latestCost;
+        }
+        if (cachedCost != null)
+        {
+            UpdateUsageCost(cachedCost);
+            _dailyCostLoading.BeginRefresh();
+        }
+        else
+        {
+            _dailyCostLoading.BeginInitialRefresh();
+        }
         UpdateDailyCostLoadingVisuals();
 
         var client = CurrentApp.GatewayClient;
@@ -309,7 +334,9 @@ public sealed partial class UsagePage : Page
         // message in that case so the page never looks frozen.
         bool failed = !_dailyCostLoading.IsRefreshing && !_dailyCostLoading.HasLoaded;
         DailyEmptyText.Text = failed ? DisconnectedListMessage : DailyEmptyMessage;
-        DailyEmptyText.Visibility = (_dailyCostLoading.ShouldShowEmpty || failed) ? Visibility.Visible : Visibility.Collapsed;
+        bool showEmpty = !_isUnsupportedRangeWarningVisible
+            && (_dailyCostLoading.ShouldShowEmpty || failed);
+        DailyEmptyText.Visibility = showEmpty ? Visibility.Visible : Visibility.Collapsed;
         PeriodSelector.IsEnabled = _dailyCostLoading.CanEdit;
     }
 
@@ -325,6 +352,7 @@ public sealed partial class UsagePage : Page
     private void ShowDisconnected()
     {
         _isUnsupportedRangeWarningVisible = false;
+        OpenConnectionButton.Visibility = Visibility.Visible;
         ConnectionInfoBar.Title = LocalizationHelper.GetString("UsagePage_GatewayDisconnected.Title");
         ConnectionInfoBar.Message = LocalizationHelper.GetString("UsagePage_GatewayDisconnected.Message");
         ConnectionInfoBar.Severity = InfoBarSeverity.Warning;

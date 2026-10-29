@@ -1,8 +1,8 @@
 namespace OpenClaw.TestSupport.Gateway;
 
 /// <summary>
-/// Returns a seven-day cached snapshot for the Gateway's initial request, then
-/// simulates a legacy Gateway that always returns thirty-day totals.
+/// Returns a synthetic seven-day seed on the first cost response, then
+/// returns thirty-day totals for every later request.
 /// </summary>
 public sealed class UsagePeriodFixture
 {
