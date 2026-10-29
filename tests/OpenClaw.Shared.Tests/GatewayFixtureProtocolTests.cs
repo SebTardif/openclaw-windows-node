@@ -530,25 +530,29 @@ public sealed partial class GatewayFixtureProtocolTests
     public async Task UsagePeriodGate_HoldsCostsWithoutBlockingOtherReads()
     {
         var token = CreateToken();
+        var fixture = new UsagePeriodFixture(UsagePeriodFixture.GatewayMode.B);
         await using var server = await FixtureGatewayServer.StartAsync(
-            GatewayScenario.CreateUsagePeriod(new UsagePeriodFixture(UsagePeriodFixture.GatewayMode.B)), token);
-        server.HoldUsageCosts();
+            GatewayScenario.CreateUsagePeriod(fixture), token);
+        server.HoldUsageCosts(7);
         await using var connected = await ConnectedClient.OpenAsync(server, token);
         var response = connected.Client.SendWizardRequestAsync("usage.cost", new { days = 7 });
         try
         {
             await server.WaitForRequestAsync("usage.cost");
             await connected.Client.SendWizardRequestAsync("health", new { }).WaitAsync(Deadline);
+            var thirtyDays = await connected.Client.SendWizardRequestAsync("usage.cost", new { days = 30 }).WaitAsync(Deadline);
+            Assert.Equal(30, thirtyDays.GetProperty("days").GetInt32());
+            Assert.Equal(300, thirtyDays.GetProperty("totals").GetProperty("totalCost").GetDouble());
             Assert.False(response.IsCompleted);
-            Assert.DoesNotContain(server.Requests, request => request.Method == "usage.cost" && request.Outcome == "ok");
+            fixture.EnableMatchingSevenDays();
         }
         finally
         {
-            server.ReleaseUsageCosts();
+            server.ReleaseUsageCosts(7);
         }
         var cost = await response.WaitAsync(Deadline);
-        Assert.Equal(30, cost.GetProperty("days").GetInt32());
-        Assert.Equal(300, cost.GetProperty("totals").GetProperty("totalCost").GetDouble());
+        Assert.Equal(7, cost.GetProperty("days").GetInt32());
+        Assert.Equal(70, cost.GetProperty("totals").GetProperty("totalCost").GetDouble());
         Assert.Empty(server.UnexpectedRequests);
     }
 

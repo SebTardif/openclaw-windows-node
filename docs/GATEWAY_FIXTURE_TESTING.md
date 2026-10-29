@@ -103,7 +103,9 @@ keeps Usage mounted while the supported `app.connection.connectSharedToken`
 command connects to synthetic B through the real connection manager. A server-side
 cost-response gate proves A's total clears before B supplies any costs. UI Automation
 retains the same `TotalCostText` identity through the mismatch warning and older
-matching B response, separately covering the page-local display and timestamp reset.
+matching B response, without changing the selected period. Separate range gates
+release the thirty-day mismatch before the delayed seven-day response, covering
+the page-local display and timestamp reset without a selector change resetting it.
 
 Browse-based scenarios advertise and answer the startup `question.list` read
 with an empty synthetic `questions` array. Question mutations remain confined
