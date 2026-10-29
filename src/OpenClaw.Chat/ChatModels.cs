@@ -162,6 +162,7 @@ public record ChatTimelineItem(
     string? ToolRunId = null,
     long ToolLegacyTurn = 0,
     ChatToolErrorTextQuality ToolErrorTextQuality = ChatToolErrorTextQuality.Unspecified,
+    int ToolProgressSequence = 0,
     bool IsBackgroundFinal = false);
 
 public readonly record struct ChatToolCorrelationKey(
@@ -188,7 +189,11 @@ public record ChatTimelineState(
     System.Collections.Immutable.ImmutableDictionary<ChatToolCorrelationKey, long>? TerminalToolCorrelations = null,
     long NextToolOutcomeSequence = 1,
     long NextToolCorrelationSequence = 1,
-    long ToolLegacyTurn = 1)
+    long ToolLegacyTurn = 1,
+    DateTimeOffset? TurnStartedAt = null,
+    DateTimeOffset? TurnEndedAt = null,
+    string? ProgressText = null,
+    ChatRunUsage? RunUsage = null)
 {
     public static ChatTimelineState Initial() => new(
         System.Collections.Immutable.ImmutableList<ChatTimelineItem>.Empty,
@@ -199,6 +204,8 @@ public record ChatTimelineState(
         PendingToolOutcomes: System.Collections.Immutable.ImmutableDictionary<ChatToolCorrelationKey, ChatPendingToolOutcome>.Empty,
         TerminalToolCorrelations: System.Collections.Immutable.ImmutableDictionary<ChatToolCorrelationKey, long>.Empty);
 }
+
+public sealed record ChatRunUsage(string RunId, long? OutputTokens = null, int Sequence = 0);
 
 public record ChatPendingToolPresentation(
     string ToolName,
@@ -232,7 +239,9 @@ public record ChatHistoryPage(ChatEvent[] Events, int NextSince, int PrevBefore,
 
 public abstract record ChatEvent;
 public record ChatUserMessageEvent(string Text, string? Nonce = null) : ChatEvent;
-public record ChatThinkingEvent(string Text) : ChatEvent;
+public record ChatThinkingEvent(string Text, string? RunId = null) : ChatEvent;
+public record ChatProgressEvent(string Text) : ChatEvent;
+public record ChatRunUsageEvent(string RunId, long OutputTokens, int Sequence) : ChatEvent;
 public record ChatReasoningEvent(string Text) : ChatEvent;
 public record ChatReasoningDeltaEvent(string Text) : ChatEvent;
 /// <summary>
@@ -266,6 +275,12 @@ public record ChatToolOutputEvent(
     string Text,
     string? ToolCallId = null,
     string? RunId = null) : ChatEvent;
+public record ChatToolProgressEvent(
+    string Text,
+    string? ToolCallId,
+    string? RunId,
+    int Sequence = 0,
+    bool Append = false) : ChatEvent;
 public record ChatToolErrorEvent(
     string Text,
     string? ToolCallId = null,
@@ -279,23 +294,6 @@ public record ChatRestoredEvent(string Text) : ChatEvent;
 public record ChatPermissionRequestEvent(string RequestId, string PermissionKind, string ToolName, string Detail, IReadOnlyList<string>? Actions = null) : ChatEvent;
 public record ChatModelChangedEvent(string Model) : ChatEvent;
 public record ChatRawEvent(string EventType, string? Text = null) : ChatEvent;
-
-public enum ChatWelcomeContentStatus
-{
-    Loading,
-    Available,
-    Unsupported,
-    Failed
-}
-
-public sealed record ChatWelcomeContent(
-    ChatWelcomeContentStatus Status,
-    ChatWelcomeCatalog? Catalog = null)
-{
-    public static ChatWelcomeContent Loading { get; } = new(ChatWelcomeContentStatus.Loading);
-    public static ChatWelcomeContent Unsupported { get; } = new(ChatWelcomeContentStatus.Unsupported);
-    public static ChatWelcomeContent Failed { get; } = new(ChatWelcomeContentStatus.Failed);
-}
 
 /// <remarks>
 /// <see cref="CurrentHistoryThreads"/> contains session keys whose history is authoritative for the current connection.
@@ -314,7 +312,6 @@ public record ChatDataSnapshot(
     IReadOnlyDictionary<string, long>? TimelineGenerations = null,
     IReadOnlyDictionary<string, long>? HistoryRevisions = null,
     IReadOnlyDictionary<string, IReadOnlyList<ChatQueuedMessage>>? QueuedMessagesByThread = null,
-    ChatWelcomeContent? WelcomeContent = null,
     IReadOnlySet<string>? CurrentHistoryThreads = null);
 
 /// <summary>

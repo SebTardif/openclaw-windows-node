@@ -53,11 +53,36 @@ Use `.\scripts\test-gateway-fixture.ps1 -AppPath '<built-app.exe>'` for the
 opt-in real-app lane. It rejects skipped or zero-test runs and preserves
 per-run artifacts. Existing MCP-only integration defaults remain unchanged.
 
+### Cross-repository candidate compatibility
+
+The reusable [`release-candidate-e2e.yml`](../.github/workflows/release-candidate-e2e.yml)
+workflow tests one exact OpenClaw package against an independently identified
+Windows app. `windows_node_workflow_sha` pins both the workflow and the maintained
+setup/test harness. `windows_node_source_sha` identifies only the app under test:
+a verified published ZIP/MSIX in release mode, or a separately checked-out and
+built Tray in main mode. Fixing the harness does not rebuild historical releases.
+
+The fixture installs the candidate (including exact beta/alpha versions), waits
+for operator/node readiness, and runs
+`FullSetup_SafeNodeInvocation_RoutesThroughRealGateway` to invoke `system.which`
+through the real Gateway. Current-feature capability inventories and recovery
+scenarios remain in ordinary product E2E, not historical-app compatibility.
+
+Success requires an executed, passing test. Only an opted-in lane may accept
+`PROTOCOL_MISMATCH`: the initial fixture must observe the exact structured app
+error, write its receipt, and fail the selected test with the dedicated exception.
+Skipped tests, setup timeouts, unrelated failures, and run-level errors fail the
+lane. [`Resolve-ReleaseCandidateE2EOutcome.ps1`](../scripts/Resolve-ReleaseCandidateE2EOutcome.ps1)
+owns result admission; its executable regression cases run in fast-validation CI.
+Evidence names include the app source kind and release tag or source SHA so
+stable, prerelease, and main invocations can upload in the same caller run.
+
 ### OpenClaw.Shared.Tests
 
 - **Command output-drain timing** - The unsupported-Windows runner fixture gates launcher release, then requires completion within three seconds of root exit while a descendant retains stdout, stderr, or both. Ten repetitions per case check short output and PID/start-time-bound child cleanup. The nonparallel `MxcOwnership` collection isolates these wall-clock budgets from unrelated tests. Native SDK finalization has separate managed ownership tests and opt-in runtime proof.
+- **Fixture process identity** - MXC pipe-fixture metadata, cleanup ownership checks, and the opt-in native MXC descendant-identity check query the observed full executable image through a retained process handle, not the loader's nullable `MainModule` or a requested launch path. `ProcessImagePathTests` checks a real, never-resumed Windows process with no initialized loader view, a different command-line image name, caller-handle lifetime, and explicit native query failure. This deterministically covers unavailable loader metadata; it does not reproduce the timing of a normally scheduled child or prove native MXC containment.
 - **Model and display formatting** - activity glyphs, app version display, session labels, gateway usage/node display, channel status, and rich text helpers.
-- **Gateway and WebSocket behavior** - gateway client parsing, session keys, WebSocket base handling, URL normalization, local gateway classification, and token sanitization. The signing-identity regression covers native and managed loopback WebSockets, with the fixture completing the close handshake and bounding disconnect waits.
+- **Gateway and WebSocket behavior** - gateway client parsing, session keys, WebSocket base handling, URL normalization, local gateway classification, and token sanitization. The signing-identity regression covers native and managed loopback WebSockets with a bounded client-initiated disconnect and a queued health request. The fixture drains application frames already in flight until the client's close frame, replies, and closes its transport under one deadline rather than relying on the client's EOF fallback timer. A separate fixture regression checks the close frame and actual TCP EOF on both transports, including fragmented text and binary data queued before close.
 - **Capabilities and MCP** - app/canvas/screen/camera/system capabilities, MCP auth token reset, MCP HTTP server, MCP tool bridge, MXC availability, MXC policy building, and command runners.
 - **Exec approval** - legacy policy coverage plus V2 evaluator, input validation, normalization, prompt adapter, routing, coordinator, store, environment sanitizing, and shell-wrapper parsing.
 - **A2UI and web bridge** - A2UI capability security, asset hash pinning, web bridge message handling, and channel payload/status tests.
@@ -147,6 +172,41 @@ Capacity-dependent Windows validation is named in
 [`PROOF_POOLS.md`](./PROOF_POOLS.md). Pull requests declare the exact pool IDs
 they need. A declaration does not claim that the pool ran, and unavailable
 proof must remain reported as blocked.
+
+### Choose the local execution target
+
+Choose by the behavior under test, not merely a name containing `Mxc`.
+This is testing guidance, not automatic CI migration, host reservation or a new
+scheduler. Keep mandatory code-change closeout and every applicable proof pool.
+
+| Behavior to prove | Default target and boundary |
+|---|---|
+| Build, unit/component logic, pure MXC policy and mocked capabilities | Task-owned host worktree with isolated test settings; no VM needed solely because the code concerns MXC |
+| App layout, navigation, chat/history and fixture-covered client behavior | [Isolated app with the deterministic fixture Gateway](GATEWAY_FIXTURE_TESTING.md); cheapest app-only default, not real pairing, node invocation or MXC proof |
+| Isolated test builds needing a real native Gateway, including single-instance and multi-instance E2E | [Task-owned builds with named side-by-side development patches](../.agents/skills/native-gateway-from-source/SKILL.md#prepare-an-isolated-test-build) on one authorized, capable Windows 11 client host with Developer Mode; separate packages/sessions/profiles/ports, not one Hyper-V VM per Gateway |
+| Integration with an existing Gateway | Explicitly operator-approved endpoint and operations, with a task-owned app profile; discovery is not permission to reconfigure, restart or use a shared runtime |
+| Clean-machine/image, signed-package install/upgrade, genuine OS isolation or unavailable host capabilities | Separate reusable local or approved cloud Windows client VM; development patches do not prove signed Store/MSIX lifecycle |
+| Required WSL Gateway or MXC `system.run` path | Existing real WSL suite, including `.\scripts\validate-mxc-e2e.ps1` where required, on an authorized capable host/VM; native patch startup does not replace it |
+
+The named-patch default also applies when selecting future cloud native-Gateway
+E2E targets, after actual Windows client/session/listener capabilities are
+qualified. Do not assume `windows-latest` or Windows Server is MXC-ready or
+claim the cloud lane ran. Unsupported or skipped proof remains blocked.
+
+For real native Gateway tests, build Companion in the task-owned worktree and
+prepare the Gateway with an explicit unique `-Patch` and task-owned `-WorkRoot`.
+Launch that binary with `OPENCLAW_NATIVE_GATEWAY_DEV_PATCH` and separate app
+data. `run-app-local.ps1 -Isolated` alone isolates only the app profile; it does
+not allocate a unique Gateway and can reuse the shared `npm-latest` slot.
+Keep fixture-only app tests on the cheaper synthetic path.
+
+Serialize deployment/cache mutation and initial port selection/startup, then
+allow independent already-prepared instances to serve concurrent tests within
+host capacity. Package separation does not remove CPU/RAM costs, isolate the OS,
+or grant concurrent desktop-input ownership. Use unique task-owned names, explicit
+Companion patch selection, distinct app data/endpoints and ownership-checked
+cleanup as described in the canonical skill. Never stop another task's runtime
+or copy the user's profile/credentials to make a test pass.
 
 ### Explain the validation plan
 
@@ -293,6 +353,13 @@ The WSL E2E fixture installs npm `latest` by default.
 package test. Running the packaging repository's pinned npm version in WSL does
 not prove Microsoft Store acquisition, package identity, MXC session setup, or
 the packaged Gateway lifecycle.
+
+Both E2E tray fixtures read `gateways.json` through `GatewayRegistryFile`, which
+joins the production `PersistenceFileLease` before opening the file. This keeps
+fixture reads out of an in-flight atomic replacement without retrying IO or
+hiding malformed JSON. The fixture-free `SetupAndConnectTestsRegistryReads`
+regressions cover writer/reader ordering, concurrent saves and error propagation;
+they do not replace the real WSL Gateway setup/connect proofs.
 
 Actual package E2E needs a disposable Windows account/host with a successful
 MXC session capability probe and a verified installable MSIX from

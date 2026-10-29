@@ -19,6 +19,9 @@ public interface IChatGatewayBridge : IDisposable
     IChatPlacementGateway? PlacementGateway => null;
     SessionInfo[] GetSessionList();
     ModelsListInfo? GetCurrentModelsList();
+    bool SupportsSessionScopedModelCatalog => false;
+    Task<ModelsListInfo?> RequestSessionModelsListAsync(string sessionKey) =>
+        Task.FromResult<ModelsListInfo?>(null);
 
     /// <summary>
     /// If the underlying gateway client was already Connected by the time
@@ -49,9 +52,6 @@ public interface IChatGatewayBridge : IDisposable
     /// does not implement the method. Request/response — no event subscription.
     /// </summary>
     Task<CommandCatalog> ListCommandsAsync(CommandCatalogQuery? query = null);
-    /// <summary>Returns null only when the Gateway does not support shared welcome content.</summary>
-    Task<ChatWelcomeCatalog?> GetWelcomeCatalogAsync(string locale) =>
-        Task.FromResult<ChatWelcomeCatalog?>(null);
     Task<SessionCreateResult> CreateSessionAsync(SessionCreateRequest request) =>
         Task.FromResult(new SessionCreateResult
         {
@@ -114,12 +114,17 @@ public interface IChatGatewayBridge : IDisposable
     event EventHandler<ChatMessageInfo>? ChatMessageReceived;
     event EventHandler<AgentEventInfo>? AgentEventReceived;
     event EventHandler<ModelsListInfo>? ModelsListUpdated;
+    event EventHandler? ModelCatalogInvalidated
+    {
+        add { }
+        remove { }
+    }
 }
 
 /// <summary>
 /// Production bridge wrapping a real <see cref="OpenClawGatewayClient"/>.
 /// </summary>
-public sealed class GatewayClientChatBridge : IChatGatewayBridge
+public sealed class GatewayClientChatBridge : IChatGatewayBridge, IChatQuestionGateway
 {
     private readonly OpenClawGatewayClient _client;
     private readonly EventHandler<ConnectionStatus> _statusChangedHandler;
@@ -129,6 +134,7 @@ public sealed class GatewayClientChatBridge : IChatGatewayBridge
     private readonly EventHandler<ChatMessageInfo> _chatMessageReceivedHandler;
     private readonly EventHandler<AgentEventInfo> _agentEventReceivedHandler;
     private readonly EventHandler<ModelsListInfo> _modelsListUpdatedHandler;
+    private readonly EventHandler _modelCatalogInvalidatedHandler;
     // _currentStatus is written from the gateway client's StatusChanged
     // callback (arbitrary thread) and read from CurrentStatus on the UI
     // thread. ``volatile`` gives us a memory barrier so the reader can't
@@ -176,6 +182,7 @@ public sealed class GatewayClientChatBridge : IChatGatewayBridge
             _currentModels = e;
             ModelsListUpdated?.Invoke(s, e);
         };
+        _modelCatalogInvalidatedHandler = (s, e) => ModelCatalogInvalidated?.Invoke(s, e);
 
         // Subscribe StatusChanged BEFORE reading the seed so any
         // ``StatusChanged → X`` edge that fires during construction is
@@ -197,6 +204,7 @@ public sealed class GatewayClientChatBridge : IChatGatewayBridge
         _client.ChatMessageReceived += _chatMessageReceivedHandler;
         _client.AgentEventReceived += _agentEventReceivedHandler;
         _client.ModelsListUpdated += _modelsListUpdatedHandler;
+        _client.ModelCatalogInvalidated += _modelCatalogInvalidatedHandler;
 
         if (_currentStatus == ConnectionStatus.Disconnected)
         {
@@ -225,11 +233,31 @@ public sealed class GatewayClientChatBridge : IChatGatewayBridge
 
     public bool IsConnected => _client.IsConnectedToGateway;
     public IChatPlacementGateway PlacementGateway { get; }
+    public event EventHandler<GatewayQuestionEvent>? QuestionReceived
+    {
+        add => _client.QuestionReceived += value;
+        remove => _client.QuestionReceived -= value;
+    }
+    public event EventHandler? QuestionProtocolError
+    {
+        add => _client.QuestionProtocolError += value;
+        remove => _client.QuestionProtocolError -= value;
+    }
+    public Task<GatewayQuestionList> ListQuestionsAsync() => _client.ListQuestionsAsync();
+    public Task<GatewayQuestionRequest> GetQuestionAsync(string id) => _client.GetQuestionAsync(id);
+    public Task<string> ResolveQuestionAsync(string id, IReadOnlyDictionary<string, string[]>? answers) =>
+        _client.ResolveQuestionAsync(id, answers);
     public ConnectionStatus CurrentStatus => _currentStatus;
     public string? MainSessionKey => _client.MainSessionKey;
     public bool HasHandshakeSnapshot => _client.HasHandshakeSnapshot;
     public SessionInfo[] GetSessionList() => _client.GetSessionList();
     public ModelsListInfo? GetCurrentModelsList() => _currentModels;
+    public bool SupportsSessionScopedModelCatalog =>
+        _client.AdvertisedServerCapabilities.Contains(
+            "session-scoped-model-catalog",
+            StringComparer.Ordinal);
+    public Task<ModelsListInfo?> RequestSessionModelsListAsync(string sessionKey) =>
+        _client.RequestSessionModelsListAsync(sessionKey);
 
     public Task SendChatMessageAsync(string message, string? sessionKey, string? sessionId, IReadOnlyList<ChatAttachment>? attachments = null) =>
         _client.SendChatMessageAsync(message, sessionKey, sessionId, attachments);
@@ -256,9 +284,6 @@ public sealed class GatewayClientChatBridge : IChatGatewayBridge
 
     public Task<CommandCatalog> ListCommandsAsync(CommandCatalogQuery? query = null) =>
         _client.ListCommandsAsync(query);
-
-    public Task<ChatWelcomeCatalog?> GetWelcomeCatalogAsync(string locale) =>
-        _client.GetChatWelcomeCatalogAsync(locale);
 
     public Task<SessionCreateResult> CreateSessionAsync(SessionCreateRequest request) =>
         _client.CreateSessionAsync(request);
@@ -316,6 +341,7 @@ public sealed class GatewayClientChatBridge : IChatGatewayBridge
     public event EventHandler<ChatMessageInfo>? ChatMessageReceived;
     public event EventHandler<AgentEventInfo>? AgentEventReceived;
     public event EventHandler<ModelsListInfo>? ModelsListUpdated;
+    public event EventHandler? ModelCatalogInvalidated;
 
     public void Dispose()
     {
@@ -329,6 +355,7 @@ public sealed class GatewayClientChatBridge : IChatGatewayBridge
         _client.ChatMessageReceived -= _chatMessageReceivedHandler;
         _client.AgentEventReceived -= _agentEventReceivedHandler;
         _client.ModelsListUpdated -= _modelsListUpdatedHandler;
+        _client.ModelCatalogInvalidated -= _modelCatalogInvalidatedHandler;
 
         StatusChanged = null;
         SessionsUpdated = null;
@@ -337,5 +364,6 @@ public sealed class GatewayClientChatBridge : IChatGatewayBridge
         ChatMessageReceived = null;
         AgentEventReceived = null;
         ModelsListUpdated = null;
+        ModelCatalogInvalidated = null;
     }
 }

@@ -81,7 +81,7 @@ public sealed class AppRefactorContractTests
         var source = ReadAppSources();
 
         Assert.Contains("new CredentialResolver", source);
-        Assert.Contains("new GatewayClientFactory { SupportsExecApprovals = true }", source);
+        Assert.Contains("new GatewayClientFactory { SupportsExecApprovals = true, ClientIdentity = OperatorClientIdentity.Interactive }", source);
         Assert.Contains("new NodeConnector", source);
         Assert.Contains("_connectionManager = new GatewayConnectionManager", source);
         Assert.Contains("nodeConnector.ClientCreated +=", source);
@@ -565,6 +565,32 @@ public sealed class AppRefactorContractTests
         Assert.Contains("ShowDashboardLaunchFailureAsync", method);
         Assert.DoesNotContain("GatewayDashboardUrlBuilder.Build", method);
         Assert.DoesNotContain("Process.Start", method);
+    }
+
+    [Fact]
+    public void SavedDashboard_InvalidUrl_UsesLocalizedCopy()
+    {
+        var source = File.ReadAllText(Path.Combine(
+            TestRepositoryPaths.GetRepositoryRoot(),
+            "src", "OpenClaw.Tray.WinUI", "Pages", "ConnectionPage.xaml.cs"));
+        var method = ExtractMethod(source, "OnSavedRowOpenDashboardAsync");
+
+        AssertInOrder(method,
+            "GatewayDashboardUrlBuilder.TryBuild(",
+            "out _))",
+            "CurrentApp.ShowTransientConnectionError(",
+            "LocalizationHelper.GetString(\"ConnectionPage_SavedDashboardInvalidAddress\")",
+            "return;",
+            "Launcher.LaunchUriAsync(");
+        Assert.DoesNotContain("urlError", method);
+
+        var resources = File.ReadAllText(Path.Combine(
+            TestRepositoryPaths.GetRepositoryRoot(),
+            "src", "OpenClaw.Tray.WinUI", "Strings", "en-us", "Resources.resw"));
+        Assert.Contains(
+            "This saved gateway address cannot open the dashboard. Edit the saved gateway and use an http, https, ws, or wss address.",
+            resources,
+            StringComparison.Ordinal);
     }
 
     [Fact]
@@ -1406,9 +1432,16 @@ public sealed class AppRefactorContractTests
         var restart = ExtractMethod(source, "RestartAfterSetupAsync");
         AssertInOrder(
             restart,
-            "if (nativeCompletion is null)",
+            "var verifiedCompletion = preparation?.Verification ?? nativeCompletion?.Verification;",
+            "if (verifiedCompletion is null)",
             "SetupStartupPolicy.ApplyClassicPreferenceAsync(enableAutoStart",
+            "if (verifiedCompletion is not null)",
+            "store.IssuePreparation(preparation) : store.Issue(nativeCompletion!)",
             "Process.Start(psi)");
+        Assert.Contains("if (verifiedCompletion is null)\n            " +
+            "await SetupStartupPolicy.ApplyClassicPreferenceAsync(enableAutoStart",
+            restart.Replace("\r\n", "\n", StringComparison.Ordinal));
+        Assert.DoesNotContain("if (nativeCompletion is null)", restart);
     }
 
     [Fact]

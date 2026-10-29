@@ -10,6 +10,9 @@ automated tests. Its five sessions include an empty conversation, distinct
 session identities and titles, and 240 mixed-height messages with an explicit
 final-message marker. Supporting model, agent, health, usage and configuration
 responses populate the application rather than just its disconnected shell.
+Read-only placement discovery returns an empty project catalog and one synthetic
+local environment through `projects.list` and `environments.list`. It creates no
+project or host resources; `projects.add` is rejected as a write.
 
 ## Build and explore
 
@@ -102,6 +105,10 @@ controls. They verify:
 - Independent profiles, endpoints, tokens and preferences in two concurrent
   application instances. Stopping one must leave the other usable.
 - Repeated A/B session selection and session-specific visible histories.
+- Session-scoped configured model reads retain a current model outside the manual
+  selection policy. Its label and catalog-only reasoning remain available while
+  its picker row stays disabled. The fixture's omitted view uses `default`, like
+  the Gateway, so omitting `view: "configured"` cannot accidentally pass this case.
 - Natural initial-tail visibility of message 240 before any explicit scroll
   command, plus final-message visibility after scrolling at two window sizes.
 - Sessions/Settings/Configuration/Chat navigation, profile-only preference
@@ -468,11 +475,15 @@ accepted; no fixture should open external resources or save credentials implicit
 Extend the same server boundary with a scenario and protocol/consumer tests when
 adding an interaction, rather than accepting arbitrary requests as success.
 
-Question protocol support is distinct from question **UI** support. This checkout's
-Windows Gateway client does not dispatch `question.requested`/`question.resolved`.
-The fixture emits the real protocol so it can exercise that UI once implemented;
-until then use the console or a WebSocket client to answer. Do not label raw
-question protocol tests as question-panel rendering proof.
+The native Reactor chat consumes `question.requested`/`question.resolved` and
+shows supported questions above the composer. Start with
+`-Scenario chat-interactive -Interaction question-choice`, then send a message
+in the app to show the choice panel. Select **Inspect** or **Summarize** and use
+**Submit answer**, or choose **Cancel question**. The run continues after the
+fixture acknowledges the separate `question.resolve` RPC. Use `question-text`
+or `question-multi` in the host console before the next send to try other inputs.
+Protocol/provider tests do not by themselves prove question-panel rendering;
+verify the visible native controls separately.
 
 Runs are bounded to 256 sends and 100 sessions, transcripts to 1,000 entries,
 text input to 32,768 characters, and external questions to a five-minute timeout.
