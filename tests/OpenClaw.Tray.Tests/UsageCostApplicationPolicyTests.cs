@@ -97,7 +97,7 @@ public sealed class UsageCostApplicationPolicyTests
     }
 
     [Fact]
-    public void Decide_IgnoresOlderMatchingRangeWithoutCompletingRefresh()
+    public void Decide_IgnoresOlderMatchingRange()
     {
         Assert.Equal(
             UsageCostApplicationPolicy.Decision.IgnoreStale,
@@ -107,6 +107,30 @@ public sealed class UsageCostApplicationPolicyTests
                 hasLoaded: true,
                 updatedAt: new DateTime(2026, 1, 19),
                 lastAppliedUpdatedAt: new DateTime(2026, 1, 20)));
+    }
+
+    [Fact]
+    public void GatewayClientSwap_ClearsGatewayCacheAndUsagePageSnapshot()
+    {
+        var root = TestRepositoryPaths.GetRepositoryRoot();
+        var gatewayService = File.ReadAllText(Path.Combine(
+            root, "src", "OpenClaw.Tray.WinUI", "Services", "GatewayService.cs"));
+        var attachStart = gatewayService.IndexOf("public void AttachClient(", StringComparison.Ordinal);
+        var attachEnd = gatewayService.IndexOf("// ── Dispatcher helper", attachStart, StringComparison.Ordinal);
+        Assert.True(attachStart >= 0 && attachEnd > attachStart);
+        var attach = gatewayService[attachStart..attachEnd];
+        Assert.Contains("if (!ReferenceEquals(oldClient, newClient))", attach, StringComparison.Ordinal);
+        Assert.Contains("_state.ClearCachedData();", attach, StringComparison.Ordinal);
+
+        var usagePage = File.ReadAllText(Path.Combine(
+            root, "src", "OpenClaw.Tray.WinUI", "Pages", "UsagePage.xaml.cs"));
+        var changedStart = usagePage.IndexOf("private void OnOperatorClientChanged(", StringComparison.Ordinal);
+        var changedEnd = usagePage.IndexOf("private void ResetUsageCostState(", changedStart, StringComparison.Ordinal);
+        Assert.True(changedStart >= 0 && changedEnd > changedStart);
+        var changed = usagePage[changedStart..changedEnd];
+        Assert.Contains("if (!ReferenceEquals(e.OldClient, e.NewClient))", changed, StringComparison.Ordinal);
+        Assert.Contains("ResetUsageCostState();", changed, StringComparison.Ordinal);
+        Assert.Contains("else ResetUsageCostState();", usagePage, StringComparison.Ordinal);
     }
 
     [Fact]

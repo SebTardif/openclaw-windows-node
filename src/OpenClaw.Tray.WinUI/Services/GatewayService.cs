@@ -73,6 +73,7 @@ internal sealed class GatewayService
             _sessionActivities.Clear();
             _displayedSessionKey = null;
             _lastSessionSwitch = DateTime.MinValue;
+            _state.ClearCachedData();
         }
 
         if (newClient != null)

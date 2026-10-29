@@ -142,6 +142,11 @@ public sealed partial class UsagePage : Page
         if (dispatcher == null) return;
         dispatcher.TryEnqueue(() =>
         {
+            if (!ReferenceEquals(e.OldClient, e.NewClient))
+            {
+                ResetUsageCostState();
+            }
+
             AttachClient(e.NewClient);
             if (e.NewClient is { IsConnectedToGateway: true })
             {
@@ -158,9 +163,24 @@ public sealed partial class UsagePage : Page
         });
     }
 
+    private void ResetUsageCostState()
+    {
+        _lastAppliedUsageCostUpdatedAtUtc = DateTime.MinValue;
+        _hasMatchingUsageCost = false;
+        _isUnsupportedRangeWarningVisible = false;
+        DailyListView.ItemsSource = null;
+        TotalCostText.Text = "—";
+        TokenCountText.Text = "—";
+        _dailyCostLoading.BeginInitialRefresh();
+        _dailyCostLoading.Fail();
+        ShowDisconnected();
+        UpdateDailyCostLoadingVisuals();
+    }
+
     private void RecoverConnectedClient(IOperatorGatewayClient client)
     {
         _isUnsupportedRangeWarningVisible = false;
+        OpenConnectionButton.Visibility = Visibility.Collapsed;
         ConnectionInfoBar.IsOpen = false;
         if (!_dailyCostLoading.HasLoaded) _dailyCostLoading.BeginInitialRefresh();
         else _dailyCostLoading.BeginRefresh();
@@ -188,7 +208,8 @@ public sealed partial class UsagePage : Page
                 if (_appState?.Usage != null) UpdateUsage(_appState.Usage);
                 break;
             case nameof(AppState.UsageCost):
-                if (_appState?.UsageCost != null) UpdateUsageCost(_appState.UsageCost);
+                if (_appState?.UsageCost is { } usageCost) UpdateUsageCost(usageCost);
+                else ResetUsageCostState();
                 break;
             case nameof(AppState.UsageStatus):
                 if (_appState?.UsageStatus != null) UpdateUsageStatus(_appState.UsageStatus);

@@ -185,6 +185,7 @@ public class AppStateTests
 
         Assert.Null(state.GetUsageCostForPeriod(7));
         Assert.Null(state.GetUsageCostForPeriod(30));
+        Assert.Null(state.UsageCost);
     }
 
     // ── AddAgentEvent ring buffer ───────────────────────────────────────
