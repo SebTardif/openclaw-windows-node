@@ -25,9 +25,12 @@ public sealed partial class GatewayFixtureUiTests
             {
                 var connection = await run.ConnectSecondaryGatewayAsync();
                 Assert.True(connection.GetProperty("connected").GetBoolean());
-                var status = await run.InvokeAsync("app.connection.status");
-                Assert.Equal(run.SecondaryGatewayId, status.GetProperty("gateway").GetProperty("id").GetString());
-                Assert.True(status.GetProperty("operator").GetProperty("connected").GetBoolean());
+                await run.WaitForAsync(async () =>
+                {
+                    var status = await run.InvokeAsync("app.connection.status");
+                    return status.GetProperty("gateway").GetProperty("id").GetString() == run.SecondaryGatewayId
+                        && status.GetProperty("operator").GetProperty("connected").GetBoolean();
+                }, "Gateway B live operator connection after shared-token validation");
                 await gateway.WaitForRequestAsync("usage.cost");
                 await WaitUiAsync(run, () => total.Current.Name == "\u2014",
                     "Gateway A total cleared while all Gateway B cost responses are held");
