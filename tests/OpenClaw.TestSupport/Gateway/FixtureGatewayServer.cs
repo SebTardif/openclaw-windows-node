@@ -42,6 +42,7 @@ public sealed class FixtureGatewayServer : IAsyncDisposable
     private TaskCompletionSource? _sessionMutationGate;
     private TaskCompletionSource? _chatSendGate;
     private TaskCompletionSource<bool>? _chatAbortGate;
+    private TaskCompletionSource? _usageCostGate;
     private int _chatEventSequence;
     private TaskCompletionSource? _nextSessionListGate;
     private TaskCompletionSource? _heldSessionList;
@@ -247,6 +248,27 @@ public sealed class FixtureGatewayServer : IAsyncDisposable
         {
             var gate = _sessionMutationGate ?? throw new InvalidOperationException("Session mutations are not held.");
             _sessionMutationGate = null;
+            gate.TrySetResult();
+        }
+    }
+
+    public void HoldUsageCosts()
+    {
+        lock (_sync)
+        {
+            ObjectDisposedException.ThrowIf(_disposal is not null, this);
+            if (_usageCostGate is not null)
+                throw new InvalidOperationException("Usage costs are already held.");
+            _usageCostGate = NewSignal();
+        }
+    }
+
+    public void ReleaseUsageCosts()
+    {
+        lock (_sync)
+        {
+            var gate = _usageCostGate ?? throw new InvalidOperationException("Usage costs are not held.");
+            _usageCostGate = null;
             gate.TrySetResult();
         }
     }
@@ -656,6 +678,7 @@ public sealed class FixtureGatewayServer : IAsyncDisposable
                     {
                         gate = method is "sessions.patch" or "sessions.delete" or "sessions.create"
                             ? _sessionMutationGate?.Task
+                            : method == "usage.cost" ? _usageCostGate?.Task
                             : method == "chat.send"
                                 ? _chatSendGate?.Task
                             : method == "sessions.list" ? _nextSessionListGate?.Task

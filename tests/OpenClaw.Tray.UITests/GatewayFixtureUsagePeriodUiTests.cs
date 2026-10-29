@@ -8,6 +8,67 @@ public sealed partial class GatewayFixtureUiTests
 {
     [GatewayFixtureUiFact]
     [Trait("Category", "GatewayFixture")]
+    public async Task UsagePeriodSwitch_MountedPageClearsBeforeNewCostsAndAcceptsOlderSnapshot()
+    {
+        var second = new UsagePeriodFixture(UsagePeriodFixture.GatewayMode.B);
+        await WithAppAsync(async run =>
+        {
+            await run.InvokeAsync("app.navigate", new { page = "usage" });
+            await WaitUiAsync(run, () => FindById(run, "TotalCostText")?.Current.Name == "$7.00"
+                && UsagePeriodSelected(run, "7 Days"), "mounted Usage seeded with Gateway A");
+            var total = FindById(run, "TotalCostText")!;
+            await CaptureIfRequestedAsync(run, "01-mounted-gateway-a.png", total, FindUsagePeriod(run, "7 Days")!);
+
+            var gateway = run.SecondaryGateway!;
+            gateway.HoldUsageCosts();
+            try
+            {
+                var connection = await run.ConnectSecondaryGatewayAsync();
+                Assert.True(connection.GetProperty("connected").GetBoolean());
+                var status = await run.InvokeAsync("app.connection.status");
+                Assert.Equal(run.SecondaryGatewayId, status.GetProperty("gateway").GetProperty("id").GetString());
+                Assert.True(status.GetProperty("operator").GetProperty("connected").GetBoolean());
+                await gateway.WaitForRequestAsync("usage.cost");
+                await WaitUiAsync(run, () => total.Current.Name == "\u2014",
+                    "Gateway A total cleared while all Gateway B cost responses are held");
+                Assert.True(Automation.Compare(total, FindById(run, "TotalCostText")!));
+                Assert.Null(FindUsageValue(run, "$7.00"));
+                Assert.DoesNotContain(gateway.Requests, request => request.Method == "usage.cost" && request.Outcome == "ok");
+                await CaptureIfRequestedAsync(run, "02-mounted-before-b-costs.png", total, FindUsagePeriod(run, "7 Days")!);
+            }
+            finally
+            {
+                gateway.ReleaseUsageCosts();
+            }
+
+            await WaitUiAsync(run, () => FindText(run, "Usage period is not available") is not null
+                && UsagePeriodSelected(run, "7 Days"), "mounted Usage recovers from Gateway B range mismatch");
+            Assert.True(Automation.Compare(total, FindById(run, "TotalCostText")!));
+            Assert.Equal("\u2014", total.Current.Name);
+            Assert.Null(FindUsageValue(run, "$300.00"));
+            Assert.Null(FindButton(run, "Open Connection"));
+            Assert.Null(FindText(run, "No daily usage for this period"));
+            Assert.Null(FindText(run, "Loading daily costs"));
+            await CaptureIfRequestedAsync(run, "03-mounted-b-warning.png",
+                total, FindText(run, "Usage period is not available")!, FindUsagePeriod(run, "7 Days")!);
+
+            second.EnableMatchingSevenDays();
+            Invoke(FindUsagePeriod(run, "30 Days")!);
+            await WaitUiAsync(run, () => total.Current.Name == "$300.00"
+                && UsagePeriodSelected(run, "30 Days"), "mounted Usage explicitly selects Gateway B thirty days");
+            Invoke(FindUsagePeriod(run, "7 Days")!);
+            await WaitUiAsync(run, () => total.Current.Name == "$70.00"
+                && UsagePeriodSelected(run, "7 Days"), "same mounted Usage accepts Gateway B older seven-day snapshot");
+            Assert.True(Automation.Compare(total, FindById(run, "TotalCostText")!));
+            Assert.Null(FindText(run, "Usage period is not available"));
+            Assert.Null(FindUsageValue(run, "$7.00"));
+            await CaptureIfRequestedAsync(run, "04-mounted-b-older-seven.png", total, FindUsagePeriod(run, "7 Days")!);
+        }, scenario: GatewayScenario.CreateUsagePeriod(new UsagePeriodFixture(UsagePeriodFixture.GatewayMode.A)),
+            secondaryScenario: GatewayScenario.CreateUsagePeriod(second));
+    }
+
+    [GatewayFixtureUiFact]
+    [Trait("Category", "GatewayFixture")]
     public async Task UsagePeriodSwitch_ClearsPreviousGatewayAndAcceptsOlderMatchingSnapshot()
     {
         var second = new UsagePeriodFixture(UsagePeriodFixture.GatewayMode.B);

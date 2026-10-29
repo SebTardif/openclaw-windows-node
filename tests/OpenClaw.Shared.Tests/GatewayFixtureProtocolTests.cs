@@ -527,6 +527,32 @@ public sealed partial class GatewayFixtureProtocolTests
     }
 
     [Fact]
+    public async Task UsagePeriodGate_HoldsCostsWithoutBlockingOtherReads()
+    {
+        var token = CreateToken();
+        await using var server = await FixtureGatewayServer.StartAsync(
+            GatewayScenario.CreateUsagePeriod(new UsagePeriodFixture(UsagePeriodFixture.GatewayMode.B)), token);
+        server.HoldUsageCosts();
+        await using var connected = await ConnectedClient.OpenAsync(server, token);
+        var response = connected.Client.SendWizardRequestAsync("usage.cost", new { days = 7 });
+        try
+        {
+            await server.WaitForRequestAsync("usage.cost");
+            await connected.Client.SendWizardRequestAsync("health", new { }).WaitAsync(Deadline);
+            Assert.False(response.IsCompleted);
+            Assert.DoesNotContain(server.Requests, request => request.Method == "usage.cost" && request.Outcome == "ok");
+        }
+        finally
+        {
+            server.ReleaseUsageCosts();
+        }
+        var cost = await response.WaitAsync(Deadline);
+        Assert.Equal(30, cost.GetProperty("days").GetInt32());
+        Assert.Equal(300, cost.GetProperty("totals").GetProperty("totalCost").GetDouble());
+        Assert.Empty(server.UnexpectedRequests);
+    }
+
+    [Fact]
     public async Task UsagePeriodSwitch_SeparateGatewaysReturnMismatchThenOlderMatchingSnapshot()
     {
         var token = CreateToken();

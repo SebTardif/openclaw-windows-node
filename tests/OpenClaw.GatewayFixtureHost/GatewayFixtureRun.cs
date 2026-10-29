@@ -42,6 +42,13 @@ public sealed class GatewayFixtureRun : IAsyncDisposable
     public bool IsRunning => _process is { HasExited: false };
     public int? AppExitCode => _process is { HasExited: true } ? _process.ExitCode : null;
 
+    public Task<JsonElement> ConnectSecondaryGatewayAsync()
+    {
+        var gateway = SecondaryGateway ?? throw new InvalidOperationException("No secondary fixture Gateway exists.");
+        return InvokeAsync("app.connection.connectSharedToken",
+            new { gatewayUrl = gateway.Endpoint.AbsoluteUri, token = _gatewayToken });
+    }
+
     private GatewayFixtureRun(FixtureGatewayServer gateway, GatewayFixtureProfile profile, string token, string appPath,
         string? artifactRoot, GatewayScenario scenario, string? postSetupLaunch)
     {
