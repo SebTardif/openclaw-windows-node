@@ -703,6 +703,7 @@ public sealed partial class GatewayFixtureProtocolTests
     [InlineData("sessions.preview", """{"keys":[7]}""", "session key strings")]
     [InlineData("models.list", """{"view":"invented"}""", "configured or all")]
     [InlineData("usage.cost", """{"days":-1}""", "positive integer")]
+    [InlineData("usage.cost", """{"days":"seven"}""", "positive integer")]
     [InlineData("projects.list", """{"unexpected":true}""", "Unsupported fixture request parameter")]
     [InlineData("environments.list", """{"unexpected":true}""", "Unsupported fixture request parameter")]
     public async Task RealClient_InvalidOrUnknownParametersFailExplicitly(string method, string json, string message)

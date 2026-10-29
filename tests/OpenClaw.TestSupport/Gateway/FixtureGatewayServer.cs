@@ -685,7 +685,8 @@ public sealed class FixtureGatewayServer : IAsyncDisposable
                                 ? held.Task : null;
                         abortOutcome = method == "chat.abort" ? _chatAbortGate?.Task : null;
                         if (method == "usage.cost" && parameters.ValueKind == JsonValueKind.Object
-                            && parameters.TryGetProperty("days", out var days) && days.TryGetInt32(out var requestedDays))
+                            && parameters.TryGetProperty("days", out var days) && days.ValueKind == JsonValueKind.Number
+                            && days.TryGetInt32(out var requestedDays))
                             gate = _usageCostGates.TryGetValue(requestedDays, out var costGate) ? costGate.Task : null;
                         if (method == "sessions.list") _nextSessionListGate = null;
                     }
