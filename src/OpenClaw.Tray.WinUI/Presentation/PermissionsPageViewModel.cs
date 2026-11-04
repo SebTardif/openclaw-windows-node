@@ -597,7 +597,8 @@ internal sealed class PermissionsPageViewModel : INavigationAware, IDisposable, 
             {
             }
 
-            SetExecApprovalsFailure(_execApprovalsFailure, PermissionsExecApprovalsStatus.SaveFailed, bumpVersion: true);
+            HandleOnUiThread(() =>
+                SetExecApprovalsFailure(_execApprovalsFailure, PermissionsExecApprovalsStatus.SaveFailed, bumpVersion: true));
             return false;
         }
         finally

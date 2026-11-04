@@ -590,6 +590,28 @@ public sealed class PermissionsPageViewModelTests
     }
 
     [Fact]
+    public async Task DefaultActionSaveFailure_ReportsStatusOnTheUiThread()
+    {
+        using var harness = PermissionsHarness.CreateWithRecordingStore(
+            BuildSnapshot("base", BuildFile(defaultAction: "prompt")));
+        harness.ViewModel.Activate(null);
+        harness.Dispatcher.HasThreadAccess = false;
+        harness.Dispatcher.RunEnqueuedImmediately = false;
+        harness.RecordingExecStore!.OnReplace = _ => throw new IOException("write blocked");
+        var statusBefore = harness.ViewModel.ExecApprovalsStatus;
+
+        Assert.False(await harness.ViewModel.SetDefaultExecActionAsync("deny"));
+
+        Assert.Equal(statusBefore, harness.ViewModel.ExecApprovalsStatus);
+        Assert.Equal("prompt", harness.ViewModel.DefaultExecActionTag);
+
+        harness.Dispatcher.FlushPending();
+
+        Assert.Equal(PermissionsExecApprovalsStatus.SaveFailed, harness.ViewModel.ExecApprovalsStatus);
+        Assert.Equal("prompt", harness.ViewModel.DefaultExecActionTag);
+    }
+
+    [Fact]
     public async Task ConcurrentMutations_CommitInInvocationOrder_AndPreserveBothEdits()
     {
         using var harness = PermissionsHarness.CreateWithRecordingStore(
