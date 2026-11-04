@@ -57,6 +57,14 @@ public class ExecApprovalCommandDisplaySanitizerTests
     }
 
     [Fact]
+    public void EscapesBrailleBlank()
+    {
+        Assert.Equal(
+            @"echo \u{2800}hi",
+            ExecApprovalCommandDisplaySanitizer.Sanitize("echo " + U(0x2800) + "hi"));
+    }
+
+    [Fact]
     public void EscapesBidiOverrideTabAndZeroWidthSpace()
     {
         Assert.Equal(
