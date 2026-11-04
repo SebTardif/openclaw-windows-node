@@ -251,7 +251,7 @@ public sealed partial class ConnectionStatusWindow : WindowEx
             var sp = new StackPanel();
             sp.Children.Add(new TextBlock
             {
-                Text = $"{statusIcon} {gw.Url}",
+                Text = $"{statusIcon} {GatewayUrlHelper.SanitizeForDisplay(gw.Url)}",
                 FontSize = 11.5,
                 FontWeight = isActive ? FontWeights.Bold : FontWeights.Normal
             });
