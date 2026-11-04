@@ -1005,7 +1005,9 @@ public sealed partial class ChatPage : Page
                          e.WebErrorStatus == CoreWebView2WebErrorStatus.ServerUnreachable)
                 {
                     ChatPagePanelStates.ApplyShowingError(PanelHost);
-                    ErrorText.Text = string.Format(LocalizationHelper.GetString("ChatPage_CannotConnectToGateway"), credential.GatewayUrl);
+                    ErrorText.Text = string.Format(
+                        LocalizationHelper.GetString("ChatPage_CannotConnectToGateway"),
+                        GatewayUrlHelper.SanitizeForDisplay(credential.GatewayUrl));
                 }
             };
             WebView.CoreWebView2.NavigationCompleted += _navCompletedHandler;
@@ -1178,7 +1180,9 @@ public sealed partial class ChatPage : Page
         if (!GatewayUrlHelper.TryNormalizeWebSocketUrl(gatewayUrl, out var normalizedUrl) ||
             !Uri.TryCreate(normalizedUrl, UriKind.Absolute, out var gatewayUri))
         {
-            errorMessage = string.Format(LocalizationHelper.GetString("ChatPage_InvalidGatewayUrl"), gatewayUrl);
+            errorMessage = string.Format(
+                LocalizationHelper.GetString("ChatPage_InvalidGatewayUrl"),
+                GatewayUrlHelper.SanitizeForDisplay(gatewayUrl));
             return false;
         }
 
