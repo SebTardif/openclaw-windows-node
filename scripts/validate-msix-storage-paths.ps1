@@ -588,8 +588,20 @@ function Invoke-Install {
         if (-not [string]::IsNullOrWhiteSpace($CertPath)) {
             Write-StepInfo "Importing sideload certificate: $CertPath"
             try {
+                $loaded = [System.Security.Cryptography.X509Certificates.X509Certificate2]::new($CertPath)
+                $thumbprint = $loaded.Thumbprint
+                $loaded.Dispose()
+                $alreadyPresent = @(Get-ChildItem -Path 'Cert:\LocalMachine\TrustedPeople' -ErrorAction SilentlyContinue |
+                    Where-Object { $_.Thumbprint -eq $thumbprint }).Count -gt 0
                 Import-Certificate -FilePath $CertPath -CertStoreLocation "Cert:\LocalMachine\TrustedPeople" | Out-Null
-                Add-Step "import-certificate" "Completed" "Certificate imported to Cert:\LocalMachine\TrustedPeople."
+                if (-not $alreadyPresent) {
+                    $script:ImportedSideloadThumbprint = $thumbprint
+                }
+                Add-Step "import-certificate" "Completed" "Certificate imported to Cert:\LocalMachine\TrustedPeople." @{
+                    thumbprint = $thumbprint
+                    alreadyPresent = $alreadyPresent
+                    removeOnTeardown = -not $alreadyPresent
+                }
             }
             catch {
                 Add-Step "import-certificate" "Failed" "Certificate import failed: $_"
@@ -1073,6 +1085,18 @@ function Invoke-Teardown {
                 error  = $_.ToString()
                 stderr = $removeStderr
             }
+        }
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($script:ImportedSideloadThumbprint)) {
+        $imported = @(Get-ChildItem -Path 'Cert:\LocalMachine\TrustedPeople' -ErrorAction SilentlyContinue |
+            Where-Object { $_.Thumbprint -eq $script:ImportedSideloadThumbprint })
+        foreach ($item in $imported) {
+            Remove-Item -LiteralPath $item.PSPath -Force
+        }
+        Add-Step "teardown-sideload-certificate" "Completed" "Removed only the certificate this run imported." @{
+            thumbprint = $script:ImportedSideloadThumbprint
+            removed = $imported.Count
         }
     }
 
