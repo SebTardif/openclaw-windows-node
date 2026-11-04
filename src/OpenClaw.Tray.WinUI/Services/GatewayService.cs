@@ -266,7 +266,7 @@ internal sealed class GatewayService
                 _sessionActivities[sessionKey] = activity;
                 ActivityStreamService.Add(
                     category: "session",
-                    title: $"{sessionKey}: {activity.Label}",
+                    title: ActivityStreamTitle.Format(sessionKey, activity),
                     dashboardPath: $"sessions/{sessionKey}",
                     details: activity.Kind.ToString(),
                     sessionKey: sessionKey);
