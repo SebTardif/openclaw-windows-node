@@ -266,6 +266,20 @@ public class SshTunnelCommandLineTests
     {
         Assert.Equal(expected, SshTunnelCommandLine.CanForwardBrowserProxyPort(remotePort, localPort));
     }
+
+    [Theory]
+    [InlineData("oc", "gateway.example", "oc@gateway.example")]
+    [InlineData(null, "gateway.example", "<user>@gateway.example")]
+    [InlineData("oc", null, "<user>@<host>")]
+    [InlineData("", "", "<user>@<host>")]
+    [InlineData("bad&user", "gateway.example", "<user>@<host>")]
+    [InlineData("oc", "-gateway.example", "<user>@<host>")]
+    [InlineData("-oc", "gateway.example", "<user>@<host>")]
+    [InlineData("oc", "bad host", "<user>@<host>")]
+    public void FormatUserAtHostForCopy_RejectsUnsafeTargets(string? user, string? host, string expected)
+    {
+        Assert.Equal(expected, SshTunnelCommandLine.FormatUserAtHostForCopy(user, host));
+    }
 }
 
 public class GatewaySelfInfoTests

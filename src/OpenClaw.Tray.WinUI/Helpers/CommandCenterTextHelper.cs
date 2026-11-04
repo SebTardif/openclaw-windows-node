@@ -324,9 +324,7 @@ internal static class CommandCenterTextHelper
         if (browserProxyPort is < 1 or > 65535)
             return "ssh -N -L <local-browser-port>:127.0.0.1:<remote-browser-port> <user>@<host>";
 
-        var target = string.IsNullOrWhiteSpace(tunnel?.User) || string.IsNullOrWhiteSpace(tunnel.Host)
-            ? "<user>@<host>"
-            : $"{tunnel.User}@{tunnel.Host}";
+        var target = SshTunnelCommandLine.FormatUserAtHostForCopy(tunnel?.User, tunnel?.Host);
         var remoteBrowserPort = ResolveRemoteBrowserProxyPort(browserProxyPort, tunnel);
         return remoteBrowserPort is >= 1 and <= 65535
             ? $"ssh -N -L {browserProxyPort}:127.0.0.1:{remoteBrowserPort} {target}"

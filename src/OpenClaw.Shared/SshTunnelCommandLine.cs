@@ -32,6 +32,28 @@ public static class SshTunnelCommandLine
             throw new ArgumentException($"SSH host contains invalid characters: '{host}'", nameof(host));
     }
 
+    /// <summary>
+    /// User and host for a copied SSH line. An invalid value becomes the placeholder
+    /// instead of being concatenated into the command the user will paste.
+    /// </summary>
+    public static string FormatUserAtHostForCopy(string? user, string? host)
+    {
+        var trimmedUser = user?.Trim() ?? "";
+        var trimmedHost = host?.Trim() ?? "";
+        if (trimmedUser.Length == 0 && trimmedHost.Length == 0)
+            return "<user>@<host>";
+        if (trimmedUser.Length == 0)
+            return IsCopySafe(trimmedHost, s_validSshHost) ? $"<user>@{trimmedHost}" : "<user>@<host>";
+        if (trimmedHost.Length == 0)
+            return "<user>@<host>";
+        if (!IsCopySafe(trimmedUser, s_validSshUser) || !IsCopySafe(trimmedHost, s_validSshHost))
+            return "<user>@<host>";
+        return $"{trimmedUser}@{trimmedHost}";
+    }
+
+    private static bool IsCopySafe(string value, Regex pattern)
+        => value.Length > 0 && !value.StartsWith('-') && pattern.IsMatch(value);
+
     public static string BuildArguments(string user, string host, int remotePort, int localPort)
         => BuildArguments(user, host, remotePort, localPort, includeBrowserProxyForward: false);
 

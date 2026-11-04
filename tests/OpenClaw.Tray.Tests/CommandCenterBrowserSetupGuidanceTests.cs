@@ -40,6 +40,32 @@ public class CommandCenterBrowserSetupGuidanceTests
         Assert.DoesNotContain("ssh -N -L 19002:127.0.0.1:19002", text);
     }
 
+    [Fact]
+    public void ManualForward_UsesPlaceholderWhenTheCopiedTargetIsUnsafe()
+    {
+        var tunnel = Tunnel("127.0.0.1:19000", "127.0.0.1:18789", browserRemote: null);
+        tunnel.User = "bad&user";
+
+        var text = CommandCenterTextHelper.BuildBrowserSetupGuidance(19002, SshTopology(), tunnel);
+
+        Assert.Contains("<user>@<host>", text);
+        Assert.DoesNotContain("bad&user", text);
+    }
+
+    [Fact]
+    public void CopiedSshTargetUsesTheSharedHostCheck()
+    {
+        var source = File.ReadAllText(Path.Combine(
+            TestRepositoryPaths.GetRepositoryRoot(),
+            "src",
+            "OpenClaw.Tray.WinUI",
+            "Services",
+            "CommandCenterStateBuilder.cs"));
+
+        Assert.Contains("SshTunnelCommandLine.FormatUserAtHostForCopy(tunnel?.User, tunnel?.Host)", source);
+        Assert.DoesNotContain("return $\"{user}@{host}\";", source);
+    }
+
     private static GatewayTopologyInfo SshTopology()
         => new()
         {

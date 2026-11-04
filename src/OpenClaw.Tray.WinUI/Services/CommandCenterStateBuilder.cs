@@ -397,15 +397,7 @@ internal sealed class CommandCenterStateBuilder
     }
 
     private static string BuildSshTarget(TunnelCommandCenterInfo? tunnel)
-    {
-        var host = tunnel?.Host?.Trim();
-        var user = tunnel?.User?.Trim();
-        if (!string.IsNullOrWhiteSpace(host) && !string.IsNullOrWhiteSpace(user))
-            return $"{user}@{host}";
-        if (!string.IsNullOrWhiteSpace(host))
-            return $"<user>@{host}";
-        return "<user>@<host>";
-    }
+        => SshTunnelCommandLine.FormatUserAtHostForCopy(tunnel?.User, tunnel?.Host);
 
     private static int ResolveLocalBrowserProxyPort(int fallbackBrowserProxyPort, TunnelCommandCenterInfo? tunnel, int? browserControlPort)
     {
