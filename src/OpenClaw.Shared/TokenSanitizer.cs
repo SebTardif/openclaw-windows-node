@@ -12,6 +12,11 @@ public static class TokenSanitizer
 {
     private static readonly TimeSpan RegexTimeout = TimeSpan.FromMilliseconds(500);
 
+    private static readonly Regex ToolActivityUrlPattern = new(
+        @"\b(?:https?|wss?)://[^\s""'<>]+",
+        RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled,
+        RegexTimeout);
+
     private static readonly string[] SensitiveKeyFragments =
     [
         "authorization",
@@ -195,6 +200,24 @@ public static class TokenSanitizer
         catch (RegexMatchTimeoutException)
         {
             // Fail-closed: never leak un-redacted input on adversarial timeout.
+            return SanitizerTimeoutSentinel;
+        }
+    }
+
+    public static string RedactToolActivityLabel(string? value)
+    {
+        if (string.IsNullOrEmpty(value))
+            return string.Empty;
+
+        try
+        {
+            var redacted = ToolActivityUrlPattern.Replace(
+                value,
+                match => GatewayUrlHelper.SanitizeForDisplay(match.Value));
+            return RedactSensitiveCommandOptions(redacted);
+        }
+        catch (RegexMatchTimeoutException)
+        {
             return SanitizerTimeoutSentinel;
         }
     }

@@ -4129,7 +4129,8 @@ public partial class OpenClawGatewayClient : WebSocketClientBase, IOperatorGatew
                     if (cmdStr != null)
                     {
                         var nl = cmdStr.IndexOf('\n');
-                        label = MenuDisplayHelper.TruncateText(nl >= 0 ? cmdStr[..nl] : cmdStr, 60);
+                        var firstLine = nl >= 0 ? cmdStr[..nl] : cmdStr;
+                        label = MenuDisplayHelper.TruncateText(TokenSanitizer.RedactToolActivityLabel(firstLine), 60);
                     }
                 }
                 else if (args.TryGetProperty("path", out var path))
@@ -4137,9 +4138,9 @@ public partial class OpenClawGatewayClient : WebSocketClientBase, IOperatorGatew
                 else if (args.TryGetProperty("file_path", out var filePath))
                     label = ShortenPath(filePath.GetString() ?? "");
                 else if (args.TryGetProperty("query", out var query))
-                    label = MenuDisplayHelper.TruncateText(query.GetString(), 60);
+                    label = MenuDisplayHelper.TruncateText(TokenSanitizer.RedactToolActivityLabel(query.GetString()), 60);
                 else if (args.TryGetProperty("url", out var url))
-                    label = MenuDisplayHelper.TruncateText(url.GetString(), 60);
+                    label = MenuDisplayHelper.TruncateText(TokenSanitizer.RedactToolActivityLabel(url.GetString()), 60);
             }
         }
 
