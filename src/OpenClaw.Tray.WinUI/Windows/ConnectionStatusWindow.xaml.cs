@@ -319,9 +319,16 @@ public sealed partial class ConnectionStatusWindow : WindowEx
 
         var decoded = SetupCodeDecoder.Decode(code);
         if (decoded.Success)
-            SetupCodePreview.Text = $"→ {decoded.Url ?? "?"}\n  token: {decoded.Token?[..Math.Min(8, decoded.Token?.Length ?? 0)]}…";
+        {
+            var previewUrl = string.IsNullOrEmpty(decoded.Url)
+                ? "?"
+                : GatewayUrlHelper.SanitizeForDisplay(decoded.Url);
+            SetupCodePreview.Text = $"→ {previewUrl}\n  token: {decoded.Token?[..Math.Min(8, decoded.Token?.Length ?? 0)]}…";
+        }
         else
+        {
             SetupCodePreview.Text = $"✗ {decoded.Error}";
+        }
     }
 
     private void OnConnect(object sender, RoutedEventArgs e) =>
