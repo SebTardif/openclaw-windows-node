@@ -476,11 +476,10 @@ public sealed partial class SchemaConfigEditor : UserControl
             });
         }
 
+        var original = config.Clone();
         var textBox = new TextBox
         {
-            Text = config.ValueKind == JsonValueKind.Array
-                ? JsonSerializer.Serialize(config, new JsonSerializerOptions { WriteIndented = true })
-                : "[]",
+            Text = SchemaJsonEditorPolicy.TextForEditor(original, expectObject: false),
             AcceptsReturn = true,
             TextWrapping = TextWrapping.NoWrap,
             FontFamily = new FontFamily("Consolas"),
@@ -490,24 +489,15 @@ public sealed partial class SchemaConfigEditor : UserControl
         textBox.TextChanged += (s, e) =>
         {
             if (_loading) return;
-            try
-            {
-                using var document = JsonDocument.Parse(textBox.Text);
-                if (document.RootElement.ValueKind != JsonValueKind.Array)
-                {
-                    _changes[path] = RemovePendingValue;
-                    SetValidationError(path, "Must be a JSON array.", errorBlock);
-                }
-                else
-                {
-                    onChanged(document.RootElement.Clone());
-                    return;
-                }
-            }
-            catch (JsonException ex)
+            if (!SchemaJsonEditorPolicy.TryStage(textBox.Text, original, expectObject: false, out var staged, out var error))
             {
                 _changes[path] = RemovePendingValue;
-                SetValidationError(path, $"Invalid JSON: {ex.Message}", errorBlock);
+                SetValidationError(path, error ?? "Invalid JSON.", errorBlock);
+            }
+            else
+            {
+                onChanged(staged);
+                return;
             }
             ConfigChanged?.Invoke(this, new SchemaConfigChangedEventArgs(GetChanges(), GetValidationErrors()));
         };
@@ -539,11 +529,10 @@ public sealed partial class SchemaConfigEditor : UserControl
             });
         }
 
+        var original = config.Clone();
         var textBox = new TextBox
         {
-            Text = config.ValueKind == JsonValueKind.Object
-                ? JsonSerializer.Serialize(config, new JsonSerializerOptions { WriteIndented = true })
-                : "{}",
+            Text = SchemaJsonEditorPolicy.TextForEditor(original, expectObject: true),
             AcceptsReturn = true,
             TextWrapping = TextWrapping.NoWrap,
             FontFamily = new FontFamily("Consolas"),
@@ -553,24 +542,15 @@ public sealed partial class SchemaConfigEditor : UserControl
         textBox.TextChanged += (s, e) =>
         {
             if (_loading) return;
-            try
-            {
-                using var document = JsonDocument.Parse(textBox.Text);
-                if (document.RootElement.ValueKind != JsonValueKind.Object)
-                {
-                    _changes[path] = RemovePendingValue;
-                    SetValidationError(path, "Must be a JSON object.", errorBlock);
-                }
-                else
-                {
-                    onChanged(document.RootElement.Clone());
-                    return;
-                }
-            }
-            catch (JsonException ex)
+            if (!SchemaJsonEditorPolicy.TryStage(textBox.Text, original, expectObject: true, out var staged, out var error))
             {
                 _changes[path] = RemovePendingValue;
-                SetValidationError(path, $"Invalid JSON: {ex.Message}", errorBlock);
+                SetValidationError(path, error ?? "Invalid JSON.", errorBlock);
+            }
+            else
+            {
+                onChanged(staged);
+                return;
             }
             ConfigChanged?.Invoke(this, new SchemaConfigChangedEventArgs(GetChanges(), GetValidationErrors()));
         };
