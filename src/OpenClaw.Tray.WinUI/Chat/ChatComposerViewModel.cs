@@ -252,8 +252,19 @@ internal sealed class ChatComposerViewModel : INotifyPropertyChanged, IDisposabl
 
     public void AppendVoiceTranscript(string transcript)
     {
-        var draft = _draft.TrimEnd();
-        SetDraft(draft.Length == 0 ? transcript : $"{draft} {transcript}");
+        Mutate(() =>
+        {
+            var draft = _draft.TrimEnd();
+            var value = draft.Length == 0 ? transcript : $"{draft} {transcript}";
+            _draftRevision++;
+            _dismissedSlashInputRevision = null;
+            _draft = value;
+            _slashMenuState = ReactorSlashCommandController.ReconcileState(
+                _draft,
+                _inputs?.AvailableCommands,
+                _slashMenuState);
+            RecomputeSlashDisplay();
+        });
     }
 
     public void CommitSlashText(string value, ReactorSlashMenuState nextState)

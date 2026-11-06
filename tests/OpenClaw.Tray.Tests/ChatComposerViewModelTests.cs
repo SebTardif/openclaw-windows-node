@@ -378,6 +378,30 @@ public sealed class ChatComposerViewModelTests
     }
 
     [Fact]
+    public void AppendVoiceTranscript_AppliesAfterQueuedKeystrokes()
+    {
+        var dispatcher = new RecordingUiDispatcher { HasThreadAccess = false, RunEnqueuedImmediately = false };
+        var vm = new ChatComposerViewModel(dispatcher, initialSpeakerMuted: false);
+
+        vm.SetDraft("typed");
+        vm.AppendVoiceTranscript("heard");
+
+        Assert.Equal(string.Empty, vm.Draft);
+        dispatcher.FlushPending();
+
+        Assert.Equal("typed heard", vm.Draft);
+    }
+
+    [Fact]
+    public void AppendVoiceTranscript_AppendsToTheCurrentDraft()
+    {
+        var vm = new ChatComposerViewModel(new RecordingUiDispatcher(), initialSpeakerMuted: false);
+        vm.SetDraft("typed");
+        vm.AppendVoiceTranscript("heard");
+        Assert.Equal("typed heard", vm.Draft);
+    }
+
+    [Fact]
     public void PropertyChanged_IsRaisedOnEveryAcceptedMutation()
     {
         var vm = new ChatComposerViewModel(new RecordingUiDispatcher(), initialSpeakerMuted: false);
