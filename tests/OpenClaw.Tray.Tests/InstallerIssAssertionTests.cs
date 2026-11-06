@@ -1,3 +1,5 @@
+using System.Diagnostics;
+
 namespace OpenClaw.Tray.Tests;
 
 /// <summary>
@@ -58,12 +60,30 @@ public sealed class InstallerIssAssertionTests
             @"Name: ""{group}\OpenClaw Chat""; Filename: ""{app}\{#MyAppExeName}""; Parameters: ""{#MyProtocol}://chat""; IconFilename: ""{app}\{#MyAppExeName}""; AppUserModelID: ""{#MyAppAumid}""",
             @"Name: ""{group}\Check for Updates""; Filename: ""{app}\{#MyAppExeName}""; Parameters: ""{#MyProtocol}://check-updates""; IconFilename: ""{app}\{#MyAppExeName}""; AppUserModelID: ""{#MyAppAumid}""",
             @"Name: ""{autodesktop}\{#MyAppName}""; Filename: ""{app}\{#MyAppExeName}""; Tasks: desktopicon; AppUserModelID: ""{#MyAppAumid}""",
-            @"Name: ""{userstartup}\{#MyAppName}""; Filename: ""{app}\{#MyAppExeName}""; Tasks: startupicon; AppUserModelID: ""{#MyAppAumid}"""
+            @"Name: ""{userstartup}\{#MyAppName}""; Filename: ""{app}\{#MyAppExeName}""; Parameters: ""--background""; Tasks: startupicon; AppUserModelID: ""{#MyAppAumid}"""
         })
         {
             Assert.Contains(iconEntry, iss);
         }
         Assert.DoesNotContain("AppUserModelID: \"OpenClaw.Tray.WinUI\"", iss);
+    }
+
+    [Fact]
+    public void Installer_MigratesOnlyOwnedArgumentFreeAutostartWithoutEnablingTasks()
+    {
+        var iss = File.ReadAllText(Path.Combine(TestRepositoryPaths.GetRepositoryRoot(), "installer.iss"));
+        var start = iss.IndexOf("procedure MigrateLegacyBackgroundLaunch;", StringComparison.Ordinal);
+        var end = iss.IndexOf("procedure EnsureLocalGatewayCleanupChoice;", start, StringComparison.Ordinal);
+        var migration = iss[start..end];
+        Assert.Contains("CompareText(RemoveQuotes(RunCommand), ExecutablePath) = 0", migration);
+        Assert.Contains("Task.Definition.Actions.Count <> 1", migration);
+        Assert.Contains("CompareText(RemoveQuotes(ActionPath), ExecutablePath) <> 0", migration);
+        Assert.Contains("(Trim(ActionArguments) <> '')", migration);
+        Assert.Contains("'/Change /TN '", migration);
+        Assert.Contains("--background", migration);
+        Assert.DoesNotContain("/Create", migration);
+        Assert.DoesNotContain("/ENABLE", migration);
+        Assert.Contains("CurStep = ssPostInstall", migration);
     }
 
     [Fact]
@@ -77,7 +97,7 @@ public sealed class InstallerIssAssertionTests
         Assert.Contains("UninstallSilent()", iss);
         Assert.Contains("LocalGatewayCleanupRequested := True", iss);
         Assert.Contains("{#MyDistroName} WSL distro", iss);
-        Assert.Contains("MB_YESNO", iss);
+        Assert.Contains("MB_YESNO or MB_DEFBUTTON2", iss);
         Assert.Contains("ExpandConstant('{sys}\\WindowsPowerShell\\v1.0\\powershell.exe')", iss);
         Assert.Contains("ewWaitUntilTerminated", iss);
         Assert.Contains("MB_RETRYCANCEL", iss);
@@ -182,9 +202,6 @@ public sealed class InstallerIssAssertionTests
         Assert.Contains("2>&1 | Out-Host", script);
         Assert.Contains("$wingetExitCode = $LASTEXITCODE", script);
         Assert.Contains("[switch]$Dev,", runScript);
-        Assert.Contains("$buildArgs = @{", runScript);
-        Assert.Contains("Configuration = $Configuration", runScript);
-        Assert.Contains("$buildArgs[\"DevBuild\"] = $true", runScript);
         Assert.Contains("app-identity.txt", runScript);
         Assert.Contains("does not match requested", runScript);
         Assert.Contains("[switch]$DevBuild,", buildScript);
@@ -196,6 +213,152 @@ public sealed class InstallerIssAssertionTests
         Assert.Contains("<AppIdentityMarker>release</AppIdentityMarker>", project);
         Assert.DoesNotContain("'$(Configuration)' == 'Debug'", project);
         Assert.DoesNotContain("<DevBuild>true</DevBuild>", project);
+    }
+
+    [Fact]
+    public async Task RunAppLocal_ExplicitArm64Runtime_WinsOverEmulatedX64Shell()
+    {
+        var root = TestRepositoryPaths.GetRepositoryRoot();
+        var script = Path.Combine(root, "run-app-local.ps1");
+        var powershell = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.Windows),
+            "System32",
+            "WindowsPowerShell",
+            "v1.0",
+            "powershell.exe");
+        var startInfo = new ProcessStartInfo(powershell)
+        {
+            WorkingDirectory = root,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false,
+            CreateNoWindow = true,
+        };
+        foreach (var argument in new[]
+        {
+            "-NoProfile",
+            "-ExecutionPolicy", "Bypass",
+            "-File", script,
+            "-NoBuild",
+            "-Configuration", "Release",
+            "-RuntimeIdentifier", "win-arm64",
+            "-DryRun",
+        })
+        {
+            startInfo.ArgumentList.Add(argument);
+        }
+        startInfo.Environment["PROCESSOR_ARCHITECTURE"] = "AMD64";
+
+        using var process = Process.Start(startInfo);
+        Assert.NotNull(process);
+        var standardOutput = process.StandardOutput.ReadToEndAsync();
+        var standardError = process.StandardError.ReadToEndAsync();
+        await process.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(30));
+        var result = $"{await standardOutput}{Environment.NewLine}{await standardError}";
+
+        Assert.Contains("Selected runtime: win-arm64", result, StringComparison.Ordinal);
+        Assert.DoesNotContain("Selected runtime: win-x64", result, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("Release", false, false, "win-x64", true)]
+    [InlineData("Release", false, true, "win-x64", true)]
+    [InlineData("Release", false, false, "win-arm64", true)]
+    [InlineData("Release", false, true, "win-arm64", true)]
+    [InlineData("Release", true, false, "win-x64", false)]
+    [InlineData("Debug", false, false, "win-x64", false)]
+    public async Task ComWrapperDiagnosticsSwitch_EvaluatesOnlyForProductionBuilds(
+        string configuration,
+        bool devBuild,
+        bool packageMsix,
+        string runtimeIdentifier,
+        bool expected)
+    {
+        var repositoryRoot = TestRepositoryPaths.GetRepositoryRoot();
+        var projectPath = Path.Combine(
+            repositoryRoot,
+            "src",
+            "OpenClaw.Tray.WinUI",
+            "OpenClaw.Tray.WinUI.csproj");
+        var startInfo = new ProcessStartInfo("dotnet")
+        {
+            WorkingDirectory = repositoryRoot,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false,
+            CreateNoWindow = true,
+        };
+        startInfo.ArgumentList.Add("msbuild");
+        startInfo.ArgumentList.Add(projectPath);
+        startInfo.ArgumentList.Add("-nologo");
+        startInfo.ArgumentList.Add("-v:q");
+        startInfo.ArgumentList.Add("-getItem:RuntimeHostConfigurationOption");
+        startInfo.ArgumentList.Add($"-p:Configuration={configuration}");
+        startInfo.ArgumentList.Add($"-p:DevBuild={devBuild.ToString().ToLowerInvariant()}");
+        startInfo.ArgumentList.Add($"-p:PackageMsix={packageMsix.ToString().ToLowerInvariant()}");
+        startInfo.ArgumentList.Add($"-p:RuntimeIdentifier={runtimeIdentifier}");
+
+        using var process = Process.Start(startInfo);
+        Assert.NotNull(process);
+        var standardOutput = process.StandardOutput.ReadToEndAsync();
+        var standardError = process.StandardError.ReadToEndAsync();
+        using var timeout = new CancellationTokenSource(TimeSpan.FromMinutes(2));
+        try
+        {
+            await process.WaitForExitAsync(timeout.Token);
+        }
+        catch (OperationCanceledException) when (timeout.IsCancellationRequested)
+        {
+            if (!process.HasExited)
+                process.Kill(entireProcessTree: true);
+            await process.WaitForExitAsync();
+
+            throw new TimeoutException(
+                $"MSBuild evaluation timed out.{Environment.NewLine}" +
+                $"Standard output:{Environment.NewLine}{await standardOutput}{Environment.NewLine}" +
+                $"Standard error:{Environment.NewLine}{await standardError}");
+        }
+
+        var output = await standardOutput;
+        var error = await standardError;
+
+        Assert.True(
+            process.ExitCode == 0,
+            $"MSBuild evaluation failed with exit code {process.ExitCode}.{Environment.NewLine}" +
+            $"Standard output:{Environment.NewLine}{output}{Environment.NewLine}" +
+            $"Standard error:{Environment.NewLine}{error}");
+
+        JsonNode? result;
+        try
+        {
+            result = JsonNode.Parse(output);
+        }
+        catch (System.Text.Json.JsonException exception)
+        {
+            throw new InvalidDataException(
+                $"MSBuild evaluation returned invalid JSON:{Environment.NewLine}{output}",
+                exception);
+        }
+
+        var options = result?["Items"]?["RuntimeHostConfigurationOption"]?.AsArray();
+        Assert.NotNull(options);
+        var matchingOptions = options
+            .Where(option =>
+                string.Equals(
+                    option?["Identity"]?.GetValue<string>(),
+                    "System.Diagnostics.Debugger.IsSupported",
+                    StringComparison.Ordinal))
+            .ToArray();
+
+        if (!expected)
+        {
+            Assert.Empty(matchingOptions);
+            return;
+        }
+
+        var matchingOption = Assert.Single(matchingOptions);
+        Assert.Equal("false", matchingOption?["Value"]?.GetValue<string>());
+        Assert.Equal("true", matchingOption?["Trim"]?.GetValue<string>());
     }
 
     [Fact]
@@ -212,9 +375,9 @@ public sealed class InstallerIssAssertionTests
         Assert.Contains(@"<AppxManifest Remove=""@(AppxManifest)"" />", project);
         Assert.DoesNotContain("PatchDevAppxManifestIdentity", project);
         Assert.Contains("Version=\"0.0.0.0\"", manifest);
-        Assert.Contains("Name=\"OpenClaw.Companion\"", manifest);
+        Assert.Contains("Name=\"OpenClawFoundation.OpenClaw\"", manifest);
         Assert.Contains("<uap:Protocol Name=\"openclaw\">", manifest);
-        Assert.DoesNotContain("OpenClaw.Companion.Dev", manifest);
+        Assert.DoesNotContain("OpenClawFoundation.OpenClaw.Dev", manifest);
     }
 
     [Fact]
@@ -237,35 +400,29 @@ public sealed class InstallerIssAssertionTests
     public void MxcSdk_IsRestoredCopiedValidatedAndIncludedInInstallerPayload()
     {
         var repositoryRoot = TestRepositoryPaths.GetRepositoryRoot();
-        var packageJson = File.ReadAllText(Path.Combine(repositoryRoot, "package.json"));
-        var packageLock = File.ReadAllText(Path.Combine(repositoryRoot, "package-lock.json"));
+        var sharedProject = File.ReadAllText(Path.Combine(
+            repositoryRoot, "src", "OpenClaw.Shared", "OpenClaw.Shared.csproj"));
         var trayProject = File.ReadAllText(Path.Combine(
             repositoryRoot, "src", "OpenClaw.Tray.WinUI", "OpenClaw.Tray.WinUI.csproj"));
         var iss = File.ReadAllText(Path.Combine(repositoryRoot, "installer.iss"));
 
-        Assert.Contains(@"""@microsoft/mxc-sdk""", packageJson);
-        Assert.Contains(@"""@microsoft/mxc-sdk"": ""^0.7.0""", packageJson);
-        Assert.Contains(@"""node_modules/@microsoft/mxc-sdk""", packageLock);
-        Assert.Contains(@"""version"": ""0.7.0""", packageLock);
-        Assert.Contains("RestoreMxcNodeBridge", trayProject);
-        Assert.Contains(@"Inputs=""$(OpenClawRepoRoot)package-lock.json""", trayProject);
-        Assert.Contains(@"<MxcSdkRestoreStamp>$(OpenClawRepoRoot)node_modules\.openclaw-mxc-sdk-$(MxcSdkExpectedVersion).stamp</MxcSdkRestoreStamp>", trayProject);
-        Assert.Contains(@"Outputs=""$(MxcSdkRestoreStamp)""", trayProject);
-        Assert.Contains(@"<Touch Files=""$(MxcSdkRestoreStamp)"" AlwaysCreate=""true"" />", trayProject);
-        Assert.Contains("npm ci --no-audit --no-fund", trayProject);
-        Assert.Contains("CopyWxcExecToOutput", trayProject);
-        Assert.Contains("CopyWxcExecToPublish", trayProject);
-        Assert.Contains("ValidateWxcExecShipped", trayProject);
-        Assert.Contains("ValidateWxcExecPublished", trayProject);
-        Assert.Contains(@"tools\mxc\$(MxcArch)\wxc-exec.exe", trayProject);
-
-        // The Inno payload recurses through the prepared publish directory, so
-        // publish-time tools\mxc\<arch>\wxc-exec.exe is shipped with the app.
+        Assert.Contains(@"PackageReference Include=""Microsoft.Mxc.Sdk"" Version=""1.0.0""", sharedProject);
+        Assert.False(File.Exists(Path.Combine(repositoryRoot, "package.json")));
+        Assert.False(File.Exists(Path.Combine(repositoryRoot, "package-lock.json")));
+        Assert.DoesNotContain("RestoreMxcNodeBridge", trayProject);
+        Assert.Contains("RemoveLegacyMxcOutput", trayProject);
+        Assert.Contains("Remove-LegacyMxcPayload.ps1", trayProject);
+        Assert.Contains(@"$(SystemRoot)\System32\WindowsPowerShell\v1.0\powershell.exe", trayProject);
+        Assert.DoesNotContain("pwsh", trayProject, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("System.IO.Path]::Combine('$(TargetDir)', '.')", trayProject);
+        Assert.Contains("System.IO.Path]::Combine('$(PublishDir)', '.')", trayProject);
+        Assert.DoesNotContain("CopyMxc", trayProject);
+        Assert.DoesNotContain("npm ci", trayProject);
         Assert.Contains(@"Source: ""{#publish}\*""; DestDir: ""{app}""; Flags: ignoreversion recursesubdirs", iss);
     }
 
     [Fact]
-    public void MxcRuntime_ProbesShippedWxcExecAndSystemRunUsesIt()
+    public void MxcRuntime_UsesTypedSdkAndOnlyPositiveWindowsCompatibility()
     {
         var repositoryRoot = TestRepositoryPaths.GetRepositoryRoot();
         var availability = File.ReadAllText(Path.Combine(
@@ -273,16 +430,40 @@ public sealed class InstallerIssAssertionTests
         var nodeService = File.ReadAllText(Path.Combine(
             repositoryRoot, "src", "OpenClaw.Tray.WinUI", "Services", "NodeService.cs"));
 
-        Assert.Contains(@"Path.Combine(root, ""tools"", ""mxc"", arch, ""wxc-exec.exe"")", availability);
-        Assert.Contains("WxcExecOverrideEnvVar", availability);
-        Assert.Contains("node_modules", availability);
-        Assert.Contains("@microsoft", availability);
-        Assert.Contains("mxc-sdk", availability);
+        Assert.Contains("MxcContainer.Probe()", availability);
+        Assert.DoesNotContain("wxc-exec", availability);
+        Assert.DoesNotContain("node_modules", availability);
 
         Assert.Contains("private ICommandRunner BuildSystemRunRunner()", nodeService);
         Assert.Contains("MxcAvailability.Probe(_logger)", nodeService);
-        Assert.Contains("new DirectAppContainerExecutor(GetOrProbeMxcAvailability, _logger)", nodeService);
+        Assert.DoesNotContain("new LocalCommandRunner", nodeService);
+        Assert.DoesNotContain("new DirectAppContainerExecutor", nodeService);
         Assert.Contains("return new MxcCommandRunner(", nodeService);
+        var runner = File.ReadAllText(Path.Combine(repositoryRoot,
+            "src", "OpenClaw.Shared", "Mxc", "MxcCommandRunner.cs"));
+        Assert.Contains("if (availability.IsWindowsUnsupported)", runner);
+        Assert.Contains("UnsupportedWindowsCommandExecutor.RunAsync", runner);
+        Assert.DoesNotContain("LocalCommandRunner", runner);
     }
 
+    [Fact]
+    public void UpgradeCleanup_CoversInnoAndCopyOverZipStartupWithoutTouchingUserState()
+    {
+        var root = TestRepositoryPaths.GetRepositoryRoot();
+        var iss = File.ReadAllText(Path.Combine(root, "installer.iss"));
+        foreach (var arch in new[] { "x64", "arm64" })
+        {
+            Assert.Contains($@"Type: files; Name: ""{{app}}\tools\mxc\{arch}\wxc-exec.exe""", iss);
+            Assert.Contains($@"Type: files; Name: ""{{app}}\tools\mxc\{arch}\wslcsdk.dll""", iss);
+            Assert.Contains($@"Type: dirifempty; Name: ""{{app}}\tools\mxc\{arch}""", iss);
+        }
+        var app = File.ReadAllText(Path.Combine(root, "src", "OpenClaw.Tray.WinUI", "App.xaml.cs"));
+        Assert.Contains("LegacyMxcFiles.Cleanup(AppContext.BaseDirectory, PackageHelper.IsPackaged)", app);
+        var cleanup = File.ReadAllText(Path.Combine(root, "src", "OpenClaw.Shared", "Mxc", "LegacyMxcFiles.cs"));
+        Assert.Contains("if (isPackaged) return []", cleanup);
+        Assert.Contains("FileAttributes.ReparsePoint", cleanup);
+        Assert.DoesNotContain("recursive: true", cleanup);
+        Assert.DoesNotContain("settings.json", cleanup);
+        Assert.DoesNotContain("gateways.json", cleanup);
+    }
 }

@@ -1,0 +1,1235 @@
+using System.Net;
+using System.Net.Sockets;
+using System.Net.WebSockets;
+using System.Security.Cryptography;
+using System.Text;
+using System.Text.Json;
+
+namespace OpenClaw.TestSupport.Gateway;
+
+/// <summary>Safe diagnostic metadata only. Request IDs, credentials and payloads are never retained.</summary>
+public sealed record GatewayFixtureRequest(
+    string Method,
+    string? SessionKey,
+    string Outcome,
+    string? Decision = null,
+    string? ApprovalId = null,
+    bool AdvertisesExecApprovals = false,
+    string? ModelCatalogView = null,
+    bool? IncludeModelDetails = null);
+
+public sealed record GatewayFixtureEvent(string Event, int DeliveredConnections);
+
+/// <summary>
+/// An independently owned, operator-only loopback Gateway. Responses are selected by
+/// method and parameters, not consumed from a tape. No request is forwarded anywhere.
+/// </summary>
+public sealed class FixtureGatewayServer : IAsyncDisposable
+{
+    /// <summary>
+    /// Request label for the one plain-HTTP route the fixture serves, the authenticated profile photo.
+    /// The colon is outside the WebSocket method alphabet, so it cannot collide with a Gateway method.
+    /// </summary>
+    public const string AvatarRequestMethod = "http:users.avatar";
+
+    /// <summary>
+    /// Flat colour of the authenticated scenario profile's photo. It is neither a Windows accent nor the
+    /// initials fallback, so finding it in a rendered window proves the photo was decoded.
+    /// </summary>
+    public const int OwnerAvatarRgb = 0x2ECC40;
+
+    private const string AvatarRoutePrefix = "/api/users/";
+    private const string AvatarRouteSuffix = "/avatar";
+    private const int MaximumRequestHeadBytes = 16 * 1024;
+
+    // An 8x8 PNG of OwnerAvatarRgb. A constant keeps this library free of an image-encoding dependency.
+    private static readonly byte[] OwnerAvatarPng = Convert.FromBase64String(
+        "iVBORw0KGgoAAAANSUhEUgAAAAgAAAAICAIAAABLbSncAAAAEUlEQVR42mPQO+OAFTEMLQkAqApOgZtsmosAAAAASUVORK5CYII=");
+
+    private readonly GatewayScenario _scenario;
+    private readonly byte[] _tokenHash;
+    private readonly TcpListener _listener;
+    private readonly CancellationTokenSource _lifetime;
+    private readonly object _sync = new();
+    private readonly List<Task> _connections = [];
+    private readonly List<GatewayFixtureRequest> _requests = [];
+    private readonly List<GatewayFixtureEvent> _events = [];
+    private readonly List<int> _unexpectedIndices = [];
+    private readonly HashSet<int> _subscriptions = [];
+    private readonly HashSet<string> _issuedApprovalIds = new(StringComparer.Ordinal);
+    private readonly Dictionary<int, ActiveConnection> _authenticatedConnections = [];
+    private readonly Dictionary<string, TaskCompletionSource> _historyGates = new(StringComparer.Ordinal);
+    private TaskCompletionSource? _sessionMutationGate;
+    private TaskCompletionSource? _agentsListGate;
+    private JsonElement? _agentsRoster;
+    private bool _agentsListUnsupported;
+    private TaskCompletionSource? _chatSendGate;
+    private TaskCompletionSource? _connectionHandshakeGate;
+    private TaskCompletionSource<bool>? _chatAbortGate;
+    private int _chatEventSequence;
+    private TaskCompletionSource? _nextSessionListGate;
+    private TaskCompletionSource? _heldSessionList;
+    private TaskCompletionSource? _sessionListCaptured;
+    private readonly Dictionary<string, Func<JsonElement, object>> _readResponses = new(StringComparer.Ordinal);
+    private readonly TaskCompletionSource _handshake = NewSignal();
+    private readonly TaskCompletionSource _accepted = NewSignal();
+    private TaskCompletionSource _requestChanged = NewSignal();
+    private readonly Task _acceptLoop;
+    private Task? _disposal;
+    private int _connectionCount;
+    private int _activeConnectionCount;
+    private int _sharedCredentialConnects;
+    private int _deviceTokenRejections;
+    private static readonly JsonElement EmptyParameters = JsonSerializer.SerializeToElement(new { });
+    private sealed record ActiveConnection(WebSocket Socket, SemaphoreSlim SendLock, CancellationToken CancellationToken)
+    {
+        public int Borrowers { get; set; }
+        public bool Retired { get; set; }
+        public TaskCompletionSource Drained { get; } = NewSignal();
+    }
+
+    public Uri Endpoint { get; }
+    public InteractiveGatewayRuntime? Interactive { get; }
+    public IReadOnlyList<GatewayFixtureEvent> Events
+    {
+        get { lock (_sync) return _events.ToArray(); }
+    }
+
+    /// <summary>
+    /// The only device token this fixture accepts. A connect carrying any other
+    /// device token is answered with <c>AUTH_DEVICE_TOKEN_MISMATCH</c>, modelling a
+    /// gateway whose pairing record no longer matches the caller's stored credential.
+    /// When null, every presented device token is rejected.
+    /// </summary>
+    public string? AcceptedDeviceToken { get; set; }
+
+    /// <summary>
+    /// Raised on the server side immediately before a presented device token is
+    /// answered with <c>AUTH_DEVICE_TOKEN_MISMATCH</c>. Lets a test change the
+    /// authority a caller will re-verify during recovery, so recovery-time
+    /// rejection can be exercised through the production connect path.
+    /// </summary>
+    public Action? DeviceTokenRejected { get; set; }
+
+    /// <summary>Pre-authentication startup rejections before this fixture admits an operator.</summary>
+    public int StartupRejectionsRemaining { get; set; }
+    public int StartupRetryAfterMs { get; set; } = 100;
+    public Action? StartupRejected { get; set; }
+    public bool CloseAfterStartupRejection { get; set; } = true;
+
+    /// <summary>Connect attempts that presented no device token, so the shared credential was judged.</summary>
+    public int SharedCredentialConnects => Volatile.Read(ref _sharedCredentialConnects);
+
+    /// <summary>Connect attempts whose presented device token was rejected.</summary>
+    public int DeviceTokenRejections => Volatile.Read(ref _deviceTokenRejections);
+    public Task HandshakeCompleted => _handshake.Task;
+    public Task ConnectionAccepted => _accepted.Task;
+    public int ConnectionCount => Volatile.Read(ref _connectionCount);
+    public int ActiveConnectionCount => Volatile.Read(ref _activeConnectionCount);
+    public int SubscriptionCount
+    {
+        get { lock (_sync) return _subscriptions.Count; }
+    }
+    public IReadOnlyList<GatewayFixtureRequest> Requests
+    {
+        get { lock (_sync) return _requests.ToArray(); }
+    }
+    public IReadOnlyList<GatewayFixtureRequest> UnexpectedRequests
+    {
+        get { lock (_sync) return _unexpectedIndices.Select(i => _requests[i]).ToArray(); }
+    }
+
+    private FixtureGatewayServer(GatewayScenario scenario, string token, CancellationToken cancellationToken,
+        TimeSpan? eventDelay, TimeSpan? interactionTimeout)
+    {
+        _scenario = scenario;
+        _tokenHash = SHA256.HashData(Encoding.UTF8.GetBytes(token));
+        _lifetime = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        if (scenario.IsInteractive)
+            Interactive = new InteractiveGatewayRuntime(scenario, BroadcastAsync, CloseConnectionsAsync,
+                _lifetime.Token, eventDelay ?? TimeSpan.FromMilliseconds(350), interactionTimeout ?? TimeSpan.FromSeconds(60));
+        _listener = new TcpListener(IPAddress.Loopback, 0);
+        _listener.Start();
+        Endpoint = new Uri($"ws://127.0.0.1:{((IPEndPoint)_listener.LocalEndpoint).Port}/");
+        _acceptLoop = AcceptLoopAsync();
+    }
+
+    public static Task<FixtureGatewayServer> StartAsync(
+        GatewayScenario scenario, string token, CancellationToken cancellationToken = default,
+        TimeSpan? eventDelay = null, TimeSpan? interactionTimeout = null)
+    {
+        ArgumentNullException.ThrowIfNull(scenario);
+        ArgumentException.ThrowIfNullOrWhiteSpace(token);
+        cancellationToken.ThrowIfCancellationRequested();
+        return Task.FromResult(new FixtureGatewayServer(scenario, token, cancellationToken, eventDelay, interactionTimeout));
+    }
+
+    private async Task BroadcastAsync(string eventName, object payload)
+    {
+        ActiveConnection[] targets;
+        lock (_sync) targets = _authenticatedConnections.Values.ToArray();
+        var delivered = 0;
+        foreach (var target in targets)
+        {
+            try
+            {
+                using var send = CancellationTokenSource.CreateLinkedTokenSource(_lifetime.Token, target.CancellationToken);
+                send.CancelAfter(TimeSpan.FromSeconds(5));
+                if (target.Socket.State != WebSocketState.Open) continue;
+                await SendAsync(target.Socket, target.SendLock, new { type = "event", @event = eventName, payload }, send.Token);
+                delivered++;
+            }
+            catch (OperationCanceledException) when (!_lifetime.IsCancellationRequested) { target.Socket.Abort(); }
+            catch (WebSocketException) { target.Socket.Abort(); }
+            catch (ObjectDisposedException) { }
+        }
+        // Zero recipients is expected during a scripted disconnect. Histories remain
+        // authoritative for reconnect; never retain message or question content here.
+        lock (_sync) _events.Add(new GatewayFixtureEvent(eventName, delivered));
+    }
+
+    /// <summary>Holds new handshakes so native reconnect UI can be observed without racing the server.</summary>
+    public void HoldConnectionHandshakes()
+    {
+        lock (_sync)
+        {
+            ObjectDisposedException.ThrowIf(_disposal is not null, this);
+            if (_connectionHandshakeGate is not null)
+                throw new InvalidOperationException("Connection handshakes are already held.");
+            _connectionHandshakeGate = NewSignal();
+        }
+    }
+
+    public void ReleaseConnectionHandshakes()
+    {
+        lock (_sync)
+        {
+            var gate = _connectionHandshakeGate ?? throw new InvalidOperationException("Connection handshakes are not held.");
+            _connectionHandshakeGate = null;
+            gate.TrySetResult();
+        }
+    }
+
+    public async Task CloseConnectionsAsync(CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        var connections = AcquireConnections(onlyOpen: false);
+        try
+        {
+            foreach (var connection in connections)
+            {
+                try
+                {
+                    using var close = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, connection.CancellationToken);
+                    close.CancelAfter(TimeSpan.FromSeconds(5));
+                    await connection.SendLock.WaitAsync(close.Token);
+                    try
+                    {
+                        if (connection.Socket.State == WebSocketState.Open)
+                            await connection.Socket.CloseOutputAsync((WebSocketCloseStatus)1012, "Fixture restart", close.Token);
+                    }
+                    finally { connection.SendLock.Release(); }
+                }
+                catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested) { connection.Socket.Abort(); }
+                catch (WebSocketException) { connection.Socket.Abort(); }
+                catch (ObjectDisposedException) { }
+            }
+        }
+        finally { ReleaseConnections(connections); }
+    }
+
+    private ActiveConnection[] AcquireConnections(bool onlyOpen)
+    {
+        lock (_sync)
+        {
+            var connections = _authenticatedConnections.OrderByDescending(pair => pair.Key)
+                .Select(pair => pair.Value)
+                .Where(connection => !onlyOpen || connection.Socket.State == WebSocketState.Open)
+                .ToArray();
+            foreach (var connection in connections) connection.Borrowers++;
+            return connections;
+        }
+    }
+
+    private void ReleaseConnections(ActiveConnection[] connections)
+    {
+        lock (_sync)
+        {
+            foreach (var connection in connections)
+                if (--connection.Borrowers == 0 && connection.Retired) connection.Drained.TrySetResult();
+        }
+    }
+
+    /// <summary>Holds subsequent reads of this history until ReleaseHistory. Other requests continue normally.</summary>
+    public void HoldHistory(string sessionKey)
+    {
+        if (!_scenario.ContainsSession(sessionKey))
+            throw new ArgumentException("Unknown fixture session key.", nameof(sessionKey));
+        lock (_sync)
+        {
+            ObjectDisposedException.ThrowIf(_disposal is not null, this);
+            if (!_historyGates.TryAdd(sessionKey, NewSignal()))
+                throw new InvalidOperationException("History is already held for this session.");
+        }
+    }
+
+    public void ReleaseHistory(string sessionKey)
+    {
+        lock (_sync)
+        {
+            if (!_historyGates.Remove(sessionKey, out var signal))
+                throw new InvalidOperationException("History is not held for this session.");
+            signal.TrySetResult();
+        }
+    }
+
+    public void HoldSessionMutations()
+    {
+        lock (_sync)
+        {
+            ObjectDisposedException.ThrowIf(_disposal is not null, this);
+            if (_sessionMutationGate is not null)
+                throw new InvalidOperationException("Session mutations are already held.");
+            _sessionMutationGate = NewSignal();
+        }
+    }
+
+    public void ReleaseSessionMutations()
+    {
+        lock (_sync)
+        {
+            var gate = _sessionMutationGate ?? throw new InvalidOperationException("Session mutations are not held.");
+            _sessionMutationGate = null;
+            gate.TrySetResult();
+        }
+    }
+
+    public void HoldChatSends()
+    {
+        lock (_sync)
+        {
+            ObjectDisposedException.ThrowIf(_disposal is not null, this);
+            if (_chatSendGate is not null)
+                throw new InvalidOperationException("Chat sends are already held.");
+            _chatSendGate = NewSignal();
+        }
+    }
+
+    public void ReleaseChatSends()
+    {
+        lock (_sync)
+        {
+            var gate = _chatSendGate ??
+                throw new InvalidOperationException("Chat sends are not held.");
+            _chatSendGate = null;
+            gate.TrySetResult();
+        }
+    }
+
+    public void HoldChatAborts()
+    {
+        lock (_sync)
+        {
+            ObjectDisposedException.ThrowIf(_disposal is not null, this);
+            if (_chatAbortGate is not null)
+                throw new InvalidOperationException("Chat aborts are already held.");
+            _chatAbortGate = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        }
+    }
+
+    public void ReleaseChatAborts(bool fail = false)
+    {
+        lock (_sync)
+        {
+            var gate = _chatAbortGate ?? throw new InvalidOperationException("Chat aborts are not held.");
+            _chatAbortGate = null;
+            gate.TrySetResult(fail);
+        }
+    }
+
+    public Task PublishChatRunEventAsync(string sessionKey, string runId, string stream, object data,
+        CancellationToken cancellationToken = default)
+    {
+        ValidateChatRun(sessionKey, runId);
+        if (stream is not ("lifecycle" or "assistant" or "tool"))
+            throw new ArgumentException("Expected a lifecycle, assistant or tool stream.", nameof(stream));
+        ArgumentNullException.ThrowIfNull(data);
+        return PublishEventAsync(new
+        {
+            type = "event", @event = "agent",
+            payload = new
+            {
+                sessionKey, runId, stream, data,
+                seq = Interlocked.Increment(ref _chatEventSequence),
+                ts = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()
+            }
+        }, cancellationToken);
+    }
+
+    public Task PublishChatFinalAsync(string sessionKey, string runId, string text,
+        CancellationToken cancellationToken = default)
+    {
+        ValidateChatRun(sessionKey, runId);
+        ArgumentException.ThrowIfNullOrWhiteSpace(text);
+        return PublishEventAsync(new
+        {
+            type = "event", @event = "chat",
+            payload = new { sessionKey, runId, state = "final", message = new { role = "assistant", content = text } }
+        }, cancellationToken);
+    }
+
+    private void ValidateChatRun(string sessionKey, string runId)
+    {
+        if (!_scenario.ContainsChatRun(sessionKey, runId))
+            throw new ArgumentException("Chat run was not issued for this fixture session.", nameof(runId));
+    }
+
+    public Task PublishChatContentAsync(string sessionKey, string runId, IReadOnlyList<object> content,
+        bool isFinal, CancellationToken cancellationToken = default)
+    {
+        ValidateChatRun(sessionKey, runId);
+        ArgumentNullException.ThrowIfNull(content);
+        if (content.Count == 0)
+            throw new ArgumentException("Chat content must contain at least one block.", nameof(content));
+        return PublishEventAsync(new
+        {
+            type = "event", @event = "chat",
+            payload = new
+            {
+                sessionKey, runId, state = isFinal ? "final" : "delta",
+                message = new { role = "assistant", content }
+            }
+        }, cancellationToken);
+    }
+
+    /// <summary>Replaces only the synthetic agents.list response; authentication remains unchanged.</summary>
+    public void SetAgentsRoster(JsonElement roster)
+    {
+        if (roster.ValueKind != JsonValueKind.Object ||
+            !roster.TryGetProperty("agents", out var agents) || agents.ValueKind != JsonValueKind.Array)
+            throw new ArgumentException("An agents roster object is required.", nameof(roster));
+        lock (_sync)
+            _agentsRoster = roster.Clone();
+    }
+
+    public void RejectAgentsListAsUnsupported()
+    {
+        lock (_sync)
+            _agentsListUnsupported = true;
+    }
+
+    public void HoldAgentsList()
+    {
+        lock (_sync)
+        {
+            ObjectDisposedException.ThrowIf(_disposal is not null, this);
+            if (_agentsListGate is not null)
+                throw new InvalidOperationException("An agents listing is already held.");
+            _agentsListGate = NewSignal();
+        }
+    }
+
+    public void ReleaseAgentsList()
+    {
+        lock (_sync)
+        {
+            var gate = _agentsListGate ?? throw new InvalidOperationException("No agents listing is held.");
+            _agentsListGate = null;
+            gate.TrySetResult();
+        }
+    }
+
+    /// <summary>Hold one listing snapshot while subsequent requests remain independent.</summary>
+    public Task HoldNextSessionList()
+    {
+        lock (_sync)
+        {
+            ObjectDisposedException.ThrowIf(_disposal is not null, this);
+            if (_heldSessionList is not null)
+                throw new InvalidOperationException("A session listing is already held.");
+            _nextSessionListGate = _heldSessionList = NewSignal();
+            _sessionListCaptured = NewSignal();
+            return _sessionListCaptured.Task;
+        }
+    }
+
+    public void ReleaseSessionList()
+    {
+        lock (_sync)
+        {
+            var held = _heldSessionList ?? throw new InvalidOperationException("No session listing is held.");
+            _heldSessionList = _nextSessionListGate = null;
+            _sessionListCaptured = null;
+            held.TrySetResult();
+        }
+    }
+
+    public void OverrideSearchRead(string method, Func<JsonElement, object> response)
+    {
+        if (method is not ("skills.status" or "sessions.search" or "sessions.list"))
+            throw new ArgumentException("Only search reads may be overridden.", nameof(method));
+        lock (_sync) _readResponses[method] = response;
+    }
+
+    public void FailSearchRead(string method) => OverrideSearchRead(method, _ =>
+        throw new FixtureRequestException("FIXTURE_SEARCH_FAILURE", "Synthetic read failure."));
+
+    public void ClearSearchReadOverride(string method)
+    {
+        lock (_sync) _readResponses.Remove(method);
+    }
+
+    /// <summary>Releases the gate immediately. Await response/UI readiness separately after releasing.</summary>
+    public Task ReleaseHistoryAsync(string sessionKey)
+    {
+        ReleaseHistory(sessionKey);
+        return Task.CompletedTask;
+    }
+
+    /// <summary>
+    /// Waits for receipt, including a request currently held at a history gate.
+    /// Occurrence is one-based and includes earlier requests in this server's lifetime.
+    /// </summary>
+    public async Task<GatewayFixtureRequest> WaitForRequestAsync(
+        string method, string? sessionKey = null, int occurrence = 1, CancellationToken cancellationToken = default)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(occurrence);
+        using var wait = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, _lifetime.Token);
+        while (true)
+        {
+            Task changed;
+            lock (_sync)
+            {
+                var request = _requests.Where(r => r.Method == method && (sessionKey is null || r.SessionKey == sessionKey))
+                    .Skip(occurrence - 1).FirstOrDefault();
+                if (request is not null)
+                    return request;
+                changed = _requestChanged.Task;
+            }
+            await changed.WaitAsync(wait.Token);
+        }
+    }
+
+    public async Task<GatewayFixtureRequest> WaitForCompletedRequestAsync(
+        string method,
+        string? sessionKey = null,
+        int occurrence = 1,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(occurrence);
+        using var wait = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, _lifetime.Token);
+        while (true)
+        {
+            Task changed;
+            lock (_sync)
+            {
+                var request = _requests
+                    .Where(request => request.Method == method
+                        && (sessionKey is null || request.SessionKey == sessionKey)
+                        && request.Outcome != "pending")
+                    .Skip(occurrence - 1)
+                    .FirstOrDefault();
+                if (request is not null)
+                    return request;
+                changed = _requestChanged.Task;
+            }
+            await changed.WaitAsync(wait.Token);
+        }
+    }
+
+    public async Task PublishAgentEventAsync(
+        string sessionKey,
+        object data,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(sessionKey);
+        ArgumentNullException.ThrowIfNull(data);
+        var targets = AcquireConnections(onlyOpen: true);
+        try
+        {
+            if (targets.Length == 0)
+                throw new InvalidOperationException("No authenticated fixture connection is available.");
+
+            var eventData = JsonSerializer.SerializeToElement(data);
+            var approvalId = ReadString(eventData, "approvalId");
+            if (ReadString(eventData, "phase") == "requested"
+                && approvalId is { Length: <= 64 }
+                && approvalId.StartsWith("fixture-", StringComparison.Ordinal))
+            {
+                lock (_sync)
+                    _issuedApprovalIds.Add(approvalId);
+            }
+
+            var message = new
+            {
+                type = "event",
+                @event = "agent",
+                payload = new
+                {
+                    runId = "",
+                    seq = 0,
+                    stream = "approval",
+                    ts = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+                    sessionKey,
+                    data = eventData,
+                },
+            };
+            await PublishEventAsync(targets, message, cancellationToken);
+        }
+        finally
+        {
+            ReleaseConnections(targets);
+        }
+    }
+
+    public Task NotifySessionsChangedAsync(CancellationToken cancellationToken = default) =>
+        PublishEventAsync(new { type = "event", @event = "sessions.changed", payload = new { } }, cancellationToken);
+
+    public Task NotifyConfigurationChangedAsync(CancellationToken cancellationToken = default) =>
+        PublishEventAsync(new { type = "event", @event = "config.changed", payload = new { } }, cancellationToken);
+
+    public Task NotifyChatMetadataChangedAsync(CancellationToken cancellationToken = default) =>
+        PublishEventAsync(new { type = "event", @event = "chat.metadata.changed",
+            payload = new { modelCatalogChanged = false, authChanged = false } }, cancellationToken);
+
+    private async Task PublishEventAsync(object message, CancellationToken cancellationToken)
+    {
+        var targets = AcquireConnections(onlyOpen: true);
+        try
+        {
+            if (targets.Length == 0)
+                throw new InvalidOperationException("No authenticated fixture connection is available.");
+            await PublishEventAsync(targets, message, cancellationToken);
+        }
+        finally { ReleaseConnections(targets); }
+    }
+
+    private static async Task PublishEventAsync(
+        ActiveConnection[] targets, object message, CancellationToken cancellationToken)
+    {
+        foreach (var target in targets)
+        {
+            try
+            {
+                using var send = CancellationTokenSource.CreateLinkedTokenSource(
+                    cancellationToken,
+                    target.CancellationToken);
+                await SendAsync(target.Socket, target.SendLock, message, send.Token);
+                return;
+            }
+            catch (OperationCanceledException) when (target.CancellationToken.IsCancellationRequested) { }
+            catch (ObjectDisposedException) { }
+            catch (WebSocketException) { }
+        }
+
+        throw new InvalidOperationException("Authenticated fixture connections closed before the event was sent.");
+    }
+
+    private async Task AcceptLoopAsync()
+    {
+        try
+        {
+            while (true)
+            {
+                var tcp = await _listener.AcceptTcpClientAsync(_lifetime.Token);
+                var id = Interlocked.Increment(ref _connectionCount);
+                lock (_sync)
+                    _connections.Add(ServeConnectionAsync(tcp, id));
+                _accepted.TrySetResult();
+            }
+        }
+        catch (OperationCanceledException) when (_lifetime.IsCancellationRequested) { }
+        catch (SocketException) when (_lifetime.IsCancellationRequested) { }
+        finally
+        {
+            _listener.Stop();
+            _accepted.TrySetCanceled(_lifetime.Token);
+            _handshake.TrySetCanceled(_lifetime.Token);
+        }
+    }
+
+    private async Task ServeConnectionAsync(TcpClient tcp, int connectionId)
+    {
+        using (tcp)
+        using (var connection = CancellationTokenSource.CreateLinkedTokenSource(_lifetime.Token))
+        using (var sendLock = new SemaphoreSlim(1, 1))
+        {
+            Interlocked.Increment(ref _activeConnectionCount);
+            var pending = new List<Task>();
+            WebSocket? socket = null;
+            ActiveConnection? activeConnection = null;
+            try
+            {
+                var stream = tcp.GetStream();
+                var head = await ReadRequestHeadAsync(stream, connection.Token);
+                if (await TryServeAvatarAsync(stream, head, connection.Token))
+                    return;
+                socket = await UpgradeAsync(stream, head, connection.Token);
+                var nonce = Convert.ToHexString(RandomNumberGenerator.GetBytes(24));
+                await SendAsync(socket, sendLock, new
+                {
+                    type = "event", @event = "connect.challenge",
+                    payload = new { nonce, ts = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() }
+                }, connection.Token);
+                var authenticated = false;
+                while (!connection.IsCancellationRequested)
+                {
+                    var json = await ReceiveAsync(socket, connection.Token);
+                    if (json is null)
+                    {
+                        await sendLock.WaitAsync(connection.Token);
+                        try
+                        {
+                            await socket.CloseOutputAsync(WebSocketCloseStatus.NormalClosure, "Fixture connection closed.", connection.Token);
+                        }
+                        finally { sendLock.Release(); }
+                        break;
+                    }
+
+                    JsonElement root;
+                    try
+                    {
+                        using var document = JsonDocument.Parse(json);
+                        root = document.RootElement.Clone();
+                    }
+                    catch (JsonException)
+                    {
+                        var malformed = Record("<malformed>", null);
+                        await SendErrorAsync(socket, sendLock, null, "INVALID_REQUEST", "Expected a Gateway JSON request.", connection.Token);
+                        Complete(malformed, "error:INVALID_REQUEST", unexpected: true);
+                        continue;
+                    }
+
+                    var id = ReadString(root, "id");
+                    var method = ReadString(root, "method");
+                    if (ReadString(root, "type") != "req" || string.IsNullOrWhiteSpace(id) || !ValidMethod(method))
+                    {
+                        var malformed = Record("<malformed>", null);
+                        await SendErrorAsync(socket, sendLock, id, "INVALID_REQUEST", "Expected a request type, string id and method.", connection.Token);
+                        Complete(malformed, "error:INVALID_REQUEST", unexpected: true);
+                        continue;
+                    }
+
+                    var parameters = root.TryGetProperty("params", out var p) ? p : EmptyParameters;
+                    var key = ReadString(parameters, "sessionKey") ?? ReadString(parameters, "key")
+                        ?? ReadString(parameters, "parentSessionKey");
+                    var requestIndex = Record(
+                        method!,
+                        (_scenario.ContainsSession(key ?? "") || Interactive?.ContainsSession(key ?? "") == true) ? key : key is null ? null : "<unknown>",
+                        SafeApprovalDecision(method!, parameters),
+                        SafeApprovalId(method!, parameters),
+                        method == "connect" &&
+                        parameters.ValueKind == JsonValueKind.Object &&
+                        parameters.TryGetProperty("caps", out var caps) &&
+                        caps.ValueKind == JsonValueKind.Array &&
+                        caps.EnumerateArray().Any(cap =>
+                            cap.ValueKind == JsonValueKind.String && cap.GetString() == "exec-approvals"),
+                        method == "models.list" && ReadString(parameters, "view") is "default" or "configured" or "all"
+                            ? ReadString(parameters, "view") : null,
+                        method == "models.list" && parameters.ValueKind == JsonValueKind.Object
+                            && parameters.TryGetProperty("includeDetails", out var details)
+                            && details.ValueKind is JsonValueKind.True or JsonValueKind.False
+                                ? details.GetBoolean() : null);
+                    if (!authenticated || method == "connect")
+                    {
+                        try
+                        {
+                            if (authenticated)
+                                throw new FixtureRequestException("INVALID_REQUEST", "Operator is already connected.");
+                            if (method != "connect")
+                                throw new FixtureRequestException("AUTH_REQUIRED", "Operator connect is required before reading fixture data.");
+                            Task? handshakeGate;
+                            lock (_sync) handshakeGate = _connectionHandshakeGate?.Task;
+                            if (handshakeGate is not null) await handshakeGate.WaitAsync(connection.Token);
+                            if (StartupRejectionsRemaining > 0)
+                            {
+                                StartupRejectionsRemaining--;
+                                await SendAsync(socket, sendLock, new
+                                {
+                                    type = "res", id, ok = false,
+                                    error = new
+                                    {
+                                        code = "UNAVAILABLE", message = "Gateway starting", retryable = true,
+                                        retryAfterMs = StartupRetryAfterMs, details = new { reason = "startup-sidecars" }
+                                    }
+                                }, connection.Token);
+                                Complete(requestIndex, "error:UNAVAILABLE");
+                                StartupRejected?.Invoke();
+                                if (CloseAfterStartupRejection)
+                                {
+                                    await socket.CloseOutputAsync((WebSocketCloseStatus)1013, "gateway starting", connection.Token);
+                                    return;
+                                }
+                                continue;
+                            }
+                            var role = Authenticate(parameters, nonce);
+                            await SendAsync(socket, sendLock, new
+                            {
+                                type = "res", id, ok = true,
+                                payload = _scenario.CreateHello($"fixture-connection-{connectionId}", role)
+                            }, connection.Token);
+                            authenticated = true;
+                            lock (_sync)
+                                _authenticatedConnections[connectionId] =
+                                    activeConnection = new ActiveConnection(socket, sendLock, connection.Token);
+                            Complete(requestIndex, "ok");
+                            _handshake.TrySetResult();
+                        }
+                        catch (FixtureRequestException ex)
+                        {
+                            await SendErrorAsync(socket, sendLock, id, ex.Code, ex.Message, connection.Token);
+                            Complete(requestIndex, $"error:{ex.Code}");
+                        }
+                        continue;
+                    }
+
+                    Task? gate;
+                    Task<bool>? abortOutcome;
+                    lock (_sync)
+                    {
+                        gate = method is "sessions.patch" or "sessions.delete" or "sessions.create"
+                            ? _sessionMutationGate?.Task
+                            : method == "agents.list" ? _agentsListGate?.Task
+                            : method == "chat.send"
+                                ? _chatSendGate?.Task
+                            : method == "sessions.list" ? _nextSessionListGate?.Task
+                            : method == "chat.history" && key is not null && _historyGates.TryGetValue(key, out var held)
+                                ? held.Task : null;
+                        abortOutcome = method == "chat.abort" ? _chatAbortGate?.Task : null;
+                        if (method == "sessions.list") _nextSessionListGate = null;
+                    }
+                    pending.RemoveAll(task => task.IsCompletedSuccessfully);
+                    pending.Add(RespondAsync(socket, sendLock, id!, method!, parameters, requestIndex, connectionId,
+                        gate, abortOutcome, connection.Token));
+                }
+            }
+            catch (OperationCanceledException) when (connection.IsCancellationRequested ||
+                socket?.State is WebSocketState.Aborted or WebSocketState.Closed) { }
+            catch (WebSocketException) when (activeConnection is null ||
+                socket?.State is WebSocketState.Aborted or WebSocketState.Closed) { }
+            catch (IOException) when (connection.IsCancellationRequested) { }
+            catch (InvalidDataException) when (socket is null)
+            {
+                Complete(Record("<upgrade>", null), "error:INVALID_UPGRADE", unexpected: true);
+            }
+            catch (IOException) when (socket is null)
+            {
+                Complete(Record("<upgrade>", null), "error:UPGRADE_DISCONNECTED", unexpected: true);
+            }
+            finally
+            {
+                await connection.CancelAsync();
+                socket?.Abort();
+                Task borrowers = Task.CompletedTask;
+                lock (_sync)
+                {
+                    _authenticatedConnections.Remove(connectionId);
+                    if (activeConnection is not null)
+                    {
+                        activeConnection.Retired = true;
+                        if (activeConnection.Borrowers == 0) activeConnection.Drained.TrySetResult();
+                        borrowers = activeConnection.Drained.Task;
+                    }
+                }
+                try { await Task.WhenAll(pending); }
+                finally
+                {
+                    // Snapshots may still own a queued send or restart close after removal.
+                    // Keep their semaphore alive until those admitted operations release it.
+                    try { await borrowers; }
+                    finally
+                    {
+                        socket?.Dispose();
+                        lock (_sync) _subscriptions.Remove(connectionId);
+                        Interlocked.Decrement(ref _activeConnectionCount);
+                    }
+                }
+            }
+        }
+    }
+
+    private async Task RespondAsync(
+        WebSocket socket, SemaphoreSlim sendLock, string id, string method, JsonElement parameters,
+        int requestIndex, int connectionId, Task? gate, Task<bool>? abortOutcome, CancellationToken cancellationToken)
+    {
+        try
+        {
+            object payload;
+            try
+            {
+                if (parameters.ValueKind != JsonValueKind.Object)
+                    throw new FixtureRequestException("INVALID_PARAMS", "params must be an object.");
+                if (method == "exec.approval.resolve" && Interactive is null)
+                {
+                    var approvalId = ReadString(parameters, "id");
+                    lock (_sync)
+                    {
+                        if (approvalId is null || !_issuedApprovalIds.Contains(approvalId))
+                            throw new FixtureRequestException(
+                                "INVALID_PARAMS",
+                                "Approval ID was not issued by the fixture.");
+                    }
+                }
+                Func<JsonElement, object>? readResponse;
+                lock (_sync) _readResponses.TryGetValue(method, out readResponse);
+                if (method == "sessions.list" && !id.StartsWith("search:", StringComparison.Ordinal))
+                    readResponse = null;
+                JsonElement? agentsRoster;
+                bool agentsListUnsupported;
+                lock (_sync)
+                {
+                    agentsRoster = method == "agents.list" ? _agentsRoster : null;
+                    agentsListUnsupported = method == "agents.list" && _agentsListUnsupported;
+                }
+                if (agentsListUnsupported)
+                    throw new FixtureRequestException("INVALID_REQUEST", "unknown method: agents.list");
+                payload = readResponse is not null ? readResponse(parameters)
+                    : agentsRoster is { } roster ? roster
+                    : Interactive is not null && InteractiveGatewayRuntime.Methods.Contains(method, StringComparer.Ordinal)
+                    ? await Interactive.RespondAsync(method, parameters, cancellationToken)
+                    : _scenario.Respond(method, parameters,
+                        Interactive is null ? null : Interactive.ContainsSession);
+                if (method == "exec.approval.resolve" && Interactive is null)
+                {
+                    var approvalId = ReadString(parameters, "id");
+                    lock (_sync)
+                    {
+                        if (approvalId is null || !_issuedApprovalIds.Remove(approvalId))
+                            throw new FixtureRequestException(
+                                "INVALID_PARAMS",
+                                "Approval ID was already consumed by the fixture.");
+                    }
+                }
+            }
+            catch (FixtureRequestException ex)
+            {
+                if (gate is not null)
+                    await gate.WaitAsync(cancellationToken);
+                Complete(requestIndex, $"error:{ex.Code}", ex.Unexpected);
+                await SendErrorAsync(socket, sendLock, id, ex.Code, ex.Message, cancellationToken);
+                return;
+            }
+            catch (InvalidOperationException) when (Interactive is not null
+                && InteractiveGatewayRuntime.Methods.Contains(method, StringComparer.Ordinal)
+                && !cancellationToken.IsCancellationRequested)
+            {
+                Complete(requestIndex, "error:INTERNAL", unexpected: true);
+                await SendErrorAsync(socket, sendLock, id, "INTERNAL", "Interactive fixture failed. Check fixture playback diagnostics.", cancellationToken);
+                return;
+            }
+            if (method == "sessions.subscribe")
+                lock (_sync) _subscriptions.Add(connectionId);
+            if (method == "sessions.list" && gate is not null)
+                lock (_sync) _sessionListCaptured?.TrySetResult();
+            if (gate is not null)
+                await gate.WaitAsync(cancellationToken);
+            if (abortOutcome is not null && await abortOutcome.WaitAsync(cancellationToken))
+            {
+                await SendErrorAsync(socket, sendLock, id, "FIXTURE_ABORT_FAILED",
+                    "Fixture abort rejected.", cancellationToken);
+                Complete(requestIndex, "error:FIXTURE_ABORT_FAILED");
+                return;
+            }
+            var reply = payload as FixtureReply;
+            try
+            {
+                await SendAsync(socket, sendLock, new { type = "res", id, ok = true, payload = reply?.Payload ?? payload }, cancellationToken);
+                if (reply is not null)
+                    foreach (var frame in reply.Events)
+                        await SendAsync(socket, sendLock, frame, cancellationToken);
+                Complete(requestIndex, "ok");
+            }
+            finally
+            {
+                if (Interactive is not null) await Interactive.AcknowledgeAsync(method, payload);
+            }
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            Complete(requestIndex, "cancelled");
+        }
+        catch (WebSocketException) when (cancellationToken.IsCancellationRequested || socket.State != WebSocketState.Open)
+        {
+            Complete(requestIndex, "disconnected");
+        }
+    }
+
+    private string Authenticate(JsonElement p, string nonce)
+    {
+        if (p.ValueKind != JsonValueKind.Object)
+            throw new FixtureRequestException("INVALID_PARAMS", "connect params must be an object.");
+        p.TryGetProperty("auth", out var auth);
+        var presentedDeviceToken = auth.ValueKind == JsonValueKind.Object ? ReadString(auth, "deviceToken") : null;
+        if (!string.IsNullOrEmpty(presentedDeviceToken))
+        {
+            // A paired caller sends its device token alone, so it is the sole credential to judge.
+            if (AcceptedDeviceToken is null || !CryptographicOperations.FixedTimeEquals(
+                    SHA256.HashData(Encoding.UTF8.GetBytes(AcceptedDeviceToken)),
+                    SHA256.HashData(Encoding.UTF8.GetBytes(presentedDeviceToken))))
+            {
+                Interlocked.Increment(ref _deviceTokenRejections);
+                DeviceTokenRejected?.Invoke();
+                throw new FixtureRequestException("AUTH_DEVICE_TOKEN_MISMATCH", "Unauthorized: device token mismatch.");
+            }
+        }
+        else
+        {
+            Interlocked.Increment(ref _sharedCredentialConnects);
+            if (auth.ValueKind != JsonValueKind.Object || ReadString(auth, "token") is not { } token
+                || !CryptographicOperations.FixedTimeEquals(_tokenHash, SHA256.HashData(Encoding.UTF8.GetBytes(token))))
+                throw new FixtureRequestException("AUTH_TOKEN_MISMATCH", "Unauthorized: fixture token mismatch.");
+        }
+        var role = ReadString(p, "role");
+        if (role is not ("operator" or "node"))
+            throw new FixtureRequestException("INVALID_PARAMS", "Fixture Gateway supports only the operator and node roles.");
+        if (!p.TryGetProperty("minProtocol", out var min) || min.ValueKind != JsonValueKind.Number || !min.TryGetInt32(out var minimum)
+            || !p.TryGetProperty("maxProtocol", out var max) || max.ValueKind != JsonValueKind.Number || !max.TryGetInt32(out var maximum)
+            || minimum > _scenario.ProtocolVersion || maximum < _scenario.ProtocolVersion || minimum > maximum)
+            throw new FixtureRequestException("PROTOCOL_MISMATCH", "Fixture Gateway protocol range mismatch.");
+        if (!p.TryGetProperty("client", out var client) || string.IsNullOrWhiteSpace(ReadString(client, "id"))
+            || !p.TryGetProperty("device", out var device) || ReadString(device, "nonce") != nonce
+            || string.IsNullOrWhiteSpace(ReadString(device, "id"))
+            || string.IsNullOrWhiteSpace(ReadString(device, "publicKey"))
+            || string.IsNullOrWhiteSpace(ReadString(device, "signature")))
+            throw new FixtureRequestException("INVALID_PARAMS", "Expected a signed operator envelope for this challenge.");
+        return role;
+    }
+
+    private int Record(
+        string method,
+        string? key,
+        string? decision = null,
+        string? approvalId = null,
+        bool advertisesExecApprovals = false,
+        string? modelCatalogView = null,
+        bool? includeModelDetails = null)
+    {
+        lock (_sync)
+        {
+            var index = _requests.Count;
+            _requests.Add(new GatewayFixtureRequest(method, key, "pending", decision, approvalId,
+                advertisesExecApprovals, modelCatalogView, includeModelDetails));
+            SignalRequestChanged();
+            return index;
+        }
+    }
+
+    private void Complete(int index, string outcome, bool unexpected = false)
+    {
+        lock (_sync)
+        {
+            _requests[index] = _requests[index] with { Outcome = outcome };
+            if (unexpected)
+                _unexpectedIndices.Add(index);
+            SignalRequestChanged();
+        }
+    }
+
+    private void SignalRequestChanged()
+    {
+        var previous = _requestChanged;
+        _requestChanged = NewSignal();
+        previous.TrySetResult();
+    }
+
+    private static TaskCompletionSource NewSignal() => new(TaskCreationOptions.RunContinuationsAsynchronously);
+    private static string? SafeApprovalDecision(string method, JsonElement parameters)
+    {
+        if (method != "exec.approval.resolve")
+            return null;
+        var decision = ReadString(parameters, "decision");
+        return decision is "allow-once" or "allow-always" or "deny"
+            ? decision
+            : "<unknown>";
+    }
+
+    private static string? SafeApprovalId(string method, JsonElement parameters)
+    {
+        if (method != "exec.approval.resolve")
+            return null;
+        var approvalId = ReadString(parameters, "id");
+        return approvalId is { Length: <= 64 } && approvalId.StartsWith("fixture-", StringComparison.Ordinal)
+            ? approvalId
+            : "<unknown>";
+    }
+
+    private static string? ReadString(JsonElement p, string name) =>
+        p.ValueKind == JsonValueKind.Object && p.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.String
+            ? value.GetString() : null;
+    private static bool ValidMethod(string? method) => method is { Length: > 0 and <= 96 }
+        && method.All(c => char.IsAsciiLetterOrDigit(c) || c is '.' or '_' or '-');
+
+    private static Task SendErrorAsync(
+        WebSocket socket, SemaphoreSlim sendLock, string? id, string code, string message, CancellationToken ct) =>
+        SendAsync(socket, sendLock, new
+        {
+            type = "res", id, ok = false,
+            error = new { code, message, details = new { code } }
+        }, ct);
+
+    private static async Task SendAsync(WebSocket socket, SemaphoreSlim sendLock, object value, CancellationToken ct)
+    {
+        var bytes = JsonSerializer.SerializeToUtf8Bytes(value);
+        await sendLock.WaitAsync(ct);
+        try { await socket.SendAsync(bytes.AsMemory(), WebSocketMessageType.Text, true, ct); }
+        finally { sendLock.Release(); }
+    }
+
+    private static async Task<string?> ReceiveAsync(WebSocket socket, CancellationToken ct)
+    {
+        var buffer = new byte[16 * 1024];
+        using var message = new MemoryStream();
+        while (true)
+        {
+            var result = await socket.ReceiveAsync(buffer.AsMemory(), ct);
+            if (result.MessageType == WebSocketMessageType.Close)
+                return null;
+            if (result.MessageType != WebSocketMessageType.Text || message.Length + result.Count > 1_048_576)
+                throw new InvalidDataException("Fixture expects text requests up to 1 MiB.");
+            message.Write(buffer, 0, result.Count);
+            if (result.EndOfMessage)
+                return Encoding.UTF8.GetString(message.GetBuffer(), 0, checked((int)message.Length));
+        }
+    }
+
+    /// <summary>
+    /// Reads one HTTP request head, exactly through CRLFCRLF so a coalesced first WebSocket frame is not consumed.
+    /// Same bounded leaf as Shared.Tests LoopbackWebSocketServer.
+    /// </summary>
+    private static async Task<string[]> ReadRequestHeadAsync(NetworkStream stream, CancellationToken ct)
+    {
+        var headers = new List<byte>();
+        var next = new byte[1];
+        while (headers.Count < MaximumRequestHeadBytes)
+        {
+            if (await stream.ReadAsync(next.AsMemory(), ct) == 0)
+                throw new EndOfStreamException("Connection ended during the fixture HTTP request head.");
+            headers.Add(next[0]);
+            if (headers.Count >= 4 && headers[^4] == '\r' && headers[^3] == '\n'
+                && headers[^2] == '\r' && headers[^1] == '\n')
+                break;
+        }
+        if (headers.Count == MaximumRequestHeadBytes)
+            throw new InvalidDataException("Fixture HTTP request head exceeded 16 KiB.");
+        return Encoding.ASCII.GetString(headers.ToArray()).Split("\r\n", StringSplitOptions.RemoveEmptyEntries);
+    }
+
+    /// <summary>
+    /// Serves the one plain-HTTP route the Companion window needs besides the WebSocket: the authenticated
+    /// scenario profile photo. Any other HTTP request is left for the upgrade check, which rejects and records it.
+    /// </summary>
+    private async Task<bool> TryServeAvatarAsync(NetworkStream stream, string[] head, CancellationToken ct)
+    {
+        if (!TryReadAvatarProfileId(head, out var profileId))
+            return false;
+
+        // Credentials are judged before the profile, so an unauthenticated caller learns nothing about which ids exist.
+        var (outcome, response) =
+            !HasAcceptedBearer(head) ? ("error:UNAUTHORIZED", AvatarResponse("401 Unauthorized", null))
+            : profileId != _scenario.AuthenticatedProfileId ? ("error:NOT_FOUND", AvatarResponse("404 Not Found", null))
+            : ("ok", AvatarResponse("200 OK", OwnerAvatarPng));
+        var index = Record(AvatarRequestMethod, null);
+        var recorded = "cancelled";
+        try
+        {
+            await stream.WriteAsync(response, ct);
+            recorded = outcome;
+        }
+        catch (Exception ex) when (ex is IOException or SocketException or ObjectDisposedException)
+        {
+            // A caller that abandons a superseded fetch is not fixture drift and must not read as a rejected upgrade.
+            recorded = "disconnected";
+        }
+        finally
+        {
+            Complete(index, recorded, unexpected: recorded.StartsWith("error:", StringComparison.Ordinal));
+        }
+        return true;
+    }
+
+    private static bool TryReadAvatarProfileId(string[] head, out string profileId)
+    {
+        profileId = "";
+        if (head.FirstOrDefault()?.Split(' ') is not ["GET", var target, "HTTP/1.1"])
+            return false;
+        // The query carries an opaque revision. It never selects the response and is never recorded.
+        var path = target.Split('?', 2)[0];
+        var idLength = path.Length - AvatarRoutePrefix.Length - AvatarRouteSuffix.Length;
+        if (idLength <= 0 || !path.StartsWith(AvatarRoutePrefix, StringComparison.Ordinal)
+            || !path.EndsWith(AvatarRouteSuffix, StringComparison.Ordinal))
+            return false;
+        var escapedId = path.Substring(AvatarRoutePrefix.Length, idLength);
+        if (escapedId.Contains('/'))
+            return false;
+        profileId = Uri.UnescapeDataString(escapedId);
+        return true;
+    }
+
+    private bool HasAcceptedBearer(string[] head)
+    {
+        const string scheme = "Bearer ";
+        var header = head.FirstOrDefault(line => line.StartsWith("Authorization:", StringComparison.OrdinalIgnoreCase))
+            ?.Split(':', 2)[1].Trim();
+        if (header is null || !header.StartsWith(scheme, StringComparison.OrdinalIgnoreCase))
+            return false;
+        var presented = SHA256.HashData(Encoding.UTF8.GetBytes(header[scheme.Length..].Trim()));
+        // One bearer is either the shared token or, once a device is paired, the accepted device token.
+        return CryptographicOperations.FixedTimeEquals(_tokenHash, presented)
+            || AcceptedDeviceToken is { } deviceToken && CryptographicOperations.FixedTimeEquals(
+                SHA256.HashData(Encoding.UTF8.GetBytes(deviceToken)), presented);
+    }
+
+    private static byte[] AvatarResponse(string status, byte[]? image)
+    {
+        var body = image ?? [];
+        var contentType = image is null ? "" : "Content-Type: image/png\r\n";
+        var head = Encoding.ASCII.GetBytes(
+            $"HTTP/1.1 {status}\r\n{contentType}Content-Length: {body.Length}\r\nConnection: close\r\n\r\n");
+        return [.. head, .. body];
+    }
+
+    private static async Task<WebSocket> UpgradeAsync(NetworkStream stream, string[] lines, CancellationToken ct)
+    {
+        var key = lines.FirstOrDefault(line => line.StartsWith("Sec-WebSocket-Key:", StringComparison.OrdinalIgnoreCase))?.Split(':', 2)[1].Trim();
+        if (lines.Length == 0 || !lines[0].StartsWith("GET / HTTP/1.1", StringComparison.Ordinal) || string.IsNullOrWhiteSpace(key))
+            throw new InvalidDataException("Expected a loopback WebSocket upgrade.");
+        var accept = Convert.ToBase64String(SHA1.HashData(Encoding.ASCII.GetBytes(key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11")));
+        var response = $"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: {accept}\r\n\r\n";
+        await stream.WriteAsync(Encoding.ASCII.GetBytes(response), ct);
+        return WebSocket.CreateFromStream(stream, isServer: true, subProtocol: null, keepAliveInterval: TimeSpan.FromSeconds(30));
+    }
+
+    public ValueTask DisposeAsync()
+    {
+        lock (_sync)
+            return new ValueTask(_disposal ??= DisposeCoreAsync());
+    }
+
+    private async Task DisposeCoreAsync()
+    {
+        await _lifetime.CancelAsync();
+        lock (_sync)
+        {
+            foreach (var gate in _historyGates.Values)
+                gate.TrySetCanceled(_lifetime.Token);
+            _historyGates.Clear();
+            _sessionMutationGate?.TrySetCanceled();
+            _sessionMutationGate = null;
+            _chatSendGate?.TrySetCanceled();
+            _chatSendGate = null;
+            _connectionHandshakeGate?.TrySetCanceled();
+            _connectionHandshakeGate = null;
+            _chatAbortGate?.TrySetCanceled();
+            _chatAbortGate = null;
+        }
+        await _acceptLoop;
+        Task[] connections;
+        lock (_sync) connections = _connections.ToArray();
+        try { await Task.WhenAll(connections); }
+        finally
+        {
+            try { if (Interactive is not null) await Interactive.DisposeAsync(); }
+            finally { _lifetime.Dispose(); }
+        }
+    }
+}

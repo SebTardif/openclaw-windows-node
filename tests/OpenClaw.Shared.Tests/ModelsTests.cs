@@ -167,7 +167,7 @@ public class SshTunnelCommandLineTests
     {
         var args = SshTunnelCommandLine.BuildArguments("scott", "mac-mini.local", 18789, 28789);
 
-        Assert.Equal("-o BatchMode=yes -o ExitOnForwardFailure=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -o TCPKeepAlive=yes -N -L 28789:127.0.0.1:18789 scott@mac-mini.local", args);
+        Assert.Equal("-o BatchMode=yes -o ExitOnForwardFailure=yes -o GatewayPorts=no -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -o TCPKeepAlive=yes -N -L 127.0.0.1:28789:127.0.0.1:18789 scott@mac-mini.local", args);
     }
 
     [Fact]
@@ -180,7 +180,7 @@ public class SshTunnelCommandLineTests
             28789,
             includeBrowserProxyForward: true);
 
-        Assert.Equal("-o BatchMode=yes -o ExitOnForwardFailure=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -o TCPKeepAlive=yes -N -L 28789:127.0.0.1:18789 -L 28791:127.0.0.1:18791 scott@mac-mini.local", args);
+        Assert.Equal("-o BatchMode=yes -o ExitOnForwardFailure=yes -o GatewayPorts=no -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -o TCPKeepAlive=yes -N -L 127.0.0.1:28789:127.0.0.1:18789 -L 127.0.0.1:28791:127.0.0.1:18791 scott@mac-mini.local", args);
     }
 
     [Fact]
@@ -194,7 +194,7 @@ public class SshTunnelCommandLineTests
             includeBrowserProxyForward: false,
             sshPort: 2222);
 
-        Assert.Equal("-o BatchMode=yes -o ExitOnForwardFailure=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -o TCPKeepAlive=yes -N -L 28789:127.0.0.1:18789 -p 2222 scott@mac-mini.local", args);
+        Assert.Equal("-o BatchMode=yes -o ExitOnForwardFailure=yes -o GatewayPorts=no -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -o TCPKeepAlive=yes -N -L 127.0.0.1:28789:127.0.0.1:18789 -p 2222 scott@mac-mini.local", args);
     }
 
     [Fact]
@@ -276,7 +276,7 @@ public class GatewaySelfInfoTests
         using var doc = JsonDocument.Parse("""
         {
           "type": "hello-ok",
-          "protocol": 1,
+          "protocol": 4,
           "server": { "version": "0.7.0", "connId": "abc123" },
           "snapshot": {
             "presence": [{ "host": "mac", "ts": 123 }],
@@ -298,7 +298,7 @@ public class GatewaySelfInfoTests
         Assert.True(info.HasAnyDetails);
         Assert.Equal("0.7.0", info.ServerVersion);
         Assert.Equal("abc123", info.ConnectionId);
-        Assert.Equal(1, info.Protocol);
+        Assert.Equal(4, info.Protocol);
         Assert.Equal(125000, info.UptimeMs);
         Assert.Equal("token", info.AuthMode);
         Assert.Equal(4, info.StateVersionPresence);
@@ -2079,4 +2079,5 @@ public class SessionInfoContextSummaryTests
         Assert.Contains("camera.clip", CommandCenterCommandGroups.MacNodeParityCommands);
         Assert.Contains("screen.record", CommandCenterCommandGroups.MacNodeParityCommands);
     }
+
 }

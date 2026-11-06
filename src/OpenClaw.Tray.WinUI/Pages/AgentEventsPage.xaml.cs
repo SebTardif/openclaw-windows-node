@@ -18,7 +18,7 @@ public sealed partial class AgentEventsPage : Page
     private bool _filterDirty;
     private AppState? _appState;
 
-    /// <summary>Set by HubWindow so Clear can also clear the central cache.</summary>
+    /// <summary>Set by the Settings view so Clear can also clear the central cache.</summary>
     public Action? ClearCentralCache { get; set; }
 
     public int EventCount => _allEvents.Count;
@@ -41,12 +41,12 @@ public sealed partial class AgentEventsPage : Page
         ApplyFilter();
     }
 
-    public void PopulateAgentFilter(HubWindow hub)
+    public void PopulateAgentFilter(IEnumerable<string> agentIds)
     {
         AgentFilterCombo.SelectionChanged -= OnAgentFilterComboChanged;
         AgentFilterCombo.Items.Clear();
         AgentFilterCombo.Items.Add(new ComboBoxItem { Content = LocalizationHelper.GetString("AgentEventsPage_AllAgents"), Tag = "" });
-        foreach (var id in hub.GetAgentIds())
+        foreach (var id in agentIds)
             AgentFilterCombo.Items.Add(new ComboBoxItem { Content = id, Tag = id });
         AgentFilterCombo.SelectedIndex = 0;
         AgentFilterCombo.SelectionChanged += OnAgentFilterComboChanged;
@@ -78,12 +78,12 @@ public sealed partial class AgentEventsPage : Page
         };
     }
 
-    public void Initialize(HubWindow hub)
+    public void Initialize(IEnumerable<string> agentIds)
     {
         _appState = ((App)Application.Current!).AppState!;
         _appState.AgentEventAdded += OnAgentEventAdded;
         _appState.PropertyChanged += OnAppStateChanged;
-        PopulateAgentFilter(hub);
+        PopulateAgentFilter(agentIds);
         UpdateLiveBadge();
     }
 
@@ -135,8 +135,9 @@ public sealed partial class AgentEventsPage : Page
 
     public void AddEvent(AgentEventInfo evt)
     {
-        // Deduplicate by RunId + Seq
-        if (_allEvents.Any(e => e.RunId == evt.RunId && e.Seq == evt.Seq))
+        // A normal row is run id plus sequence. Translated approvals share
+        // an empty run id and sequence 0, so they use approval id and phase.
+        if (_allEvents.Any(e => AgentEventIdentity.IsSame(e, evt)))
             return;
 
         // For assistant events, replace earlier streaming chunks with the latest one
