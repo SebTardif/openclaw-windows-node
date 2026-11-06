@@ -1,3 +1,12 @@
+// <summary>
+// Settings page that displays Gateway channel status and applies channel credential or configuration changes.
+// It observes AppState, reads the current Gateway configuration before full-config patches, and cancels page-owned
+// refresh and linking work when unloaded. The page does not own Gateway connection state or persisted configuration.
+// Usage:
+//   frame.Navigate(typeof(ChannelsPage));
+//   // The Settings host calls Initialize on the navigated page to attach AppState and refresh status.
+//   // The page cancels its work when the host removes it from the frame.
+// </summary>
 using Microsoft.UI;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
@@ -7,6 +16,9 @@ using Microsoft.UI.Xaml.Shapes;
 using OpenClaw.Shared;
 using OpenClawTray.Helpers;
 using OpenClawTray.Services;
+using OpenClawTray.Presentation;
+using OpenClaw.SetupEngine;
+using OpenClaw.Connection;
 using System;
 using System.Collections.Generic;
 using System.ComponentModel;
@@ -21,19 +33,60 @@ using Windows.Storage.Streams;
 namespace OpenClawTray.Pages;
 
 /// <summary>
-/// Channels page — single-column Expander layout. See <c>ChannelsPage.xaml</c>
-/// for the architectural comment. Data flows from the gateway's
-/// <c>channels.status</c> response → <see cref="ChannelsStatusSnapshot"/> →
-/// <see cref="ChannelRecord"/>s → Expander cards built imperatively below.
-///
-/// Follows the single-app-model pattern (see <c>docs/DATA_FLOW_ARCHITECTURE.md</c>):
-/// the page observes <see cref="AppState"/> directly via <see cref="INotifyPropertyChanged"/>
-/// and routes commands through <see cref="App"/> globally; no <c>HubWindow</c> coupling.
+/// Renders channel status and invokes the Gateway-backed channel setup actions for the active Settings route.
 /// </summary>
 public sealed partial class ChannelsPage : Page
 {
     private static App CurrentApp => (App)Microsoft.UI.Xaml.Application.Current!;
     private AppState? _appState;
+    private SetupNativeNavigationRequest? _nativeSetupRequest;
+    private ChannelsStatusSnapshot? _nativeSnapshot;
+    private bool _nativeDestinationPresented;
+
+    protected override void OnNavigatedTo(Microsoft.UI.Xaml.Navigation.NavigationEventArgs e)
+    {
+        _nativeSetupRequest = e.Parameter as SetupNativeNavigationRequest;
+        base.OnNavigatedTo(e);
+    }
+
+    private IOperatorGatewayClient? BoundClient
+    {
+        get
+        {
+            if (_nativeSetupRequest is not null)
+            {
+                try { return _nativeSetupRequest.GetConnectedClient(CurrentApp.Registry, CurrentApp.ConnectionManager); }
+                catch (InvalidOperationException)
+                {
+                    ErrorBar.Message = LocalizationHelper.GetString("Onboarding_Ready_LaunchChanged");
+                    SetInfoBarOpen(ErrorBar, true);
+                    SetChannelControlsEnabled(false);
+                    return null;
+                }
+            }
+            return CurrentApp.GatewayClient;
+        }
+    }
+
+    private void RequireNativeSetupOwner() =>
+        _nativeSetupRequest?.GetConnectedClient(CurrentApp.Registry, CurrentApp.ConnectionManager);
+
+    private void SetChannelControlsEnabled(bool enabled)
+    {
+        foreach (var row in ConfiguredList.Children.Concat(AvailableList.Children).OfType<Control>())
+            row.IsEnabled = enabled;
+    }
+
+    internal async Task WaitForNativeSetupAsync(SetupNativeNavigationRequest request, CancellationToken ct)
+    {
+        while (!_nativeDestinationPresented || !IsLoaded)
+        {
+            RequireNativeSetupOwner();
+            if (!ReferenceEquals(_nativeSetupRequest, request)) throw new SetupNativeOwnershipException();
+            await Task.Delay(50, ct);
+        }
+        RequireNativeSetupOwner();
+    }
 
     /// <summary>
     /// When we last received a snapshot from the gateway. The snapshot itself
@@ -114,6 +167,7 @@ public sealed partial class ChannelsPage : Page
     /// </summary>
     private CancellationTokenSource? _linkingCts;
 
+    /// <summary>Initializes the page's view controls and unload cleanup handler.</summary>
     public ChannelsPage()
     {
         InitializeComponent();
@@ -176,27 +230,27 @@ public sealed partial class ChannelsPage : Page
         if (_appState != null)
             _appState.PropertyChanged += OnAppStateChanged;
 
-        SetInfoBarOpen(NotConnectedBar, CurrentApp.GatewayClient == null);
+        SetInfoBarOpen(NotConnectedBar, BoundClient == null);
 
         // Render whatever AppState already holds (lets the user re-enter the
         // page without a gateway round-trip) and then kick off a fresh fetch
         // so the snapshot stays current.
         var cached = _appState?.ChannelsSnapshot;
-        if (cached != null)
+        if (cached != null && _nativeSetupRequest is null)
             Render(cached);
 
         // Adopt any config already in AppState so SaveAsync doesn't have to
         // wait on a fresh fetch if the user goes straight to saving.
-        if (_appState?.Config is { } existingConfig)
+        if (_nativeSetupRequest is null && _appState?.Config is { } existingConfig)
             CaptureConfigSnapshot(existingConfig);
 
-        _ = RefreshAsync();
+        _ = RefreshAsync(probe: _nativeSetupRequest is null);
 
         // Warm the config cache. Required by SaveAsync — the gateway only
         // accepts full-config patches, so we need the current config + baseHash
         // before we can write channel credentials.
-        if (CurrentApp.GatewayClient != null)
-            _ = CurrentApp.GatewayClient.RequestConfigAsync();
+        if (BoundClient is { } client)
+            _ = client.RequestConfigAsync();
     }
 
     /// <summary>
@@ -217,10 +271,12 @@ public sealed partial class ChannelsPage : Page
     /// </summary>
     private void OnAppStateChanged(object? sender, PropertyChangedEventArgs e)
     {
+        if (_nativeSetupRequest is not null && BoundClient is null) return;
         switch (e.PropertyName)
         {
             case nameof(AppState.ChannelsSnapshot):
-                if (_appState?.ChannelsSnapshot is { } snap)
+                if (_appState?.ChannelsSnapshot is { } snap &&
+                    (_nativeSetupRequest is null || ReferenceEquals(snap, _nativeSnapshot)))
                     Render(snap);
                 break;
             case nameof(AppState.Channels):
@@ -246,24 +302,7 @@ public sealed partial class ChannelsPage : Page
     private void CaptureConfigSnapshot(JsonElement envelope)
     {
         var snapshot = envelope.Clone();
-        var root = snapshot.TryGetProperty("parsed", out var parsed) ? parsed
-            : (snapshot.TryGetProperty("config", out var inner) ? inner : snapshot);
-
-        string? baseHash = null;
-        if (snapshot.TryGetProperty("baseHash", out var bh) && bh.ValueKind == JsonValueKind.String)
-            baseHash = bh.GetString();
-        else if (snapshot.TryGetProperty("hash", out var hashEl) && hashEl.ValueKind == JsonValueKind.String)
-            baseHash = hashEl.GetString();
-        else if (snapshot.TryGetProperty("raw", out var rawEl) && rawEl.ValueKind == JsonValueKind.String)
-        {
-            var rawContent = rawEl.GetString();
-            if (rawContent != null)
-            {
-                var bytes = System.Text.Encoding.UTF8.GetBytes(rawContent);
-                var hash = System.Security.Cryptography.SHA256.HashData(bytes);
-                baseHash = Convert.ToHexStringLower(hash);
-            }
-        }
+        GatewayConfigEnvelope.TryRead(snapshot, out var root, out var baseHash);
 
         // Atomic publish: a single field swap so readers always see a
         // consistent (root, baseHash) pair.
@@ -297,7 +336,7 @@ public sealed partial class ChannelsPage : Page
     private async Task<bool> EnsureConfigLoadedAsync(int timeoutMs = 5000)
     {
         if (_configSnapshot.HasRoot) return true;
-        var client = CurrentApp.GatewayClient;
+        var client = BoundClient;
         if (client == null) return false;
 
         // Reuse any in-flight load TCS so concurrent saves share one fetch.
@@ -326,13 +365,16 @@ public sealed partial class ChannelsPage : Page
 
     private async Task RefreshAsync(bool probe = true)
     {
-        var client = CurrentApp.GatewayClient;
+        var client = BoundClient;
         if (client == null)
         {
             SetInfoBarOpen(NotConnectedBar, true);
             return;
         }
         SetInfoBarOpen(NotConnectedBar, false);
+        if (!await _refreshGate.WaitAsync(0))
+            return;
+        SetChannelControlsEnabled(true);
 
         // Replace any superseded CTS, disposing the old one so we don't leak
         // its internal handle.
@@ -348,23 +390,26 @@ public sealed partial class ChannelsPage : Page
         // Coalesce concurrent calls (user clicks + push deltas) — only one
         // gateway request in flight at a time. If we can't acquire immediately,
         // skip: the in-flight call will reflect the latest state shortly.
-        if (!await _refreshGate.WaitAsync(0))
-            return;
-
         SetRefreshBusy(true);
         try
         {
-            var snapshot = await client.GetChannelsStatusAsync(probe);
+            var snapshot = await client.GetChannelsStatusAsync(_nativeSetupRequest is null && probe);
             if (cts.IsCancellationRequested) return;
+            if (_nativeSetupRequest is not null &&
+                (BoundClient is null || !ReferenceEquals(client, BoundClient))) return;
             if (snapshot == null)
             {
                 ErrorBar.Title = "Couldn't refresh channels";
-                ErrorBar.Message = "The gateway didn't return a channels.status response. Try Refresh again.";
+                ErrorBar.Message = _nativeSetupRequest is not null
+                    ? LocalizationHelper.GetString("Onboarding_Ready_ChannelUnconfirmed")
+                    : "The gateway didn't return a channels.status response. Try Refresh again.";
                 SetInfoBarOpen(ErrorBar, true);
+                _nativeDestinationPresented = _nativeSetupRequest is not null;
                 return;
             }
             SetInfoBarOpen(ErrorBar, false);
             _latestSnapshotAt = DateTime.UtcNow;
+            _nativeSnapshot = _nativeSetupRequest is null ? null : snapshot;
             // Publish into AppState — single source of truth. Setting the
             // property fires PropertyChanged which calls Render via
             // OnAppStateChanged; no need to call Render directly here.
@@ -403,7 +448,7 @@ public sealed partial class ChannelsPage : Page
         var records = ChannelsAggregator.Aggregate(
             snapshot,
             _latestSnapshotAt == default ? DateTime.UtcNow : _latestSnapshotAt,
-            useBuiltInFallback: true);
+            useBuiltInFallback: _nativeSetupRequest is null);
         var configured = records.Where(r => r.IsConfigured).ToList();
         var available = records.Where(r => !r.IsConfigured).ToList();
 
@@ -424,7 +469,7 @@ public sealed partial class ChannelsPage : Page
         // GuideBar so the user knows the channels below are a generic preview
         // rather than a definitive list of what their gateway supports. Also
         // doubles as the page's "how channels work" intro for that state.
-        var connected = CurrentApp.GatewayClient != null;
+        var connected = BoundClient != null;
         var gatewayReportedSomething = snapshot.ChannelOrder.Count > 0
             || snapshot.Channels.Count > 0
             || (snapshot.ChannelMeta?.Count ?? 0) > 0;
@@ -481,6 +526,43 @@ public sealed partial class ChannelsPage : Page
             : (connected && !gatewayReportedSomething
                 ? $"showing {records.Count} common channels (your gateway didn't list any: some may not work)"
                 : $"{configured.Count} configured · {available.Count} available to add");
+        ApplyNativeChannelFocus(snapshot);
+    }
+
+    private void ApplyNativeChannelFocus(ChannelsStatusSnapshot snapshot)
+    {
+        if (_nativeSetupRequest is not { } request || !ReferenceEquals(snapshot, _nativeSnapshot) || BoundClient is null)
+            return;
+        if (request.ChannelId is not { } id)
+        {
+            _nativeDestinationPresented = true;
+            return;
+        }
+        var availability = SetupChannelFocusPolicy.GetAvailability(snapshot, id);
+        if (availability != SetupChannelAvailability.Offered || !_expanderById.TryGetValue(id, out var row))
+        {
+            ErrorBar.Message = LocalizationHelper.GetString(availability == SetupChannelAvailability.NotOffered
+                ? "Onboarding_Ready_ChannelUnavailable" : "Onboarding_Ready_ChannelUnconfirmed");
+            SetInfoBarOpen(ErrorBar, true);
+            _nativeDestinationPresented = true;
+            return;
+        }
+        row.IsExpanded = true;
+        _expandedIds.Add(id);
+        void FocusRow()
+        {
+            if (BoundClient is null || !_expanderById.TryGetValue(id, out var current) || !ReferenceEquals(row, current)) return;
+            row.StartBringIntoView(new BringIntoViewOptions { AnimationDesired = false });
+            row.Focus(FocusState.Programmatic);
+            _nativeDestinationPresented = true;
+        }
+        if (row.IsLoaded) FocusRow();
+        else
+        {
+            RoutedEventHandler? loaded = null;
+            loaded = (_, _) => { row.Loaded -= loaded; FocusRow(); };
+            row.Loaded += loaded;
+        }
     }
 
     // ─── Expander construction ─────────────────────────────────────────────
@@ -1358,7 +1440,7 @@ public sealed partial class ChannelsPage : Page
             // cached form drafts on success.
             _pendingBannerIsAction = false;
 
-            var client = CurrentApp.GatewayClient;
+            var client = BoundClient;
             if (client == null)
             {
                 _pendingSaveBanner = (record.Id, LocalizationHelper.GetString("ChannelsPage_BannerNotConnectedTitle"),
@@ -1453,7 +1535,9 @@ public sealed partial class ChannelsPage : Page
 
                 if (!patchResult.Ok)
                 {
-                    var detail = patchResult.Error ?? LocalizationHelper.GetString("ChannelsPage_BannerGatewayNoResponse");
+                    var detail = patchResult.Error ?? LocalizationHelper.GetString(patchResult.TimedOut
+                        ? "ChannelsPage_BannerGatewayNoResponse"
+                        : "ConfigPage_StatusSaveRejectedMessage");
                     var title = string.Format(LocalizationHelper.GetString("ChannelsPage_BannerSaveFailedTitle"), record.Id);
                     if (patchResult.LooksLikeStaleBaseHash)
                     {
@@ -1721,7 +1805,7 @@ public sealed partial class ChannelsPage : Page
             relinkBtn.IsEnabled = false;
             try
             {
-                await StartLinkingAsync(qrImage, messageBlock, diagnostic, diagnosticBody, recoveryPanel, record.Id, force);
+                await StartLinkingAsync(BoundClient, qrImage, messageBlock, diagnostic, diagnosticBody, recoveryPanel, record.Id, force);
             }
             finally
             {
@@ -1741,6 +1825,7 @@ public sealed partial class ChannelsPage : Page
     }
 
     private async Task StartLinkingAsync(
+        IOperatorGatewayClient? client,
         Image qrImage,
         TextBlock messageBlock,
         Expander diagnostic,
@@ -1751,23 +1836,10 @@ public sealed partial class ChannelsPage : Page
     {
         // Local helper: show the diagnostic disclosure with method/params/response
         // info so the user can see *exactly* what the gateway did or didn't do.
-        void ShowDiagnostic(string method, object @params, string? error, string? rawResponse)
+        void ShowDiagnostic(string method, object @params, string? error, string? rawResponse, string? qrDataUrl = null)
         {
-            var parts = new List<string>
-            {
-                $"Method:   {method}",
-                $"Channel:  {channelId}",
-                $"Params:   {System.Text.Json.JsonSerializer.Serialize(@params)}",
-            };
-            if (!string.IsNullOrEmpty(error)) parts.Add($"Error:    {error}");
-            if (!string.IsNullOrEmpty(rawResponse))
-            {
-                // Trim verbose stack traces; keep first 1000 chars (plenty for diagnosis,
-                // small enough to read in the disclosure).
-                var trimmed = rawResponse.Length > 1000 ? rawResponse[..1000] + "…" : rawResponse;
-                parts.Add($"Response: {trimmed}");
-            }
-            diagnosticBody.Text = string.Join("\n", parts);
+            diagnosticBody.Text = ChannelLinkDiagnosticText.Format(
+                method, channelId, JsonSerializer.Serialize(@params), error, rawResponse, qrDataUrl);
             diagnostic.Visibility = Visibility.Visible;
         }
         void HideDiagnostic()
@@ -1867,7 +1939,6 @@ public sealed partial class ChannelsPage : Page
             recoveryPanel.Children.Clear();
         }
 
-        var client = CurrentApp.GatewayClient;
         if (client == null)
         {
             qrImage.Visibility = Visibility.Collapsed;
@@ -1942,7 +2013,7 @@ public sealed partial class ChannelsPage : Page
         if (start.Connected)
         {
             messageBlock.Text = !string.IsNullOrEmpty(start.Message)
-                ? start.Message
+                ? ChannelLinkDiagnosticText.Redact(start.Message)
                 : $"{channelId} is already linked.";
             qrImage.Visibility = Visibility.Collapsed;
             await RefreshAsync(probe: false);
@@ -1954,7 +2025,7 @@ public sealed partial class ChannelsPage : Page
             // raw response so the user can see what it did say.
             qrImage.Visibility = Visibility.Collapsed;
             messageBlock.Text = !string.IsNullOrEmpty(start.Message)
-                ? start.Message
+                ? ChannelLinkDiagnosticText.Redact(start.Message)
                 : $"Gateway didn't return a QR for {channelId}. See details below for what it returned.";
             ShowDiagnostic("web.login.start", startParams, null, start.RawResponse);
             return;
@@ -1963,7 +2034,7 @@ public sealed partial class ChannelsPage : Page
         await RenderQrAsync(qrImage, messageBlock, start.QrDataUrl);
         if (ct.IsCancellationRequested) return;
         messageBlock.Text = !string.IsNullOrEmpty(start.Message)
-            ? start.Message
+            ? ChannelLinkDiagnosticText.Redact(start.Message)
             : channelId.Equals("whatsapp", StringComparison.OrdinalIgnoreCase)
                 ? "Open WhatsApp on your phone → Settings → Linked devices → scan this QR."
                 : "Open the mobile app's linked-devices screen and scan this QR.";
@@ -1980,13 +2051,13 @@ public sealed partial class ChannelsPage : Page
         if (!string.IsNullOrEmpty(waitResult.Error))
         {
             messageBlock.Text = $"Link wait failed for {channelId}. See details below.";
-            ShowDiagnostic("web.login.wait", waitParams, waitResult.Error, waitResult.RawResponse);
+            ShowDiagnostic("web.login.wait", waitParams, waitResult.Error, waitResult.RawResponse, start.QrDataUrl);
             return;
         }
         if (waitResult.Connected)
         {
             messageBlock.Text = !string.IsNullOrEmpty(waitResult.Message)
-                ? waitResult.Message
+                ? ChannelLinkDiagnosticText.Redact(waitResult.Message)
                 : $"{channelId} linked.";
             qrImage.Visibility = Visibility.Collapsed;
             await RefreshAsync(probe: false);
@@ -1997,7 +2068,7 @@ public sealed partial class ChannelsPage : Page
             await RenderQrAsync(qrImage, messageBlock, waitResult.QrDataUrl);
             if (ct.IsCancellationRequested) return;
             if (!string.IsNullOrEmpty(waitResult.Message))
-                messageBlock.Text = waitResult.Message;
+                messageBlock.Text = ChannelLinkDiagnosticText.Redact(waitResult.Message);
         }
         else
         {
@@ -2051,7 +2122,7 @@ public sealed partial class ChannelsPage : Page
             // Surface decode failures to the user — silent hide makes gateway faults
             // look like UX bugs.
             target.Visibility = Visibility.Collapsed;
-            messageBlock.Text = $"QR decode failed: {ex.Message}";
+            messageBlock.Text = $"QR decode failed: {ChannelLinkDiagnosticText.Redact(ex.Message)}";
         }
     }
 
@@ -2172,7 +2243,7 @@ public sealed partial class ChannelsPage : Page
 
     private async Task LogoutAsync(string channelId, bool isQr)
     {
-        var client = CurrentApp.GatewayClient;
+        var client = BoundClient;
         if (client == null)
         {
             ErrorBar.Title = "Not connected";
@@ -2239,7 +2310,7 @@ public sealed partial class ChannelsPage : Page
         // or clear form drafts (see _pendingBannerIsAction docs).
         _pendingBannerIsAction = true;
 
-        var client = CurrentApp.GatewayClient;
+        var client = BoundClient;
         if (client == null)
         {
             _pendingSaveBanner = (channelId, "Not connected",
@@ -2300,7 +2371,7 @@ public sealed partial class ChannelsPage : Page
         // Action-flow banner (see _pendingBannerIsAction docs).
         _pendingBannerIsAction = true;
 
-        var client = CurrentApp.GatewayClient;
+        var client = BoundClient;
         if (client == null)
         {
             _pendingSaveBanner = (channelId, "Not connected",

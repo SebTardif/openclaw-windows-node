@@ -145,6 +145,7 @@ public class McpToolBridgeTests
             new FakeCapability("screen", "screen.snapshot"),
             new FakeCapability("camera", "camera.snap"),
             new FakeCapability("tts", "tts.speak"),
+            new FakeCapability("app-connection", "app.connection.status"),
             new FakeCapability("custom", "custom.unknown"),
         };
         var bridge = CreateBridge(caps);
@@ -163,6 +164,9 @@ public class McpToolBridgeTests
         Assert.Contains("screenshot", byName["screen.snapshot"]);
         Assert.Contains("camera", byName["camera.snap"], System.StringComparison.OrdinalIgnoreCase);
         Assert.Contains("Speak text", byName["tts.speak"]);
+        Assert.Contains("package version", byName["app.connection.status"], System.StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("wire protocol", byName["app.connection.status"], System.StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("compatibility", byName["app.connection.status"], System.StringComparison.OrdinalIgnoreCase);
 
         // Unknown commands keep the generic fallback so newly-added capabilities still render.
         Assert.Equal("custom capability: custom.unknown", byName["custom.unknown"]);
@@ -841,6 +845,67 @@ public class McpToolBridgeTests
         Assert.DoesNotContain("stt.transcribe", toolNames);
         Assert.DoesNotContain("stt.listen", toolNames);
         Assert.DoesNotContain("stt.status", toolNames);
+    }
+
+    [Fact]
+    public async Task ToolsList_OllamaModels_HasCuratedDescription()
+    {
+        var caps = new List<INodeCapability> { new FakeCapability("local-inference", "ollama.models") };
+        var bridge = CreateBridge(caps);
+        var resp = await bridge.HandleRequestAsync(@"{""jsonrpc"":""2.0"",""id"":1,""method"":""tools/list""}");
+
+        using var doc = JsonDocument.Parse(resp!);
+        var description = doc.RootElement.GetProperty("result")
+            .GetProperty("tools")[0]
+            .GetProperty("description")
+            .GetString()!;
+
+        Assert.Contains("Ollama", description);
+        Assert.Contains("Read-only", description, System.StringComparison.OrdinalIgnoreCase);
+        // Privacy: must mention the opt-in gate so MCP clients know this
+        // is not always available.
+        Assert.Contains("NodeOllamaInferenceEnabled", description);
+        Assert.DoesNotContain("local-inference capability:", description);
+    }
+
+    [Fact]
+    public async Task ToolsList_OllamaChat_HasCuratedDescription()
+    {
+        var caps = new List<INodeCapability> { new FakeCapability("local-inference", "ollama.chat") };
+        var bridge = CreateBridge(caps);
+        var resp = await bridge.HandleRequestAsync(@"{""jsonrpc"":""2.0"",""id"":1,""method"":""tools/list""}");
+
+        using var doc = JsonDocument.Parse(resp!);
+        var description = doc.RootElement.GetProperty("result")
+            .GetProperty("tools")[0]
+            .GetProperty("description")
+            .GetString()!;
+
+        Assert.Contains("prompt", description, System.StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("Privacy", description);
+        Assert.Contains("NodeOllamaInferenceEnabled", description);
+    }
+
+    [Fact]
+    public async Task ToolsList_Ollama_Absent_WhenOllamaCapabilityNotRegistered()
+    {
+        // Ollama capability is gated by NodeOllamaInferenceEnabled in
+        // NodeService; when disabled, no OllamaCapability is constructed
+        // and tools/list must omit both ollama.* tools.
+        var caps = new List<INodeCapability>
+        {
+            new FakeCapability("device", "device.status"),
+        };
+        var bridge = CreateBridge(caps);
+        var resp = await bridge.HandleRequestAsync(@"{""jsonrpc"":""2.0"",""id"":1,""method"":""tools/list""}");
+
+        using var doc = JsonDocument.Parse(resp!);
+        var toolNames = new HashSet<string>();
+        foreach (var t in doc.RootElement.GetProperty("result").GetProperty("tools").EnumerateArray())
+            toolNames.Add(t.GetProperty("name").GetString()!);
+
+        Assert.DoesNotContain("ollama.models", toolNames);
+        Assert.DoesNotContain("ollama.chat", toolNames);
     }
 
     [Fact]
