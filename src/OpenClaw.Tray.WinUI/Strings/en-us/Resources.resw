@@ -8323,4 +8323,22 @@ After enrolling, return to Settings &gt; Windows Update and check for updates. I
   <data name="GatewayVoice_TimedOut" xml:space="preserve"><value>Gateway speech timed out. Synthesis may have completed. Check the Gateway before trying again; no automatic retry was made.</value></data>
   <data name="GatewayVoice_SynthesisFailed" xml:space="preserve"><value>Gateway speech failed. Check its voice configuration and provider quota. No local fallback or automatic retry was made.</value></data>
   <data name="GatewayVoice_PlaybackFailed" xml:space="preserve"><value>Windows could not play the speech audio. Check your output device. No automatic retry was made.</value></data>
+  <data name="CronPage_RemoveConfirmTitle" xml:space="preserve">
+    <value>Remove this job?</value>
+  </data>
+  <data name="CronPage_RemoveConfirmBody" xml:space="preserve">
+    <value>{0} will be removed.</value>
+  </data>
+  <data name="CronPage_RemoveConfirmButton" xml:space="preserve">
+    <value>Remove</value>
+  </data>
+  <data name="CronPage_RunDisabledConfirmTitle" xml:space="preserve">
+    <value>Run this job now?</value>
+  </data>
+  <data name="CronPage_RunDisabledConfirmBody" xml:space="preserve">
+    <value>{0} is turned off. Run Now starts it once.</value>
+  </data>
+  <data name="CronPage_RunDisabledConfirmButton" xml:space="preserve">
+    <value>Run now</value>
+  </data>
 </root>

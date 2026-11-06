@@ -192,7 +192,7 @@ public sealed partial class CronPage : Page
         }
     }
 
-    private void OnRunNowClick(object sender, RoutedEventArgs e)
+    private async void OnRunNowClick(object sender, RoutedEventArgs e)
     {
         var btn = sender as Button;
         var jobId = btn?.Tag as string;
@@ -201,6 +201,17 @@ public sealed partial class CronPage : Page
         if (CurrentApp.GatewayClient == null) { ShowDisconnected(); return; }
         var vm = _jobs.Find(j => j.Id == jobId);
         if (_runningJobIds.Contains(jobId)) return;
+        if (vm is { IsEnabled: false })
+        {
+            var confirmed = await ConfirmCronActionAsync(
+                LocalizationHelper.GetString("CronPage_RunDisabledConfirmTitle"),
+                LocalizationHelper.Format("CronPage_RunDisabledConfirmBody", vm.Name),
+                LocalizationHelper.GetString("CronPage_RunDisabledConfirmButton"),
+                destructive: false);
+            if (!confirmed) return;
+            if (_runningJobIds.Contains(jobId)) return;
+            if (CurrentApp.GatewayClient == null) { ShowDisconnected(); return; }
+        }
         _runningJobIds.Add(jobId);
         RefreshJobActionButtons(jobId);
 
@@ -329,16 +340,51 @@ public sealed partial class CronPage : Page
         _runRefreshCts.Clear();
     }
 
-    private void OnRemoveClick(object sender, RoutedEventArgs e)
+    private async void OnRemoveClick(object sender, RoutedEventArgs e)
     {
         var jobId = (sender as Button)?.Tag as string;
         if (string.IsNullOrEmpty(jobId)) return;
         if (!_cronLoading.CanEdit) return;
         if (_runningJobIds.Contains(jobId)) return;
         if (CurrentApp.GatewayClient == null) { ShowDisconnected(); return; }
+        var vm = _jobs.Find(j => j.Id == jobId);
+        var confirmed = await ConfirmCronActionAsync(
+            LocalizationHelper.GetString("CronPage_RemoveConfirmTitle"),
+            LocalizationHelper.Format("CronPage_RemoveConfirmBody", vm?.Name ?? jobId),
+            LocalizationHelper.GetString("CronPage_RemoveConfirmButton"),
+            destructive: true);
+        if (!confirmed) return;
+        var client = CurrentApp.GatewayClient;
+        if (client == null) { ShowDisconnected(); return; }
         _removedJobIds.Add(jobId);
-        // Gateway client's HandleKnownResponse refreshes the list automatically on cron.remove
-        _ = CurrentApp.GatewayClient.RemoveCronJobAsync(jobId);
+        var removed = false;
+        try
+        {
+            removed = await client.RemoveCronJobAsync(jobId);
+        }
+        finally
+        {
+            if (!removed)
+                _removedJobIds.Remove(jobId);
+        }
+    }
+
+    private async Task<bool> ConfirmCronActionAsync(string title, string body, string confirmLabel, bool destructive)
+    {
+        if (XamlRoot is null)
+            return false;
+        var dialog = new ContentDialog
+        {
+            Title = title,
+            Content = body,
+            PrimaryButtonText = confirmLabel,
+            CloseButtonText = LocalizationHelper.GetString("SessionActionPrompt_CancelLabel"),
+            DefaultButton = ContentDialogButton.None,
+            XamlRoot = XamlRoot,
+        };
+        if (destructive)
+            dialog.PrimaryButtonStyle = (Style)Application.Current.Resources["AccentButtonStyle"];
+        return await dialog.ShowAsync() == ContentDialogResult.Primary;
     }
 
     private void OnEnabledToggleChanged(object sender, RoutedEventArgs e)

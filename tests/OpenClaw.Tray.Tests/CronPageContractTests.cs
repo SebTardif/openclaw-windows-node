@@ -20,7 +20,13 @@ public sealed class CronPageContractTests
         Assert.Contains("histBtn.IsEnabled = _cronLoading.CanEdit && vm.HasRunHistory;", source);
         Assert.Contains("removeBtn.IsEnabled = _cronLoading.CanEdit && !isRunning;", source);
         Assert.Contains("IsEnabled = _cronLoading.CanEdit && !vm.IsCompletedOneShot && !_runningJobIds.Contains(vm.Id)", source);
-        Assert.Contains("if (_runningJobIds.Contains(jobId)) return;", ExtractMethod(source, "OnRemoveClick"));
+        var removeHandler = ExtractMethod(source, "OnRemoveClick");
+        Assert.Contains("if (_runningJobIds.Contains(jobId)) return;", removeHandler);
+        var confirmAt = removeHandler.IndexOf("ConfirmCronActionAsync", StringComparison.Ordinal);
+        var addAt = removeHandler.IndexOf("_removedJobIds.Add(jobId)", StringComparison.Ordinal);
+        Assert.True(confirmAt >= 0 && addAt > confirmAt, "Remove must ask before remembering the job id.");
+        Assert.Contains("if (!removed)", removeHandler);
+        Assert.Contains("_removedJobIds.Remove(jobId)", removeHandler);
         Assert.Contains("if (_runningJobIds.Contains(jobId)) return;", ExtractMethod(source, "OnEnabledToggleChanged"));
         Assert.Contains("CancelAllRunRefreshLoops();", source);
         Assert.Contains("CancelRunRefreshLoop(jobId);", source);
@@ -34,6 +40,8 @@ public sealed class CronPageContractTests
         var runNowHandler = ExtractMethod(source, "OnRunNowClick");
         Assert.DoesNotContain("if (vm != null && !vm.IsEnabled) return;", runNowHandler);
         Assert.Contains("if (_runningJobIds.Contains(jobId)) return;", runNowHandler);
+        Assert.Contains("IsEnabled: false", runNowHandler);
+        Assert.Contains("CronPage_RunDisabledConfirmTitle", runNowHandler);
         Assert.Contains("RunCronJobDetailedAsync(jobId)", runNowHandler);
         Assert.Contains("result?.Enqueued != true", runNowHandler);
         Assert.Contains("ShowRunNotStartedNotification", runNowHandler);
@@ -78,7 +86,9 @@ public sealed class CronPageContractTests
     {
         var markers = new[]
         {
+            $"private async void {methodName}",
             $"private void {methodName}",
+            $"private async Task {methodName}",
             $"private UIElement {methodName}",
             $"private static string {methodName}"
         };

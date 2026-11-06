@@ -8308,4 +8308,22 @@ Após a inscrição, volte para Configurações &gt; Windows Update e verifique 
   <data name="GatewayVoice_TimedOut" xml:space="preserve"><value>O tempo da fala da Gateway esgotou. A síntese pode ter terminado. Verifique a Gateway antes de tentar de novo. Não houve nova tentativa automática.</value></data>
   <data name="GatewayVoice_SynthesisFailed" xml:space="preserve"><value>A fala da Gateway falhou. Verifique a configuração de voz e a cota do provedor. Não houve alternativa local nem nova tentativa automática.</value></data>
   <data name="GatewayVoice_PlaybackFailed" xml:space="preserve"><value>O Windows não conseguiu reproduzir o áudio. Verifique o dispositivo de saída. Não houve nova tentativa automática.</value></data>
+  <data name="CronPage_RemoveConfirmTitle" xml:space="preserve">
+    <value>Remover este trabalho?</value>
+  </data>
+  <data name="CronPage_RemoveConfirmBody" xml:space="preserve">
+    <value>{0} será removido.</value>
+  </data>
+  <data name="CronPage_RemoveConfirmButton" xml:space="preserve">
+    <value>Remover</value>
+  </data>
+  <data name="CronPage_RunDisabledConfirmTitle" xml:space="preserve">
+    <value>Executar este trabalho agora?</value>
+  </data>
+  <data name="CronPage_RunDisabledConfirmBody" xml:space="preserve">
+    <value>{0} está desativado. Executar agora inicia uma vez.</value>
+  </data>
+  <data name="CronPage_RunDisabledConfirmButton" xml:space="preserve">
+    <value>Executar agora</value>
+  </data>
 </root>
