@@ -192,7 +192,9 @@ internal sealed class ChatHistoryState
             ChatTimelineState prior,
             IReadOnlyDictionary<string, ChatEntryMetadata> priorMetadata,
             DateTimeOffset requestStartedAt,
-            bool authoritative)
+            bool authoritative,
+            bool replacement = false,
+            IReadOnlySet<string>? replacementBaselineIds = null)
     {
         var rebuilt = plan.Timeline;
         var rebuiltMetadata = new Dictionary<string, ChatEntryMetadata>(
@@ -327,6 +329,13 @@ internal sealed class ChatHistoryState
                     rebuiltTimes.RemoveAt(match);
                     continue;
                 }
+            }
+
+            if (replacement &&
+                replacementBaselineIds is not null &&
+                replacementBaselineIds.Contains(entry.Id))
+            {
+                continue;
             }
 
             var entryToAdd = entry;

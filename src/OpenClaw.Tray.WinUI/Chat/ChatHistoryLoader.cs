@@ -379,7 +379,8 @@ internal sealed class ChatHistoryLoader : IDisposable
                 commitToken,
                 plan,
                 requestStartedAt,
-                authoritative);
+                authoritative,
+                replacement);
             if (!committed)
             {
                 outcome = ChatTelemetryOutcome.Canceled;
