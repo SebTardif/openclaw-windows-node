@@ -27,9 +27,29 @@ public class LocalizationValidationTests
 
     private static readonly HashSet<string> InvariantOrDeferredResourceKeys = new(StringComparer.Ordinal)
     {
+        // Custom model provider API types are protocol product names, and the
+        // provider/model ID placeholders are literal identifier examples.
+        "DefaultModelPage_CustomApiAnthropic.Content",
+        "DefaultModelPage_CustomApiOpenAiResponses.Content",
+        "DefaultModelPage_CustomProviderId.PlaceholderText",
+        "DefaultModelPage_CustomProviderModels.PlaceholderText",
+        // Updater dependency recovery is seeded in English across every locale.
+        // Translate the explanation and manual-release action together after review.
+        "Update_Message_Unavailable",
+        "Update_ManualDownload",
+        // Canonical setup product/transport names, not untranslated prose.
+        "Onboarding_V2_NodeMode.Header",
+        "Onboarding_V2_NodeModeToggle.[using:Microsoft.UI.Xaml.Automation]AutomationProperties.Name",
+        "Onboarding_V2_CliCard.Header",
+        "Onboarding_V2_LocalAiReview.Header",
+        "Onboarding_V2_LocalAiCard.Header",
+        "Onboarding_V2_DetailLocalAi",
+        "Onboarding_V2_TailscaleReview.Header",
+        "Onboarding_V4_TailscaleDisclosure.Header",
+        "Onboarding_V2_TailscaleCard.Header",
+        "Onboarding_V2_DetailTailscale",
         "CanvasWindow_TextBlock_31.Text",
         "CanvasWindow_winexWindowEx_2.Title",
-        "ChatWindow_winexWindowEx_2.Title",
         "HubWindow_winexWindowEx_2.Title",
         "TitleText.Text",
         "TokenPromptBox.Header",
@@ -40,10 +60,15 @@ public class LocalizationValidationTests
         "WindowTitle_TrayMenu",
         "WindowTitle_Update",
         // VoiceOverlayWindow window-title key — matches the convention
-        // for ChatWindow / HubWindow / CanvasWindow / TrayMenuWindow.
+        // for HubWindow / CanvasWindow / TrayMenuWindow.
         "VoiceOverlayWindow_winexWindowEx_2.Title",
         // Brand name — identical across all locales.
         "ConnectionPage_TopologyTailscale",
+        // Canonical product surface name, shared with the existing Dashboard action.
+        "ChatDashboardButton.Content",
+        // Native engine executable/product name. Keep the exact llama-server
+        // spelling in every locale so it matches diagnostics and process names.
+        "LocalAiPage_EngineHeading.Text",
         // Product/feature name — "OpenClaw Onboard" is kept identical across
         // all locales (the card's description and button are translated).
         "SettingsPage_OnboardWizard_Header.Text",
@@ -53,6 +78,7 @@ public class LocalizationValidationTests
         // Sample IDs / brand identifiers — same across locales.
         "VoiceSettingsPage_ElevenLabsVoiceIdBox.PlaceholderText",
         "VoiceSettingsPage_ElevenLabsModelBox.PlaceholderText",
+        "VoiceSettingsPage_MiniMaxModelBox.PlaceholderText",
         // Capability command identifier — should match the wire/API name.
         "NotificationsPage_MetadataSystemRun",
         // Punctuation-only layout format; localized parts are supplied by
@@ -85,6 +111,8 @@ public class LocalizationValidationTests
         "PermissionsPage_Cap_Tts_Description",
         "PermissionsPage_Cap_Stt_Label",
         "PermissionsPage_Cap_Stt_Description",
+        "PermissionsPage_Cap_Ollama_Label",
+        "PermissionsPage_Cap_Ollama_Description",
         "PermissionsPage_Cap_SystemRun_Label",
         "PermissionsPage_Cap_SystemRun_Description",
         "PermissionsPage_NodeStatus_Disabled",
@@ -216,6 +244,9 @@ public class LocalizationValidationTests
         "SandboxPage_1MiB.Content",
         "SandboxPage_64MiB.Content",
         "SandboxPage_SystemRun.Text",
+        // Canonical product surface name, unchanged across locales.
+        "SandboxPage_Title.Text",
+        "SandboxPage_OneDrive.Text",
         // SessionsPage runtime accessibility strings — seeded English-only across
         // all 5 locales using the deferred-translation pattern. These are
         // tooltip / AutomationProperties.Name overrides on the OpenChat button.
@@ -229,13 +260,12 @@ public class LocalizationValidationTests
         // the PermissionsPage / InstancesPage / SessionsPage runtime keys above.
         "CronPage_JobCompleted",
         "CronPage_JobCompletedRanSuccessfully",
-        "BindingsPage_CouldNotLoadBindings",
         "ConfigPage_CheckingConfigPermissions",
         "ConfigPage_ConfigUnavailable",
         "ConfigPage_ConfigIsReadOnly",
         // ConnectionPage gateway terminal controls — surfaced after PR #597
         // landed in master. Seeded English-only across all 5 locales using the
-        // same deferred-translation pattern as the AgentEventsPage / SkillsPage
+        // same deferred-translation pattern as the AgentEventsPage
         // / CronPage entries above. The Description_Format key takes the WSL
         // distro name as {0} and is formatted in ConnectionPage.xaml.cs.
         "ConnectionPage_GatewayHostControlsDescription_Format",
@@ -257,8 +287,6 @@ public class LocalizationValidationTests
         "Command_GoToSessions_Subtitle",
         "Command_GoToAgentEvents_Title",
         "Command_GoToAgentEvents_Subtitle",
-        "Command_GoToSkills_Title",
-        "Command_GoToSkills_Subtitle",
         "Command_GoToCron_Title",
         "Command_GoToCron_Subtitle",
         "Command_GoToWorkspace_Title",
@@ -271,16 +299,12 @@ public class LocalizationValidationTests
         "Command_GoToConfig_Subtitle",
         "Command_GoToUsage_Title",
         "Command_GoToUsage_Subtitle",
-        "Command_GoToBindings_Title",
-        "Command_GoToBindings_Subtitle",
         "Command_GoToPermissions_Title",
         "Command_GoToPermissions_Subtitle",
         "Command_GoToSettings_Title",
         "Command_GoToSettings_Subtitle",
         "Command_GoToDiagnostics_Title",
         "Command_GoToDiagnostics_Subtitle",
-        "Command_OpenChatWindow_Title",
-        "Command_OpenChatWindow_Subtitle",
         "Command_OpenDashboard_Title",
         "Command_OpenDashboard_Subtitle",
         "Command_ToggleNodeMode_Title",
@@ -329,6 +353,10 @@ public class LocalizationValidationTests
         "WorkspacePage_RootFolder",
         "WorkspacePage_SearchResultsPath",
         "WorkspacePage_BrowserTruncated",
+        // "GB" is an internationally recognized SI byte-size abbreviation kept identical
+        // across every supported locale (matches how NodesPage_Label_* technical loanwords
+        // above are handled); only the surrounding sentence is translated per locale.
+        "LocalAi_Reason_GigabytesFormat",
     };
 
     private static readonly HashSet<string> EnUsOnlyFallbackResourceKeys = new(StringComparer.Ordinal);
@@ -349,14 +377,11 @@ public class LocalizationValidationTests
 
     private static readonly string[] RequiredLocalizedAccessibilityKeys =
     [
+        "Onboarding_Ready_Chat.[using:Microsoft.UI.Xaml.Automation]AutomationProperties.Name",
         "SandboxPage_UnavailablePrimaryButton.[using:Microsoft.UI.Xaml.Automation]AutomationProperties.Name",
         "SandboxPage_PresetLockedButton.[using:Microsoft.UI.Xaml.Automation]AutomationProperties.Name",
         "SandboxPage_PresetBalancedButton.[using:Microsoft.UI.Xaml.Automation]AutomationProperties.Name",
         "SandboxPage_PresetPermissiveButton.[using:Microsoft.UI.Xaml.Automation]AutomationProperties.Name",
-        "SandboxPage_AllowWindowsUi.[using:Microsoft.UI.Xaml.Automation]AutomationProperties.Name",
-        "SandboxPage_DocsAccessCombo.[using:Microsoft.UI.Xaml.Automation]AutomationProperties.Name",
-        "SandboxPage_DownloadsAccessCombo.[using:Microsoft.UI.Xaml.Automation]AutomationProperties.Name",
-        "SandboxPage_DesktopAccessCombo.[using:Microsoft.UI.Xaml.Automation]AutomationProperties.Name",
         "SettingsPage_NotificationSoundComboBox.[using:Microsoft.UI.Xaml.Automation]AutomationProperties.Name",
         "VoiceSettingsPage_LanguageCombo.[using:Microsoft.UI.Xaml.Automation]AutomationProperties.Name",
         "HubWindow_MainNavigation.[using:Microsoft.UI.Xaml.Automation]AutomationProperties.Name",
@@ -595,6 +620,7 @@ public class LocalizationValidationTests
     {
         "fr-fr",
         "nl-nl",
+        "pt-br",
     };
 
     private static bool IsInvariantOrDeferred(string key, string value) =>
@@ -603,6 +629,9 @@ public class LocalizationValidationTests
         || key.StartsWith("ChannelsPage_", StringComparison.Ordinal)
         || key.StartsWith("DiagnosticsPage_", StringComparison.Ordinal)
         || key.StartsWith("SettingsRow_", StringComparison.Ordinal)
+        // Approved Workspace copy is seeded consistently in English while
+        // locale review is pending, matching the existing deferred-copy policy.
+        || key.StartsWith("WorkspaceShell_", StringComparison.Ordinal)
         // Title-bar status pill + notifications bell flyout strings. Seeded
         // English-only across all five .resw files using the deferred-translation
         // pattern; translations land in a follow-up.
@@ -768,10 +797,10 @@ public class LocalizationValidationTests
     }
 
     [Fact]
-    public void AllFiveLocaleDirectories_Exist()
+    public void AllSupportedLocaleDirectories_Exist()
     {
         var stringsDir = GetStringsDirectory();
-        string[] expected = ["en-us", "fr-fr", "nl-nl", "zh-cn", "zh-tw"];
+        string[] expected = ["en-us", "fr-fr", "nl-nl", "zh-cn", "zh-tw", "pt-br"];
 
         foreach (var locale in expected)
         {
@@ -780,6 +809,30 @@ public class LocalizationValidationTests
             Assert.True(File.Exists(Path.Combine(dir, "Resources.resw")),
                 $"Resources.resw missing for locale: {locale}");
         }
+    }
+
+    [Fact]
+    public void LanguageOverrideWhitelist_MatchesSupportedLocaleDirectories()
+    {
+        var root = TestRepositoryPaths.GetRepositoryRoot();
+        var appSource = File.ReadAllText(Path.Combine(root, "src", "OpenClaw.Tray.WinUI", "App.xaml.cs"));
+        var whitelist = Regex.Match(
+            appSource,
+            @"string\[\]\s+allowedLocales\s*=\s*\[(?<locales>[^\]]+)\]",
+            RegexOptions.CultureInvariant);
+
+        Assert.True(whitelist.Success, "App language override whitelist was not found.");
+
+        var allowedLocales = Regex.Matches(whitelist.Groups["locales"].Value, @"""(?<locale>[^""]+)""")
+            .Select(match => match.Groups["locale"].Value)
+            .OrderBy(locale => locale, StringComparer.OrdinalIgnoreCase);
+        var resourceLocales = Directory.GetDirectories(GetStringsDirectory())
+            .Select(Path.GetFileName)
+            .Where(locale => locale is not null)
+            .Cast<string>()
+            .OrderBy(locale => locale, StringComparer.OrdinalIgnoreCase);
+
+        Assert.Equal(resourceLocales, allowedLocales);
     }
 
     [Fact]
@@ -802,6 +855,49 @@ public class LocalizationValidationTests
         }
     }
 
+    /// <summary>
+    /// Matches an XML entity or numeric character reference that survived XML
+    /// decoding. A .resw value is stored escaped and decoded once when loaded,
+    /// so a well-formed resource can never yield one of these after decoding.
+    /// Seeing one means the literal text was escaped an extra time.
+    /// </summary>
+    private static readonly Regex SurvivingXmlEntity = new(
+        @"&(?:#x?[0-9A-Fa-f]+|amp|lt|gt|quot|apos);",
+        RegexOptions.CultureInvariant | RegexOptions.Compiled);
+
+    [Fact]
+    public void Resources_DoNotContainOverEscapedXmlEntities()
+    {
+        var stringsDir = GetStringsDirectory();
+        var failures = new List<string>();
+
+        foreach (var localeDir in Directory.GetDirectories(stringsDir).OrderBy(d => d, StringComparer.Ordinal))
+        {
+            var reswPath = Path.Combine(localeDir, "Resources.resw");
+            if (!File.Exists(reswPath)) continue;
+
+            var locale = Path.GetFileName(localeDir);
+            foreach (var (key, value) in LoadResw(reswPath))
+            {
+                var match = SurvivingXmlEntity.Match(value);
+                if (match.Success)
+                {
+                    failures.Add($"{locale} :: {key} :: renders literal '{match.Value}'");
+                }
+            }
+        }
+
+        Assert.True(
+            failures.Count == 0,
+            "Resource values must not contain XML entities that survive decoding; users see the raw " +
+            "escape sequence instead of the intended character. This happens when already-escaped text " +
+            "is escaped again, for example lifting a XAML attribute into .resw ('&#x2192;' becomes " +
+            "'&amp;#x2192;') or re-escaping a translated value ('&amp;' becomes '&amp;amp;'). " +
+            "Store the literal character instead: write an arrow as '\u2192' and an ampersand as a " +
+            "single '&' in the source text, which the .resw writer escapes exactly once." +
+            Environment.NewLine + string.Join(Environment.NewLine, failures));
+    }
+
     [Fact]
     public void AllLocales_ContainRuntimeOnboardingKeys()
     {
@@ -822,6 +918,67 @@ public class LocalizationValidationTests
             Assert.True(missing.Count == 0,
                 $"Locale '{locale}' is missing runtime onboarding key(s): {string.Join(", ", missing)}");
         }
+    }
+
+    [Fact]
+    public void NativeConnectionEditor_AllRuntimeReferencesResolveInEveryLocale()
+    {
+        var (prefix, suffixes) = ReadNativeConnectionReferences();
+        var failures = new List<string>();
+        foreach (var localeDir in Directory.GetDirectories(GetStringsDirectory()))
+        {
+            var locale = Path.GetFileName(localeDir);
+            var resources = LoadResw(Path.Combine(localeDir, "Resources.resw"));
+            foreach (var suffix in suffixes)
+            {
+                var key = prefix + suffix;
+                if (!resources.TryGetValue(key, out var value) || string.IsNullOrWhiteSpace(value))
+                {
+                    failures.Add($"{locale}: missing {key}");
+                    continue;
+                }
+                Assert.DoesNotContain("Onboarding_", value);
+                Assert.DoesNotContain("\u2014", value);
+            }
+        }
+        Assert.True(failures.Count == 0, string.Join(Environment.NewLine, failures));
+        Assert.Equal("Onboarding_NativeConnection_", prefix);
+    }
+
+    [Theory]
+    [InlineData("en-us", "Checking the gateway connection...", "Connection attempt cancelled.")]
+    [InlineData("fr-fr", "Vérification de la connexion au Gateway...", "Tentative de connexion annulée.")]
+    [InlineData("nl-nl", "De verbinding met de Gateway controleren...", "Verbindingspoging geannuleerd.")]
+    [InlineData("pt-br", "Verificando a conexão com o Gateway...", "Tentativa de conexão cancelada.")]
+    [InlineData("zh-cn", "正在检查 Gateway 连接...", "连接尝试已取消。")]
+    [InlineData("zh-tw", "正在檢查 Gateway 連線...", "連線嘗試已取消。")]
+    public void NativeConnectionEditor_StatusCopyDoesNotDescribePackageInstallation(
+        string locale, string checking, string cancelled)
+    {
+        var (prefix, suffixes) = ReadNativeConnectionReferences();
+        Assert.Contains("Checking", suffixes);
+        Assert.Contains("Cancelled", suffixes);
+        var resources = LoadResw(Path.Combine(GetStringsDirectory(), locale, "Resources.resw"));
+        Assert.Equal(checking, resources[prefix + "Checking"]);
+        Assert.Equal(cancelled, resources[prefix + "Cancelled"]);
+        Assert.NotEqual(checking, resources["Onboarding_Native_Checking"]);
+        Assert.Contains("WinGet", resources["Onboarding_Native_Cancelled"]);
+    }
+
+    private static (string Prefix, string[] Suffixes) ReadNativeConnectionReferences()
+    {
+        var source = File.ReadAllText(Path.Combine(TestRepositoryPaths.GetRepositoryRoot(),
+            "src", "OpenClaw.SetupEngine.UI", "Pages", "SetupNativeConnectionPage.xaml.cs"));
+        // Follow the page's actual helper and call sites so a renamed prefix or new label
+        // cannot escape validation through a separate list of expected resource keys.
+        var helper = Regex.Match(source,
+            """private static string S\(string key\) => SetupLocalization.GetString\("(?<prefix>[^"]+)" \+ key\);""");
+        Assert.True(helper.Success, "Update this source contract if the page's localization helper changes.");
+        var calls = Regex.Matches(source, """\bS\("(?<suffix>[^"]+)"\)""");
+        Assert.NotEmpty(calls);
+        Assert.Equal(Regex.Matches(source, @"\bS\(").Count - 1, calls.Count);
+        return (helper.Groups["prefix"].Value,
+            calls.Select(match => match.Groups["suffix"].Value).Distinct(StringComparer.Ordinal).ToArray());
     }
 
     [Fact]
@@ -849,6 +1006,28 @@ public class LocalizationValidationTests
             Assert.True(duplicates.Count == 0,
                 $"Locale '{locale}' has duplicate keys: {string.Join(", ", duplicates)}");
         }
+    }
+
+    [Fact]
+    public void NoLocale_HasStrayTextOutsideResourceElements()
+    {
+        var offenders = new List<string>();
+        foreach (var localeDir in Directory.GetDirectories(GetStringsDirectory()).OrderBy(d => d, StringComparer.Ordinal))
+        {
+            var reswPath = Path.Combine(localeDir, "Resources.resw");
+            if (!File.Exists(reswPath)) continue;
+
+            var locale = Path.GetFileName(localeDir);
+            foreach (var text in XDocument.Load(reswPath).Root!.Nodes().OfType<XText>())
+            {
+                if (!string.IsNullOrWhiteSpace(text.Value))
+                    offenders.Add($"{locale}: '{text.Value.Trim()}'");
+            }
+        }
+
+        Assert.True(offenders.Count == 0,
+            "Resources.resw files contain text outside <data>/<resheader> elements (merge residue?): " +
+            string.Join("; ", offenders));
     }
 
     [Fact]
@@ -950,6 +1129,28 @@ public class LocalizationValidationTests
 
             if (identicalLocales.Count != localeResw.Count)
             {
+                // These ordinary words are spelled identically in these languages.
+                string[] naturalLoanwordLocales = key switch
+                {
+                    "Onboarding_V2_LocalAiModel.Header" or "HubWindow_NavigationViewItemHeader_Model.Content" or
+                        "LocalAiPage_ModelSelector.Header" => ["nl-nl"],
+                    "Onboarding_V2_ProfileReadOnlyTitle.Text" or "SandboxPage_PresetStrict.Text" => ["fr-fr"],
+                    "Onboarding_V2_ProfileFullTitle.Text" or "SandboxPage_PresetOpen.Text" => ["nl-nl"],
+                    "Onboarding_V2_Microphone" or "Onboarding_V2_Notifications"
+                        or "HubWindow_NavigationViewItem_145.Content"
+                        or "WorkspaceShell_NotificationsButton.[using:Microsoft.UI.Xaml.Controls]ToolTipService.ToolTip" => ["fr-fr"],
+                    "Onboarding_V2_Tokens" => ["nl-nl", "pt-br"],
+                    "Search_Dashboard" or "Search_Group_Dashboard" or "Search_Dashboard_Apps" or
+                        "Search_Dashboard_Dashboards" or "Search_Group_Chats" => ["nl-nl"],
+                    "Search_Dashboard_Plugins" => ["pt-br"],
+                    "Search_Dashboard_Secrets" => ["fr-fr"],
+                    "Search_Group_Agents" => ["fr-fr", "nl-nl"],
+                    _ => [],
+                };
+                if (naturalLoanwordLocales.Length > 0 &&
+                    identicalLocales.Order().SequenceEqual(naturalLoanwordLocales.Order()))
+                    continue;
+
                 // Allow Latin-script loanwords (e.g. "OK") to be identical
                 // across en-us/fr-fr/nl-nl while still being translated for
                 // non-Latin-script locales (zh-CN, zh-TW).
@@ -973,5 +1174,18 @@ public class LocalizationValidationTests
         Assert.True(identicalWithoutRationale.Count == 0,
             "Resources identical to en-us in every non-English locale need an invariant/deferred rationale. Entries: " +
             string.Join("; ", identicalWithoutRationale.Take(20)));
+    }
+
+    [Fact]
+    public void SandboxComposer_UsesExistingLocalizedSurfaceNames()
+    {
+        foreach (var localeDirectory in Directory.EnumerateDirectories(GetStringsDirectory()))
+        {
+            var resources = LoadResw(Path.Combine(localeDirectory, "Resources.resw"));
+            var title = resources["Chat_Composer_Sandbox_Title"];
+            Assert.Contains(title, resources["SandboxPage_StatusOnTitle"], StringComparison.OrdinalIgnoreCase);
+            Assert.Contains(resources["HubWindow_NavigationViewItem_Sandbox.Content"],
+                resources["Chat_Composer_Sandbox_OpenSettings"], StringComparison.OrdinalIgnoreCase);
+        }
     }
 }

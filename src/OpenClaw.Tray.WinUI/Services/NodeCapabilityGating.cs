@@ -51,6 +51,17 @@ internal static class NodeCapabilityGating
     public static bool ShouldRegisterStt(SettingsManager? s)          => s?.NodeSttEnabled          == true;
 
     /// <summary>
+    /// Opt-in gate for the <c>local-inference</c> capability
+    /// (<c>ollama.models</c> / <c>ollama.chat</c>). Any paired active
+    /// gateway can invoke the separately installed Windows Ollama service
+    /// through this node once explicitly enabled. Registration must not
+    /// depend on whether Ollama is currently reachable/healthy - that is
+    /// a runtime concern surfaced by the capability's own commands, not a
+    /// registration precondition.
+    /// </summary>
+    public static bool ShouldRegisterOllama(SettingsManager? s)       => s?.NodeOllamaInferenceEnabled == true;
+
+    /// <summary>
     /// Resolve the local node's capability list from the gateway-reported
     /// <see cref="OpenClaw.Shared.GatewayNodeInfo"/> array — the single source
     /// of truth used by the tray menu, instances page, connection page, and
@@ -77,7 +88,7 @@ internal static class NodeCapabilityGating
             string.Equals(n.NodeId, localDeviceId, System.StringComparison.OrdinalIgnoreCase));
     }
 
-    public static bool ShouldRegisterSystemRun(SettingsManager? s)    => s?.NodeSystemRunEnabled    != false;
+    public static bool ShouldRegisterSystemRun(SettingsManager? s)    => s?.IsSystemRunPermissionGranted != false;
 
     /// <summary>Counts node capability categories served by local MCP without a gateway node client.</summary>
     public static int CountMcpServedCapabilities(SettingsManager? s)
@@ -89,6 +100,7 @@ internal static class NodeCapabilityGating
         if (ShouldRegisterLocation(s)) n++;
         if (ShouldRegisterTts(s)) n++;
         if (ShouldRegisterStt(s)) n++;
+        if (ShouldRegisterOllama(s)) n++;
         return n;
     }
 }

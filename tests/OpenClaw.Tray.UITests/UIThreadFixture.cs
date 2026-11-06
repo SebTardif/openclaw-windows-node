@@ -7,7 +7,31 @@ using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.Windows.ApplicationModel.DynamicDependency;
 
+// Windows App SDK bootstrap must not run while other test collections execute: hosted runners
+// froze the whole testhost inside Bootstrap.Initialize while non-UI collections started in parallel.
+// Almost every test already shares the serialized UI collection, so this only serializes the few
+// classes outside it.
+[assembly: CollectionBehavior(DisableTestParallelization = true)]
+
 namespace OpenClaw.Tray.UITests;
+
+// PresentationCore's module initializer calls SetProcessDPIAware when native UIA first loads WPF,
+// which launched-app collections (Gateway fixture UI, Accessibility app) can trigger before the
+// UIThreadFixture initializes. Lock the testhost's PerMonitorV2 default at assembly load, before
+// any HWND, like the product manifest; the fixture still asserts the locked context.
+internal static class TestHostDpiInitializer
+{
+    [System.Runtime.CompilerServices.ModuleInitializer]
+    internal static void Initialize()
+    {
+        try { OnboardingNativeProof.LockProcessDpi(); }
+        catch
+        {
+            // slopwatch-ignore: SW003 A module initializer must not throw; the fixture asserts
+            // the locked context where a failure can fail tests with a clear message.
+        }
+    }
+}
 
 /// <summary>
 /// Bootstraps a single WinUI3 <see cref="Application"/> + hidden <see cref="Window"/>
@@ -135,7 +159,13 @@ public sealed class UIThreadFixture : IDisposable
         var tcs = new TaskCompletionSource<T>(TaskCreationOptions.RunContinuationsAsynchronously);
         if (!Dispatcher.TryEnqueue(async () =>
         {
-            try { tcs.SetResult(await work().ConfigureAwait(true)); }
+            try
+            {
+                OnboardingNativeProof.TraceDpiContext("RunOnUIAsync: dispatched", TestWindow);
+                var result = await work().ConfigureAwait(true);
+                OnboardingNativeProof.TraceDpiContext("RunOnUIAsync: resumed", TestWindow);
+                tcs.SetResult(result);
+            }
             catch (Exception ex) { tcs.SetException(ex); }
         }))
         {
@@ -196,13 +226,22 @@ public sealed class UIThreadFixture : IDisposable
     {
         try
         {
-            _startupPhase = "initializing Windows App SDK bootstrap";
+            OnboardingNativeProof.InitializeProductProcessDpi();
+            OnboardingNativeProof.TraceDpiContext("UIThreadProc: before bootstrap");
+            _startupPhase = "initializing WinRT COM wrappers";
+            Console.WriteLine("UIThreadFixture: initializing WinRT COM wrappers");
+            WinRT.ComWrappersSupport.InitializeComWrappers();
+            Console.WriteLine("UIThreadFixture: WinRT COM wrappers initialized");
 
             // Initialize WinAppSDK runtime (unpackaged process).
             if (Interlocked.Exchange(ref s_bootstrapInitialized, 1) == 0)
             {
+                _startupPhase = "initializing Windows App SDK bootstrap";
+                Console.WriteLine("UIThreadFixture: initializing Windows App SDK bootstrap");
                 Bootstrap.Initialize(WinAppSdkMajorMinor, WinAppSdkVersionTag);
+                Console.WriteLine("UIThreadFixture: Windows App SDK bootstrap initialized");
             }
+            OnboardingNativeProof.TraceDpiContext("UIThreadProc: bootstrap complete");
 
             // Application.Start blocks the calling thread until Application.Current.Exit().
             // The lambda runs once, on this same thread, with a live dispatcher.
@@ -211,23 +250,21 @@ public sealed class UIThreadFixture : IDisposable
             {
                 try
                 {
+                    OnboardingNativeProof.TraceDpiContext("Application.Start: callback");
+                    Dispatcher = DispatcherQueue.GetForCurrentThread();
+                    SynchronizationContext.SetSynchronizationContext(
+                        new DispatcherQueueSynchronizationContext(Dispatcher));
                     _startupPhase = "creating TestApp";
                     var app = new TestApp(); // ctor stashes itself as Application.Current
-                    // Application.Resources can only be touched once the COM object
-                    // is fully wired; safe by the time we reach here (post-ctor).
-                    _startupPhase = "merging app resources";
-                    app.MergeStandardResources();
-
+                    OnboardingNativeProof.TraceDpiContext("Application.Start: TestApp constructed");
                     _startupPhase = "getting dispatcher";
-                    Dispatcher = DispatcherQueue.GetForCurrentThread();
-
                     _startupPhase = "creating hidden test window";
                     Container = new Grid { Padding = new Microsoft.UI.Xaml.Thickness(24) };
-                    TestWindow = new Window
+                    TestWindow = OnboardingNativeProof.CreateWindow(() => new Window
                     {
                         Title = "OpenClaw.Tray.UITests",
                         Content = Container,
-                    };
+                    });
 
                     if (IsSlow)
                     {
@@ -250,8 +287,25 @@ public sealed class UIThreadFixture : IDisposable
                         MoveOffScreen(TestWindow);
                     }
 
-                    _startupPhase = "ready";
-                    _ready.Set();
+                    // The Application.Start callback must return before the native
+                    // application resource map is ready for compiled product pages.
+                    _startupPhase = "waiting for app resources";
+                    if (!Dispatcher.TryEnqueue(() =>
+                    {
+                        try
+                        {
+                            app.MergeStandardResources();
+                            if (!app.Resources.ContainsKey("TextFillColorSecondaryBrush"))
+                                throw new InvalidOperationException("The WinUI test resource map did not initialize.");
+                            _startupPhase = "ready";
+                        }
+                        catch (Exception ex)
+                        {
+                            _startupError = ex;
+                        }
+                        finally { _ready.Set(); }
+                    }))
+                        throw new InvalidOperationException("The WinUI dispatcher rejected resource initialization.");
                 }
                 catch (Exception ex)
                 {
@@ -285,6 +339,17 @@ public sealed class UIThreadFixture : IDisposable
 
     public void Dispose()
     {
+        if (Dispatcher is not null && _uiThread.IsAlive)
+        {
+            ResetContainerAsync().WaitAsync(TimeSpan.FromSeconds(10)).GetAwaiter().GetResult();
+            // Release projected XAML objects while their dispatcher and native
+            // reference trackers still exist, not after Application.Exit.
+            Console.WriteLine("UIThreadFixture: dispose finalizer drain begin");
+            GC.Collect();
+            GC.WaitForPendingFinalizers();
+            Console.WriteLine("UIThreadFixture: dispose finalizer drain end");
+            YieldToRenderAsync().WaitAsync(TimeSpan.FromSeconds(10)).GetAwaiter().GetResult();
+        }
         try
         {
             // Ask the UI thread to exit. Application.Current.Exit() unwinds
