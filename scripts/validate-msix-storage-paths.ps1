@@ -249,6 +249,7 @@ $script:summary = [ordered]@{
 
 # Script-level slot for engine result (populated by Invoke-CliEngineUninstall)
 $script:engineResult = $null
+. (Join-Path $PSScriptRoot "MsixStorageVerdict.ps1")
 
 # Exit-code sentinels
 $EXIT_PASS            = 0
@@ -851,9 +852,10 @@ function Invoke-CliEngineUninstall {
         try {
             $raw          = Get-Content -LiteralPath $jsonOutputPath -Raw -Encoding UTF8
             $engineJson   = $raw | ConvertFrom-Json
-            $engineSuccess = [bool]$engineJson.success
-            # Build an ordered hashtable from the postconditions object
-            $pc = $engineJson.postconditions
+            $engineSuccess = Test-EngineUninstallSucceeded -EngineJson $engineJson -ProcessExitCode $exitCode
+            # Copy postconditions only when the engine wrote them. Do not invent them.
+            $postProperty = $engineJson.PSObject.Properties["postconditions"]
+            $pc = if ($null -eq $postProperty) { $null } else { $postProperty.Value }
             if ($pc) {
                 $enginePostconds = [ordered]@{
                     wsl_distro_absent     = [bool]$pc.wsl_distro_absent
@@ -1184,6 +1186,21 @@ function Get-FinalExitCode {
     $verdict = if ($VerdictData) { $VerdictData.verdict } else { $script:summary.verdict }
     if ($verdict -eq "Inconclusive") { return $EXIT_FAIL }
     if ([string]::IsNullOrWhiteSpace($verdict)) { return $EXIT_FAIL }
+
+    if ($verdict -eq "PathA-OrphanRisk" -or $verdict -eq "PathB-CleanRemove") {
+        $consistent = $false
+        if ($VerdictData -and $VerdictData.PSObject.Properties.Name -contains "cross_check_consistent") {
+            $consistent = $VerdictData.cross_check_consistent -eq $true
+        }
+        $postconditions = $null
+        if ($null -ne $script:engineResult) {
+            $postconditions = $script:engineResult.postconditions
+        }
+        if (-not (Test-MsixStorageVerdictConfirmed -Verdict $verdict -CrossCheckConsistent $consistent -Postconditions $postconditions)) {
+            Write-Host "  Path verdict is not confirmed. The cross check must pass, and the device token and WSL distro must be cleared." -ForegroundColor Red
+            return $EXIT_FAIL
+        }
+    }
 
     return $EXIT_PASS
 }
