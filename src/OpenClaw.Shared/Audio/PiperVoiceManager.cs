@@ -63,25 +63,32 @@ public sealed class PiperVoiceManager
     [
         new("en_US-amy-low",     "English (US): Amy (low quality, fast)",   "en-US",
             "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/vits-piper-en_US-amy-low.tar.bz2",
-            "c70f5284a09a7fd4ed203b39b2ff51cac1432b422b852eb647b481dade3cf639"),
+            "c70f5284a09a7fd4ed203b39b2ff51cac1432b422b852eb647b481dade3cf639",
+            67_095_344),
         new("en_US-libritts-high","English (US): LibriTTS (high quality)",  "en-US",
             "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/vits-piper-en_US-libritts-high.tar.bz2",
-            "d9d35056703fd38ed38e95c202a50f603fefdc8a92a7b6332c4f1a41616eac72"),
+            "d9d35056703fd38ed38e95c202a50f603fefdc8a92a7b6332c4f1a41616eac72",
+            131_033_598),
         new("en_GB-alan-low",    "English (GB): Alan (low quality, fast)",  "en-GB",
             "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/vits-piper-en_GB-alan-low.tar.bz2",
-            "1308e730b7a12c3b64b669d65daa0138fcb83b1a086edee92fa9fa68cb0290dd"),
+            "1308e730b7a12c3b64b669d65daa0138fcb83b1a086edee92fa9fa68cb0290dd",
+            67_086_942),
         new("en_GB-northern_english_male-medium", "English (GB): Northern English Male (medium quality)", "en-GB",
             "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/vits-piper-en_GB-northern_english_male-medium.tar.bz2",
-            "2bb2c1e709f58c11f17c693b3b38f500e110e7f54f2651774ec48b8d41f12c55"),
+            "2bb2c1e709f58c11f17c693b3b38f500e110e7f54f2651774ec48b8d41f12c55",
+            67_210_490),
         new("fr_FR-siwis-low",   "Français (FR): Siwis (low quality, fast)","fr-FR",
             "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/vits-piper-fr_FR-siwis-low.tar.bz2",
-            "3d69170c160c8375c4123901a72a3845222b39456d39ab74f5bbd7310952b5af"),
+            "3d69170c160c8375c4123901a72a3845222b39456d39ab74f5bbd7310952b5af",
+            26_522_254),
         new("de_DE-thorsten-low","Deutsch (DE): Thorsten (low quality)",    "de-DE",
             "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/vits-piper-de_DE-thorsten-low.tar.bz2",
-            "41fab35910fdcec4696b031951d8fd6c262e594cf77b35e1068fadbeb5a091a6"),
+            "41fab35910fdcec4696b031951d8fd6c262e594cf77b35e1068fadbeb5a091a6",
+            67_101_576),
         new("zh_CN-huayan-medium","中文 (CN): Huayan (medium quality)",      "zh-CN",
             "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/vits-piper-zh_CN-huayan-medium.tar.bz2",
-            "dbdfec42b91d9cee31cce9ff4b3e9c305eb6fbf60546d071f7e46273554cce6b"),
+            "dbdfec42b91d9cee31cce9ff4b3e9c305eb6fbf60546d071f7e46273554cce6b",
+            67_255_926),
     ];
 
     public PiperVoiceManager(string dataDirectory, IOpenClawLogger logger)
@@ -159,7 +166,8 @@ public sealed class PiperVoiceManager
             InFlightDownloads,
             key,
             token => DownloadVoiceCoreAsync(info, progress, token),
-            cancellationToken);
+            cancellationToken,
+            TimeSpan.FromMinutes(10));
     }
 
     private async Task DownloadVoiceCoreAsync(
@@ -191,19 +199,18 @@ public sealed class PiperVoiceManager
             using var response = await AllowedAssetDownload.GetAsync(httpClient, info.DownloadUrl, cancellationToken).ConfigureAwait(false);
             response.EnsureSuccessStatusCode();
 
-            var totalBytes = response.Content.Headers.ContentLength ?? 0;
+            var totalBytes = response.Content.Headers.ContentLength ?? info.ArchiveSizeBytes;
             using (var contentStream = await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false))
             using (var fileStream = new FileStream(tarballPath, FileMode.Create, FileAccess.Write, FileShare.None, 81920))
             {
-                var buffer = new byte[81920];
-                long downloaded = 0;
-                int bytesRead;
-                while ((bytesRead = await contentStream.ReadAsync(buffer, cancellationToken).ConfigureAwait(false)) > 0)
-                {
-                    await fileStream.WriteAsync(buffer.AsMemory(0, bytesRead), cancellationToken).ConfigureAwait(false);
-                    downloaded += bytesRead;
-                    progress?.Report((downloaded, totalBytes));
-                }
+                await BoundedDownload.CopyAsync(
+                    contentStream,
+                    fileStream,
+                    info.ArchiveSizeBytes,
+                    info.VoiceId,
+                    cancellationToken,
+                    progress,
+                    totalBytes).ConfigureAwait(false);
             }
 
             // SECURITY: verify SHA-256 of the downloaded tarball BEFORE we
@@ -449,9 +456,12 @@ public sealed class PiperVoiceManager
 /// tarball. MUST be set; downloads are refused when null. See the catalog
 /// for the "verified on" date. Re-verify all shipped assets before every public
 /// release; see <c>docs/AUDIO_MODEL_ASSETS.md</c>.</param>
+/// <param name="ArchiveSizeBytes">Exact archive size from the published
+/// release asset. The download stops if the body grows past it.</param>
 public sealed record PiperVoiceInfo(
     string VoiceId,
     string DisplayName,
     string LanguageTag,
     string DownloadUrl,
-    string? Sha256);
+    string? Sha256,
+    long ArchiveSizeBytes);
