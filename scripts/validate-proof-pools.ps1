@@ -755,7 +755,10 @@ foreach ($pool in $inventory.pools) {
             $normalizedCommand -match "(?i)\bmsbuild(?:\.exe)?\b" -or
             $normalizedCommand -match "(?i)\bvstest\.console(?:\.(?:exe|dll))?\b" -or
             $normalizedCommand -match "(?i)\bvstest\.(?:exe|dll)\b" -or
-            $normalizedCommand -match "(?i)[/-](?:t|target):[^\r\n;&|]*\bVSTest\b"
+            $normalizedCommand -match "(?i)[/-](?:t|target):[^\r\n;&|]*\bVSTest\b" -or
+            $normalizedCommand -match "(?i)\bGet-Command\b" -or
+            $normalizedCommand -match "(?i)[A-Za-z0-9]\+[A-Za-z0-9]" -or
+            $normalizedCommand -match "(?i)(?:^|[\s;|&])&\s*\("
         if ($command.kind -eq "proof-test" -or $invokesProofRunner) {
             if ($command.kind -ne "proof-test") {
                 throw "Proof runner command '$($pool.id)/$($command.id)' must use kind 'proof-test'."
