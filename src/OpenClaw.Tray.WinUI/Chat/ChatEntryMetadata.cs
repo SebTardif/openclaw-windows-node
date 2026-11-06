@@ -60,6 +60,14 @@ namespace OpenClawTray.Chat;
 /// Stable client-side id for a local send. Used to attach a later gateway
 /// identity to the exact optimistic transcript row without text matching.
 /// </param>
+/// <param name="Attachments">
+/// Structured attachment presentation metadata. Gateway references never carry
+/// preview cache keys.
+/// </param>
+/// <param name="AssistantContent">
+/// Renderer-safe assistant media presentation. Transport references remain
+/// opaque and are never encoded into timeline text.
+/// </param>
 public sealed record ChatEntryMetadata(
     DateTimeOffset? Timestamp,
     string? Model,
@@ -75,4 +83,22 @@ public sealed record ChatEntryMetadata(
     long? CompactionTokensBefore = null,
     long? CompactionTokensAfter = null,
     bool IsLocalQueuedSend = false,
-    string? LocalQueuedMessageId = null);
+    string? LocalQueuedMessageId = null,
+    IReadOnlyList<ChatAttachmentPresentation>? Attachments = null,
+    ChatAssistantContentPresentation? AssistantContent = null)
+{
+    // Live-only correlation follows the entry's reset/history lifetime.
+    [System.Text.Json.Serialization.JsonIgnore]
+    public string? BackgroundFinalRunId { get; init; }
+
+    // Gateway timestamps fence delayed usage replies without comparing host clocks.
+    [System.Text.Json.Serialization.JsonIgnore]
+    public long? UsageSnapshotTimestamp { get; init; }
+
+    // A usage-free final advances the fence without making older counters newer.
+    [System.Text.Json.Serialization.JsonIgnore]
+    public long? UsageMeasurementTimestamp { get; init; }
+
+    [System.Text.Json.Serialization.JsonIgnore]
+    public bool UsageSnapshotIsAuthoritative { get; init; }
+}

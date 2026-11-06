@@ -134,6 +134,7 @@ public partial class App
             "EnableNodeMode", "EnableMcpServer", "PreferStructuredCategories",
             "NodeCanvasEnabled", "NodeScreenEnabled", "NodeCameraEnabled",
             "NodeLocationEnabled", "NodeBrowserProxyEnabled", "NodeTtsEnabled",
+            "NodeOllamaInferenceEnabled",
             "HasSeenActivityStreamTip", "TtsProvider"
         };
 
@@ -150,6 +151,15 @@ public partial class App
         {
             if (_settings == null) return new { error = "Settings not loaded" };
             if (!safeSettings.Contains(name)) return new { error = $"Setting '{name}' is not accessible" };
+            if (name.Equals(nameof(SettingsManager.AutoStart), StringComparison.OrdinalIgnoreCase))
+            {
+                try { AutoStartReconciliation.ThrowIfFixtureMutation(); }
+                catch (AutoStartRefusedException ex)
+                {
+                    Logger.Warn(ex.Message);
+                    return new { error = ex.Message };
+                }
+            }
             var prop = typeof(SettingsManager).GetProperty(name,
                 System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.IgnoreCase);
             if (prop == null) return new { error = $"Unknown setting: {name}" };
@@ -174,7 +184,7 @@ public partial class App
                     _settings.Save();
                 }
 
-                OnSettingsSaved(this, EventArgs.Empty);
+                ApplySettingsSavedAndWait();
                 var runtimeError = McpRuntimeStatePolicy.GetSettingsSetError(
                     name,
                     converted,
@@ -213,13 +223,14 @@ public partial class App
 
         app.SearchHandler = (query) =>
         {
-            if (ActiveHubWindow is not OpenClawTray.Windows.HubWindow hubWindow) return Array.Empty<object>();
-            var commands = hubWindow.BuildCommandList();
-            var matches = commands
-                .Where(c => c.Title.Contains(query, StringComparison.OrdinalIgnoreCase)
-                    || (c.Subtitle?.Contains(query, StringComparison.OrdinalIgnoreCase) ?? false))
+            var workspace = ActiveHubWindow as OpenClawTray.Windows.WorkspaceWindow;
+            var commands = HubCommandCatalog.BuildSearch(_appState, workspace?.SelectedAgentId ?? "main",
+                GatewayClient?.GrantedOperatorScopes.Contains("operator.admin") == true);
+            var matches = HubSearch.Find(commands, query, perGroupLimit: 10)
                 .Take(10)
-                .Select(c => new { c.Title, c.Subtitle, c.Icon })
+                .Select(match => new { match.Item.Title, match.Item.Subtitle, match.Item.Icon,
+                    Group = match.Item.Group.ToString(), match.Item.OpensDashboard,
+                    HasDashboardCounterpart = match.Item.DashboardPath is not null })
                 .ToArray();
             return matches;
         };
@@ -229,11 +240,14 @@ public partial class App
             if (!TryResolveChatCredentials(out var gatewayUrl, out var token, out var credentialSource, out var isBootstrapToken))
                 return new { error = "Gateway URL or credential is not configured" };
 
-            var url = GatewayDashboardUrlBuilder.Build(
-                gatewayUrl,
-                path,
-                token,
-                !isBootstrapToken && credentialSource == CredentialResolver.SourceSharedGatewayToken);
+            if (!GatewayDashboardUrlBuilder.TryBuild(
+                    gatewayUrl,
+                    path,
+                    token,
+                    !isBootstrapToken && credentialSource == CredentialResolver.SourceSharedGatewayToken,
+                    out var url,
+                    out var urlError))
+                return new { error = urlError };
 
             return new
             {
@@ -269,7 +283,8 @@ public partial class App
                 mcpError: mcpPlan.ShouldShow ? mcpPlan.Message : null,
                 nodeBrowserProxyEnabled: _settings?.NodeBrowserProxyEnabled != false,
                 recentDiagnostics: recentDiagnostics,
-                diagnosticEventCount: diagnostics?.Count ?? recentDiagnostics.Count));
+                diagnosticEventCount: diagnostics?.Count ?? recentDiagnostics.Count,
+                gatewaySelf: _appState?.GatewaySelf));
         };
 
         connection.GatewaysHandler = () =>
@@ -441,6 +456,11 @@ public partial class App
                     ? booleanValue
                     : throw new InvalidCastException($"Setting '{name}' must be a boolean.");
                 return true;
+            case nameof(SettingsManager.NodeOllamaInferenceEnabled):
+                value = converted is bool ollamaBooleanValue
+                    ? ollamaBooleanValue
+                    : throw new InvalidCastException($"Setting '{name}' must be a boolean.");
+                return true;
             default:
                 value = false;
                 return false;
@@ -475,6 +495,9 @@ public partial class App
             case nameof(SettingsManager.NodeTtsEnabled):
                 edit.NodeTtsEnabled = value;
                 break;
+            case nameof(SettingsManager.NodeOllamaInferenceEnabled):
+                edit.NodeOllamaInferenceEnabled = value;
+                break;
             default:
                 throw new InvalidOperationException($"Setting '{name}' is not store-managed.");
         }
@@ -507,6 +530,9 @@ public partial class App
                 break;
             case nameof(SettingsManager.NodeTtsEnabled):
                 settings.NodeTtsEnabled = value;
+                break;
+            case nameof(SettingsManager.NodeOllamaInferenceEnabled):
+                settings.NodeOllamaInferenceEnabled = value;
                 break;
             default:
                 throw new InvalidOperationException($"Setting '{name}' is not store-managed.");

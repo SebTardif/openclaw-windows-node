@@ -3,6 +3,41 @@ namespace OpenClaw.Tray.Tests;
 public sealed class SetupWindowConfigErrorContractTests
 {
     [Fact]
+    public void MinimumSize_ConstrainsTheNativePresenterBeforeConfigurationAndTracksDpiUntilClose()
+    {
+        var root = TestRepositoryPaths.GetRepositoryRoot();
+        var source = File.ReadAllText(Path.Combine(root, "src", "OpenClaw.SetupEngine.UI", "SetupWindow.xaml.cs"));
+        var ready = File.ReadAllText(Path.Combine(root, "src", "OpenClaw.SetupEngine.UI", "SetupReadyWindow.cs"));
+        var sizing = File.ReadAllText(Path.Combine(root, "src", "OpenClaw.SetupEngine.UI", "SetupWindowSizingController.cs"));
+        AssertInOrder(source, "InitializeComponent();", "_windowSizing = new(this, RootFrame);", "SetupWindowCommandLine.TryParse(");
+        Assert.Contains("_windowSizing = new(this, _frame);", ready);
+        Assert.DoesNotContain("AppWindow.Resize", source);
+        Assert.DoesNotContain("AppWindow.Resize", ready);
+        Assert.Contains("_window.AppWindow.Presenter is not OverlappedPresenter presenter", sizing);
+        Assert.Contains("GetDpiForWindow(WinRT.Interop.WindowNative.GetWindowHandle(_window))", sizing);
+        Assert.Contains("SetupWindowSizing.MinimumPixels(dpi)", sizing);
+        Assert.Contains("presenter.PreferredMinimumWidth = minimum.Width", sizing);
+        Assert.Contains("presenter.PreferredMinimumHeight = minimum.Height", sizing);
+        Assert.Contains("SetupWindowSizing.InitialPixels(", sizing);
+        Assert.Contains("_content.Loaded += ContentLoaded", sizing);
+        Assert.Contains("root.Changed += RootChanged", sizing);
+        Assert.Contains("previous.Changed -= RootChanged", sizing);
+        Assert.Contains("args.DidPositionChange || args.DidPresenterChange", sizing);
+        Assert.Contains("_window.Closed += WindowClosed", sizing);
+        Assert.Contains("WindowClosed(object sender, WindowEventArgs args) => Dispose()", sizing);
+        var close = sizing[sizing.IndexOf("public void Dispose()", StringComparison.Ordinal)..];
+        Assert.Contains("_content.Loaded -= ContentLoaded", close);
+        Assert.Contains("_window.AppWindow.Changed -= WindowChanged", close);
+        Assert.Contains("root.Changed -= RootChanged", close);
+        Assert.Contains("_root = null", close);
+        var apply = sizing[sizing.IndexOf("internal void ApplyMinimumSize()", StringComparison.Ordinal)..
+            sizing.IndexOf("private void WindowClosed", StringComparison.Ordinal)];
+        Assert.DoesNotContain("AppWindow.Resize", apply);
+        Assert.DoesNotContain("IsResizable = false", sizing);
+        Assert.DoesNotContain("IsMaximizable = false", sizing);
+    }
+
+    [Fact]
     public void ConfigurationLoadFailuresAreSurfacedBeforeSetupStarts()
     {
         var root = TestRepositoryPaths.GetRepositoryRoot();

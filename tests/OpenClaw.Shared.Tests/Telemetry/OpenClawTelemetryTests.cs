@@ -22,6 +22,11 @@ public sealed class OpenClawTelemetryTests
         Assert.Equal("openclaw.reason", OpenClawTelemetryTagKey.Reason.ToTelemetryName());
         Assert.Equal("openclaw.status", OpenClawTelemetryTagKey.Status.ToTelemetryName());
         Assert.Equal("error.type", OpenClawTelemetryTagKey.ErrorType.ToTelemetryName());
+        Assert.Equal("openclaw.protocol.client", OpenClawTelemetryTagKey.ClientProtocol.ToTelemetryName());
+        Assert.Equal("openclaw.protocol.gateway", OpenClawTelemetryTagKey.GatewayProtocol.ToTelemetryName());
+        Assert.Equal(
+            "openclaw.protocol.compatibility",
+            OpenClawTelemetryTagKey.ProtocolCompatibility.ToTelemetryName());
     }
 
     [Fact]
@@ -361,14 +366,14 @@ public sealed class OpenClawTelemetryTests
                 }
             };
             _listener.SetMeasurementEventCallback<long>((instrument, measurement, tags, _) =>
-                LongMeasurements.Add(new MetricMeasurement<long>(instrument.Name, measurement, tags.ToArray())));
+                LongMeasurements.Enqueue(new MetricMeasurement<long>(instrument.Name, measurement, tags.ToArray())));
             _listener.SetMeasurementEventCallback<double>((instrument, measurement, tags, _) =>
-                DoubleMeasurements.Add(new MetricMeasurement<double>(instrument.Name, measurement, tags.ToArray())));
+                DoubleMeasurements.Enqueue(new MetricMeasurement<double>(instrument.Name, measurement, tags.ToArray())));
             _listener.Start();
         }
 
-        public List<MetricMeasurement<long>> LongMeasurements { get; } = new();
-        public List<MetricMeasurement<double>> DoubleMeasurements { get; } = new();
+        public ConcurrentQueue<MetricMeasurement<long>> LongMeasurements { get; } = new();
+        public ConcurrentQueue<MetricMeasurement<double>> DoubleMeasurements { get; } = new();
 
         public static MetricCollector Listen(string meterName) => new(meterName);
 

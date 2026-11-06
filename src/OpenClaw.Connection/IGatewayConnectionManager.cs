@@ -3,9 +3,9 @@ using OpenClaw.Shared;
 namespace OpenClaw.Connection;
 
 /// <summary>
-/// Single owner of the complete connection lifecycle for the active gateway.
-/// Manages operator connection, node connection, credential resolution,
-/// state transitions, and diagnostics.
+/// Stable public façade for the complete active-gateway connection lifecycle.
+/// The implementation owns operator/state orchestration and delegates cohesive
+/// node, bootstrap-token, and device-pair workflows to internal domain owners.
 /// </summary>
 public interface IGatewayConnectionManager : IDisposable, IAsyncDisposable
 {
@@ -20,6 +20,11 @@ public interface IGatewayConnectionManager : IDisposable, IAsyncDisposable
 
     // ─── Lifecycle ───
     Task ConnectAsync(string? gatewayId = null);
+    Task ConnectAsync(string? gatewayId, CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        return ConnectAsync(gatewayId);
+    }
     Task ConnectNodeOnlyAsync(string? gatewayId = null);
     Task DisconnectAsync();
     Task DisconnectByUserAsync();
@@ -66,6 +71,12 @@ public interface IGatewayConnectionManager : IDisposable, IAsyncDisposable
     Task EnsureNodeConnectedAsync(CancellationToken cancellationToken = default);
 
     // ─── Setup ───
+    Task<SetupCodeResult> ValidateConnectionAsync(
+        GatewayRecord candidate, GatewayValidationIdentity identity,
+        CancellationToken cancellationToken = default) =>
+        Task.FromResult(new SetupCodeResult(
+            SetupCodeOutcome.ConnectionFailed, "Native connection validation is unavailable."));
+
     Task<SetupCodeResult> ApplySetupCodeAsync(string setupCode, SshTunnelConfig? sshTunnel = null);
     Task<SetupCodeResult> ConnectWithSharedTokenAsync(string gatewayUrl, string token, SshTunnelConfig? sshTunnel = null);
 

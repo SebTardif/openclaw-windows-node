@@ -121,6 +121,8 @@ internal enum RecoveryCategory
     Tailscale,
     /// <summary>A different or unverified local process owns the managed gateway port.</summary>
     LocalPortConflict,
+    /// <summary>The Gateway and Windows app do not share a supported wire protocol.</summary>
+    ProtocolMismatch,
 }
 
 /// <summary>
@@ -136,9 +138,16 @@ internal sealed record ConnectionPagePlan
     public ConnectionAccent StripAccent { get; init; } = ConnectionAccent.Neutral;
     public string StripHeadline { get; init; } = "Not connected";
     public string StripSub { get; init; } = "";
+    public string? StripHeadlineResourceKey { get; init; }
+    public string? StripSubResourceKey { get; init; }
+    public int? ProtocolExpectedVersion { get; init; }
+    public int ProtocolMinimumVersion { get; init; } = GatewayProtocolContract.MinimumSupportedVersion;
+    public int ProtocolMaximumVersion { get; init; } = GatewayProtocolContract.MaximumSupportedVersion;
+    public int ProtocolCurrentVersion { get; init; } = GatewayProtocolContract.CurrentVersion;
     public bool StripShowProgress { get; init; }
     public string? StripPrimaryLabel { get; init; }
     public ConnectionPrimaryAction StripPrimaryAction { get; init; } = ConnectionPrimaryAction.None;
+    public bool AllowConnectionToggle { get; init; } = true;
 
     // ─── Operator card ───
     public OperatorCardState OperatorCard { get; init; } = OperatorCardState.Hidden;
@@ -162,10 +171,13 @@ internal sealed record ConnectionPagePlan
         new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase);
     /// <summary>For OnNodeError — sanitized error string.</summary>
     public string? NodeErrorDetail { get; init; }
+    public string? NodeErrorDetailResourceKey { get; init; }
 
     // ─── Recovery sub-screen ───
     public RecoveryCategory Recovery { get; init; } = RecoveryCategory.None;
     public string? RecoveryDetail { get; init; }
+    public string? RecoveryHeaderResourceKey { get; init; }
+    public IReadOnlyList<string> RecoveryBulletResourceKeys { get; init; } = Array.Empty<string>();
     /// <summary>For RecoveryCategory.Pairing — the CLI command the user should run.</summary>
     public string? RecoveryApproveCommand { get; init; }
 
@@ -225,6 +237,16 @@ internal sealed record ConnectionPagePlan
         int savedGatewayCount,
         string displayName)
     {
+        if (snap.ProtocolCompatibility.IsMismatch &&
+            snap.ProtocolCompatibilityRole == GatewayProtocolCompatibilityRole.Node &&
+            snap.OverallState == OverallConnectionState.Degraded)
+        {
+            return BuildNodeProtocolMismatchCockpit(snap, activeRecord, self, settings, displayName);
+        }
+
+        if (snap.ProtocolCompatibility.IsMismatch)
+            return BuildProtocolMismatchRecovery(snap, activeRecord, displayName);
+
         // ─── Derived layout ───
         return snap.OverallState switch
         {
@@ -260,6 +282,70 @@ internal sealed record ConnectionPagePlan
             _ => BuildIdle(savedGatewayCount, activeRecord, settings),
         };
     }
+
+    private static ConnectionPagePlan BuildProtocolMismatchRecovery(
+        GatewayConnectionSnapshot snap,
+        GatewayRecord? rec,
+        string name)
+    {
+        var compatibility = snap.ProtocolCompatibility;
+        var (headerKey, detailKey) = GetProtocolMismatchResourceKeys(compatibility);
+        var url = ConnectionCardPlanSanitizer.SanitizeGatewayUrl(rec?.Url ?? snap.GatewayUrl);
+
+        return new ConnectionPagePlan
+        {
+            Mode = ConnectionPageMode.Recovery,
+            Recovery = RecoveryCategory.ProtocolMismatch,
+            StripGlyph = OpenClawTray.Helpers.FluentIconCatalog.StatusErr,
+            StripAccent = ConnectionAccent.Critical,
+            StripHeadlineResourceKey = headerKey,
+            StripSubResourceKey = detailKey,
+            StripPrimaryLabel = null,
+            StripPrimaryAction = ConnectionPrimaryAction.None,
+            AllowConnectionToggle = true,
+            ProtocolExpectedVersion = compatibility.GatewayExpectedProtocol,
+            RecoveryHeaderResourceKey = headerKey,
+            RecoveryBulletResourceKeys = detailKey is null ? [] : [detailKey],
+            ActiveGatewayDisplayName = name,
+            ActiveGatewayDetailLine = url,
+            ActiveGatewayHasSshTunnel = rec?.SshTunnel != null,
+            RelevantGatewayId = rec?.Id
+        };
+    }
+
+    private static ConnectionPagePlan BuildNodeProtocolMismatchCockpit(
+        GatewayConnectionSnapshot snap,
+        GatewayRecord? rec,
+        GatewaySelfInfo? self,
+        SettingsManager? settings,
+        string name)
+    {
+        var compatibility = snap.ProtocolCompatibility;
+        var (headerKey, detailKey) = GetProtocolMismatchResourceKeys(compatibility);
+        return BuildCockpitDegraded(snap, rec, self, settings, name) with
+        {
+            StripHeadlineResourceKey = headerKey,
+            StripSubResourceKey = detailKey,
+            StripPrimaryLabel = null,
+            StripPrimaryAction = ConnectionPrimaryAction.None,
+            OperatorCard = OperatorCardState.Active,
+            NodeErrorDetail = null,
+            NodeErrorDetailResourceKey = detailKey ?? headerKey,
+            ProtocolExpectedVersion = compatibility.GatewayExpectedProtocol
+        };
+    }
+
+    private static (string HeaderKey, string? DetailKey) GetProtocolMismatchResourceKeys(
+        GatewayProtocolCompatibility compatibility)
+        => compatibility.State switch
+        {
+            GatewayProtocolCompatibilityState.GatewayTooOld =>
+                ("ConnectionPage_ProtocolGatewayUpdateRequired", "ConnectionPage_ProtocolGatewayUpdateDetail"),
+            GatewayProtocolCompatibilityState.GatewayTooNew when compatibility.GatewayExpectedProtocol.HasValue =>
+                ("ConnectionPage_ProtocolWindowsUpdateRequired", "ConnectionPage_ProtocolWindowsUpdateDetail"),
+            _ =>
+                ("ConnectionPage_ProtocolUnknownMismatch", null)
+        };
 
     // ───────────────────────────────────────────────────────────────────
     // Mode builders
@@ -772,29 +858,25 @@ internal sealed record ConnectionPagePlan
     private static string? BuildNodeApproveCommand(GatewayConnectionSnapshot snap)
     {
         if (snap.NodeState != RoleConnectionState.PairingRequired) return null;
-        var reqId = !string.IsNullOrEmpty(snap.NodePairingRequestId)
-            ? ConnectionCardPlanSanitizer.Sanitize(snap.NodePairingRequestId!, maxLen: 64)
-            : null;
         // Exact approval commands require an explicit kind. Unknown legacy
         // events stay discovery-only so operators can classify the request.
         // Missing requestId is a real-world case on older gateway builds:
         // emit a single discovery command the
-        // user can paste verbatim into any shell — they then pick a
+        // user can paste verbatim into any shell. They then pick a
         // requestId from its output and run approve manually. We avoid
         // embedding a "# then:" or "<requestId>" follow-up in the clipboard
         // text because `#` is treated as a literal arg by cmd.exe and `<`
-        // is parsed as input redirection — pasting either breaks for
-        // Windows-cmd users.
+        // is parsed as input redirection. Pasting either breaks for
+        // Windows-cmd users. The raw id is passed through so a 65 to 128
+        // character id is not cut before the command is built.
         if (snap.NodePairingApprovalKind == PairingApprovalKind.DevicePair)
         {
-            return CommandCenterDiagnostics.BuildDeviceApprovalRepairCommand(reqId);
+            return CommandCenterDiagnostics.BuildDeviceApprovalRepairCommand(snap.NodePairingRequestId);
         }
 
         if (snap.NodePairingApprovalKind == PairingApprovalKind.NodePair)
         {
-            return reqId != null
-                ? $"openclaw nodes approve {reqId}"
-                : "openclaw nodes pending";
+            return CommandCenterDiagnostics.BuildNodeApprovalRepairCommand(snap.NodePairingRequestId);
         }
 
         return CommandCenterDiagnostics.BuildUnknownPairingDiscoveryCommands();
@@ -804,15 +886,10 @@ internal sealed record ConnectionPagePlan
     {
         if (!snap.OperatorPairingRequired && snap.OperatorState != RoleConnectionState.PairingRequired)
             return null;
-        var reqId = !string.IsNullOrEmpty(snap.OperatorPairingRequestId)
-            ? ConnectionCardPlanSanitizer.Sanitize(snap.OperatorPairingRequestId!, maxLen: 64)
-            : null;
         // Noun-first per openclaw/src/cli/devices-cli.ts:
-        // `openclaw devices approve <requestId>`. Mirror BuildNodeApproveCommand:
-        // single discovery command in the clipboard, no shell-hostile suffix.
-        return reqId != null
-            ? $"openclaw devices approve {reqId}"
-            : "openclaw devices list";
+        // `openclaw devices approve <requestId>`. The helper keeps a safe id
+        // up to 128 characters and falls back to `openclaw devices list`.
+        return CommandCenterDiagnostics.BuildDeviceApprovalRepairCommand(snap.OperatorPairingRequestId);
     }
 
     private static string? ExtractNodeErrorDetail(GatewayConnectionSnapshot snap)
@@ -876,6 +953,7 @@ internal sealed record ConnectionPagePlan
         if (s.NodeLocationEnabled) n++;
         if (s.NodeTtsEnabled) n++;
         if (s.NodeSttEnabled) n++;
+        if (s.NodeOllamaInferenceEnabled) n++;
         return n;
     }
 
@@ -893,6 +971,7 @@ internal sealed record ConnectionPagePlan
             OpenClaw.Shared.GatewayErrorKind.Tls => RecoveryCategory.Tls,
             OpenClaw.Shared.GatewayErrorKind.Tunnel => RecoveryCategory.Tunnel,
             OpenClaw.Shared.GatewayErrorKind.LocalPortConflict => RecoveryCategory.LocalPortConflict,
+            OpenClaw.Shared.GatewayErrorKind.ProtocolMismatch => RecoveryCategory.ProtocolMismatch,
             OpenClaw.Shared.GatewayErrorKind.Server => RecoveryCategory.Server,
             OpenClaw.Shared.GatewayErrorKind.RateLimited => RecoveryCategory.RateLimited,
             OpenClaw.Shared.GatewayErrorKind.PairingRejected => RecoveryCategory.Auth,

@@ -355,7 +355,7 @@ public class StartupSetupStateTests
     }
 
     [Fact]
-    public void RequiresSetup_PreservesNodeModePrecedence_WhenRegistryHasExternalGatewayToken()
+    public void RequiresSetup_ReturnsFalse_WhenNodePairingIsPendingForConfiguredGateway()
     {
         using var temp = TempSettings.Create();
         var settings = new SettingsManager(temp.Path) { EnableNodeMode = true };
@@ -367,7 +367,8 @@ public class StartupSetupStateTests
             SharedGatewayToken = "shared-token"
         });
 
-        Assert.True(StartupSetupState.RequiresSetup(settings, temp.Path, registry));
+        Assert.False(StartupSetupState.RequiresSetup(settings, temp.Path, registry));
+        Assert.False(StartupSetupState.CanStartNodeGateway(settings, temp.Path));
     }
 
     [Fact]
@@ -389,7 +390,7 @@ public class StartupSetupStateTests
     }
 
     [Fact]
-    public void RequiresSetup_ReturnsTrue_WhenNodeModeHasInactiveBootstrapGateway()
+    public void RequiresSetup_ReturnsFalse_WhenNodeModeHasSavedBootstrapGateway()
     {
         using var temp = TempSettings.Create();
         var settings = new SettingsManager(temp.Path) { EnableNodeMode = true };
@@ -401,7 +402,39 @@ public class StartupSetupStateTests
             BootstrapToken = "bootstrap-token"
         });
 
-        Assert.True(StartupSetupState.RequiresSetup(settings, temp.Path, registry));
+        Assert.False(StartupSetupState.RequiresSetup(settings, temp.Path, registry));
+        Assert.False(StartupSetupState.CanStartNodeGateway(settings, temp.Path));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void RequiresSetup_ConfiguredOperatorDoesNotNeedSetupAgainWhenNodeModeChanges(bool useRegistry)
+    {
+        using var temp = TempSettings.Create();
+        var settings = new SettingsManager(temp.Path)
+        {
+            EnableNodeMode = true,
+            GatewayUrl = "wss://remote.example.com"
+        };
+        var registry = useRegistry ? new GatewayRegistry(temp.Path) : null;
+        if (registry is not null)
+        {
+            registry.AddOrUpdate(new GatewayRecord
+            {
+                Id = "configured-operator",
+                Url = settings.GatewayUrl
+            });
+            registry.SetActive("configured-operator");
+            StoreDeviceToken(registry.GetIdentityDirectory("configured-operator"));
+        }
+        else
+        {
+            StoreDeviceToken(temp.Path);
+        }
+
+        Assert.False(StartupSetupState.RequiresSetup(settings, temp.Path, registry));
+        Assert.False(StartupSetupState.CanStartNodeGateway(settings, temp.Path));
     }
 
     [Fact]
@@ -578,14 +611,18 @@ public class StartupSetupStateTests
         Assert.False(StartupSetupState.RequiresSetup(settings, temp.Path));
     }
 
-    [Fact]
-    public void DefaultGatewayUrl_IsLocalhost18789()
+    [Theory]
+    [InlineData("ws://127.0.0.1:18789")]
+    [InlineData("ws://localhost:18789")]
+    public void DefaultAndLegacyGatewayUrls_DoNotBypassSetup(string gatewayUrl)
     {
-        // StartupSetupState uses "ws://localhost:18789" as the default gateway URL.
-        // A non-default URL indicates the user has configured an external gateway.
-        // This test guards against accidentally changing the constant.
-        var settings = new SettingsManager(Path.GetTempPath()) { GatewayUrl = "ws://localhost:18789" };
-        Assert.True(StartupSetupState.RequiresSetup(settings, Path.GetTempPath()));
+        // Setup uses explicit IPv4 to avoid localhost resolving to IPv6 across
+        // mirrored WSL networking. Preserve the older localhost value only as
+        // a settings-migration alias, not as the runtime connection target.
+        using var temp = TempSettings.Create();
+        var settings = new SettingsManager(temp.Path) { GatewayUrl = gatewayUrl };
+
+        Assert.True(StartupSetupState.RequiresSetup(settings, temp.Path));
     }
 
     private static void StoreDeviceToken(string dataPath)
@@ -641,7 +678,7 @@ public class StartupSetupStateTests
         public Task<WslCommandResult> UnregisterDistroAsync(string name, CancellationToken cancellationToken = default) =>
             Task.FromResult(new WslCommandResult(0, "", ""));
 
-        public Task<WslCommandResult> RunInDistroAsync(string name, IReadOnlyList<string> command, CancellationToken cancellationToken = default, IReadOnlyDictionary<string, string>? environment = null) =>
+        public Task<WslCommandResult> RunInDistroAsync(string name, IReadOnlyList<string> command, CancellationToken cancellationToken = default, IReadOnlyDictionary<string, string>? environment = null, string? standardInput = null) =>
             Task.FromResult(new WslCommandResult(0, "", ""));
     }
 
@@ -659,7 +696,7 @@ public class StartupSetupStateTests
         public Task<WslCommandResult> UnregisterDistroAsync(string name, CancellationToken cancellationToken = default) =>
             Task.FromResult(new WslCommandResult(0, "", ""));
 
-        public Task<WslCommandResult> RunInDistroAsync(string name, IReadOnlyList<string> command, CancellationToken cancellationToken = default, IReadOnlyDictionary<string, string>? environment = null) =>
+        public Task<WslCommandResult> RunInDistroAsync(string name, IReadOnlyList<string> command, CancellationToken cancellationToken = default, IReadOnlyDictionary<string, string>? environment = null, string? standardInput = null) =>
             Task.FromResult(new WslCommandResult(0, "", ""));
     }
 }
