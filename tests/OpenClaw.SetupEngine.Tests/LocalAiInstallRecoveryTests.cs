@@ -79,6 +79,33 @@ public sealed class LocalAiInstallRecoveryTests
     }
 
     [Fact]
+    public async Task ModelInstall_WrongLengthFullResponsePreservesPartial()
+    {
+        using var temp = new TempDirectory();
+        byte[] modelBytes = "verified-model"u8.ToArray();
+        byte[] kept = modelBytes[..4];
+        LocalModelInfo model = CreateModel(modelBytes);
+        LocalAiComponentIdentity component = TestComponent();
+        (_, string partialPath) = ResolveModelPaths(temp.Path, component, model);
+        Directory.CreateDirectory(Path.GetDirectoryName(partialPath)!);
+        await File.WriteAllBytesAsync(partialPath, kept);
+        using var client = new HttpClient(new DelegateHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new ByteArrayContent(new byte[] { 1, 2 }),
+        }));
+
+        await Assert.ThrowsAsync<HuggingFaceModelInstallException>(() =>
+            CreateModelInstaller(client, temp.Path).InstallAsync(
+                temp.Path,
+                component,
+                model,
+                progress: null,
+                CancellationToken.None));
+
+        Assert.Equal(kept, await File.ReadAllBytesAsync(partialPath));
+    }
+
+    [Fact]
     public async Task ModelInstall_InvalidRangePreservesPreexistingPartial()
     {
         using var temp = new TempDirectory();

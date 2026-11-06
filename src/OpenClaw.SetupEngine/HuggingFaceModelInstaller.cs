@@ -527,6 +527,12 @@ internal sealed partial class HuggingFaceModelInstaller : IHuggingFaceModelAcqui
         }
         else
         {
+            if (response.Content.Headers.ContentLength is { } declaredLength && declaredLength != artifact.SizeBytes)
+            {
+                throw new HuggingFaceModelInstallException(
+                    $"The Hugging Face response declared {declaredLength} bytes; expected {artifact.SizeBytes} bytes.");
+            }
+
             resumeOffset = 0;
             partial.SetLength(0);
             hash.GetHashAndReset();
