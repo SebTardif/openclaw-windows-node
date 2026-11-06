@@ -20,6 +20,7 @@ internal sealed class ChatConversationState
     private readonly ChatResetState _reset = new();
     private readonly Dictionary<string, ChatTimelineState> _timelines = new();
     private readonly Dictionary<string, Dictionary<string, ChatEntryMetadata>> _entryMeta = new();
+    private readonly Dictionary<string, HashSet<string>> _historyReplacementBaselineIds = new();
     private ConnectionStatus _status;
     private bool _disposed;
 
@@ -194,8 +195,10 @@ internal sealed class ChatConversationState
             var token = _history.BeginReplacement(
                 threadId,
                 GetResetVersionLocked(threadId));
-            _timelines[threadId] = ChatTimelineState.Initial();
-            _entryMeta.Remove(threadId);
+            var timeline = GetOrCreateTimelineLocked(threadId);
+            _historyReplacementBaselineIds[threadId] = timeline.Entries
+                .Select(entry => entry.Id)
+                .ToHashSet(StringComparer.Ordinal);
             return new(BuildSnapshotLocked(context), token);
         }
     }
@@ -251,7 +254,8 @@ internal sealed class ChatConversationState
         ChatHistoryRebuildPlan plan,
         DateTimeOffset requestStartedAt,
         bool authoritative,
-        ChatHistoryRunLease? runLease = null)
+        ChatHistoryRunLease? runLease = null,
+        bool replacement = false)
     {
         lock (_gate)
         {
@@ -274,14 +278,19 @@ internal sealed class ChatConversationState
                 out var metadata)
                 ? metadata
                 : new Dictionary<string, ChatEntryMetadata>();
+            _historyReplacementBaselineIds.TryGetValue(token.ThreadId, out var baselineIds);
             var merged = plan.OlderPage is not null
                 ? ChatHistoryState.PrependOlderPage(plan, prior, priorMetadata)
                 : ChatHistoryState.MergeWithLiveEntries(
-                plan,
-                prior,
-                priorMetadata,
-                requestStartedAt,
-                authoritative);
+                    plan,
+                    prior,
+                    priorMetadata,
+                    requestStartedAt,
+                    authoritative,
+                    replacement,
+                    baselineIds);
+            if (replacement)
+                _historyReplacementBaselineIds.Remove(token.ThreadId);
             _timelines[token.ThreadId] = merged.Timeline;
             _entryMeta[token.ThreadId] = merged.Metadata;
             _history.MarkCommitted(token, plan.SessionId, plan.OlderCursor, plan.OlderPage is not null, plan.OlderMessageId);

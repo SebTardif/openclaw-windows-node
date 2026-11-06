@@ -325,7 +325,7 @@ public sealed class ChatConversationStateTests
     }
 
     [Fact]
-    public void HistoryReplacement_ClearsTimelineAndAdvancesOwnedTokenAtomically()
+    public void HistoryReplacement_KeepsTimelineUntilCommitAndAdvancesOwnedTokenAtomically()
     {
         var state = new ChatConversationState(
             ConnectionStatus.Connected,
@@ -346,8 +346,8 @@ public sealed class ChatConversationStateTests
         var replacement = state.BeginHistoryReplacement("main", context);
 
         Assert.NotNull(replacement);
-        Assert.Empty(replacement.Snapshot.Timelines["main"].Entries);
-        Assert.Empty(state.GetEntryMetadata("main"));
+        Assert.Contains(replacement.Snapshot.Timelines["main"].Entries, entry => entry.Text == "archived");
+        Assert.NotEmpty(state.GetEntryMetadata("main"));
         Assert.Equal(
             oldToken.ReplacementGeneration + 1,
             replacement.Token.ReplacementGeneration);
