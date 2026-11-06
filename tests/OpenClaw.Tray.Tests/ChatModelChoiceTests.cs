@@ -5,6 +5,36 @@ namespace OpenClaw.Tray.Tests;
 
 public class ChatModelChoiceTests
 {
+    [Theory]
+    [InlineData("github-copilot", "GitHub")]
+    [InlineData(" GITHUB-COPILOT ", "GitHub")]
+    [InlineData("openai", "OpenAI")]
+    [InlineData("anthropic", "Anthropic")]
+    [InlineData("google", "Google")]
+    [InlineData("llama-cpp", "llama.cpp")]
+    [InlineData("lmstudio", "LM Studio")]
+    [InlineData("longcat", "LongCat")]
+    [InlineData("moonshot", "Moonshot AI")]
+    [InlineData("opencode", "OpenCode")]
+    [InlineData("openrouter", "OpenRouter")]
+    [InlineData("qwen", "Qwen Cloud")]
+    [InlineData("zai", "Z.AI")]
+    [InlineData("custom_vendor-name", "Custom Vendor Name")]
+    [InlineData("my-API", "My API")]
+    [InlineData(null, "")]
+    [InlineData("", "")]
+    public void FormatProviderName_UsesWebBrandLabelsAndReadableFallback(string? id, string expected) =>
+        Assert.Equal(expected, ChatModelLabels.FormatProviderName(id));
+
+    [Fact]
+    public void FormatProviderName_DoesNotChangeSelectionIdentity()
+    {
+        var choice = new ChatModelChoice("claude-opus-4.7", "Claude Opus 4.7", "github-copilot");
+        Assert.Equal("GitHub", ChatModelLabels.FormatProviderName(choice.Provider));
+        Assert.Equal("github-copilot/claude-opus-4.7", choice.SelectionId);
+        Assert.Equal("github-copilot", choice.Provider);
+    }
+
     // ── FromModelsList mapping ───────────────────────────────────────────
 
     [Fact]
@@ -91,6 +121,7 @@ public class ChatModelChoiceTests
                 new ModelInfo { Id = "unconfigured", HasConfiguredFlag = true, IsConfigured = false },
                 new ModelInfo { Id = "needs-key", HasConfiguredFlag = true, IsConfigured = false, RequiresAuth = true },
                 new ModelInfo { Id = "ready", HasConfiguredFlag = true, IsConfigured = true },
+                new ModelInfo { Id = "automatic", ManualSelectionAllowed = false },
                 new ModelInfo { Id = "unknown" },
             }
         };
@@ -98,7 +129,7 @@ public class ChatModelChoiceTests
         var choices = ChatModelChoice.FromModelsList(info);
 
         Assert.Equal(
-            new[] { "unconfigured", "needs-key", "ready", "unknown" },
+            new[] { "unconfigured", "needs-key", "ready", "automatic", "unknown" },
             choices.Select(c => c.Id).ToArray());
 
         var unconfigured = choices[0];
@@ -107,6 +138,8 @@ public class ChatModelChoiceTests
 
         Assert.True(choices[1].RequiresAuth);
         Assert.True(choices[1].IsSelectable);
+        Assert.False(choices[3].IsSelectable);
+        Assert.Null(choices[4].ManualSelectionAllowed);
     }
 
     // Selectability

@@ -1,75 +1,76 @@
 using System.Diagnostics;
-using Microsoft.UI;
 using Microsoft.UI.Dispatching;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
-using Microsoft.UI.Xaml.Media;
 using Microsoft.UI.Xaml.Navigation;
 using OpenClaw.SetupEngine.UI;
 using OpenClaw.Shared;
-using Windows.UI;
 
 namespace OpenClaw.SetupEngine.UI.Pages;
 
 internal sealed record ProgressPageArgs(
     SetupConfig Config,
     bool ShowMilestoneOnly,
+    bool LocalAiRecoveryOnly,
     string DataDir,
     string LocalDataDir);
 
-public sealed partial class ProgressPage : Page
+public sealed partial class ProgressPage : Page, IAsyncDisposable
 {
     private SetupConfig? _config;
     private SetupPipeline? _pipeline;
     private SetupLogger? _logger;
     private CancellationTokenSource? _runCts;
-    private readonly Dictionary<string, StepRow> _rows = new();
     private int _logLineCount;
     private bool _pipelineFinished;
     private string _dataDir = null!;
     private string _localDataDir = null!;
     private Uri? _tailscaleAuthorizationUri;
+    private HashSet<string> _activeStepIds = [];
+    private bool _localAiRecoveryOnly;
+    private SetupInstallationProgress? _installationProgress;
+    private Task _pipelineTask = Task.CompletedTask;
+    private bool _closed;
+    private SetupWindow? _window;
+    private SetupLoadingProgress.Scope? _loading;
+    private bool _resumeLoadingAfterAuthorization;
     private const int MaxLogLines = 200;
 
     internal bool IsPipelineRunning => _runCts != null && !_pipelineFinished;
 
-    // Map pipeline step IDs to display groups (N:1)
-    private static readonly (string GroupId, string DisplayName, string[] StepIds)[] StepGroups =
-    [
-        ("preflight", "Check system", ["validate-distro-path", "preflight-os", "preflight-wsl", "preflight-windows-tailscale"]),
-        ("cleanup", "Removing existing gateway", ["cleanup-distro", "cleanup-gateway"]),
-        ("port", "Checking gateway port", ["preflight-port"]),
-        ("wsl-create", "Installing clean WSL gateway", ["wsl-create"]),
-        ("wsl-configure", "Configuring instance", ["wsl-configure", "validate-wsl-lockdown"]),
-        ("install-cli", "Installing OpenClaw", ["install-cli"]),
-        ("tailscale-auth", "Connecting Tailscale", ["install-tailscale", "authorize-tailscale"]),
-        ("configure", "Preparing gateway", ["configure-gateway", "install-service"]),
-        ("start", "Starting gateway", ["start-gateway", "mint-token"]),
-        ("tailscale-serve", "Publishing on Tailscale", ["finalize-tailscale-serve"]),
-        ("pairing", "Pairing device", ["pair-operator", "pair-node", "verify-e2e"]),
-        ("finish", "Finishing setup", ["run-wizard", "start-keepalive"]),
-    ];
-
     public ProgressPage()
     {
         InitializeComponent();
-        Unloaded += (_, _) => CancelPipeline();
+        Unloaded += (_, _) =>
+        {
+            CancelPipeline();
+            _loading?.Dispose();
+        };
     }
 
     protected override void OnNavigatedTo(NavigationEventArgs e)
     {
         var args = e.Parameter as ProgressPageArgs;
         _config = args?.Config ?? e.Parameter as SetupConfig ?? new SetupConfig();
+        _window = SetupWindow.Active;
         _dataDir = args?.DataDir ?? SetupContext.ResolveDataDir();
         _localDataDir = args?.LocalDataDir ?? SetupContext.ResolveLocalDataDir();
-        SubtitleText.Text = $"Creating {_config.DistroName} WSL instance";
+        _localAiRecoveryOnly = args?.LocalAiRecoveryOnly == true;
+        var steps = BuildSteps(_config, _localAiRecoveryOnly);
+        _installationProgress = new(steps, _localAiRecoveryOnly);
+        _activeStepIds = steps
+            .Select(step => step.Id)
+            .ToHashSet(StringComparer.Ordinal);
+        TitleText.Text = SetupLocalization.GetString(_config.NativeLocalAiAcquisition
+            ? "Onboarding_AiSetup_LocalInstalling"
+            : _localAiRecoveryOnly ? "Onboarding_V4_RecoveryTitle" : "Onboarding_V4_InstallationTitle");
+        SubtitleText.Text = SetupLocalization.GetString("Onboarding_V4_InstallationSubtitle");
+        if (_localAiRecoveryOnly)
+            InstallPhase.Header = SetupLocalization.GetString("Onboarding_V4_RecoveryInstall");
 
-        BuildStepRows();
+        RenderInstallationOverview();
         if (args?.ShowMilestoneOnly == true)
         {
-            foreach (var (groupId, _, _) in StepGroups)
-                if (_rows.TryGetValue(groupId, out var row))
-                    row.SetStatus(StepStatus.Done);
             ShowGatewayInstalledMilestone();
             return;
         }
@@ -78,9 +79,6 @@ public sealed partial class ProgressPage : Page
         {
             if (SetupPreview.RequestedPage == "milestone")
             {
-                foreach (var (groupId, _, _) in StepGroups)
-                    if (_rows.TryGetValue(groupId, out var row))
-                        row.SetStatus(StepStatus.Done);
                 ShowGatewayInstalledMilestone();
                 return;
             }
@@ -92,36 +90,31 @@ public sealed partial class ProgressPage : Page
 
     private void RenderProgressPreview()
     {
-        SubtitleText.Text = "Creating OpenClawGateway WSL instance: about 4 minutes left";
-        var ids = StepGroups.Select(g => g.GroupId).ToArray();
-        for (int i = 0; i < ids.Length; i++)
+        bool localAiPreview =
+            _config?.LocalAi.Enabled == true ||
+            SetupPreview.RequestedPage == "progress-local-ai";
+        foreach (var step in BuildSteps(_config!, _localAiRecoveryOnly))
         {
-            var status = i < 3 ? StepStatus.Done : i == 3 ? StepStatus.Running : StepStatus.Idle;
-            if (_rows.TryGetValue(ids[i], out var row))
-                row.SetStatus(status);
+            var isCurrent = step.Id == (localAiPreview ? "acquire-local-ai-model" : "wsl-create");
+            _installationProgress!.Apply(new(step.Id, step.DisplayName, isCurrent ? null : StepOutcome.Success, null));
+            if (isCurrent) break;
         }
+        RenderInstallationOverview();
+        if (localAiPreview)
+            ApplyDetailProgress(new("acquire-local-ai-model", "Downloading Qwen3.8-27B-UD-Q4_K_M.gguf",
+                6_322_405_376, 16_464_440_224, SetupDetailProgressUnit.Bytes));
         LogText.Text =
             "[12:04:01] [info] Windows 11 26100 · WSL 2 present\n" +
             "[12:04:03] [info] port 127.0.0.1:18789 available\n" +
             "[12:04:05] [info] wsl --install -d Ubuntu-24.04 --name OpenClawGateway --no-launch\n" +
-            "[12:04:38] [info] downloading distro … 142/200 MB\n" +
+            "[12:04:38] [info] downloading distro image (disk use varies)\n" +
             "[12:04:38] [changed] created %LOCALAPPDATA%\\OpenClawTray\\wsl\\OpenClawGateway\\\n" +
             "[12:04:38] [info] next: install CLI via HTTPS, configure loopback gateway\n";
     }
 
-    private void BuildStepRows()
-    {
-        foreach (var (groupId, displayName, _) in StepGroups)
-        {
-            var row = new StepRow(displayName);
-            _rows[groupId] = row;
-            StepsPanel.Children.Add(row.Element);
-        }
-    }
-
     private void StartPipeline() =>
         AsyncEventHandlerGuard.Run(
-            StartPipelineAsync,
+            () => _pipelineTask = StartPipelineAsync(),
             NullLogger.Instance,
             nameof(StartPipeline));
 
@@ -130,6 +123,8 @@ public sealed partial class ProgressPage : Page
         var config = _config!;
         if (_runCts != null)
             return;
+        if (SetupLoadingProgress.PipelineGroup(config.NativeLocalAiAcquisition, _localAiRecoveryOnly) is { } group)
+            _loading = _window?.BeginLoading(group, SetupLoadingStep.CheckArtifacts);
 
         config.LogPath ??= Path.Combine(
             _dataDir, "Logs", "Setup", $"setup-engine-{DateTime.UtcNow:yyyyMMdd-HHmmss}.jsonl");
@@ -157,59 +152,108 @@ public sealed partial class ProgressPage : Page
                 _dataDir,
                 _localDataDir);
             ctx.ExternalAuthorizationPresenter = new ProgressAuthorizationPresenter(DispatcherQueue, ShowTailscaleAuthorization);
+            ctx.DetailProgress = new DirectProgress<SetupDetailProgressEvent>(OnDetailProgress);
 
-            var steps = BuildSteps(config);
+            var steps = BuildSteps(config, _localAiRecoveryOnly);
+            var setupOwner = _window;
+            ctx.ExpectedGatewayRegistry = config.NativeLocalAiAcquisition ? null : setupOwner?.BeginGatewaySetup();
+            ctx.PersistTraySettings = _window is { } settingsOwner ? settingsOwner.PersistPipelineSettings : null;
             _pipeline = new SetupPipeline(steps);
             _pipeline.StepProgress += OnStepProgress;
 
-            var result = await Task.Run(() => _pipeline.RunAsync(ctx), cts.Token);
+            var pipeline = _pipeline;
+            var result = await SetupPipeline.RunWithSettlementAsync(
+                () => Task.Run(() => pipeline.RunAsync(ctx), cts.Token),
+                outcome => config.NativeLocalAiAcquisition ? Task.CompletedTask : setupOwner?.SettleGatewaySetupAsync(ctx.ExpectedGatewayRegistry,
+                    outcome?.Outcome == PipelineOutcome.Success ? config.LocalAiRecoveryGatewayId ?? ctx.GatewayRecordId : null)
+                    ?? Task.CompletedTask);
             sw.Stop();
             _pipelineFinished = true;
+            if (_closed || _window?.IsClosed == true)
+                return;
 
             var success = result.Outcome == PipelineOutcome.Success;
+            ProgressMascot.Mood = success ? OnboardingMascotMood.Happy : OnboardingMascotMood.Sad;
             if (success)
             {
-                if (!config.SkipWizard)
+                var gatewayId = config.LocalAiRecoveryGatewayId ?? ctx.GatewayRecordId;
+                if (config.LocalAi.Enabled && !config.NativeLocalAiAcquisition)
                 {
-                    if (_rows.TryGetValue("finish", out var finishRow))
-                        finishRow.SetStatus(StepStatus.Done);
-                    // Pause on a "Gateway installed" milestone so the user knowingly steps
-                    // from install (gateway provisioning) into onboarding (the OpenClaw wizard),
-                    // instead of being thrown straight into the questions.
-                    ShowGatewayInstalledMilestone();
+                    var modelRef = ctx.ResolvedLocalAiModelRef ??
+                        throw new InvalidOperationException("The completed Local AI install did not provide its configured model.");
+                    _window?.SetExpectedConfiguredModelRef(modelRef,
+                        gatewayId ?? throw new InvalidOperationException("The completed Local AI install did not provide its Gateway."));
+                }
+                if (config.NativeLocalAiAcquisition)
+                {
+                    if (_window is not { } owner)
+                        throw new InvalidOperationException(SetupLocalization.GetString("Onboarding_Flow_CompletionUnavailable"));
+                    owner.ContinueInstalledNativeLocalAi();
+                }
+                else if (OnboardingFlowPolicy.RequiresAiSetup(config))
+                {
+                    if (_window?.TryNavigateToWizard() != true)
+                        throw new InvalidOperationException(SetupLocalization.GetString("Onboarding_Flow_AiNavigationFailed"));
                 }
                 else
-                    // Permissions are now surfaced inline on the capabilities screen, so
-                    // the standalone permissions step is skipped — go straight to done.
-                    SetupWindow.Active?.NavigateToComplete(true, sw.Elapsed, config.LogPath);
+                {
+                    if (_window is not { } setupWindow)
+                        throw new InvalidOperationException(SetupLocalization.GetString("Onboarding_Flow_CompletionUnavailable"));
+                    await setupWindow.CompleteSetupAsync();
+                }
             }
             else
             {
+                if (result.Outcome == PipelineOutcome.Cancelled)
+                {
+                    _installationProgress?.Cancel();
+                    RenderInstallationOverview();
+                }
                 var errorMsg = result.Outcome == PipelineOutcome.Cancelled
                     ? "Setup was cancelled."
                     : result.FailedStepId != null
                         ? $"Step '{result.FailedStepId}' failed: {result.Message}"
                         : result.Message;
-                SetupWindow.Active?.NavigateToComplete(
+                _window?.NavigateToComplete(
                     false,
                     sw.Elapsed,
                     config.LogPath,
                     errorMsg,
-                    result.CompatibilityFailure);
+                    result.CompatibilityFailure,
+                    result.Detail,
+                    restartRequired: result.RequiresRestart);
             }
+        }
+        catch (SetupPipelineSettlementException ex)
+        {
+            sw.Stop();
+            _pipelineFinished = true;
+            _logger?.Error($"Setup pipeline and settlement outcomes: {ex}");
+            ProgressMascot.Mood = OnboardingMascotMood.Sad;
+            if (!_closed && _window?.IsClosed == false)
+                _window.NavigateToComplete(false, sw.Elapsed, config.LogPath, SetupLogger.Sanitize(ex.Message),
+                    ex.OriginalResult?.CompatibilityFailure, ex.OriginalResult?.Detail,
+                    restartRequired: ex.OriginalResult?.RequiresRestart == true);
         }
         catch (OperationCanceledException) when (cts.IsCancellationRequested)
         {
             sw.Stop();
             _pipelineFinished = true;
-            SetupWindow.Active?.NavigateToComplete(false, sw.Elapsed, config.LogPath, "Setup was cancelled.");
+            if (!_closed && _window?.IsClosed == false)
+            {
+                _installationProgress?.Cancel();
+                RenderInstallationOverview();
+                _window.NavigateToComplete(false, sw.Elapsed, config.LogPath, "Setup was cancelled.");
+            }
         }
         catch (Exception ex)
         {
             sw.Stop();
             _pipelineFinished = true;
             _logger?.Error($"Setup UI pipeline failed: {ex.Message}");
-            SetupWindow.Active?.NavigateToComplete(false, sw.Elapsed, config.LogPath, $"Setup crashed: {ex.Message}");
+            ProgressMascot.Mood = OnboardingMascotMood.Sad;
+            if (!_closed && _window?.IsClosed == false)
+                _window.NavigateToComplete(false, sw.Elapsed, config.LogPath, $"Setup crashed: {ex.Message}");
         }
         finally
         {
@@ -225,6 +269,13 @@ public sealed partial class ProgressPage : Page
         }
     }
 
+    public async ValueTask DisposeAsync()
+    {
+        _closed = true;
+        CancelPipeline();
+        await _pipelineTask;
+    }
+
     private void CancelPipeline()
     {
         if (!_pipelineFinished)
@@ -233,46 +284,83 @@ public sealed partial class ProgressPage : Page
 
     private void OnStepProgress(object? sender, StepProgressEvent e)
     {
+        if (e.Outcome is null)
+        {
+            _loading?.ReportActivity(e.DisplayName, e.StepId);
+        }
         DispatcherQueue.TryEnqueue(() =>
         {
-            // Find which group this step belongs to
-            var groupIndex = Array.FindIndex(StepGroups, g => g.StepIds.Contains(e.StepId));
-            if (groupIndex < 0) return;
-
-            var group = StepGroups[groupIndex];
-            var row = _rows[group.GroupId];
-
-            if (e.Outcome == null)
+            if (_closed) return;
+            if (_resumeLoadingAfterAuthorization && !_pipelineFinished && e.Outcome is null && _window is { IsClosed: false })
             {
-                // Step started — mark all previous groups as done if still running
-                for (int i = 0; i < groupIndex; i++)
-                {
-                    var prevRow = _rows[StepGroups[i].GroupId];
-                    if (prevRow.Status == StepStatus.Running)
-                        prevRow.SetStatus(StepStatus.Done);
-                }
-
-                // Mark this group as running
-                if (row.Status != StepStatus.Done)
-                    row.SetStatus(StepStatus.Running);
+                _resumeLoadingAfterAuthorization = false;
+                _loading = _window.BeginLoading(SetupLoadingGroup.LocalAi, SetupLoadingStep.AcquireArtifacts);
+                _loading.ReportActivity(e.DisplayName, e.StepId);
             }
-            else if (e.Outcome == StepOutcome.Failed || e.Outcome == StepOutcome.FailedTerminal)
-            {
-                row.SetStatus(StepStatus.Failed);
-            }
-            else
-            {
-                // Step succeeded/skipped — track it
-                _completedSteps.Add(e.StepId);
-
-                // If all steps in this group are done, mark group done
-                if (group.StepIds.All(id => _completedSteps.Contains(id)))
-                    row.SetStatus(StepStatus.Done);
-            }
+            _installationProgress?.Apply(e);
+            RenderInstallationOverview();
+            DownloadActivity.Visibility = DownloadProgress.Visibility = Visibility.Collapsed;
+            ProgressMascot.Mood = e.Outcome is StepOutcome.Failed or StepOutcome.FailedTerminal
+                ? OnboardingMascotMood.Sad : OnboardingMascotMood.Working;
         });
     }
 
-    private readonly HashSet<string> _completedSteps = new();
+    private void RenderInstallationOverview()
+    {
+        if (_installationProgress is not { } progress) return;
+        foreach (var phase in progress.Phases)
+        {
+            var (status, activity) = phase.Phase switch
+            {
+                SetupInstallationPhase.Prepare => (PrepareStatus, PrepareActivity),
+                SetupInstallationPhase.Install => (InstallStatus, InstallActivity),
+                _ => (ConnectStatus, ConnectActivity),
+            };
+            status.Apply(phase.Status);
+            activity.Text = phase.CurrentActivity ?? "";
+            activity.Visibility = string.IsNullOrWhiteSpace(phase.CurrentActivity)
+                ? Visibility.Collapsed : Visibility.Visible;
+        }
+    }
+
+    private void OnDetailProgress(SetupDetailProgressEvent progress)
+    {
+        if (_activeStepIds.Contains(progress.StepId))
+            _loading?.ReportDetail(new(progress.Detail, progress.Completed, progress.Total,
+                progress.Unit == SetupDetailProgressUnit.Bytes), progress.StepId);
+        DispatcherQueue.TryEnqueue(() =>
+        {
+            if (_closed) return;
+            ApplyDetailProgress(progress);
+        });
+    }
+
+    private void ApplyDetailProgress(SetupDetailProgressEvent progress)
+    {
+        if (!_activeStepIds.Contains(progress.StepId))
+        {
+            Trace.TraceWarning("Setup detail progress for an inactive step was ignored: {0}", progress.StepId);
+            return;
+        }
+        var measurement = progress.Unit switch
+        {
+            SetupDetailProgressUnit.Bytes when progress.Total is > 0 =>
+                SetupLocalization.Format("Onboarding_V5_DownloadMeasurement", FormatBytes(progress.Completed), FormatBytes(progress.Total.Value)),
+            SetupDetailProgressUnit.Items when progress.Total is > 0 =>
+                SetupLocalization.Format("Onboarding_V5_DownloadMeasurement", progress.Completed, progress.Total.Value),
+            _ => "",
+        };
+        DownloadActivity.Text = string.IsNullOrWhiteSpace(measurement) ? progress.Detail : $"{progress.Detail}  {measurement}";
+        DownloadActivity.Visibility = Visibility.Visible;
+        DownloadProgress.Visibility = progress.Total is > 0 ? Visibility.Visible : Visibility.Collapsed;
+        if (progress.Total is > 0)
+            DownloadProgress.Value = Math.Clamp((double)progress.Completed / progress.Total.Value, 0, 1);
+    }
+
+    private static string FormatBytes(long bytes) =>
+        bytes >= 1_000_000_000
+            ? $"{bytes / 1_000_000_000d:0.0} GB"
+            : $"{bytes / 1_000_000d:0} MB";
 
     private void OnLogEmitted(object? sender, LogEntry entry)
     {
@@ -305,6 +393,8 @@ public sealed partial class ProgressPage : Page
 
     private void ShowTailscaleAuthorization(ExternalAuthorizationRequest request)
     {
+        _resumeLoadingAfterAuthorization = _loading?.IsCurrent == true;
+        _loading?.Dispose();
         _tailscaleAuthorizationUri = request.AuthorizationUri;
         TailscaleAuthorizationText.Text = request.Message;
         TailscaleAuthorizationPanel.Visibility = Visibility.Visible;
@@ -322,6 +412,7 @@ public sealed partial class ProgressPage : Page
     // connects when the user chooses to continue.
     private void ShowGatewayInstalledMilestone()
     {
+        _loading?.Dispose();
         InstallHeader.Visibility = Visibility.Collapsed;
         InstallContent.Visibility = Visibility.Collapsed;
         MilestonePanel.Visibility = Visibility.Visible;
@@ -336,11 +427,10 @@ public sealed partial class ProgressPage : Page
         MilestoneStatusText.Text = "Another setup task is still active. Wait for it to finish, then start OpenClaw onboard.";
     }
 
-    private static List<SetupStep> BuildSteps(SetupConfig config)
-        => SetupStepFactory.BuildDefaultSteps()
-            .Where(step => step is not RunGatewayWizardStep)
-            .Where(step => config.SkipWizard || step is not WindowsNodeBootstrapContextStep)
-            .ToList();
+    private static List<SetupStep> BuildSteps(SetupConfig config, bool localAiRecoveryOnly = false)
+        => config.NativeLocalAiAcquisition
+            ? SetupStepFactory.BuildNativeLocalAiAcquisitionSteps()
+            : OnboardingFlowPolicy.BuildInstallationSteps(localAiRecoveryOnly);
 }
 
 internal sealed class ProgressAuthorizationPresenter(
@@ -356,159 +446,9 @@ internal sealed class ProgressAuthorizationPresenter(
     }
 }
 
-// ─── Step Row UI Element ───
-
-internal enum StepStatus { Idle, Running, Done, Failed }
-
-internal sealed class StepRow
+internal sealed class DirectProgress<T>(Action<T> report) : IProgress<T>
 {
-    public FrameworkElement Element { get; }
-    public StepStatus Status { get; private set; }
+    private readonly Action<T> _report = report ?? throw new ArgumentNullException(nameof(report));
 
-    private readonly TextBlock _label;
-    private readonly ProgressRing _spinner;
-    private readonly Border _idleBadge;
-    private readonly Border _checkBadge;
-    private readonly Border _errorBadge;
-    private readonly Border _rowBorder;
-
-    public StepRow(string displayName)
-    {
-        _label = new TextBlock
-        {
-            Text = displayName,
-            FontSize = 14,
-            VerticalAlignment = VerticalAlignment.Center,
-        };
-
-        // Bare Windows spinner (no filled disc) — theme-neutral so it reads white
-        // on the dark active row and dark on light, like a standard ProgressRing.
-        _spinner = new ProgressRing
-        {
-            Width = 20, Height = 20,
-            MinWidth = 20, MinHeight = 20,
-            IsActive = false,
-            Visibility = Visibility.Collapsed,
-        };
-        if (Application.Current.Resources.TryGetValue("TextFillColorPrimaryBrush", out var spinnerFg) && spinnerFg is Brush spinnerBrush)
-            _spinner.Foreground = spinnerBrush;
-
-        _idleBadge = CreateEmptyBadge();
-
-        _checkBadge = CreateIconBadge("\uE73E", ResolveColor("SystemFillColorSuccess", Color.FromArgb(255, 0x2B, 0xC3, 0x6F)), Colors.White);
-        _checkBadge.Visibility = Visibility.Collapsed;
-
-        _errorBadge = CreateIconBadge("\uE711", ResolveColor("SystemFillColorCritical", Color.FromArgb(255, 0xE8, 0x11, 0x23)), Colors.White);
-        _errorBadge.Visibility = Visibility.Collapsed;
-
-        var badgeContainer = new Grid
-        {
-            Width = 24,
-            Height = 24,
-            HorizontalAlignment = HorizontalAlignment.Center,
-            VerticalAlignment = VerticalAlignment.Center,
-        };
-        badgeContainer.Children.Add(_idleBadge);
-        badgeContainer.Children.Add(_spinner);
-        badgeContainer.Children.Add(_checkBadge);
-        badgeContainer.Children.Add(_errorBadge);
-
-        var grid = new Grid
-        {
-            ColumnDefinitions = { new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) }, new ColumnDefinition { Width = GridLength.Auto } },
-        };
-        Grid.SetColumn(_label, 0);
-        Grid.SetColumn(badgeContainer, 1);
-        grid.Children.Add(_label);
-        grid.Children.Add(badgeContainer);
-
-        _rowBorder = new Border
-        {
-            Child = grid,
-            CornerRadius = new CornerRadius(4),
-            Padding = new Thickness(12, 5, 12, 5),
-            BorderThickness = new Thickness(1),
-            BorderBrush = new SolidColorBrush(Colors.Transparent),
-            Background = new SolidColorBrush(Colors.Transparent),
-        };
-
-        Element = _rowBorder;
-    }
-
-    public void SetStatus(StepStatus status)
-    {
-        Status = status;
-        _spinner.IsActive = status == StepStatus.Running;
-        _spinner.Visibility = status == StepStatus.Running ? Visibility.Visible : Visibility.Collapsed;
-        _idleBadge.Visibility = status == StepStatus.Idle ? Visibility.Visible : Visibility.Collapsed;
-        _checkBadge.Visibility = status == StepStatus.Done ? Visibility.Visible : Visibility.Collapsed;
-        _errorBadge.Visibility = status == StepStatus.Failed ? Visibility.Visible : Visibility.Collapsed;
-        _label.Opacity = status == StepStatus.Idle ? 0.72 : 1.0;
-        _label.FontWeight = status == StepStatus.Running
-            ? Microsoft.UI.Text.FontWeights.SemiBold
-            : Microsoft.UI.Text.FontWeights.Normal;
-
-        // Highlight the active step with the setup accent while it is running.
-        if (status == StepStatus.Running
-            && Application.Current.Resources.TryGetValue("SetupIndicatorAccentBrush", out var accent)
-            && accent is SolidColorBrush accentBrush)
-        {
-            var c = accentBrush.Color;
-            _rowBorder.Background = new SolidColorBrush(Color.FromArgb(28, c.R, c.G, c.B));
-            _rowBorder.BorderBrush = new SolidColorBrush(Color.FromArgb(110, c.R, c.G, c.B));
-        }
-        else
-        {
-            _rowBorder.Background = new SolidColorBrush(Colors.Transparent);
-            _rowBorder.BorderBrush = new SolidColorBrush(Colors.Transparent);
-        }
-    }
-
-    private static Border CreateEmptyBadge()
-    {
-        // Use a theme-aware stroke so the pending-step ring stays visible in every theme.
-        var border = new Border
-        {
-            Width = 20,
-            Height = 20,
-            CornerRadius = new CornerRadius(10),
-            BorderThickness = new Thickness(1),
-        };
-
-        if (Application.Current.Resources.TryGetValue("ControlStrongStrokeColorDefaultBrush", out var brush)
-            && brush is Brush themed)
-        {
-            border.BorderBrush = themed;
-        }
-        else
-        {
-            border.BorderBrush = new SolidColorBrush(Color.FromArgb(140, 128, 128, 128));
-        }
-
-        return border;
-    }
-
-    private static Border CreateIconBadge(string glyph, Color background, Color foreground)
-    {
-        return new Border
-        {
-            Width = 20,
-            Height = 20,
-            CornerRadius = new CornerRadius(10),
-            Background = new SolidColorBrush(background),
-            Child = new FontIcon
-            {
-                Glyph = glyph,
-                FontSize = 11,
-                FontFamily = IconFonts.SymbolThemeFontFamily,
-                Foreground = new SolidColorBrush(foreground),
-                HorizontalAlignment = HorizontalAlignment.Center,
-                VerticalAlignment = VerticalAlignment.Center,
-            }
-        };
-    }
-
-    // Resolve a native Color theme resource (e.g. SystemFillColorSuccess) with a fallback.
-    private static Color ResolveColor(string key, Color fallback) =>
-        Application.Current.Resources.TryGetValue(key, out var v) && v is Color c ? c : fallback;
+    public void Report(T value) => _report(value);
 }

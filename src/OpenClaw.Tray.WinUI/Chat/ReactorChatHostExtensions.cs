@@ -26,23 +26,28 @@ public static class ReactorChatHostExtensions
                 System.Diagnostics.Debug.WriteLine("Dropped chat UI update because DispatcherQueue rejected the work item.");
         };
 
-    public static MountedReactorChat MountReactorChat(
-        this Window window,
+    /// <summary>Builds the reset-confirmation dialog closure and creates one
+    /// <see cref="ChatComposerSession"/> from the
+    /// resolved <paramref name="composerFactory"/>. Callers pass the returned session
+    /// into <see cref="MountReactorChat"/>. <see cref="IChatComposerFactory"/> and
+    /// <see cref="ChatComposerHostActions"/> stay internal — this helper, not a
+    /// public factory parameter on <c>MountReactorChat</c>, is their only call site
+    /// outside this file.</summary>
+    internal static ChatComposerSession CreateComposerSession(
         Border target,
+        IChatComposerFactory composerFactory,
         IChatDataProvider provider,
-        string? initialThreadId = null,
-        Func<string, Task>? onReadAloud = null,
-        Action? onStopSpeaking = null,
-        Func<CancellationToken, Action?, Task<string?>>? onVoiceRequest = null,
-        Action? onAttachClick = null,
-        Action? onSettingsClick = null,
-        Action<string>? onOpenCheckpoints = null,
-        Action<bool>? onSpeakerMuteChanged = null,
-        bool initialMuted = false,
-        bool isCompact = false)
+        Func<CancellationToken, Action?, Task<string?>>? onVoiceRequest,
+        Action? onAttachClick,
+        Action<bool>? onSpeakerMuteChanged,
+        bool initialMuted,
+        Action onSandboxSettingsClick,
+        Action? onSessionNavigationStarting = null,
+        Action<string, string?>? onSessionSelected = null,
+        Action<string>? onSpeechTargetChanged = null)
     {
-        ArgumentNullException.ThrowIfNull(window);
         ArgumentNullException.ThrowIfNull(target);
+        ArgumentNullException.ThrowIfNull(composerFactory);
         ArgumentNullException.ThrowIfNull(provider);
 
         async Task<bool> ConfirmResetAsync(string sessionKey, string? displayName)
@@ -72,39 +77,97 @@ public static class ReactorChatHostExtensions
             return await dialog.ShowAsync() == ContentDialogResult.Primary;
         }
 
-        var callbacks = new ReactorChatHostCallbacks();
-        var props = new OpenClawReactorChatRootProps(
-            provider,
-            callbacks,
-            initialThreadId,
-            onReadAloud,
-            onStopSpeaking,
-            onVoiceRequest,
-            onAttachClick,
-            onSettingsClick,
-            onOpenCheckpoints,
-            onSpeakerMuteChanged,
+        var hostActions = new ChatComposerHostActions(
             ConfirmResetAsync,
-            initialMuted,
-            isCompact);
-        var host = new ReactorHostControl();
-        host.Mount(_ => Component<OpenClawReactorChatRoot, OpenClawReactorChatRootProps>(props));
-        target.Child = host;
-        VisualTestCapture.ScheduleSignalCapture(target);
-        return new MountedReactorChat(target, host, callbacks);
+            onAttachClick,
+            onVoiceRequest,
+            onSpeakerMuteChanged,
+            onSessionNavigationStarting,
+            onSessionSelected,
+            SandboxSettingsNavigation: onSandboxSettingsClick,
+            SpeechTargetChanged: onSpeechTargetChanged);
+        return composerFactory.Create(provider, hostActions, initialMuted);
+    }
+
+    /// <summary>Transfers ownership of the session, including disposal if mounting fails.</summary>
+    public static MountedReactorChat MountReactorChat(
+        this Window window,
+        Border target,
+        IChatDataProvider provider,
+        ChatComposerSession composerSession,
+        string? initialThreadId = null,
+        Func<string, Task>? onReadAloud = null,
+        Action? onStopSpeaking = null,
+        Action<string>? onOpenCheckpoints = null,
+        bool initialThreadIsExplicitSelection = true)
+    {
+        ArgumentNullException.ThrowIfNull(composerSession);
+        MountedReactorChat? mounted = null;
+        try
+        {
+            ArgumentNullException.ThrowIfNull(window);
+            ArgumentNullException.ThrowIfNull(target);
+            ArgumentNullException.ThrowIfNull(provider);
+
+            // External ingress is bound once per session, not on every render.
+            var callbacks = new ReactorChatHostCallbacks
+            {
+                AttachFiles = attachments => composerSession.Controller.AddAttachments(attachments),
+                SetVoiceTranscript = text => composerSession.ViewModel.SetVoiceTranscript(text),
+                SetVoiceAudioLevel = level => composerSession.ViewModel.SetVoiceAudioLevel(level),
+                TriggerVoiceRecording = () => composerSession.Controller.StartVoiceRecording(),
+                SetSpeakerMuted = muted => composerSession.ViewModel.SetSpeakerMuted(muted),
+            };
+
+            var props = new OpenClawReactorChatRootProps(
+                provider,
+                composerSession,
+                initialThreadId,
+                onReadAloud,
+                onStopSpeaking,
+                onOpenCheckpoints,
+                InitialThreadIsExplicitSelection: initialThreadIsExplicitSelection);
+            var host = new ReactorHostControl();
+            mounted = new MountedReactorChat(target, host, callbacks, composerSession);
+            host.Mount(_ => Component<OpenClawReactorChatRoot, OpenClawReactorChatRootProps>(props));
+            target.Child = host;
+            VisualTestCapture.ScheduleSignalCapture(target);
+            return mounted;
+        }
+        catch
+        {
+            if (mounted is not null)
+                mounted.Dispose();
+            else
+                composerSession.Dispose();
+            throw;
+        }
     }
 }
 
 /// <summary>
-/// Imperative host handle used by the page and compact window for attachment
-/// and voice input that originates outside the declarative chat tree.
+/// Imperative host handle used by the Workspace chat page for attachment
+/// and voice input that originates outside the declarative chat tree. Owns the one
+/// <see cref="ChatComposerSession"/> created for this mount and disposes it exactly
+/// once, alongside the Reactor host.
 /// </summary>
 public sealed class MountedReactorChat(
     Border target,
     ReactorHostControl host,
-    ReactorChatHostCallbacks callbacks) : IDisposable
+    ReactorChatHostCallbacks callbacks,
+    ChatComposerSession session) : IDisposable
 {
-    public void AttachFile(ChatAttachment attachment) => AttachFiles(new[] { attachment });
+    private int _disposed;
+
+    internal string? CurrentThreadId => session.ViewModel.Inputs?.CurrentThread.Id;
+
+    internal bool TrySelectSession(string sessionKey) => session.Controller.TrySelectSession(sessionKey);
+
+    internal void InvalidatePendingSessionNavigation() => session.Controller.InvalidatePendingSessionNavigation();
+
+    internal void CancelVoiceRecording() => session.Controller.CancelVoiceRecording();
+
+    internal void SetHostVisible(bool visible) => session.SetHostVisible(visible);
 
     public void AttachFiles(IReadOnlyList<ChatAttachment> attachments) =>
         callbacks.AttachFiles?.Invoke(attachments);
@@ -123,8 +186,17 @@ public sealed class MountedReactorChat(
     public void SetSpeakerMuted(bool muted) =>
         callbacks.SetSpeakerMuted?.Invoke(muted);
 
+    /// <summary>First-wins/idempotent: only the first call performs teardown
+    /// (session disposal, callback clearing, host disposal, target detach); every
+    /// later call — concurrent or sequential — is a no-op. This matters because
+    /// <see cref="ReactorHostControl.Dispose"/> is not itself guaranteed idempotent,
+    /// so a repeated external <c>Dispose()</c> call must never reach it twice.</summary>
     public void Dispose()
     {
+        if (Interlocked.Exchange(ref _disposed, 1) != 0)
+            return;
+
+        session.Dispose();
         callbacks.Clear();
         host.Dispose();
         if (ReferenceEquals(target.Child, host))

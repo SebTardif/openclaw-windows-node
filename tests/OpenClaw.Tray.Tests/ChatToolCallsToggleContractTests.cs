@@ -44,17 +44,17 @@ public sealed class ChatToolCallsToggleContractTests
     }
 
     [Fact]
-    public void ChatExplorationDesignSurface_IsRemoved()
+    public void WorkspaceChatPage_MountsReactorRoot()
     {
-        var root = TestRepositoryPaths.GetRepositoryRoot();
-        var chatRoot = Read("src", "OpenClaw.Tray.WinUI", "Chat", "OpenClawChatRoot.cs");
-        var timeline = Read("src", "OpenClaw.Tray.WinUI", "Chat", "OpenClawChatTimeline.cs");
+        var page = Read("src", "OpenClaw.Tray.WinUI", "Pages", "ChatPage.xaml.cs");
+        var host = Read("src", "OpenClaw.Tray.WinUI", "Chat", "ReactorChatHostExtensions.cs");
 
-        Assert.False(Directory.Exists(Path.Combine(root, "src", "OpenClaw.Tray.WinUI", "Chat", "Explorations")));
-        Assert.False(File.Exists(Path.Combine(root, "src", "OpenClaw.Tray.WinUI", "Windows", "ChatExplorationsWindow.cs")));
-        Assert.DoesNotContain("ChatExploration", chatRoot);
-        Assert.DoesNotContain("ChatExploration", timeline);
-        Assert.DoesNotContain("ToolBurstStyle", timeline);
+        Assert.Contains(".MountReactorChat(", page);
+        Assert.Contains("var host = new ReactorHostControl();", host);
+        Assert.Contains(
+            "Component<OpenClawReactorChatRoot, OpenClawReactorChatRootProps>(props)",
+            host);
+        Assert.Contains("target.Child = host;", host);
     }
 
     private static string Read(params string[] parts)
