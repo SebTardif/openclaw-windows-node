@@ -37,7 +37,7 @@ public sealed class CronPageContractTests
         Assert.Contains("BuildFullResponseExpander", source);
         Assert.Contains("CronRunHistoryDisplay.ExtractText(entry, isError)", source);
         Assert.Contains("MakeRunChatButton(sessionKey)", source);
-        var runNowHandler = ExtractMethod(source, "OnRunNowClick");
+        var runNowHandler = ExtractMethod(source, "OnRunNowClick") + ExtractMethod(source, "StartObservedCronRun");
         Assert.DoesNotContain("if (vm != null && !vm.IsEnabled) return;", runNowHandler);
         Assert.Contains("if (_runningJobIds.Contains(jobId)) return;", runNowHandler);
         Assert.Contains("IsEnabled: false", runNowHandler);

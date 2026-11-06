@@ -192,7 +192,7 @@ public sealed partial class CronPage : Page
         }
     }
 
-    private async void OnRunNowClick(object sender, RoutedEventArgs e)
+    private void OnRunNowClick(object sender, RoutedEventArgs e)
     {
         var btn = sender as Button;
         var jobId = btn?.Tag as string;
@@ -203,15 +203,26 @@ public sealed partial class CronPage : Page
         if (_runningJobIds.Contains(jobId)) return;
         if (vm is { IsEnabled: false })
         {
-            var confirmed = await ConfirmCronActionAsync(
-                LocalizationHelper.GetString("CronPage_RunDisabledConfirmTitle"),
-                LocalizationHelper.Format("CronPage_RunDisabledConfirmBody", vm.Name),
-                LocalizationHelper.GetString("CronPage_RunDisabledConfirmButton"),
-                destructive: false);
-            if (!confirmed) return;
-            if (_runningJobIds.Contains(jobId)) return;
-            if (CurrentApp.GatewayClient == null) { ShowDisconnected(); return; }
+            AsyncEventHandlerGuard.Run(async () =>
+            {
+                var confirmed = await ConfirmCronActionAsync(
+                    LocalizationHelper.GetString("CronPage_RunDisabledConfirmTitle"),
+                    LocalizationHelper.Format("CronPage_RunDisabledConfirmBody", vm.Name),
+                    LocalizationHelper.GetString("CronPage_RunDisabledConfirmButton"),
+                    destructive: false);
+                if (!confirmed) return;
+                if (_runningJobIds.Contains(jobId)) return;
+                if (CurrentApp.GatewayClient == null) { ShowDisconnected(); return; }
+                StartObservedCronRun(jobId, vm);
+            }, operationName: nameof(OnRunNowClick));
+            return;
         }
+        StartObservedCronRun(jobId, vm);
+    }
+
+    private void StartObservedCronRun(string jobId, CronJobViewModel? vm)
+    {
+        if (_runningJobIds.Contains(jobId)) return;
         _runningJobIds.Add(jobId);
         RefreshJobActionButtons(jobId);
 
@@ -340,7 +351,7 @@ public sealed partial class CronPage : Page
         _runRefreshCts.Clear();
     }
 
-    private async void OnRemoveClick(object sender, RoutedEventArgs e)
+    private void OnRemoveClick(object sender, RoutedEventArgs e)
     {
         var jobId = (sender as Button)?.Tag as string;
         if (string.IsNullOrEmpty(jobId)) return;
@@ -348,25 +359,28 @@ public sealed partial class CronPage : Page
         if (_runningJobIds.Contains(jobId)) return;
         if (CurrentApp.GatewayClient == null) { ShowDisconnected(); return; }
         var vm = _jobs.Find(j => j.Id == jobId);
-        var confirmed = await ConfirmCronActionAsync(
-            LocalizationHelper.GetString("CronPage_RemoveConfirmTitle"),
-            LocalizationHelper.Format("CronPage_RemoveConfirmBody", vm?.Name ?? jobId),
-            LocalizationHelper.GetString("CronPage_RemoveConfirmButton"),
-            destructive: true);
-        if (!confirmed) return;
-        var client = CurrentApp.GatewayClient;
-        if (client == null) { ShowDisconnected(); return; }
-        _removedJobIds.Add(jobId);
-        var removed = false;
-        try
+        AsyncEventHandlerGuard.Run(async () =>
         {
-            removed = await client.RemoveCronJobAsync(jobId);
-        }
-        finally
-        {
-            if (!removed)
-                _removedJobIds.Remove(jobId);
-        }
+            var confirmed = await ConfirmCronActionAsync(
+                LocalizationHelper.GetString("CronPage_RemoveConfirmTitle"),
+                LocalizationHelper.Format("CronPage_RemoveConfirmBody", vm?.Name ?? jobId),
+                LocalizationHelper.GetString("CronPage_RemoveConfirmButton"),
+                destructive: true);
+            if (!confirmed) return;
+            var client = CurrentApp.GatewayClient;
+            if (client == null) { ShowDisconnected(); return; }
+            _removedJobIds.Add(jobId);
+            var removed = false;
+            try
+            {
+                removed = await client.RemoveCronJobAsync(jobId);
+            }
+            finally
+            {
+                if (!removed)
+                    _removedJobIds.Remove(jobId);
+            }
+        }, operationName: nameof(OnRemoveClick));
     }
 
     private async Task<bool> ConfirmCronActionAsync(string title, string body, string confirmLabel, bool destructive)
