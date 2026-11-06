@@ -591,6 +591,17 @@ try {
         -TestSchemaPath $schemaPath `
         -ExpectedMessage "must use kind 'proof-test' instead of invoking dotnet directly"
 
+    $inventory = Get-Content -LiteralPath $inventoryPath -Raw | ConvertFrom-Json
+    $inventory.pools[2].authoritativeCommands[0].command =
+        "& (Get-Command ('do'+'tnet')) test"
+    $concatenatedDotnetPath = Join-Path $tempRoot "concatenated-dotnet.json"
+    Write-JsonFile -Value $inventory -Path $concatenatedDotnetPath
+    Assert-RejectedByAllModes `
+        -Name "concatenated dotnet call" `
+        -TestInventoryPath $concatenatedDotnetPath `
+        -TestSchemaPath $schemaPath `
+        -ExpectedMessage "must use kind 'proof-test' instead of invoking dotnet directly"
+
     $acceptedRepositoryCommands = @(
         @{
             Command = "dotnet build .\src\OpenClaw.Shared\OpenClaw.Shared.csproj -o .\artifacts\vstest"
