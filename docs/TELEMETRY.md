@@ -100,9 +100,24 @@ The tray exports gateway lifecycle diagnostics when an endpoint is configured:
 - structured state logs in the `OpenClaw.Telemetry.Connection` category
 
 Lifecycle attributes are limited to role, operation, outcome, coarse error
-category, and finite operator/node/overall states. Gateway URLs, IDs, device
-IDs, pairing request IDs, credentials, error messages, and diagnostic-ring
+category, finite operator/node/overall states, and these protocol fields:
+
+- `openclaw.protocol.client`: the current client wire protocol integer; Windows
+  currently advertises support from protocol 3 through protocol 4
+- `openclaw.protocol.gateway`: the finite relative bucket `older`, `current`,
+  `newer`, or `unknown`, relative to the advertised 3-through-4 range; this
+  bucket is not itself a compatibility verdict
+- `openclaw.protocol.compatibility`: `unknown`, `compatible`,
+  `gateway_too_old`, `gateway_too_new`, or `mismatch`
+
+Gateway package versions are not protocol values and are not exported by this
+instrumentation. Gateway URLs, IDs, device IDs, pairing request IDs,
+credentials, integrity values, error messages, raw frames, and diagnostic-ring
 text are not exported.
+
+Only an explicit protocol mismatch maps to the `protocolmismatch` error
+category. Unknown or otherwise unclassified Gateway errors map to
+`internalerror`; they are never promoted to protocol mismatch.
 
 The operator phase spans distinguish local credential/client/tunnel preparation,
 WebSocket transport establishment, and the gateway challenge/hello handshake.
@@ -110,6 +125,8 @@ The Windows node initiates its gateway connection: its prepare span includes
 credential resolution, client creation, and synchronous capability registration;
 its transport span covers the outbound WebSocket; and its handshake span covers
 the gateway's `connect.challenge`, the signed connect request, and `hello-ok`.
+`NodeConnectionCoordinator` owns this node attempt/phase instrumentation; the
+manager continues to own operator and overall state-transition instrumentation.
 
 A node attempt succeeds only after `hello-ok` yields connected and paired
 readiness. Pending approval completes the attempt as `pairing_required`; human
@@ -234,7 +251,7 @@ operations. Full loads use source `initial` for the first load of that transcrip
 in the current connection generation or `forced` when deliberately bypassing
 the loaded-history cache. Backfills use the finite reason `remote_turn` or
 `reset_reconciliation`. Receiving `sessions.list`
-hydrates session-picker metadata only and does not emit a history-load operation.
+hydrates conversation metadata only and does not emit a history-load operation.
 At startup the tray loads the current/default session transcript; another
 session's transcript is loaded when that session is selected. Reconnect
 invalidates transcript freshness and refreshes the selected session through the
@@ -376,20 +393,23 @@ Reviewed attributes are:
   `legacy` remains a finite historical value for backward-compatible telemetry
   readers, but the runtime no longer selects the legacy approval path. Present
   only for `system.run` traces and failure/cancellation logs
-- `openclaw.node.tool.sandbox.requested`: whether sandboxing was configured
+- `openclaw.node.tool.sandbox.requested`: whether MXC execution was requested;
+  supported Windows requests containment; positively unsupported Windows uses
+  approved host compatibility execution with this value set to `false`
 - `openclaw.node.tool.sandbox.applied`: whether the command was known to run
-  inside the sandbox; omitted when an infrastructure failure makes that unknown
+  inside the sandbox; `false` when approval revalidation rejects the command
+  before launch; omitted for infrastructure failure or a deadline that
+  may have interrupted a still-pending native launch
 - `openclaw.node.tool.sandbox.provider`: `mxc` when MXC was selected
-- `openclaw.node.tool.sandbox.technology`: `windows_appcontainer` for the
-  currently wired MXC backend
+- `openclaw.node.tool.sandbox.technology`: `windows_basecontainer` for an
+  admitted SDK execution result; omitted on blocked/unknown execution
 - `openclaw.node.tool.sandbox.denial.reason`: a finite host-side pre-execution
   reason: `direct_argv_unsupported`, `custom_environment_unsupported`,
   `effective_shell_changed`, `fallback_shell_unapproved`, or
   `unsupported_sandbox_request`
-- `openclaw.node.tool.sandbox.fallback.target`: `unsandboxed` when an unavailable
-  MXC backend caused compatibility fallback
-- `openclaw.node.tool.sandbox.fallback.reason`: `mxc_unavailable` for that
-  fallback
+- Sandbox fallback attributes are retired from current execution. Positively
+  unsupported Windows reports host execution with `sandbox.requested=false` and
+  `sandbox.applied=false`, without an MXC provider or applied technology.
 - `error.type`: exception type only
 
 Failure categories are `invalid_request`, `unsupported_command`, `node_busy`,
@@ -421,6 +441,17 @@ nonzero exit is `command_failed` with `sandbox.requested=true` and
 cannot distinguish a command failure caused by an in-container policy from
 other nonzero process exits without unsafe message parsing or a sandbox
 protocol change.
+
+Command-runner capacity rejection is a `node_busy` tool error before an
+execution route is selected. It has no execution mode, sandbox provider or
+applied-containment claim. Running commands and pending cleanup both retain
+their capacity slots.
+
+The public SDK exposes capture metadata, not an applied-tier readback. Native
+request admission is not post-launch telemetry. Local MXC logs keep applied
+tier `unknown` and include only operation, requested mode, grant counts,
+exit/timeout and coarse error type. Raw config and full-secret logging are
+removed. SDK-native telemetry is explicitly disabled for owned spawns.
 
 The tray exports one structured log only for a failed or canceled invocation.
 Forwarding uses a nonblocking queue capped at 256 entries. Full queues drop the

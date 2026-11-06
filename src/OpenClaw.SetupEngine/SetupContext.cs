@@ -1,13 +1,28 @@
+// <summary>
+// Defines setup input, mutable pipeline context, and result contracts shared by CLI and UI setup hosts.
+// Setup steps exchange only transaction-scoped state through SetupContext; configuration is loaded before
+// execution and result helpers classify success, retryable failure, terminal failure, and restart needs.
+// Usage:
+//   var context = new SetupContext(config, logger, journal, commands, cancellationToken);
+//   StepResult result = await step.ExecuteAsync(context, cancellationToken);
+//   // The runner uses result.Outcome and context state to continue or roll back the transaction.
+// </summary>
+
+using System.Collections.Immutable;
 using System.Diagnostics.CodeAnalysis;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using OpenClaw.Connection;
+using OpenClaw.Connection.LocalAi;
 using OpenClaw.Shared;
+using OpenClaw.Shared.Inference;
+using OpenClaw.Shared.Inference.Catalog;
 
 namespace OpenClaw.SetupEngine;
 
 // ─── Configuration ───
 
+/// <summary>Contains the persisted and runtime-only inputs that configure one setup transaction.</summary>
 public sealed class SetupConfig
 {
     public string DistroName { get; set; } = "OpenClawGateway";
@@ -22,6 +37,8 @@ public sealed class SetupConfig
     public bool CleanBeforeRun { get; set; }
     public bool DryRun { get; set; }
     public bool ConfirmDestructive { get; set; }
+    [JsonIgnore]
+    public string? ConfirmedDestructiveDistroName { get; set; }
     public string LogLevel { get; set; } = "trace";
     public string? LogPath { get; set; }
     public string? GatewayUrl { get; set; }
@@ -29,6 +46,10 @@ public sealed class SetupConfig
     public Dictionary<string, string>? WizardAnswers { get; set; }
     [JsonIgnore]
     public bool UsesBundledDefaultConfig { get; set; }
+    [JsonIgnore]
+    public string? LocalAiRecoveryGatewayId { get; set; }
+    [JsonIgnore]
+    public bool NativeLocalAiAcquisition { get; set; }
 
     // Nested config sections — everything is configurable
     public WslConfig Wsl { get; set; } = new();
@@ -38,9 +59,11 @@ public sealed class SetupConfig
     public PairingConfig Pairing { get; set; } = new();
     public WindowsNodeContextConfig WindowsNodeContext { get; set; } = new();
     public TailscaleConfig Tailscale { get; set; } = new();
+    public LocalAiConfig LocalAi { get; set; } = new();
 
-    public string EffectiveGatewayUrl => GatewayUrl ?? $"ws://localhost:{GatewayPort}";
+    public string EffectiveGatewayUrl => GatewayUrl ?? $"ws://127.0.0.1:{GatewayPort}";
 
+    /// <summary>Loads a setup configuration from JSON using the setup serialization contract.</summary>
     public static SetupConfig LoadFromFile(string path)
     {
         var json = File.ReadAllText(path);
@@ -48,6 +71,7 @@ public sealed class SetupConfig
             ?? throw new JsonException("Config file must contain a JSON object.");
     }
 
+    /// <summary>Attempts to load a setup configuration and returns a user-facing parse error on failure.</summary>
     public static bool TryLoadFromFile(
         string path,
         [NotNullWhen(true)] out SetupConfig? config,
@@ -72,6 +96,7 @@ public sealed class SetupConfig
         }
     }
 
+    /// <summary>Overlays supported setup environment variables onto a configuration.</summary>
     public static SetupConfig FromEnvironment(SetupConfig? baseConfig = null)
     {
         var config = baseConfig ?? new SetupConfig();
@@ -102,6 +127,7 @@ public sealed class SetupConfig
         return config;
     }
 
+    /// <summary>Applies interactive UI defaults to this configuration and returns it for chaining.</summary>
     public SetupConfig ApplyUiDefaults(bool rollbackOnFailure = true)
     {
         Headless = false;
@@ -130,10 +156,47 @@ public sealed class SetupConfig
 
 // ─── WSL Configuration ───
 
+// Native local inference is disabled for programmatic and backward-compatible
+// configs. The bundled product config explicitly enables it for onboarding.
+/// <summary>Contains Local AI selection, timeout, and user-consent settings for setup.</summary>
+public sealed class LocalAiConfig
+{
+    public bool Enabled { get; set; }
+    public string? SelectedModelId { get; set; }
+    /// <summary>Runtime-only effective profile selected from detected GPU capacity.</summary>
+    [JsonIgnore]
+    public string? SelectedProfileId { get; set; }
+    /// <summary>
+    /// Runtime-only model ID proven by the existing installation receipt for a pinned
+    /// recovery. It authorizes retired-catalog lookup only for that exact selection.
+    /// </summary>
+    [JsonIgnore]
+    internal string? InstalledReceiptModelId { get; set; }
+    /// <summary>
+    /// Runtime-only recorded plan for a pinned recovery whose model the catalog cannot
+    /// re-derive (Bolt's fixed tiers, custom Hugging Face models).
+    /// </summary>
+    [JsonIgnore]
+    internal OpenClaw.Shared.Inference.Catalog.LocalInferencePlan? PinnedPlan { get; set; }
+    /// <summary>Managed llama-server port. Zero selects a free loopback port during setup.</summary>
+    public int Port { get; set; }
+    public bool WslMirroredNetworkingConsent { get; set; }
+    /// <summary>
+    /// How long the managed llama-server router may take to report healthy. The first
+    /// start after an install pays a Windows Defender scan of the freshly extracted
+    /// ~700 MB CUDA runtime (measured 26.0 s cold, 0.17 s once cached), so this has to
+    /// clear that comfortably or a clean install fails the race non-deterministically.
+    /// </summary>
+    public int HealthTimeoutSeconds { get; set; } = 90;
+    public int AcquisitionTimeoutSeconds { get; set; } = 7_200;
+    public int InferenceTimeoutSeconds { get; set; } = 600;
+}
+
+/// <summary>Contains WSL distribution settings used while provisioning the managed Gateway.</summary>
 public sealed class WslConfig
 {
     private static readonly System.Text.RegularExpressions.Regex s_linuxUserNamePattern =
-        new("^[a-z_][a-z0-9_-]{0,31}$", System.Text.RegularExpressions.RegexOptions.Compiled);
+        new(@"\A[a-z_][a-z0-9_-]{0,31}\z", System.Text.RegularExpressions.RegexOptions.Compiled);
 
     public string User { get; set; } = "openclaw";
     public bool Systemd { get; set; } = true;
@@ -145,18 +208,27 @@ public sealed class WslConfig
     public string? Memory { get; set; }
     public string? Swap { get; set; }
 
-    public static bool IsValidLinuxUserName(string value)
-        => s_linuxUserNamePattern.IsMatch(value);
+    public static bool IsValidLinuxUserName(string? value)
+        => !string.IsNullOrWhiteSpace(value)
+            && s_linuxUserNamePattern.IsMatch(value);
 }
 
 // ─── Gateway Configuration ───
 
+/// <summary>Contains Gateway installation and runtime settings for setup.</summary>
 public sealed class GatewayConfig
 {
     public string Bind { get; set; } = "loopback";
     public string? InstallUrl { get; set; }
-    public string Selection { get; set; } = "recommended";
+    // Compatibility input from the former recommended/fallback/exact policy.
+    // ValidateAndApply translates it into Version and then clears it.
+    public string? Selection { get; set; }
+    // Upstream installer selector: null defaults to latest; tags and exact package versions are supported.
     public string? Version { get; set; }
+    // Optional exact stable version offered after a typed compatibility failure.
+    public string? FallbackVersion { get; set; }
+    [JsonIgnore]
+    public string? InstalledVersion { get; set; }
     // Runtime-only input for the explicit headless release-candidate validation lane.
     [JsonIgnore]
     public string? ValidationPackagePath { get; set; }
@@ -164,12 +236,11 @@ public sealed class GatewayConfig
     public string ReloadMode { get; set; } = "hybrid";
     public string AuthMode { get; set; } = "token";
     public Dictionary<string, string>? ExtraConfig { get; set; }
-    [JsonIgnore]
-    public GatewayReleaseResolution? ResolvedRelease { get; set; }
 }
 
 // ─── Capabilities Configuration ───
 
+/// <summary>Contains capability selections used to configure the Windows node.</summary>
 public sealed class CapabilitiesConfig
 {
     public bool System { get; set; } = true;
@@ -213,9 +284,14 @@ public sealed class CapabilitiesConfig
 
 // ─── Tray Settings (written to settings.json) ───
 
+/// <summary>Contains tray settings patches written by setup after provisioning succeeds.</summary>
 public sealed class TraySettingsConfig
 {
+    public OpenClaw.Shared.SystemRunAccessPreset? SystemRunPreset { get; set; }
+    public bool SystemRunPresetIsExplicit { get; set; }
     public bool EnableNodeMode { get; set; } = true;
+    public bool? EnableMcpServer { get; set; }
+    public bool? NodeOllamaInferenceEnabled { get; set; }
     public bool? EnableManagedLocalGatewayAutoRepair { get; set; }
     public bool AutoStart { get; set; } = false;
     public bool NodeSystemRunEnabled { get; set; } = true;
@@ -227,12 +303,48 @@ public sealed class TraySettingsConfig
     public bool NodeTtsEnabled { get; set; } = true;
     public bool NodeSttEnabled { get; set; } = true;
 
+    public IReadOnlyDictionary<string, bool> CreatePatch(bool? startup, bool startupOnly = false)
+    {
+        var patch = new Dictionary<string, bool>();
+        if (startup is { } selected) patch["AutoStart"] = selected;
+        if (startupOnly) return patch;
+        patch["EnableNodeMode"] = EnableNodeMode;
+        patch["NodeSystemRunEnabled"] = NodeSystemRunEnabled;
+        patch["NodeCanvasEnabled"] = NodeCanvasEnabled;
+        patch["NodeScreenEnabled"] = NodeScreenEnabled;
+        patch["NodeCameraEnabled"] = NodeCameraEnabled;
+        patch["NodeLocationEnabled"] = NodeLocationEnabled;
+        patch["NodeBrowserProxyEnabled"] = NodeBrowserProxyEnabled;
+        patch["NodeTtsEnabled"] = NodeTtsEnabled;
+        patch["NodeSttEnabled"] = NodeSttEnabled;
+        if (EnableMcpServer is { } mcp) patch["EnableMcpServer"] = mcp;
+        if (NodeOllamaInferenceEnabled is { } ollama) patch["NodeOllamaInferenceEnabled"] = ollama;
+        if (EnableManagedLocalGatewayAutoRepair is { } repair) patch["EnableManagedLocalGatewayAutoRepair"] = repair;
+        return patch;
+    }
+
     /// <summary>
     /// Merges these settings into an existing settings.json (or creates a new one).
     /// Only overwrites the fields we control — preserves all other user settings.
     /// </summary>
-    public void MergeIntoSettingsFile(string settingsPath)
+    public void MergeIntoSettingsFile(
+        string settingsPath, bool includeAutoStart = true, bool defaultManagedAutoRepair = true)
+        => MergeSettingsFile(settingsPath, CreatePatch(includeAutoStart ? AutoStart : null),
+            defaultManagedAutoRepair);
+
+    public void MergeCapabilitiesIntoSettingsFile(string settingsPath)
     {
+        var patch = CreatePatch(null)
+            .Where(setting => setting.Key is not (
+                "EnableMcpServer" or "NodeOllamaInferenceEnabled" or "EnableManagedLocalGatewayAutoRepair"))
+            .ToDictionary(setting => setting.Key, setting => setting.Value);
+        MergeSettingsFile(settingsPath, patch, defaultManagedAutoRepair: false);
+    }
+
+    private void MergeSettingsFile(
+        string settingsPath, IReadOnlyDictionary<string, bool> setupOwnedSettings, bool defaultManagedAutoRepair)
+    {
+        using var lease = PersistenceFileLease.Acquire(settingsPath);
         Dictionary<string, JsonElement>? existing = null;
 
         if (File.Exists(settingsPath))
@@ -248,43 +360,45 @@ public sealed class TraySettingsConfig
             }
         }
 
-        var setupOwnedSettings = new Dictionary<string, object>
-        {
-            ["EnableNodeMode"] = EnableNodeMode,
-            ["AutoStart"] = AutoStart,
-            ["NodeSystemRunEnabled"] = NodeSystemRunEnabled,
-            ["NodeCanvasEnabled"] = NodeCanvasEnabled,
-            ["NodeScreenEnabled"] = NodeScreenEnabled,
-            ["NodeCameraEnabled"] = NodeCameraEnabled,
-            ["NodeLocationEnabled"] = NodeLocationEnabled,
-            ["NodeBrowserProxyEnabled"] = NodeBrowserProxyEnabled,
-            ["NodeTtsEnabled"] = NodeTtsEnabled,
-            ["NodeSttEnabled"] = NodeSttEnabled
-        };
-
         var settings = new Dictionary<string, object>();
         if (existing != null)
         {
             foreach (var kvp in existing)
                 settings[kvp.Key] = kvp.Value;
         }
+        foreach (var key in settings.Keys.Where(key =>
+            key.Equals("SystemRunSandboxEnabled", StringComparison.OrdinalIgnoreCase) ||
+            key.Equals("SystemRunBlockHostFallbackWhenMxcUnavailable", StringComparison.OrdinalIgnoreCase)).ToArray())
+            settings.Remove(key);
 
         foreach (var kvp in setupOwnedSettings)
             settings[kvp.Key] = kvp.Value;
 
+        if (SystemRunPreset is { } preset && (SystemRunPresetIsExplicit || existing is null || existing.Count == 0 ||
+            existing.TryGetValue("SystemRunFilesystemScope", out var scope) && scope.ValueKind == JsonValueKind.Null))
+        {
+            var permissions = OpenClaw.Shared.SystemRunPermissionPresets.Apply(new OpenClaw.Shared.SettingsData(), preset);
+            settings["SystemRunFilesystemScope"] = permissions.SystemRunFilesystemScope!;
+            settings["SystemRunAllowOutbound"] = permissions.SystemRunAllowOutbound;
+            settings["SandboxDocumentsAccess"] = null!;
+            settings["SandboxDownloadsAccess"] = null!;
+            settings["SandboxDesktopAccess"] = null!;
+            settings["SandboxCustomFolders"] = Array.Empty<OpenClaw.Shared.SandboxCustomFolder>();
+        }
+
         const string autoRepairKey = "EnableManagedLocalGatewayAutoRepair";
-        if (EnableManagedLocalGatewayAutoRepair is { } configuredAutoRepair)
-            settings[autoRepairKey] = configuredAutoRepair;
-        else if (!settings.ContainsKey(autoRepairKey))
+        if (defaultManagedAutoRepair && !settings.ContainsKey(autoRepairKey))
             settings[autoRepairKey] = true;
 
         Directory.CreateDirectory(Path.GetDirectoryName(settingsPath)!);
         var json = JsonSerializer.Serialize(settings, SetupConfig.JsonWriteOptions);
         AtomicFile.WriteAllText(settingsPath, json);
+        SystemRunPresetIsExplicit = false;
     }
 
     public static void UpdateAutoStartInSettingsFile(string settingsPath, bool autoStart)
     {
+        using var lease = PersistenceFileLease.Acquire(settingsPath);
         Dictionary<string, JsonElement>? existing = null;
 
         if (File.Exists(settingsPath))
@@ -338,6 +452,7 @@ public sealed class TraySettingsConfig
 
 // ─── Pairing Configuration ───
 
+/// <summary>Contains the timeout used while setup waits for pairing approval.</summary>
 public sealed class PairingConfig
 {
     public int TimeoutSeconds { get; set; } = 60;
@@ -345,6 +460,7 @@ public sealed class PairingConfig
 
 // ─── Windows Node Context Injection ───
 
+/// <summary>Contains settings for injecting managed Windows node context into the Gateway workspace.</summary>
 public sealed class WindowsNodeContextConfig
 {
     public bool Enabled { get; set; } = true;
@@ -354,6 +470,7 @@ public sealed class WindowsNodeContextConfig
 
 // ─── Tailscale Serve Configuration ───
 
+/// <summary>Chooses whether optional Tailscale setup uses interactive browser approval or an auth key.</summary>
 [JsonConverter(typeof(JsonStringEnumConverter<TailscaleAuthMode>))]
 public enum TailscaleAuthMode
 {
@@ -361,6 +478,7 @@ public enum TailscaleAuthMode
     AuthKey
 }
 
+/// <summary>Contains optional Tailscale authentication and Serve configuration for setup.</summary>
 public sealed class TailscaleConfig
 {
     public bool Enabled { get; set; }
@@ -399,18 +517,23 @@ public sealed class TailscaleConfig
     }
 }
 
+/// <summary>Describes an external authorization interaction requested by a setup step.</summary>
 public sealed record ExternalAuthorizationRequest(
     string Provider,
     Uri AuthorizationUri,
     string Message);
 
+/// <summary>Presents an external authorization request for an interactive setup host.</summary>
 public interface IExternalAuthorizationPresenter
 {
+    /// <summary>Presents the request and returns when the host has handed it to the user.</summary>
     Task PresentAsync(ExternalAuthorizationRequest request, CancellationToken cancellationToken);
 }
 
+/// <summary>Writes authorization instructions to the console for headless setup.</summary>
 public sealed class ConsoleExternalAuthorizationPresenter : IExternalAuthorizationPresenter
 {
+    /// <summary>Writes the authorization URL and message without performing browser automation.</summary>
     public Task PresentAsync(ExternalAuthorizationRequest request, CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
@@ -424,20 +547,42 @@ public sealed class ConsoleExternalAuthorizationPresenter : IExternalAuthorizati
 
 // ─── Step Result ───
 
+/// <summary>Classifies whether a setup step succeeded, skipped, failed, or needs restart before retrying.</summary>
 public enum StepOutcome { Success, Skipped, Failed, FailedTerminal }
 
-public sealed record StepResult(StepOutcome Outcome, string? Message = null, Exception? Error = null)
+/// <summary>
+/// Root-cause evidence for a Local AI failure. The step message reports what OpenClaw observed
+/// (an HTTP status, a timeout); these are llama-server's own words about why, plus the directory
+/// holding its logs — which is not the setup log directory the UI otherwise links to.
+/// </summary>
+public sealed record LocalAiFailureDetail(IReadOnlyList<string> Diagnostics, string LogDirectory);
+
+/// <summary>Represents the outcome, diagnostic, and restart requirement of one setup step.</summary>
+public sealed record StepResult(
+    StepOutcome Outcome,
+    string? Message = null,
+    Exception? Error = null,
+    LocalAiFailureDetail? Detail = null)
 {
+    public bool RequiresRestart { get; init; }
+    internal bool GatewayRestartServingOwnerUnavailable { get; init; }
+    internal bool GatewayRestartIntentContention { get; init; }
+
     public static StepResult Ok(string? message = null) => new(StepOutcome.Success, message);
     public static StepResult Skip(string reason) => new(StepOutcome.Skipped, reason);
-    public static StepResult Fail(string message, Exception? ex = null) => new(StepOutcome.Failed, message, ex);
-    public static StepResult Terminal(string message, Exception? ex = null) => new(StepOutcome.FailedTerminal, message, ex);
+    public static StepResult Fail(string message, Exception? ex = null, LocalAiFailureDetail? detail = null) =>
+        new(StepOutcome.Failed, message, ex, detail);
+    public static StepResult Terminal(string message, Exception? ex = null, LocalAiFailureDetail? detail = null) =>
+        new(StepOutcome.FailedTerminal, message, ex, detail);
+    public static StepResult RestartRequired(string message) =>
+        new(StepOutcome.FailedTerminal, message) { RequiresRestart = true };
 
     public bool IsSuccess => Outcome is StepOutcome.Success or StepOutcome.Skipped;
 }
 
 // ─── Setup Context ───
 
+/// <summary>Holds transaction-scoped state shared by ordered setup steps and their rollback paths.</summary>
 public sealed class SetupContext
 {
     public SetupConfig Config { get; }
@@ -452,15 +597,72 @@ public sealed class SetupContext
     public string? SharedGatewayToken { get; set; }
     public string? BootstrapToken { get; set; }
     public string? GatewayRecordId { get; set; }
+    [JsonIgnore]
+    public GatewayRegistrySnapshot? ExpectedGatewayRegistry { get; set; }
+    [JsonIgnore]
+    public Action<TraySettingsConfig>? PersistTraySettings { get; set; }
+
+    /// <summary>Checks the prior operation-owned state before a pipeline registry mutation.</summary>
+    public GatewayRegistry LoadSetupRegistry()
+    {
+        var registry = new GatewayRegistry(DataDir, logger: new SetupOpenClawLogger(Logger));
+        registry.Load();
+        if (ExpectedGatewayRegistry is { } expected &&
+            !GatewayRegistry.HasSameSetupAuthority(registry.CapturePersistedSnapshot(), expected))
+            throw new InvalidOperationException("The Gateway registry changed outside the setup operation.");
+        return registry;
+    }
+
+    public void SaveSetupRegistry(GatewayRegistry registry)
+    {
+        var written = registry.GetSnapshot();
+        registry.Save(ExpectedGatewayRegistry);
+        if (ExpectedGatewayRegistry is not null)
+            ExpectedGatewayRegistry = written;
+    }
     public string? OperatorDeviceId { get; set; }
     public string? NodeDeviceId { get; set; }
+    internal PendingRequestBaseline? SetupDeviceApprovalBaseline { get; set; }
+    internal PendingRequestBaseline? SetupNodeApprovalBaseline { get; set; }
+    internal PendingRequestBaseline? CurrentDeviceApprovalBaseline { get; set; }
+    internal PendingRequestBaseline? CurrentNodeApprovalBaseline { get; set; }
     public GatewaySelfInfo? ObservedGatewaySelf { get; set; }
     public GatewayCompatibilityException? GatewayCompatibilityFailure { get; set; }
     public string? WindowsTailnetDnsSuffix { get; set; }
     public string? TailscaleDnsName { get; set; }
     public IExternalAuthorizationPresenter? ExternalAuthorizationPresenter { get; set; }
+    public IProgress<SetupDetailProgressEvent>? DetailProgress { get; set; }
     public Func<GatewayRecord, CancellationToken, Task<GatewayEndpointProvenance>>?
         EndpointProvenanceProbe { get; set; }
+    internal WslViabilityResult? WslViability { get; set; }
+    public HostHardwareInfo? LocalAiHardware { get; set; }
+    public LocalInferenceEligibilityResult? LocalAiEligibility { get; set; }
+    public int? LocalAiPort { get; set; }
+    internal LlamaRuntimeInstallResult? LocalAiRuntimeInstall { get; set; }
+    internal HuggingFaceModelInstallResult? LocalAiModelInstall { get; set; }
+    /// <summary>
+    /// Verified additional model assets (a DFlash draft checkpoint and/or
+    /// in catalog order. Empty for every recipe
+    /// that has neither.
+    /// </summary>
+    internal ImmutableArray<HuggingFaceAdditionalAssetInstallResult> LocalAiAdditionalModelInstalls { get; set; } =
+        ImmutableArray<HuggingFaceAdditionalAssetInstallResult>.Empty;
+    internal LocalAiResolvedInstall? LocalAiResolvedInstall { get; set; }
+    public string? ResolvedLocalAiModelRef => LocalAiResolvedInstall is { } install
+        ? LocalAiGatewayProviderDefinition.BuildPrimaryModel(install)
+        : null;
+    internal LocalAiResolvedInstall? LocalAiRecoveryOriginalInstall { get; set; }
+    internal LocalAiResolvedInstall? LocalAiUpgradeOriginalInstall { get; set; }
+    internal bool LocalAiRecoveryProviderTransition { get; set; }
+    internal bool LocalAiRecoveryReceiptRollbackAllowed { get; set; }
+    internal bool LocalAiManifestCreatedThisRun { get; set; }
+    internal ILocalAiRuntime? LocalAiRuntime { get; set; }
+    internal HostHardwareInfo? LocalAiGpuBaseline { get; set; }
+    internal LlamaServerInferenceVerification? LocalAiInferenceVerification { get; set; }
+    internal LocalAiGpuLoadEvidence? LocalAiGpuLoadEvidence { get; set; }
+    internal LocalAiGatewayPriorState? LocalAiGatewayPriorState { get; set; }
+    internal bool IsUninstalling { get; set; }
+    internal bool LocalAiRecoveryStoppedWsl { get; set; }
 
     // Data directory for gateway registry and identity files
     public string DataDir { get; }
@@ -469,6 +671,7 @@ public sealed class SetupContext
     // WSL PATH prefix using configured user
     public string WslPathPrefix => WslConstants.GetPathPrefix(Config.Wsl.User);
 
+    /// <summary>Creates setup context with its configuration, transaction services, and cancellation source.</summary>
     public SetupContext(
         SetupConfig config,
         SetupLogger logger,
@@ -493,10 +696,12 @@ public sealed class SetupContext
         GatewayUrl = config.EffectiveGatewayUrl;
     }
 
+    /// <summary>Resolves the app data directory used for Gateway registry and identity state.</summary>
     public static string ResolveDataDir()
         => Environment.GetEnvironmentVariable("OPENCLAW_TRAY_DATA_DIR")
             ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "OpenClawTray");
 
+    /// <summary>Resolves the local app data directory used for Local AI installation state.</summary>
     public static string ResolveLocalDataDir()
     {
         if (Environment.GetEnvironmentVariable("OPENCLAW_TRAY_LOCALAPPDATA_DIR") is { Length: > 0 } localAppDataRoot)

@@ -4,11 +4,9 @@ using OpenClaw.Shared;
 using OpenClawTray.Dialogs;
 using OpenClawTray.Helpers;
 using System;
-using System.IO;
 using System.Runtime.InteropServices;
 using System.Threading;
 using System.Threading.Tasks;
-using Updatum;
 
 namespace OpenClawTray.Services;
 
@@ -17,14 +15,19 @@ namespace OpenClawTray.Services;
 /// All public methods must be called from the UI thread.
 /// </summary>
 internal sealed class UpdateCoordinator(
-    UpdatumManager updater,
     AppState appState,
     SettingsManager? settings,
+    Func<IOperatorGatewayClient?> getGatewayClient,
     Func<XamlRoot?> getXamlRoot,
     Action refreshStatus,
-    Action exit)
+    Action exit,
+    Func<IUpdateBackend>? createUpdater = null)
 {
     private readonly SettingsManager? _settings = settings;
+    private readonly UpdateBackendLoader _updaterLoader =
+        new(createUpdater ?? ReleaseUpdateBackendFactory.Create);
+    private readonly Func<IOperatorGatewayClient?> _getGatewayClient =
+        getGatewayClient ?? throw new ArgumentNullException(nameof(getGatewayClient));
 
     // Cross-path concurrency for update checks, split into two phases:
     //  - _updateCheckGate: held only during the metadata/network check.
@@ -60,6 +63,23 @@ internal sealed class UpdateCoordinator(
             return true; // Don't block launch
         }
 
+        if (PackageHelper.IsPackaged)
+        {
+            // A Store-installed package is updated by Windows, not by the release updater.
+            // Self-updating from GitHub releases would bypass the Store, and the
+            // packaged app must not claim update ownership from a legacy install.
+            Logger.Info("Skipping update check in packaged build; updates are managed by the Microsoft Store");
+            appState.UpdateInfo = new UpdateCommandCenterInfo
+            {
+                Status = "Skipped",
+                CurrentVersion = AppVersionInfo.Version,
+                CheckedAt = DateTime.UtcNow,
+                Detail = "managed by the Microsoft Store"
+            };
+            _updateCheckGate.Release();
+            return true;
+        }
+
         if (AppIdentity.IsDev)
         {
             Logger.Info("Skipping release-channel update check in development build");
@@ -68,7 +88,8 @@ internal sealed class UpdateCoordinator(
                 Status = "Skipped",
                 CurrentVersion = AppVersionInfo.Version,
                 CheckedAt = DateTime.UtcNow,
-                Detail = "development build"
+                Detail = LocalizationHelper.GetString(
+                    "Update_Message_Skipped_Dev")
             };
             _updateCheckGate.Release();
             return true;
@@ -83,7 +104,8 @@ internal sealed class UpdateCoordinator(
                 Status = "Skipped",
                 CurrentVersion = AppVersionInfo.Version,
                 CheckedAt = DateTime.UtcNow,
-                Detail = "debug build"
+                Detail = LocalizationHelper.GetString(
+                    "Update_Message_Skipped_Debug")
             };
             return true;
         }
@@ -94,8 +116,16 @@ internal sealed class UpdateCoordinator(
 #else
         string releaseTag;
         string changelog;
+        IUpdateBackend updater;
         try
         {
+            var backend = _updaterLoader.Load();
+            if (backend is null)
+            {
+                ReportUpdaterUnavailable(_updaterLoader.Failure!);
+                return true;
+            }
+            updater = backend;
             Logger.Info("Checking for updates...");
             appState.UpdateInfo = new UpdateCommandCenterInfo
             {
@@ -103,7 +133,15 @@ internal sealed class UpdateCoordinator(
                 CurrentVersion = AppVersionInfo.Version,
                 CheckedAt = DateTime.UtcNow
             };
-            var updateFound = await updater.CheckForUpdatesAsync();
+            var checkOutcome = await UpdateCheckPipeline.CheckAsync(
+                updater,
+                AppVersionInfo.Version);
+            var updateFound = checkOutcome.UpdateFound;
+            if (checkOutcome.ActivatedFallbackTag is not null)
+            {
+                Logger.Info(
+                    $"Using OpenClaw stable correction ordering for update {checkOutcome.ActivatedFallbackTag}");
+            }
 
             if (!updateFound)
             {
@@ -118,10 +156,29 @@ internal sealed class UpdateCoordinator(
                 return true;
             }
 
-            var release = updater.LatestRelease!;
-            if (string.IsNullOrEmpty(release.TagName))
+            if (UpdateReleasePolicy.Classify(checkOutcome.SelectedRelease) ==
+                    ReleaseSecurityClassification.Ordinary &&
+                CompanionUpdateSuppressionPolicy.ShouldSuppress(
+                    await TryGetGatewayUpdateStatusAsync(_getGatewayClient()),
+                    checkOutcome))
             {
-                // Defensive: AppUpdater says an update is available but the
+                Logger.Info(
+                    "Skipping ordinary companion update: authenticated Gateway is on extended-stable");
+                appState.UpdateInfo = new UpdateCommandCenterInfo
+                {
+                    Status = "Skipped",
+                    CurrentVersion = AppVersionInfo.Version,
+                    CheckedAt = DateTime.UtcNow,
+                    Detail = LocalizationHelper.GetString(
+                        "Update_Message_Skipped_ExtendedStable")
+                };
+                return true;
+            }
+
+            var release = checkOutcome.SelectedRelease;
+            if (string.IsNullOrEmpty(release?.TagName))
+            {
+                // Defensive: the updater says an update is available but the
                 // release has no tag. Don't silently claim "up to date" —
                 // surface as Failed so the user sees something is off.
                 Logger.Warn("Update reported available but release has no TagName");
@@ -136,7 +193,7 @@ internal sealed class UpdateCoordinator(
             }
 
             releaseTag = release.TagName;
-            changelog = updater.GetChangelog(true) ?? "No release notes available.";
+            changelog = updater.GetChangelog() ?? "No release notes available.";
             Logger.Info($"Update available: {releaseTag}");
             appState.UpdateInfo = new UpdateCommandCenterInfo
             {
@@ -164,6 +221,11 @@ internal sealed class UpdateCoordinator(
                 };
                 return true;
             }
+        }
+        catch (Exception ex) when (UpdateBackendLoader.IsDependencyFailure(ex))
+        {
+            ReportUpdaterUnavailable(ex);
+            return true;
         }
         catch (OperationCanceledException)
         {
@@ -256,8 +318,8 @@ internal sealed class UpdateCoordinator(
                     _settings.SkippedUpdateTag = string.Empty;
                     _settings.Save();
                 }
-                var installed = await DownloadAndInstallUpdateAsync();
-                if (!installed)
+                var installed = await DownloadAndInstallUpdateAsync(updater);
+                if (!installed && _updaterLoader.Failure is null)
                 {
                     appState.UpdateInfo = new UpdateCommandCenterInfo
                     {
@@ -312,6 +374,64 @@ internal sealed class UpdateCoordinator(
             Interlocked.Exchange(ref _updateInstallInProgress, 0);
         }
 #endif
+    }
+
+    private static async Task<GatewayUpdateStatus?> TryGetGatewayUpdateStatusAsync(
+        IOperatorGatewayClient? gatewayClient)
+    {
+        if (gatewayClient is null)
+            return null;
+
+        if (!gatewayClient.HasHandshakeSnapshot &&
+            !await WaitForGatewayHandshakeAsync(gatewayClient))
+        {
+            Logger.Info(
+                "Gateway update channel unavailable before deadline; using companion updater");
+            return null;
+        }
+
+        if (!GatewayUpdateStatusLookup.CanQuery(
+                gatewayClient.HasHandshakeSnapshot,
+                gatewayClient.IsConnectedToGateway,
+                gatewayClient.GrantedOperatorScopes))
+        {
+            Logger.Info(
+                "Gateway update channel unavailable or unauthorized; using companion updater");
+            return null;
+        }
+
+        return await GatewayUpdateStatusLookup.TryGetAsync(
+            () => gatewayClient.GetUpdateStatusAsync(),
+            ex => Logger.Info(
+                $"Gateway update channel unavailable; using companion updater: {ex.Message}"));
+    }
+
+    private static async Task<bool> WaitForGatewayHandshakeAsync(
+        IOperatorGatewayClient gatewayClient)
+    {
+        var completion = new TaskCompletionSource(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+
+        void OnHandshakeSucceeded(object? sender, EventArgs args) =>
+            completion.TrySetResult();
+
+        gatewayClient.HandshakeSucceeded += OnHandshakeSucceeded;
+        try
+        {
+            if (gatewayClient.HasHandshakeSnapshot)
+                return true;
+
+            await completion.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            return gatewayClient.HasHandshakeSnapshot;
+        }
+        catch (TimeoutException)
+        {
+            return false;
+        }
+        finally
+        {
+            gatewayClient.HandshakeSucceeded -= OnHandshakeSucceeded;
+        }
     }
 
     // Re-entrancy guard: the button/menu/deep-link are all fire-and-forget
@@ -369,10 +489,13 @@ internal sealed class UpdateCoordinator(
                         await ShowUpdateInfoDialogAsync(
                             "Skipped",
                             LocalizationHelper.GetString("Update_Title_Skipped"),
+                            info.Detail ??
                             LocalizationHelper.GetString(
-                                AppIdentity.IsDev
-                                    ? "Update_Message_Skipped_Dev"
-                                    : "Update_Message_Skipped_Debug"));
+                                PackageHelper.IsPackaged
+                                    ? "Update_Message_Skipped_Store"
+                                    : AppIdentity.IsDev
+                                        ? "Update_Message_Skipped_Dev"
+                                        : "Update_Message_Skipped_Debug"));
                         break;
                 }
             }
@@ -384,6 +507,20 @@ internal sealed class UpdateCoordinator(
         {
             Interlocked.Exchange(ref _manualUpdateCheckInFlight, 0);
         }
+    }
+
+    private void ReportUpdaterUnavailable(Exception error)
+    {
+        _updaterLoader.MarkUnavailable(error);
+        Logger.Warn($"Updater dependency unavailable: {error}");
+        appState.UpdateInfo = new UpdateCommandCenterInfo
+        {
+            Status = "Failed",
+            CurrentVersion = AppVersionInfo.Version,
+            CheckedAt = DateTime.UtcNow,
+            Detail = LocalizationHelper.GetString("Update_Message_Unavailable") +
+                "\n\n" + UpdateBackendLoader.ReleasesUrl
+        };
     }
 
     private async Task ShowUpdateInfoDialogAsync(string logKey, string title, string message)
@@ -406,6 +543,17 @@ internal sealed class UpdateCoordinator(
             DefaultButton = ContentDialogButton.Close,
             XamlRoot = xamlRoot
         };
+        if (logKey == "Failed" && _updaterLoader.Failure is not null)
+        {
+            var content = new StackPanel { Spacing = 12 };
+            content.Children.Add(new TextBlock { Text = message, TextWrapping = TextWrapping.Wrap });
+            content.Children.Add(new HyperlinkButton
+            {
+                Content = LocalizationHelper.GetString("Update_ManualDownload"),
+                NavigateUri = new Uri(UpdateBackendLoader.ReleasesUrl)
+            });
+            dialog.Content = content;
+        }
         try
         {
             await dialog.ShowAsync();
@@ -427,27 +575,21 @@ internal sealed class UpdateCoordinator(
         }
     }
 
-    private async Task<bool> DownloadAndInstallUpdateAsync()
+    private async Task<bool> DownloadAndInstallUpdateAsync(IUpdateBackend updater)
     {
         DownloadProgressDialog? progressDialog = null;
         try
         {
-            progressDialog = new DownloadProgressDialog(updater);
+            progressDialog = new DownloadProgressDialog();
             progressDialog.ShowAsync(); // Fire and forget
 
-            var downloadedAsset = await updater.DownloadUpdateAsync();
-
+            return await updater.DownloadAndInstallAsync(() => TryCloseProgressDialog(progressDialog));
+        }
+        catch (Exception ex) when (UpdateBackendLoader.IsDependencyFailure(ex))
+        {
+            ReportUpdaterUnavailable(ex);
             TryCloseProgressDialog(progressDialog);
-
-            if (downloadedAsset == null || !File.Exists(downloadedAsset.FilePath))
-            {
-                Logger.Error("Update download failed or file missing");
-                return false;
-            }
-
-            Logger.Info("Installing update and restarting...");
-            await updater.InstallUpdateAsync(downloadedAsset);
-            return true;
+            return false;
         }
         catch (Exception ex)
         {

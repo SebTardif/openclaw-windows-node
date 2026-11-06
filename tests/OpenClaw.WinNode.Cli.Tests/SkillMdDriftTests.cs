@@ -23,6 +23,7 @@ public class SkillMdDriftTests
     {
         var skillMdPath = LocateSkillMd();
         var content = File.ReadAllText(skillMdPath);
+        Assert.Contains("\"provider\": \"kokoro|piper|windows|elevenlabs|minimax\"", content);
 
         var documented = ParseCommandHeadings(content);
         var canonical = new HashSet<string>(McpToolBridge.KnownCommands, StringComparer.Ordinal);
@@ -45,11 +46,25 @@ public class SkillMdDriftTests
         {
             var msg = "skill.md drifted from the capability registry " +
                       "(McpToolBridge.CommandDescriptions). Update " +
-                      $"src/OpenClaw.WinNode.Cli/skill.md.\n  Missing from doc: " +
+                      $".agents/skills/winnode/SKILL.md.\n  Missing from doc: " +
                       $"[{string.Join(", ", missingFromDoc)}]\n  Extras in doc: " +
                       $"[{string.Join(", ", extrasInDoc)}]";
             Assert.Fail(msg);
         }
+    }
+
+    [Fact]
+    public void ConnectionStatus_documents_package_and_protocol_compatibility_separately()
+    {
+        var content = File.ReadAllText(LocateSkillMd());
+
+        Assert.Contains("gateway.packageVersion", content, StringComparison.Ordinal);
+        Assert.Contains("wire protocol", content, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("gateway_too_old", content, StringComparison.Ordinal);
+        Assert.Contains("gateway_too_new", content, StringComparison.Ordinal);
+        Assert.Contains("retryable", content, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("4/3/4", content, StringComparison.Ordinal);
+        Assert.Contains("selectedProtocol", content, StringComparison.Ordinal);
     }
 
     /// <summary>
@@ -92,6 +107,7 @@ public class SkillMdDriftTests
             new TtsCapability(NullLogger.Instance),
         };
 
+        using var ollamaCapability = new OllamaCapability(NullLogger.Instance);
         var commands = new HashSet<string>(StringComparer.Ordinal);
         foreach (var capability in capabilities)
         {
@@ -99,6 +115,10 @@ public class SkillMdDriftTests
             {
                 commands.Add(command);
             }
+        }
+        foreach (var command in ollamaCapability.Commands)
+        {
+            commands.Add(command);
         }
         return commands;
     }
@@ -114,8 +134,8 @@ public class SkillMdDriftTests
     }
 
     /// <summary>
-    /// skill.md ships next to winnode.exe. From the test's working directory
-    /// (the test bin folder), walk up to the repo root and resolve the source
+    /// SKILL.md ships next to winnode.exe as skill.md. From the test bin
+    /// working directory, walk up to the repo root and resolve the source
     /// copy — that's the canonical input the build copies to output. Falls
     /// back to the test bin's own copy if the source can't be located.
     /// </summary>
@@ -124,12 +144,12 @@ public class SkillMdDriftTests
         var dir = AppContext.BaseDirectory;
         for (var i = 0; i < 8 && dir is not null; i++)
         {
-            var candidate = Path.Combine(dir, "src", "OpenClaw.WinNode.Cli", "skill.md");
+            var candidate = Path.Combine(dir, ".agents", "skills", "winnode", "SKILL.md");
             if (File.Exists(candidate)) return candidate;
             dir = Path.GetDirectoryName(dir);
         }
         var nextTo = Path.Combine(AppContext.BaseDirectory, "skill.md");
         if (File.Exists(nextTo)) return nextTo;
-        throw new FileNotFoundException("Could not locate src/OpenClaw.WinNode.Cli/skill.md from the test working directory.");
+        throw new FileNotFoundException("Could not locate .agents/skills/winnode/SKILL.md from the test working directory.");
     }
 }

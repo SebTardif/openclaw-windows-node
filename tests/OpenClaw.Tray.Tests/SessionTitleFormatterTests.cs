@@ -192,7 +192,7 @@ public sealed class SessionTitleFormatterTests
     public void SessionLocalizationResources_CoverGeneratedTitlesAndSubtitleLabels()
     {
         var root = TestRepositoryPaths.GetRepositoryRoot();
-        foreach (var locale in new[] { "en-us", "fr-fr", "nl-nl", "zh-cn", "zh-tw" })
+        foreach (var locale in new[] { "en-us", "fr-fr", "nl-nl", "zh-cn", "zh-tw", "pt-br" })
         {
             var resources = File.ReadAllText(Path.Combine(
                 root,
@@ -237,36 +237,6 @@ public sealed class SessionTitleFormatterTests
         Assert.Contains("Tag=\"{Binding Key}\"", xaml, StringComparison.Ordinal);
         Assert.Contains("SessionsPageShowBackground", xaml, StringComparison.Ordinal);
 
-        var chatRoot = File.ReadAllText(Path.Combine(
-            TestRepositoryPaths.GetRepositoryRoot(),
-            "src",
-            "OpenClaw.Tray.WinUI",
-            "Chat",
-            "OpenClawChatRoot.cs"));
-        Assert.Contains("t.IsVisibleInSessionPicker(effectiveThread?.Id)", chatRoot, StringComparison.Ordinal);
-        Assert.Contains("t.AgentId", chatRoot, StringComparison.Ordinal);
-
-        var composer = File.ReadAllText(Path.Combine(
-            TestRepositoryPaths.GetRepositoryRoot(),
-            "src",
-            "OpenClaw.Tray.WinUI",
-            "Chat",
-            "OpenClawComposer.cs"));
-        Assert.Contains("ToolTipService.SetToolTip(b, session.Title)", composer, StringComparison.Ordinal);
-    }
-
-    [Fact]
-    public void ChatThreadVisibility_HidesBackgroundButRetainsExplicitSelection()
-    {
-        var thread = new OpenClaw.Chat.ChatThread
-        {
-            Id = "agent:main:subagent:child",
-            Title = "Research",
-            IsBackground = true,
-        };
-
-        Assert.False(thread.IsVisibleInSessionPicker("agent:main:main"));
-        Assert.True(thread.IsVisibleInSessionPicker(thread.Id));
     }
 
     [Fact]

@@ -15,6 +15,11 @@
     <DefaultLanguage>en-US</DefaultLanguage>
     <Platforms>x64;ARM64</Platforms>
     <RuntimeIdentifiers>win-x64;win-arm64</RuntimeIdentifiers>
+    <!-- app.manifest declares PerMonitorV2 DPI awareness and must be embedded in every
+         flavor. Packaging does not supply DPI awareness: an MSIX built without this
+         ships a DPI-unaware executable that renders blurry on mixed-DPI displays, and
+         the Windows App Certification Kit reports it. -->
+    <ApplicationManifest>app.manifest</ApplicationManifest>
   </PropertyGroup>
 
   <!-- Dev build identity: allows side-by-side installation with Release.
@@ -30,6 +35,19 @@
     <AppIdentityMarker>release</AppIdentityMarker>
   </PropertyGroup>
 
+  <!-- Fixture launchers require this marker before starting an app with host-side effects suppressed. -->
+  <ItemGroup>
+    <RuntimeHostConfigurationOption Include="OpenClaw.GatewayFixtureIsolationVersion" Value="1" />
+  </ItemGroup>
+
+  <!-- Work around dotnet/runtime#129191 in production builds. Explicit DevBuild
+       builds retain debugger support for managed/native interop diagnostics. -->
+  <ItemGroup Condition="'$(Configuration)' == 'Release' and '$(DevBuild)' != 'true'">
+    <RuntimeHostConfigurationOption Include="System.Diagnostics.Debugger.IsSupported"
+                                    Value="false"
+                                    Trim="true" />
+  </ItemGroup>
+
   <!-- Map $(Platform) to $(RuntimeIdentifier) so self-contained WinUI F5/debug produces a launchable EXE. -->
   <PropertyGroup Condition="'$(RuntimeIdentifier)' == '' and '$(Platform)' == 'x64'">
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>
@@ -38,18 +56,27 @@
     <RuntimeIdentifier>win-arm64</RuntimeIdentifier>
   </PropertyGroup>
 
+  <Import Project="Migration.Build.props" />
+
   <!-- Unpackaged (default): traditional EXE distribution via Inno Setup -->
   <PropertyGroup Condition="'$(PackageMsix)' != 'true'">
     <WindowsPackageType>None</WindowsPackageType>
     <WindowsAppSDKSelfContained>true</WindowsAppSDKSelfContained>
-    <ApplicationManifest>app.manifest</ApplicationManifest>
   </PropertyGroup>
 
   <!-- MSIX packaged: enables camera/mic consent prompts, package identity -->
   <PropertyGroup Condition="'$(PackageMsix)' == 'true'">
     <WindowsPackageType>MSIX</WindowsPackageType>
     <WindowsAppSDKSelfContained>true</WindowsAppSDKSelfContained>
-    <AppxPackageSigningEnabled>false</AppxPackageSigningEnabled>
+    <OpenClawDevMsixPublisher>CN=OpenClaw Local Development</OpenClawDevMsixPublisher>
+    <OpenClawDevMsixCertificateDirectory>$(LOCALAPPDATA)\OpenClawDevelopment\MSIX</OpenClawDevMsixCertificateDirectory>
+    <OpenClawDevMsixThumbprintFile>$(OpenClawDevMsixCertificateDirectory)\dev-msix-thumbprint.txt</OpenClawDevMsixThumbprintFile>
+    <OpenClawDevMsixCertificateThumbprint Condition="'$(DevBuild)' == 'true' and Exists('$(OpenClawDevMsixThumbprintFile)')">$([System.IO.File]::ReadAllText('$(OpenClawDevMsixThumbprintFile)').Trim())</OpenClawDevMsixCertificateThumbprint>
+    <!-- Local DevBuild packages use a non-exportable self-signed certificate.
+         Production Store submissions leave signing to Partner Center. -->
+    <AppxPackageSigningEnabled Condition="'$(DevBuild)' == 'true' and '$(OpenClawDevMsixCertificateThumbprint)' != ''">true</AppxPackageSigningEnabled>
+    <AppxPackageSigningEnabled Condition="'$(AppxPackageSigningEnabled)' == ''">false</AppxPackageSigningEnabled>
+    <PackageCertificateThumbprint Condition="'$(DevBuild)' == 'true'">$(OpenClawDevMsixCertificateThumbprint)</PackageCertificateThumbprint>
     <GenerateAppxPackageOnBuild>true</GenerateAppxPackageOnBuild>
     <AppxBundle>Never</AppxBundle>
     <UapAppxPackageBuildMode>SideloadOnly</UapAppxPackageBuildMode>
@@ -72,27 +99,32 @@
 
   <ItemGroup>
     <PackageReference Include="Microsoft.Extensions.DependencyInjection" Version="10.0.0" />
-    <PackageReference Include="Microsoft.UI.Reactor" Version="0.1.0-preview.12" />
+    <!-- Keep both aligned. Preview.16 includes the ItemsView recycled-anchor workaround
+         from microsoft/microsoft-ui-reactor#1214 and the upstream Markdown list layout. -->
+    <PackageReference Include="Microsoft.UI.Reactor" Version="0.1.0-preview.16" />
+    <PackageReference Include="Microsoft.UI.Reactor.Advanced" Version="0.1.0-preview.16" />
     <PackageReference Include="Microsoft.WindowsAppSDK" Version="$(MicrosoftWindowsAppSDKVersion)" />
     <PackageReference Include="Microsoft.Windows.SDK.BuildTools" Version="$(MicrosoftWindowsSdkBuildToolsVersion)" />
     <PackageReference Include="OpenTelemetry" Version="1.16.0" />
     <PackageReference Include="OpenTelemetry.Exporter.OpenTelemetryProtocol" Version="1.16.0" />
-    <PackageReference Include="WinUIEx" Version="2.9.0" />
+    <PackageReference Include="WinUIEx" Version="2.9.3" />
     <PackageReference Include="Microsoft.Toolkit.Uwp.Notifications" Version="7.1.3" />
     <PackageReference Include="CommunityToolkit.WinUI.Controls.SettingsControls" Version="8.3.260402-preview2" />
     <PackageReference Include="CommunityToolkit.WinUI.Controls.Sizers" Version="8.3.260402-preview2" />
     <PackageReference Include="System.Diagnostics.PerformanceCounter" Version="10.0.0" />
-    <PackageReference Include="System.Drawing.Common" Version="10.0.9" />
+    <PackageReference Include="System.Drawing.Common" Version="10.0.12" />
     <PackageReference Include="System.Security.Cryptography.ProtectedData" Version="10.0.0" />
     <PackageReference Include="Updatum" Version="1.3.4" />
     <PackageReference Include="NAudio.Wasapi" Version="2.3.0" />
     <PackageReference Include="org.k2fsa.sherpa.onnx" Version="1.13.0" />
+    <PackageReference Include="Larroy.Kokoro" Version="0.1.0" />
     <PackageReference Include="Zeroconf" Version="3.6.11" />
     <PackageReference Include="ZXing.Net" Version="0.16.10" />
   </ItemGroup>
 
   <ItemGroup>
     <Content Include="Assets\**\*" CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="THIRD_PARTY_NOTICES.md" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
     <None Include="..\OpenClaw.SetupEngine\default-config.json"
              Link="default-config.json"
              CopyToOutputDirectory="PreserveNewest" />
@@ -101,16 +133,6 @@
   <PropertyGroup>
     <OpenClawRepoRoot>$([System.IO.Path]::GetFullPath('$(MSBuildThisFileDirectory)..\..\'))</OpenClawRepoRoot>
     <OpenClawSetupDefaultConfig>$(OpenClawRepoRoot)src\OpenClaw.SetupEngine\default-config.json</OpenClawSetupDefaultConfig>
-    <!-- RID-derived arch for tools/mxc/<arch>/wxc-exec.exe. Falls back to x64
-         when no RID is present (e.g. unpackaged debug builds). -->
-    <MxcArch Condition="'$(MxcArch)' == '' And '$(RuntimeIdentifier)' == 'win-arm64'">arm64</MxcArch>
-    <MxcArch Condition="'$(MxcArch)' == '' And '$(RuntimeIdentifier)' == 'win-x64'">x64</MxcArch>
-    <MxcArch Condition="'$(MxcArch)' == '' And '$(PlatformTarget)' == 'ARM64'">arm64</MxcArch>
-    <MxcArch Condition="'$(MxcArch)' == '' And '$(RuntimeIdentifier)' == ''">x64</MxcArch>
-    <MxcSdkBinDir>$(OpenClawRepoRoot)node_modules\@microsoft\mxc-sdk\bin\$(MxcArch)\</MxcSdkBinDir>
-    <MxcSdkExpectedVersion>0.7.0</MxcSdkExpectedVersion>
-    <MxcSdkPackageJson>$(OpenClawRepoRoot)node_modules\@microsoft\mxc-sdk\package.json</MxcSdkPackageJson>
-    <MxcSdkRestoreStamp>$(OpenClawRepoRoot)node_modules\.openclaw-mxc-sdk-$(MxcSdkExpectedVersion).stamp</MxcSdkRestoreStamp>
   </PropertyGroup>
 
   <!-- Generate the versioned/channel-specific manifest under obj/. Never rewrite the
@@ -123,13 +145,19 @@
       <FourPartVersion ParameterType="System.String" Required="true" />
       <DevBuild ParameterType="System.String" />
       <IdentityName ParameterType="System.String" Required="true" />
+      <Publisher ParameterType="System.String" Required="true" />
       <DisplayName ParameterType="System.String" Required="true" />
       <ProtocolName ParameterType="System.String" Required="true" />
+      <ToastActivatorClsid ParameterType="System.String" Required="true" />
     </ParameterGroup>
     <Task>
       <Code Type="Fragment" Language="cs">
         <![CDATA[
-        if (!System.Text.RegularExpressions.Regex.IsMatch(FourPartVersion, @"^\d+\.\d+\.\d+\.\d+$")) {
+        System.Version packageVersion;
+        if (!System.Text.RegularExpressions.Regex.IsMatch(FourPartVersion, @"^[1-9]\d*\.(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$") ||
+            !System.Version.TryParse(FourPartVersion, out packageVersion) ||
+            packageVersion.Major > 65535 || packageVersion.Minor > 65535 ||
+            packageVersion.Build > 65535 || packageVersion.Revision > 65535) {
             Log.LogError("GenerateOpenClawAppxManifest: '" + FourPartVersion + "' is not a valid four-part MSIX version.");
             return false;
         }
@@ -153,6 +181,15 @@
                 return false;
             }
             text = nameRegex.Replace(text, "${1}" + IdentityName + "$2", 1);
+
+            var publisherRegex = new System.Text.RegularExpressions.Regex(
+                "(<Identity\\b[^>]*?\\bPublisher\\s*=\\s*[\"'])[^\"']+([\"'])",
+                System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+            if (!publisherRegex.IsMatch(text)) {
+                Log.LogError("GenerateOpenClawAppxManifest: Identity/@Publisher missing from " + SourceManifestPath);
+                return false;
+            }
+            text = publisherRegex.Replace(text, "${1}" + Publisher + "$2", 1);
 
             var propsDisplayRegex = new System.Text.RegularExpressions.Regex(
             "(<Properties>[\\s\\S]*?<DisplayName>)[^<]+(</DisplayName>)",
@@ -180,6 +217,31 @@
                 return false;
             }
             text = protocolRegex.Replace(text, "${1}" + ProtocolName + "$2", 1);
+
+            // Windows Startup Apps and Task Manager surface this string. Without the
+            // rewrite a side-by-side Dev install is indistinguishable from production,
+            // so the user can disable the wrong startup entry.
+            var startupTaskDisplayRegex = new System.Text.RegularExpressions.Regex(
+                "(<desktop:StartupTask\\b[^>]*?\\bDisplayName\\s*=\\s*[\"'])[^\"']+([\"'])",
+                System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+            if (!startupTaskDisplayRegex.IsMatch(text)) {
+                Log.LogError("GenerateOpenClawAppxManifest: StartupTask/@DisplayName missing from " + SourceManifestPath);
+                return false;
+            }
+            text = startupTaskDisplayRegex.Replace(text, "${1}" + DisplayName + "$2", 1);
+
+            var toastClsidRegex = new System.Text.RegularExpressions.Regex(
+                "(<desktop:ToastNotificationActivation\\b[^>]*?\\bToastActivatorCLSID\\s*=\\s*[\"'])[^\"']+([\"'])",
+                System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+            var comClassRegex = new System.Text.RegularExpressions.Regex(
+                "(<com:Class\\b[^>]*?\\bId\\s*=\\s*[\"'])[^\"']+([\"'])",
+                System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+            if (!toastClsidRegex.IsMatch(text) || !comClassRegex.IsMatch(text)) {
+                Log.LogError("GenerateOpenClawAppxManifest: toast activation CLSID declarations missing from " + SourceManifestPath);
+                return false;
+            }
+            text = toastClsidRegex.Replace(text, "${1}" + ToastActivatorClsid + "$2", 1);
+            text = comClassRegex.Replace(text, "${1}" + ToastActivatorClsid + "$2", 1);
         }
 
         System.IO.Directory.CreateDirectory(System.IO.Path.GetDirectoryName(OutputManifestPath));
@@ -193,25 +255,37 @@
 
   <Target Name="PrepareOpenClawAppxManifest"
           BeforeTargets="_ValidatePresenceOfAppxManifestItems;_CalculateInputsForGenerateCurrentProjectAppxManifest"
+          DependsOnTargets="GetVersion"
           Condition="'$(WindowsPackageType)' == 'MSIX'">
     <Error Text="MSIX packaging requested but Version is empty. Pass /p:Version=X.Y[.Z]." Condition="'$(Version)' == ''" />
     <PropertyGroup>
       <_StrippedVersion>$([System.Text.RegularExpressions.Regex]::Replace('$(Version)', '[-+].*$', ''))</_StrippedVersion>
       <_VersionDotCount>$([System.Text.RegularExpressions.Regex]::Matches('$(_StrippedVersion)', '\.').Count)</_VersionDotCount>
-      <_AppxManifestVersion Condition="'$(_VersionDotCount)' == '3'">$(_StrippedVersion)</_AppxManifestVersion>
-      <_AppxManifestVersion Condition="'$(_VersionDotCount)' == '2'">$(_StrippedVersion).0</_AppxManifestVersion>
-      <_AppxManifestVersion Condition="'$(_VersionDotCount)' == '1'">$(_StrippedVersion).0.0</_AppxManifestVersion>
+      <_AppxBaseVersion Condition="'$(_VersionDotCount)' == '3'">$([System.Text.RegularExpressions.Regex]::Replace('$(_StrippedVersion)', '\.\d+$', ''))</_AppxBaseVersion>
+      <_AppxBaseVersion Condition="'$(_VersionDotCount)' == '2'">$(_StrippedVersion)</_AppxBaseVersion>
+      <_AppxBaseVersion Condition="'$(_VersionDotCount)' == '1'">$(_StrippedVersion).0</_AppxBaseVersion>
+      <!-- CI allocates the package base independently of the application's GitVersion. -->
+      <_AppxBaseVersion Condition="'$(MsixPackageBaseVersion)' != ''">$(MsixPackageBaseVersion)</_AppxBaseVersion>
+      <_AppxRevision Condition="'$(DevBuild)' == 'true' and '$(MsixRevision)' != ''">$(MsixRevision)</_AppxRevision>
+      <_AppxRevision Condition="'$(DevBuild)' == 'true' and '$(_AppxRevision)' == '' and '$(GitVersion_CommitsSinceVersionSource)' != ''">$(GitVersion_CommitsSinceVersionSource)</_AppxRevision>
+      <_AppxRevision Condition="'$(DevBuild)' == 'true' and '$(_AppxRevision)' == ''">1</_AppxRevision>
+      <_AppxRevision Condition="'$(DevBuild)' != 'true'">0</_AppxRevision>
+      <_AppxManifestVersion>$(_AppxBaseVersion).$(_AppxRevision)</_AppxManifestVersion>
       <_GeneratedAppxManifestPath>$(IntermediateOutputPath)openclaw.Package.appxmanifest</_GeneratedAppxManifestPath>
     </PropertyGroup>
-    <Error Text="Cannot derive four-part MSIX version from $(Version). Use X.Y or X.Y.Z with an optional suffix." Condition="'$(_AppxManifestVersion)' == ''" />
+    <Error Text="Cannot derive a three-part MSIX base version from $(Version). Use X.Y or X.Y.Z with an optional suffix." Condition="'$(_AppxBaseVersion)' == ''" />
+    <Error Text="MSIX revision '$(_AppxRevision)' must be an integer from 0 through 65535." Condition="!$([System.Text.RegularExpressions.Regex]::IsMatch('$(_AppxRevision)', '^\d+$'))" />
+    <Error Text="MSIX revision '$(_AppxRevision)' must be an integer from 0 through 65535." Condition="$([System.Text.RegularExpressions.Regex]::IsMatch('$(_AppxRevision)', '^\d+$')) and '$(_AppxRevision)' &gt; '65535'" />
     <GenerateOpenClawAppxManifest
       SourceManifestPath="$(MSBuildThisFileDirectory)Package.appxmanifest"
       OutputManifestPath="$(_GeneratedAppxManifestPath)"
       FourPartVersion="$(_AppxManifestVersion)"
       DevBuild="$(DevBuild)"
-      IdentityName="OpenClaw.Companion.Dev"
-      DisplayName="OpenClaw Companion (Dev)"
-      ProtocolName="openclaw-dev" />
+      IdentityName="OpenClawFoundation.OpenClaw.Dev"
+      Publisher="$(OpenClawDevMsixPublisher)"
+      DisplayName="OpenClaw (Dev)"
+      ProtocolName="openclaw-dev"
+      ToastActivatorClsid="C536D4AD-19BE-4F7A-B227-AB97629BF299" />
     <ItemGroup>
       <AppxManifest Remove="@(AppxManifest)" />
       <AppxManifest Include="$(_GeneratedAppxManifestPath)">
@@ -230,6 +304,18 @@
       Encoding="UTF-8" />
   </Target>
 
+  <!-- Old incremental output must not be copied back by Inno, MSIX or Updatum ZIPs. -->
+  <Target Name="RemoveLegacyMxcOutput" BeforeTargets="ComputeFilesToPublish;_ComputeAppxPackagePayload" AfterTargets="Build">
+    <Exec Command="&quot;$(SystemRoot)\System32\WindowsPowerShell\v1.0\powershell.exe&quot; -NoProfile -NonInteractive -ExecutionPolicy Bypass -File &quot;$(OpenClawRepoRoot)scripts\Remove-LegacyMxcPayload.ps1&quot; -PayloadPath &quot;$([System.IO.Path]::Combine('$(TargetDir)', '.'))&quot;" />
+    <Exec Condition="'$(PublishDir)' != ''" Command="&quot;$(SystemRoot)\System32\WindowsPowerShell\v1.0\powershell.exe&quot; -NoProfile -NonInteractive -ExecutionPolicy Bypass -File &quot;$(OpenClawRepoRoot)scripts\Remove-LegacyMxcPayload.ps1&quot; -PayloadPath &quot;$([System.IO.Path]::Combine('$(PublishDir)', '.'))&quot;" />
+    <ItemGroup>
+      <ResolvedFileToPublish Remove="**\tools\mxc\x64\wxc-exec.exe;**\tools\mxc\x64\wslcsdk.dll;**\tools\mxc\arm64\wxc-exec.exe;**\tools\mxc\arm64\wslcsdk.dll" />
+    </ItemGroup>
+  </Target>
+  <Target Name="RemoveLegacyMxcAfterPublish" AfterTargets="Publish">
+    <Exec Condition="'$(PublishDir)' != ''" Command="&quot;$(SystemRoot)\System32\WindowsPowerShell\v1.0\powershell.exe&quot; -NoProfile -NonInteractive -ExecutionPolicy Bypass -File &quot;$(OpenClawRepoRoot)scripts\Remove-LegacyMxcPayload.ps1&quot; -PayloadPath &quot;$([System.IO.Path]::Combine('$(PublishDir)', '.'))&quot;" />
+  </Target>
+
   <Target Name="WriteBuildAppIdentityMarker" AfterTargets="Build">
     <WriteLinesToFile
       File="$(TargetDir)app-identity.txt"
@@ -238,65 +324,22 @@
       Encoding="UTF-8" />
   </Target>
 
-  <!-- Fail fast on RIDs we have no wxc-exec binary for, so x86/non-Windows
-       builds don't silently fall back to x64 and ship a broken sandbox.
-       Suppress with -p:VerifyWxcExecShipped=false for SDK-less unit-test builds. -->
-  <Target Name="ValidateMxcArchMapping" BeforeTargets="Build;Publish" Condition="'$(MxcArch)' == '' And '$(VerifyWxcExecShipped)' != 'false' And '$(SkipMxcNodeBridgeRestore)' != 'true'">
-    <Error Text="Unsupported RuntimeIdentifier '$(RuntimeIdentifier)' for MXC sandbox. Only win-x64 and win-arm64 are supported. Override -p:MxcArch=x64 or -p:MxcArch=arm64 if you know what you are doing." />
-  </Target>
 
-  <Target Name="RestoreMxcNodeBridge"
-          BeforeTargets="Build;Publish;CopyWxcExecToOutput;CopyWxcExecToPublish"
-          Condition="'$(SkipMxcNodeBridgeRestore)' != 'true' And Exists('$(OpenClawRepoRoot)package-lock.json')"
-          Inputs="$(OpenClawRepoRoot)package-lock.json"
-          Outputs="$(MxcSdkRestoreStamp)">
-    <Message Importance="high" Text="Restoring @microsoft/mxc-sdk to extract wxc-exec.exe ($(MxcArch))" />
-    <Exec Command="npm ci --no-audit --no-fund" WorkingDirectory="$(OpenClawRepoRoot)" />
-    <Touch Files="$(MxcSdkRestoreStamp)" AlwaysCreate="true" />
-  </Target>
-
-  <Target Name="ValidateMxcSdkVersion"
-          BeforeTargets="CopyWxcExecToOutput;CopyWxcExecToPublish"
-          DependsOnTargets="RestoreMxcNodeBridge"
-          Condition="'$(SkipMxcNodeBridgeRestore)' != 'true' And Exists('$(OpenClawRepoRoot)package-lock.json')">
-    <Error Condition="!Exists('$(MxcSdkPackageJson)')" Text="@microsoft/mxc-sdk package.json missing at $(MxcSdkPackageJson). Run `npm ci` at $(OpenClawRepoRoot)." />
-    <Error Condition="Exists('$(MxcSdkPackageJson)') And !$([System.IO.File]::ReadAllText('$(MxcSdkPackageJson)').Contains('&quot;version&quot;: &quot;$(MxcSdkExpectedVersion)&quot;'))" Text="@microsoft/mxc-sdk version mismatch. Expected $(MxcSdkExpectedVersion) in $(MxcSdkPackageJson). Run `npm ci` at $(OpenClawRepoRoot)." />
-  </Target>
-
-  <!-- Copy ONLY wxc-exec.exe (and any sibling DLLs) for the active arch into
-       $(TargetDir)tools/mxc/<arch>/. No node_modules ships. The C# probe in
-       MxcAvailability.ResolveWxcExec looks here first. -->
-  <Target Name="CopyWxcExecToOutput" AfterTargets="Build">
+  <!-- llama-server is downloaded under LocalAppData and runs outside the MSIX
+       package graph. Keep a private copy of the publish-time VC runtime in the
+       package so SetupEngine can stage its three imported DLLs app-local. -->
+  <Target Name="AddLocalAiVCRuntimeToPublishItems"
+          BeforeTargets="ComputeFilesToPublish"
+          DependsOnTargets="ResolveOpenClawVCRuntimeFromVSInstall"
+          Condition="'$(PackageMsix)' == 'true'">
     <ItemGroup>
-      <_WxcExecFiles Include="$(MxcSdkBinDir)wxc-exec.exe" />
-      <_WxcExecFiles Include="$(MxcSdkBinDir)*.dll" />
+      <ResolvedFileToPublish Include="@(OpenClawVCRuntimeFiles)">
+        <RelativePath>tools\local-ai-vc-runtime\%(Filename)%(Extension)</RelativePath>
+        <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+      </ResolvedFileToPublish>
     </ItemGroup>
-    <Copy SourceFiles="@(_WxcExecFiles)" DestinationFiles="@(_WxcExecFiles->'$(TargetDir)tools\mxc\$(MxcArch)\%(Filename)%(Extension)')" SkipUnchangedFiles="true" Condition="'@(_WxcExecFiles)' != ''" />
   </Target>
 
-  <!-- Standalone publish copy. Deliberately not chained to Build so
-       dotnet publish with no-build still works. -->
-  <Target Name="CopyWxcExecToPublish" AfterTargets="Publish" Condition="'$(PublishDir)' != ''">
-    <ItemGroup>
-      <_WxcExecPublishFiles Include="$(MxcSdkBinDir)wxc-exec.exe" />
-      <_WxcExecPublishFiles Include="$(MxcSdkBinDir)*.dll" />
-    </ItemGroup>
-    <Copy SourceFiles="@(_WxcExecPublishFiles)" DestinationFiles="@(_WxcExecPublishFiles->'$(PublishDir)tools\mxc\$(MxcArch)\%(Filename)%(Extension)')" SkipUnchangedFiles="true" Condition="'@(_WxcExecPublishFiles)' != ''" />
-  </Target>
-
-  <!-- Fail the build if wxc-exec.exe didn't land in the expected output path.
-       Catches RID/arch mismatches and silent npm ci skips. Gated on
-       VerifyWxcExecShipped (default true) so unit-test-only builds without
-       npm available can opt out. -->
-  <Target Name="ValidateWxcExecShipped" AfterTargets="CopyWxcExecToOutput" Condition="'$(VerifyWxcExecShipped)' != 'false' And '$(SkipMxcNodeBridgeRestore)' != 'true'">
-    <Error Condition="!Exists('$(TargetDir)tools\mxc\$(MxcArch)\wxc-exec.exe')" Text="wxc-exec.exe missing at $(TargetDir)tools\mxc\$(MxcArch)\. Check MxcArch=$(MxcArch), MxcSdkBinDir=$(MxcSdkBinDir). Run `npm ci` at $(OpenClawRepoRoot)." />
-  </Target>
-
-  <!-- Same validation, but after publish, catches publish-no-build runs that
-       silently ship without wxc-exec. -->
-  <Target Name="ValidateWxcExecPublished" AfterTargets="CopyWxcExecToPublish" Condition="'$(PublishDir)' != '' And '$(VerifyWxcExecShipped)' != 'false' And '$(SkipMxcNodeBridgeRestore)' != 'true'">
-    <Error Condition="!Exists('$(PublishDir)tools\mxc\$(MxcArch)\wxc-exec.exe')" Text="wxc-exec.exe missing at $(PublishDir)tools\mxc\$(MxcArch)\. Publish-time copy did not run; check MxcArch=$(MxcArch), MxcSdkBinDir=$(MxcSdkBinDir)." />
-  </Target>
 
   <!-- Copy WebView2Loader.dll to output root for unpackaged app (not needed for MSIX) -->
   <Target Name="CopyWebView2Loader" AfterTargets="Build" Condition="'$(PackageMsix)' != 'true'">
@@ -312,6 +355,27 @@
 
   <Target Name="CopySetupDefaultConfigToOutput" AfterTargets="Build">
     <Copy SourceFiles="$(OpenClawSetupDefaultConfig)" DestinationFiles="$(TargetDir)default-config.json" SkipUnchangedFiles="true" Condition="Exists('$(OpenClawSetupDefaultConfig)')" />
+  </Target>
+
+  <!--
+    PRI expansion adds library-qualified SetupEngine.UI assets to the consumer
+    copy list using transient files under the referenced project's bin folder.
+    On a clean build, some of those generated files can disappear before the
+    consumer Copy task opens them. Replace only those qualified setup entries
+    with the stable repository sources while preserving their runtime paths.
+  -->
+  <Target Name="UseSourceSetupAssetsForPriConsumerCopy"
+          AfterTargets="AddPriPayloadFilesToCopyToOutputDirectoryItems">
+    <ItemGroup>
+      <_AllChildProjectItemsWithTargetPath
+          Remove="@(_AllChildProjectItemsWithTargetPath)"
+          Condition="$([System.String]::Copy('%(_AllChildProjectItemsWithTargetPath.TargetPath)').StartsWith('OpenClaw.SetupEngine.UI\Assets\Setup\'))" />
+      <_SetupPriAssetSource Include="Assets\Setup\**\*" />
+      <_AllChildProjectItemsWithTargetPath Include="@(_SetupPriAssetSource)">
+        <TargetPath>OpenClaw.SetupEngine.UI\Assets\Setup\%(RecursiveDir)%(Filename)%(Extension)</TargetPath>
+        <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      </_AllChildProjectItemsWithTargetPath>
+    </ItemGroup>
   </Target>
 
   <!--
@@ -340,6 +404,11 @@
     </ItemGroup>
     <Copy SourceFiles="@(_SetupAssetPublishSource)"
           DestinationFiles="@(_SetupAssetPublishSource->'$(PublishDir)Assets\Setup\%(RecursiveDir)%(Filename)%(Extension)')"
+          SkipUnchangedFiles="true" />
+    <!-- WinUI adds library-qualified assets to build output, but not to the
+         .NET publish item list. Preserve the paths referenced by the setup PRI. -->
+    <Copy SourceFiles="@(_SetupAssetPublishSource)"
+          DestinationFiles="@(_SetupAssetPublishSource->'$(PublishDir)OpenClaw.SetupEngine.UI\Assets\Setup\%(RecursiveDir)%(Filename)%(Extension)')"
           SkipUnchangedFiles="true" />
   </Target>
 
