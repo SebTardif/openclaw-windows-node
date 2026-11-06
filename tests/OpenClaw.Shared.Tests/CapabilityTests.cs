@@ -200,6 +200,36 @@ public class SystemCapabilityTests
         Assert.Null(SystemCapability.ResolveExecutable("..\\cmd"));
         Assert.Null(SystemCapability.ResolveExecutable("../bin/sh"));
         Assert.Null(SystemCapability.ResolveExecutable("C:\\Windows\\cmd"));
+        Assert.Null(SystemCapability.ResolveExecutable("NUL"));
+        Assert.Null(SystemCapability.ResolveExecutable("CON"));
+        Assert.Null(SystemCapability.ResolveExecutable("COM1"));
+        Assert.Null(SystemCapability.ResolveExecutable("LPT1.exe"));
+    }
+
+    [Fact]
+    public void ResolveExecutable_RejectsDriveRelativeNameEvenWhenThatFileExists()
+    {
+        if (!OperatingSystem.IsWindows()) return;
+
+        var name = "openclaw-which-probe-" + Guid.NewGuid().ToString("N");
+        var created = Path.Combine(Directory.GetCurrentDirectory(), name + ".exe");
+        File.WriteAllBytes(created, [0x4D, 0x5A]);
+        var previousPath = Environment.GetEnvironmentVariable("PATH");
+        var decoy = Path.Combine(Path.GetTempPath(), "openclaw-which-empty-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(decoy);
+        try
+        {
+            Environment.SetEnvironmentVariable("PATH", decoy);
+            Assert.Null(SystemCapability.ResolveExecutable("C:" + name));
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("PATH", previousPath);
+            if (File.Exists(created))
+                File.Delete(created);
+            if (Directory.Exists(decoy))
+                Directory.Delete(decoy, recursive: true);
+        }
     }
 
     [Fact]

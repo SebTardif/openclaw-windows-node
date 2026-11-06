@@ -175,8 +175,12 @@ public class SystemCapability : NodeCapabilityBase
     /// </summary>
     internal static string? ResolveExecutable(string bin)
     {
-        // Reject anything that looks like a path
-        if (bin.Contains('/') || bin.Contains('\\'))
+        // Reject paths, drive-relative names such as C:tool, and reserved devices.
+        if (string.IsNullOrWhiteSpace(bin)
+            || bin.Contains('/')
+            || bin.Contains('\\')
+            || bin.Contains(':')
+            || IsWindowsReservedDeviceName(bin))
             return null;
         
         var extensions = new List<string>();
@@ -199,12 +203,59 @@ public class SystemCapability : NodeCapabilityBase
             foreach (var ext in extensions)
             {
                 var candidate = Path.Combine(dir, bin + ext);
-                if (File.Exists(candidate))
-                    return candidate;
+                if (!File.Exists(candidate))
+                    continue;
+
+                string fullCandidate;
+                string fullDir;
+                try
+                {
+                    fullCandidate = Path.GetFullPath(candidate);
+                    fullDir = Path.GetFullPath(dir);
+                }
+                catch (Exception ex) when (ex is ArgumentException or NotSupportedException or PathTooLongException)
+                {
+                    continue;
+                }
+
+                if (!IsUnderDirectory(fullCandidate, fullDir))
+                    continue;
+                if (IsWindowsReservedDeviceName(Path.GetFileName(fullCandidate)))
+                    continue;
+
+                return fullCandidate;
             }
         }
         
         return null;
+    }
+
+    private static bool IsWindowsReservedDeviceName(string name)
+    {
+        if (!OperatingSystem.IsWindows() || string.IsNullOrWhiteSpace(name))
+            return false;
+
+        var stem = Path.GetFileNameWithoutExtension(name);
+        if (stem.Equals("CON", StringComparison.OrdinalIgnoreCase)
+            || stem.Equals("PRN", StringComparison.OrdinalIgnoreCase)
+            || stem.Equals("AUX", StringComparison.OrdinalIgnoreCase)
+            || stem.Equals("NUL", StringComparison.OrdinalIgnoreCase))
+            return true;
+
+        if (stem.Length == 4
+            && (stem.StartsWith("COM", StringComparison.OrdinalIgnoreCase)
+                || stem.StartsWith("LPT", StringComparison.OrdinalIgnoreCase))
+            && stem[3] is >= '1' and <= '9')
+            return true;
+
+        return false;
+    }
+
+    private static bool IsUnderDirectory(string fullPath, string fullDirectory)
+    {
+        var prefix = fullDirectory.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
+            + Path.DirectorySeparatorChar;
+        return fullPath.StartsWith(prefix, StringComparison.OrdinalIgnoreCase);
     }
     
     private static string FormatExecCommand(string[] argv) => ShellQuoting.FormatExecCommand(argv);
