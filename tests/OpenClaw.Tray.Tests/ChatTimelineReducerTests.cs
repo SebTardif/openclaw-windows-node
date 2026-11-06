@@ -5,6 +5,32 @@ namespace OpenClaw.Tray.Tests;
 
 public class ChatTimelineReducerTests
 {
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void BackgroundFinal_PreservesActiveTurnAndCannotReconcileIntoItsAnswer(bool hasStream)
+    {
+        var state = ChatTimelineReducer.AddLocalUser(ChatTimelineState.Initial(), "New question", "nonce");
+        if (hasStream)
+            state = ChatTimelineReducer.Apply(state, new ChatMessageDeltaEvent("Shared opening"));
+        var updated = ChatTimelineReducer.Apply(state, new ChatBackgroundFinalEvent("Shared opening"));
+        Assert.Equal(state with { Entries = updated.Entries, NextId = updated.NextId }, updated);
+        var background = Assert.Single(updated.Entries, entry => entry.IsBackgroundFinal);
+        Assert.False(background.IsStreaming);
+        Assert.Equal("Shared opening", background.Text);
+        if (hasStream)
+        {
+            updated = ChatTimelineReducer.Apply(updated, new ChatMessageDeltaEvent(" continues"));
+            Assert.Contains(updated.Entries, entry => entry.Id == state.ActiveAssistantId &&
+                entry.Text == "Shared opening continues" && entry.IsStreaming);
+        }
+        updated = ChatTimelineReducer.Apply(updated,
+            new ChatMessageEvent("Shared opening finished", ReconcilePrevious: true));
+        Assert.Contains(updated.Entries, entry => !entry.IsBackgroundFinal && entry.Text == "Shared opening finished");
+        Assert.Contains(background, updated.Entries);
+        Assert.True(updated.TurnActive);
+    }
+
     [Fact]
     public void ChatPermissionDecision_ExistingNumericValuesRemainStable()
     {
@@ -1222,8 +1248,7 @@ public class ChatTimelineReducerTests
     // ── Failed tool followed by final assistant response (regression coverage for issue #672) ──
     // When a tool call fails and the assistant then sends a final reply, both
     // entries should be present in state, the turn should end cleanly, and the
-    // ToolCall entry should precede the Assistant entry in the insertion order
-    // (the rendering layer in OpenClawChatTimeline reorders them for display).
+    // ToolCall entry should precede the Assistant entry in insertion and display order.
 
     [Fact]
     public void ToolError_ThenFinalAssistant_ProducesToolAndAssistantEntries()
@@ -1270,10 +1295,8 @@ public class ChatTimelineReducerTests
     [Fact]
     public void ToolError_ThenFinalAssistant_ToolEntryPrecedesAssistantInState()
     {
-        // Pins the state insertion order: ToolCall is added first, then Assistant.
-        // The rendering layer (OpenClawChatTimeline) reorders ToolCall entries to
-        // appear AFTER non-ToolCall entries within a turn, so the failed tool event
-        // ends up at the visual bottom instead of the assistant reply — see #672.
+        // Pins the state insertion order that the Reactor timeline now presents directly:
+        // ToolCall is added first, then Assistant.
         var state = ChatTimelineState.Initial();
         state = ChatTimelineReducer.Apply(state, new ChatToolStartEvent("run nodes", "openclaw", ToolCallId: "tc1"));
         state = ChatTimelineReducer.Apply(state, new ChatToolErrorEvent("failed", ToolCallId: "tc1"));

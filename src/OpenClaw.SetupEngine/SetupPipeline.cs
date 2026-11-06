@@ -12,6 +12,8 @@ public abstract class SetupStep
     public abstract Task<StepResult> ExecuteAsync(SetupContext ctx, CancellationToken ct);
 
     public virtual Task RollbackAsync(SetupContext ctx, CancellationToken ct) => Task.CompletedTask;
+    public virtual TimeSpan GetRollbackTimeout(SetupContext ctx) =>
+        TimeSpan.FromSeconds(Math.Max(1, ctx.Config.RollbackTimeoutSeconds));
     public virtual bool CanSkip(SetupContext ctx) => false;
     public virtual bool CanRetry => true;
     public virtual RetryPolicy Retry => RetryPolicy.Default;
@@ -25,8 +27,11 @@ public sealed record PipelineResult(
     PipelineOutcome Outcome,
     string? FailedStepId = null,
     string? Message = null,
-    GatewayCompatibilityFailureKind? CompatibilityFailure = null)
+    GatewayCompatibilityFailureKind? CompatibilityFailure = null,
+    LocalAiFailureDetail? Detail = null)
 {
+    public bool RequiresRestart { get; init; }
+
     public int ExitCode => Outcome switch
     {
         PipelineOutcome.Success => 0,
@@ -36,16 +41,83 @@ public sealed record PipelineResult(
     };
 }
 
+public sealed class SetupPipelineSettlementException : AggregateException
+{
+    public PipelineResult? OriginalResult { get; }
+    public Exception? RunFailure { get; }
+    public Exception SettlementFailure { get; }
+
+    public SetupPipelineSettlementException(PipelineResult? result, Exception? runFailure, Exception settlementFailure)
+        : base(
+            $"Setup result: {(runFailure is null ? $"{result?.Outcome}; step '{result?.FailedStepId}'; {result?.Message}" : runFailure.Message)}. " +
+            $"Gateway settlement failed: {settlementFailure.Message}",
+            runFailure is null ? [settlementFailure] : [runFailure, settlementFailure])
+    {
+        OriginalResult = result;
+        RunFailure = runFailure;
+        SettlementFailure = settlementFailure;
+    }
+}
+
 // ─── Pipeline Events ───
 
 public sealed record StepProgressEvent(string StepId, string DisplayName, StepOutcome? Outcome, TimeSpan? Elapsed);
 
 public static class SetupStepFactory
 {
+    /// <summary>
+    /// Opt-in inference proof for diagnostics and release validation after the managed
+    /// router is installed. These steps load the model and must not gate installation.
+    /// </summary>
+    public static List<SetupStep> BuildLocalAiInferenceProofSteps() =>
+    [
+        new CaptureLocalAiGpuBaselineStep(),
+        new VerifyLocalAiInferenceStep(),
+        new VerifyLocalAiGpuLoadStep(),
+    ];
+
     public static List<SetupStep> BuildWizardOnlySteps() =>
     [
         new RunGatewayWizardStep(),
         new WindowsNodeBootstrapContextStep(),
+    ];
+
+    /// <summary>
+    /// Artifact-only native acquisition. The caller retains exact Gateway admission
+    /// and continues through a separately authorized Use action afterward. This never starts a listener,
+    /// loads a model, publishes a provider, or creates/restarts a Gateway.
+    /// </summary>
+    public static List<SetupStep> BuildNativeLocalAiAcquisitionSteps() =>
+    [
+        new PreflightOsStep(),
+        new PreflightLocalAiHardwareStep(),
+        new ReconcileLocalAiInstallationStep(),
+        new AcquireLocalAiRuntimeStep(),
+        new AcquireLocalAiModelStep(),
+        new PersistLocalAiManifestStep(),
+    ];
+
+    public static List<SetupStep> BuildLocalAiRecoverySteps() =>
+    [
+        new PreflightOsStep(),
+        new ValidateLocalAiRecoveryGatewayStep(),
+        new PreserveLocalAiRecoveryGatewayStep(),
+        new PreflightLocalAiHardwareStep(),
+        new PreflightWslStep(),
+        new EnsureWslPlatformStep(reusePreflightResult: true),
+        new ReconcileLocalAiInstallationStep(),
+        new AcquireLocalAiRuntimeStep(),
+        new AcquireLocalAiModelStep(),
+        new PersistLocalAiManifestStep(),
+        new StartLocalAiRuntimeStep(),
+        new CaptureLocalAiGpuBaselineStep(),
+        new VerifyLocalAiInferenceStep(),
+        new VerifyLocalAiGpuLoadStep(),
+        new ValidateLocalAiRecoveryGatewayStep(finalCheck: true),
+        new ConfigureLocalAiWslNetworkingStep(),
+        new VerifyLocalAiWslStep(),
+        new ConfigureLocalAiGatewayStep(),
+        new RestartGatewayStep(),
     ];
 
     public static List<SetupStep> BuildDefaultSteps()
@@ -54,8 +126,16 @@ public static class SetupStepFactory
         [
             new ValidateDistroInstallPathStep(),
             new PreflightOsStep(),
+            new PreflightLocalAiHardwareStep(),
             new PreflightWslStep(),
             new PreflightWindowsTailscaleStep(),
+            new EnsureWslPlatformStep(reusePreflightResult: true),
+            new ReconcileLocalAiInstallationStep(),
+            new AcquireLocalAiRuntimeStep(),
+            new AcquireLocalAiModelStep(),
+            new PersistLocalAiManifestStep(),
+            new StartLocalAiRuntimeStep(),
+            new ConfigureLocalAiWslNetworkingStep(),
             new CleanupStaleDistroStep(),
             new CleanupStaleGatewayStep(),
             new PreflightPortStep(),
@@ -63,9 +143,11 @@ public static class SetupStepFactory
             new ConfigureWslInstanceStep(),
             new ValidateWslLockdownStep(),
             new InstallCliStep(),
+            new VerifyLocalAiWslStep(),
             new InstallTailscaleStep(),
             new AuthorizeTailscaleStep(),
             new ConfigureGatewayStep(),
+            new ConfigureLocalAiGatewayStep(),
             new InstallGatewayServiceStep(),
             new StartGatewayStep(),
             new FinalizeTailscaleServeStep(),
@@ -84,16 +166,40 @@ public static class SetupStepFactory
 
 public sealed class SetupPipeline
 {
+    public static async Task<PipelineResult> RunWithSettlementAsync(
+        Func<Task<PipelineResult>> run, Func<PipelineResult?, Task> settle)
+    {
+        PipelineResult? result = null;
+        Exception? failure = null;
+        try { result = await run(); }
+        catch (Exception error) { failure = error; }
+        try { await settle(result); }
+        catch (Exception error) { throw new SetupPipelineSettlementException(result, failure, error); }
+        if (failure is not null)
+            System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(failure).Throw();
+        return result!;
+    }
+
     private readonly List<SetupStep> _steps;
     private readonly List<SetupStep> _completedSteps = new();
     private readonly bool? _rollbackOnFailureOverride;
+    private readonly Func<SetupContext, string, StepResult, Task>? _beforeFailureRollback;
 
     public event EventHandler<StepProgressEvent>? StepProgress;
 
     public SetupPipeline(IEnumerable<SetupStep> steps, bool? rollbackOnFailureOverride = null)
+        : this(steps, rollbackOnFailureOverride, null)
+    {
+    }
+
+    internal SetupPipeline(
+        IEnumerable<SetupStep> steps,
+        bool? rollbackOnFailureOverride,
+        Func<SetupContext, string, StepResult, Task>? beforeFailureRollback)
     {
         _steps = steps.ToList();
         _rollbackOnFailureOverride = rollbackOnFailureOverride;
+        _beforeFailureRollback = beforeFailureRollback;
     }
 
     internal static bool ShouldRunTrayArtifactCleanup(PipelineResult result, bool dryRun)
@@ -116,6 +222,7 @@ public sealed class SetupPipeline
         {
             if (ct.IsCancellationRequested)
             {
+                await RollbackCancelledSetupAsync(null, ctx);
                 ctx.Journal.RecordPipelineEvent("pipeline_cancelled");
                 return new PipelineResult(PipelineOutcome.Cancelled);
             }
@@ -150,6 +257,7 @@ public sealed class SetupPipeline
                 }
                 catch (OperationCanceledException) when (ct.IsCancellationRequested)
                 {
+                    await RollbackCancelledSetupAsync(step, ctx);
                     ctx.Journal.RecordPipelineEvent("pipeline_cancelled", $"during step {step.Id}");
                     return new PipelineResult(PipelineOutcome.Cancelled);
                 }
@@ -162,6 +270,7 @@ public sealed class SetupPipeline
                 }
                 catch (OperationCanceledException) when (ct.IsCancellationRequested)
                 {
+                    await RollbackCancelledSetupAsync(step, ctx);
                     ctx.Journal.RecordPipelineEvent("pipeline_cancelled", $"during step {step.Id}");
                     return new PipelineResult(PipelineOutcome.Cancelled);
                 }
@@ -193,6 +302,19 @@ public sealed class SetupPipeline
             else
                 ctx.Logger.Warn($"SetupPipeline: Step '{step.Id}' failed: {result.Message}");
 
+            if (_beforeFailureRollback is not null)
+            {
+                try
+                {
+                    await _beforeFailureRollback(ctx, step.Id, result);
+                }
+                catch (Exception ex)
+                {
+                    // A diagnostic must not replace the original failure or prevent owned-resource rollback.
+                    ctx.Logger.Warn($"Pre-rollback diagnostic failed ({ex.GetType().Name}); continuing rollback");
+                }
+            }
+
             if (_rollbackOnFailureOverride ?? ctx.Config.RollbackOnFailure)
             {
                 await RollbackFailedStep(step, ctx);
@@ -204,7 +326,11 @@ public sealed class SetupPipeline
                 PipelineOutcome.Failed,
                 step.Id,
                 result.Message,
-                (result.Error as GatewayCompatibilityException)?.Kind);
+                (result.Error as GatewayCompatibilityException)?.Kind,
+                result.Detail)
+            {
+                RequiresRestart = result.RequiresRestart,
+            };
         }
 
         pipelineSw.Stop();
@@ -214,6 +340,9 @@ public sealed class SetupPipeline
     }
 
     private async Task RollbackCompletedSteps(SetupContext ctx)
+        => await RollbackCompletedSteps(ctx, ctx.CancellationToken);
+
+    private async Task RollbackCompletedSteps(SetupContext ctx, CancellationToken rollbackCancellationToken)
     {
         ctx.Logger.Warn($"Rolling back {_completedSteps.Count} completed steps");
         for (int i = _completedSteps.Count - 1; i >= 0; i--)
@@ -222,10 +351,10 @@ public sealed class SetupPipeline
             try
             {
                 ctx.Logger.Info($"Rolling back: {step.DisplayName}");
-                await RunRollbackWithTimeout(step, ctx, ctx.CancellationToken);
+                await RunRollbackWithTimeout(step, ctx, rollbackCancellationToken);
                 ctx.Journal.RecordRollback(step.Id, success: true);
             }
-            catch (OperationCanceledException) when (ctx.CancellationToken.IsCancellationRequested)
+            catch (OperationCanceledException) when (rollbackCancellationToken.IsCancellationRequested)
             {
                 throw;
             }
@@ -238,15 +367,21 @@ public sealed class SetupPipeline
     }
 
     private static async Task RollbackFailedStep(SetupStep step, SetupContext ctx)
+        => await RollbackFailedStep(step, ctx, ctx.CancellationToken);
+
+    private static async Task RollbackFailedStep(
+        SetupStep step,
+        SetupContext ctx,
+        CancellationToken rollbackCancellationToken)
     {
         ctx.Logger.Warn($"Attempting cleanup for failed step: {step.DisplayName}");
 
         try
         {
-            await RunRollbackWithTimeout(step, ctx, ctx.CancellationToken);
+            await RunRollbackWithTimeout(step, ctx, rollbackCancellationToken);
             ctx.Journal.RecordRollback(step.Id, success: true);
         }
-        catch (OperationCanceledException) when (ctx.CancellationToken.IsCancellationRequested)
+        catch (OperationCanceledException) when (rollbackCancellationToken.IsCancellationRequested)
         {
             throw;
         }
@@ -255,6 +390,18 @@ public sealed class SetupPipeline
             ctx.Logger.Error($"Cleanup failed for failed step {step.Id}: {ex.Message}");
             ctx.Journal.RecordRollback(step.Id, success: false);
         }
+    }
+
+    private async Task RollbackCancelledSetupAsync(SetupStep? interruptedStep, SetupContext ctx)
+    {
+        if (!(_rollbackOnFailureOverride ?? ctx.Config.RollbackOnFailure))
+            return;
+
+        // The setup token is already cancelled, so rollback needs its own bounded
+        // lifetime. Each step still receives the configured rollback timeout.
+        if (interruptedStep is not null)
+            await RollbackFailedStep(interruptedStep, ctx, CancellationToken.None);
+        await RollbackCompletedSteps(ctx, CancellationToken.None);
     }
 
     /// <summary>
@@ -285,6 +432,8 @@ public sealed class SetupPipeline
             ctx.Logger.Error("Uninstall requires --confirm-destructive flag");
             return new PipelineResult(PipelineOutcome.Failed, Message: "Safety gate: --confirm-destructive required for live uninstall");
         }
+
+        ctx.IsUninstalling = true;
 
         ctx.Journal.RecordPipelineEvent("uninstall_started", $"steps={_steps.Count}, dry_run={ctx.Config.DryRun}");
         ctx.Logger.Info($"Uninstall starting — {_steps.Count} steps in reverse order (dry_run={ctx.Config.DryRun})");
@@ -354,8 +503,9 @@ public sealed class SetupPipeline
 
     private static async Task RunRollbackWithTimeout(SetupStep step, SetupContext ctx, CancellationToken ct)
     {
+        TimeSpan timeout = step.GetRollbackTimeout(ctx);
         using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-        cts.CancelAfter(TimeSpan.FromSeconds(Math.Max(1, ctx.Config.RollbackTimeoutSeconds)));
+        cts.CancelAfter(timeout);
 
         try
         {
@@ -363,7 +513,8 @@ public sealed class SetupPipeline
         }
         catch (OperationCanceledException) when (!ct.IsCancellationRequested)
         {
-            throw new TimeoutException($"Rollback for step '{step.Id}' exceeded {ctx.Config.RollbackTimeoutSeconds}s.");
+            throw new TimeoutException(
+                $"Rollback for step '{step.Id}' exceeded {timeout.TotalSeconds:F0}s.");
         }
     }
 }
