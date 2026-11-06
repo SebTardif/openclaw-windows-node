@@ -1,10 +1,13 @@
 using System;
 using System.Threading;
+using System.IO;
+using System.Reflection;
 using Microsoft.UI;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Markup;
 using Microsoft.UI.Xaml.Media;
+using Microsoft.Windows.ApplicationModel.Resources;
 
 namespace OpenClaw.Tray.UITests;
 
@@ -22,8 +25,41 @@ namespace OpenClaw.Tray.UITests;
 /// visual tree even before the merge happens — assertions on text content,
 /// hierarchy, and click handlers don't depend on theme styles.
 /// </summary>
-internal sealed class TestApp : Application
+internal sealed class TestApp : Application, IXamlMetadataProvider
 {
+    // The generated product provider includes native WinUI templates and setup controls.
+    private readonly OpenClawTray.OpenClaw_Tray_WinUI_XamlTypeInfo.XamlMetaDataProvider _metadata = new();
+
+    public IXamlType GetXamlType(Type type) => _metadata.GetXamlType(type);
+
+    public IXamlType GetXamlType(string fullName) => _metadata.GetXamlType(fullName);
+
+    public XmlnsDefinition[] GetXmlnsDefinitions() => _metadata.GetXmlnsDefinitions();
+
+    public TestApp()
+    {
+        var requestedTheme = Environment.GetEnvironmentVariable("OPENCLAW_UI_TEST_APP_THEME");
+        if (!string.IsNullOrWhiteSpace(requestedTheme))
+        {
+            if (!Enum.TryParse<ApplicationTheme>(requestedTheme, ignoreCase: true, out var theme) ||
+                !Enum.IsDefined(theme))
+                throw new InvalidOperationException("OPENCLAW_UI_TEST_APP_THEME must be Light or Dark.");
+            RequestedTheme = theme;
+        }
+
+        // Resolve compiled product strings, not the testhost executable's empty PRI.
+        var productResources = new ResourceManager(
+            Path.Combine(AppContext.BaseDirectory, "OpenClaw.Tray.WinUI.pri"));
+        ResourceManagerRequested += (_, args) => args.CustomResourceManager = productResources;
+        var localization = typeof(OpenClaw.SetupEngine.UI.SetupWindow).Assembly.GetType(
+            "OpenClaw.SetupEngine.UI.SetupLocalization", throwOnError: true)!;
+        var resourceCache = localization.GetField("s_resourceManager", BindingFlags.NonPublic | BindingFlags.Static)
+            ?? throw new MissingFieldException(localization.FullName, "s_resourceManager");
+        resourceCache.SetValue(null, productResources);
+        UnhandledException += (_, args) =>
+            Console.Error.WriteLine($"WinUI test host unhandled exception: {args.Exception}");
+    }
+
     private static readonly (string Key, Windows.UI.Color Color)[] FluentBrushFallbacks =
     [
         ("SolidBackgroundFillColorBaseBrush", Colors.White),
@@ -75,6 +111,7 @@ internal sealed class TestApp : Application
             "<Style xmlns='http://schemas.microsoft.com/winfx/2006/xaml/presentation' " +
             "TargetType='Button'>" +
             "<Setter Property='Foreground' Value='White' />" +
+            "<Setter Property='Background' Value='{ThemeResource AccentFillColorDefaultBrush}' />" +
             "<Setter Property='CornerRadius' Value='4' />" +
             "</Style>");
         EnsureFluentBrushFallbacks(resources);
@@ -87,7 +124,6 @@ internal sealed class TestApp : Application
             TryAddBrushResource(resources, key, color);
         }
 
-        AddChatTimelineStyles(resources);
     }
 
     private bool TryGetResources(out ResourceDictionary resources)
@@ -114,7 +150,8 @@ internal sealed class TestApp : Application
     {
         try
         {
-            resources[key] = XamlReader.Load(xaml);
+            if (!resources.ContainsKey(key))
+                resources[key] = XamlReader.Load(xaml);
         }
         // slopwatch-ignore: SW003 Test cleanup or fixture teardown is best-effort and must not hide the test outcome.
         catch
@@ -127,7 +164,8 @@ internal sealed class TestApp : Application
     {
         try
         {
-            resources[key] = new SolidColorBrush(color);
+            if (!resources.ContainsKey(key))
+                resources[key] = new SolidColorBrush(color);
         }
         // slopwatch-ignore: SW003 Test cleanup or fixture teardown is best-effort and must not hide the test outcome.
         catch
@@ -136,38 +174,4 @@ internal sealed class TestApp : Application
         }
     }
 
-    private static void AddChatTimelineStyles(ResourceDictionary resources)
-    {
-        if (!resources.ContainsKey("ChatUserBubbleSelectionStyle"))
-        {
-            resources["ChatUserBubbleSelectionStyle"] = new Style
-            {
-                TargetType = typeof(RichTextBlock),
-            };
-        }
-
-        AddChatBorderStyle(resources, "ChatToolCardBorderStyle");
-        AddChatBorderStyle(resources, "ChatCompactionCardStyle");
-    }
-
-    private static void AddChatBorderStyle(ResourceDictionary resources, string key)
-    {
-        if (resources.ContainsKey(key))
-            return;
-
-        var style = new Style
-        {
-            TargetType = typeof(Border),
-        };
-        style.Setters.Add(new Setter(
-            Border.BackgroundProperty,
-            resources["CardBackgroundFillColorDefaultBrush"]));
-        style.Setters.Add(new Setter(
-            Border.BorderBrushProperty,
-            resources["ControlStrokeColorDefaultBrush"]));
-        style.Setters.Add(new Setter(
-            Border.BorderThicknessProperty,
-            new Thickness(1)));
-        resources[key] = style;
-    }
 }
