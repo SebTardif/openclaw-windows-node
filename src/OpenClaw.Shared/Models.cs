@@ -299,6 +299,8 @@ public class SessionInfo
     public int? SpawnDepth { get; set; }
     public string? SessionId { get; set; }
     public string? ThinkingLevel { get; set; }
+    public ThinkingContext? ThinkingContext { get; set; }
+    public ThinkingContext? ThinkingDefaults { get; set; }
     public string? VerboseLevel { get; set; }
     public bool SystemSent { get; set; }
     public bool AbortedLastRun { get; set; }
@@ -307,6 +309,14 @@ public class SessionInfo
     /// older Gateway did not provide the field, so callers may use legacy status.
     /// </summary>
     public bool? HasActiveRun { get; set; }
+    public bool Pinned { get; set; }
+    public long? PinnedAt { get; set; }
+    public bool Unread { get; set; }
+    public long? MarkedUnreadAt { get; set; }
+    /// <summary>Gateway session creation time (Unix ms). Write-once upstream; compact/sparse
+    /// rows may omit it, so a missing value means "not projected", not "cleared".</summary>
+    public long? CreatedAt { get; set; }
+    public bool Archived { get; set; }
     public long InputTokens { get; set; }
     public long OutputTokens { get; set; }
     public long TotalTokens { get; set; }
@@ -1003,6 +1013,7 @@ public class NodeCapabilityHealthInfo
                 .ToList(),
             Permissions = new Dictionary<string, bool>(node.Permissions, StringComparer.OrdinalIgnoreCase),
             SafeApprovedCommands = CommandCenterCommandGroups.SafeCompanionCommands
+                .Concat(OllamaNodeCommandPolicy.ReadOnlyCommands)
                 .Where(commandSet.Contains)
                 .ToList(),
             PrivacySensitiveApprovedCommands = CommandCenterCommandGroups.DangerousCommands
@@ -1022,7 +1033,8 @@ public class NodeCapabilityHealthInfo
                 continue;
 
             info.PermissionBlockedCommands.Add(command);
-            if (CommandCenterCommandGroups.SafeCompanionCommandSet.Contains(command))
+            if (CommandCenterCommandGroups.SafeCompanionCommandSet.Contains(command) ||
+                OllamaNodeCommandPolicy.ReadOnlyCommandSet.Contains(command))
                 info.MissingSafeAllowlistCommands.Add(command);
             else if (CommandCenterCommandGroups.DangerousCommandSet.Contains(command))
                 info.MissingDangerousAllowlistCommands.Add(command);
@@ -1182,7 +1194,8 @@ public static class CommandCenterCommandGroups
         "tts.status",
         "stt.transcribe",
         "stt.listen",
-        "stt.status"
+        "stt.status",
+        .. OllamaNodeCommandPolicy.SensitiveCommands
     ];
 
     public static readonly FrozenSet<string> DangerousCommandSet =
@@ -1795,6 +1808,19 @@ public class ChatMessageInfo
     /// <summary>Session this message belongs to (e.g. "main").</summary>
     public string SessionKey { get; set; } = "";
 
+    /// <summary>Optional run identity from the live chat event payload, not the message ID.</summary>
+    public string? RunId { get; set; }
+
+    /// <summary>Set by synchronous chat consumers when this frame must not produce a notification.</summary>
+    [System.Text.Json.Serialization.JsonIgnore]
+    public bool IsNotificationSuppressed { get; private set; }
+
+    /// <summary>
+    /// Suppresses the parser's subsequent notification without changing other
+    /// consumers' delivery. Suppression is monotonic for this received frame.
+    /// </summary>
+    public void SuppressNotification() => IsNotificationSuppressed = true;
+
     /// <summary>"user", "assistant", "system", etc.</summary>
     public string Role { get; set; } = "";
 
@@ -1809,7 +1835,7 @@ public class ChatMessageInfo
         Array.Empty<ChatToolContentInfo>();
 
     /// <summary>
-    /// Ordered text and tool blocks retained from array-valued message content.
+    /// Ordered text, tool, and media blocks retained from message content.
     /// Flat <see cref="Text"/> and <see cref="ToolContent"/> remain populated for
     /// compatibility with consumers that do not need block-level chronology.
     /// </summary>
@@ -1893,6 +1919,7 @@ public enum ChatMessageContentPartKind
 {
     Text,
     Tool,
+    Media,
 }
 
 public class ChatMessageContentPartInfo
@@ -1900,6 +1927,74 @@ public class ChatMessageContentPartInfo
     public ChatMessageContentPartKind Kind { get; set; }
     public string? Text { get; set; }
     public ChatToolContentInfo? Tool { get; set; }
+    public ChatMediaContentInfo? Media { get; set; }
+}
+
+public enum ChatMediaContentKind
+{
+    Image,
+    Audio,
+    Video,
+    File,
+    Unknown,
+}
+
+public enum ChatMediaPlaybackMode
+{
+    Native,
+    Transcode,
+}
+
+public enum ChatMediaContentSource
+{
+    Structured,
+    LegacyDirective,
+    Unavailable,
+}
+
+/// <summary>
+/// Typed assistant media metadata retained from the Gateway protocol. Legacy
+/// Gateway sources are transient transport references and must never be
+/// displayed, logged, persisted, or passed to local file APIs.
+/// </summary>
+public sealed class ChatMediaContentInfo
+{
+    public ChatMediaContentKind Kind { get; set; }
+    public ChatMediaContentSource Source { get; set; }
+    public string? Type { get; set; }
+    public string? MimeType { get; set; }
+    public string? FileName { get; set; }
+    public string? ArtifactId { get; set; }
+    public string? AgentId { get; set; }
+    public string? Url { get; set; }
+    public string? OpenUrl { get; set; }
+    public string? Alt { get; set; }
+    public int? Width { get; set; }
+    public int? Height { get; set; }
+    public long? SizeBytes { get; set; }
+    public double? DurationSeconds { get; set; }
+    public ChatMediaPlaybackMode? Playback { get; set; }
+
+    internal string? GatewaySource { get; set; }
+
+    /// <summary>Compares media identity and content without exposing private legacy transport references.</summary>
+    public bool HasSameContent(ChatMediaContentInfo other) =>
+        Kind == other.Kind &&
+        Source == other.Source &&
+        Type == other.Type &&
+        MimeType == other.MimeType &&
+        FileName == other.FileName &&
+        ArtifactId == other.ArtifactId &&
+        AgentId == other.AgentId &&
+        Url == other.Url &&
+        OpenUrl == other.OpenUrl &&
+        Alt == other.Alt &&
+        Width == other.Width &&
+        Height == other.Height &&
+        SizeBytes == other.SizeBytes &&
+        DurationSeconds == other.DurationSeconds &&
+        Playback == other.Playback &&
+        GatewaySource == other.GatewaySource;
 }
 
 /// <summary>
@@ -2174,6 +2269,8 @@ public class ModelInfo
     public string? Provider { get; set; }
     public int? ContextWindow { get; set; }
     public int? ContextTokens { get; set; }
+    public bool? Reasoning { get; set; }
+    public ThinkingContext? ThinkingContext { get; set; }
 
     /// <summary>True when the model's provider is configured on the gateway.</summary>
     public bool IsConfigured { get; set; }
@@ -2195,6 +2292,12 @@ public class ModelInfo
     /// it can be used (e.g. an API key has not been configured yet).
     /// </summary>
     public bool RequiresAuth { get; set; }
+
+    /// <summary>
+    /// Whether the gateway permits users to select this model manually. Null
+    /// preserves the behavior of gateways that do not publish selection policy.
+    /// </summary>
+    public bool? ManualSelectionAllowed { get; set; }
 
     public string DisplayName => Name ?? Id;
 }

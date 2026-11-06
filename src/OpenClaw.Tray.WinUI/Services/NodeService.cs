@@ -9,6 +9,7 @@ using OpenClaw.Connection;
 using OpenClaw.Shared;
 using OpenClaw.Shared.Capabilities;
 using OpenClaw.Shared.ExecApprovals;
+using OpenClaw.Shared.Inference;
 using OpenClaw.Shared.Mcp;
 using OpenClaw.Shared.Mxc;
 using OpenClaw.Shared.Telemetry;
@@ -31,6 +32,7 @@ public sealed class NodeService : IDisposable, IAsyncDisposable
     private readonly object _disposeLock = new();
     private TaskCompletionSource<bool>? _screenConsentInFlight;
     private TaskCompletionSource<bool>? _cameraConsentInFlight;
+    private TaskCompletionSource<bool>? _locationConsentInFlight;
     private Task? _disposeTask;
     private WindowsNodeClient? _nodeClient;
     private CanvasWindow? _canvasWindow;
@@ -44,7 +46,6 @@ public sealed class NodeService : IDisposable, IAsyncDisposable
     private ScreenCaptureService? _screenCaptureService;
     private ScreenRecordingService? _screenRecordingService;
     private CameraCaptureService? _cameraCaptureService;
-    private DateTime _lastScreenCaptureNotification = DateTime.MinValue;
     // Concurrent navigates from rapid-fire agent requests can race on the
     // bucket structure of a HashSet. Use ConcurrentDictionary as a thread-safe
     // set; value byte is unused.
@@ -91,8 +92,11 @@ public sealed class NodeService : IDisposable, IAsyncDisposable
     private BrowserProxyCapability? _browserProxyCapability;
     private SttCapability? _sttCapability;
     private TtsCapability? _ttsCapability;
+    private OllamaCapability? _ollamaCapability;
+    private OllamaInferenceBackend? _ollamaBackend;
     private TextToSpeechService? _textToSpeechService;
     private VoiceService? _voiceService;
+    private readonly Func<IOpenClawLogger, SettingsManager, VoiceService>? _voiceServiceFactory;
     private readonly string _dataPath;
     // Identity store location for the role-aware DeviceIdentity. Defaults to
     // _dataPath when no separate path is supplied (preserves existing test
@@ -209,7 +213,8 @@ public sealed class NodeService : IDisposable, IAsyncDisposable
         Func<SshTunnelConfig?>? activeGatewayTunnelResolver = null,
         Func<string?>? activeGatewayUrlResolver = null,
         Func<Uri, CancellationToken, Task<bool>>? browserControlAuthorization = null,
-        ExecApprovalsStore? execApprovalsStore = null)
+        ExecApprovalsStore? execApprovalsStore = null,
+        Func<IOpenClawLogger, SettingsManager, VoiceService>? voiceServiceFactory = null)
     {
         _logger = logger;
         _dispatcherQueue = dispatcherQueue;
@@ -221,6 +226,7 @@ public sealed class NodeService : IDisposable, IAsyncDisposable
         _activeGatewayUrlResolver = activeGatewayUrlResolver;
         _browserControlAuthorization = browserControlAuthorization;
         _execApprovalsStore = execApprovalsStore;
+        _voiceServiceFactory = voiceServiceFactory;
         _settings = settings;
         _enableMcpServer = enableMcpServer;
         _screenCaptureService = new ScreenCaptureService(logger);
@@ -315,7 +321,7 @@ public sealed class NodeService : IDisposable, IAsyncDisposable
         // stay registered regardless.
         _systemCapability = new SystemCapability(
             _logger,
-            includeRunCommands: NodeCapabilityGating.ShouldRegisterSystemRun(_settings));
+            includeRunCommands: () => NodeCapabilityGating.ShouldRegisterSystemRun(_settings));
         _systemCapability.NotifyRequested += OnSystemNotify;
         _systemCapability.SetCommandRunner(BuildSystemRunRunner());
         // One coordinator per service lifetime (it serializes approvals with a
@@ -363,7 +369,7 @@ public sealed class NodeService : IDisposable, IAsyncDisposable
         if (NodeCapabilityGating.ShouldRegisterLocation(_settings))
         {
             _locationCapability = new LocationCapability(_logger);
-            _locationCapability.GetRequested += async (args) => await GetLocationAsync(args);
+            _locationCapability.GetRequested += GetLocationAsync;
             Register(_locationCapability);
         }
 
@@ -387,12 +393,25 @@ public sealed class NodeService : IDisposable, IAsyncDisposable
             // handlers return a clear error pointing the caller at the
             // Voice Settings page; there is no automatic fallback.
             var settings = _settings ?? throw new InvalidOperationException("Settings are required to register speech-to-text.");
-            _voiceService ??= new VoiceService(_logger, settings);
+            _voiceService ??= _voiceServiceFactory?.Invoke(_logger, settings)
+                ?? new VoiceService(_logger, settings);
             _sttCapability = new SttCapability(_logger);
             _sttCapability.TranscribeRequested += OnSttTranscribeAsync;
             _sttCapability.ListenRequested += OnSttListenAsync;
             _sttCapability.StatusRequested += OnSttStatusAsync;
             Register(_sttCapability);
+        }
+
+        if (NodeCapabilityGating.ShouldRegisterOllama(_settings))
+        {
+            _ollamaBackend ??= new OllamaInferenceBackend();
+            _ollamaCapability ??= new OllamaCapability(_logger, _ollamaBackend);
+            Register(_ollamaCapability);
+        }
+        else if (_ollamaCapability is not null)
+        {
+            _ollamaCapability.Revoke();
+            _ollamaCapability = null;
         }
 
         // Device metadata/status capability - dispose previous provider on re-registration
@@ -632,103 +651,25 @@ public sealed class NodeService : IDisposable, IAsyncDisposable
     }
 
     /// <summary>
-    /// Build the <see cref="ICommandRunner"/> for system.run. Returns an
-    /// <see cref="MxcCommandRunner"/> wrapping <see cref="DirectAppContainerExecutor"/>.
-    /// The runner honors <see cref="SettingsData.SystemRunSandboxEnabled"/>
-    /// by attempting MXC containment when available, preserving compatibility
-    /// host fallback when MXC is unavailable unless strict fallback blocking is
-    /// enabled, and rejecting unsupported sandbox request features while
-    /// sandboxing remains enabled.
+    /// Composes MXC execution with fresh platform protection. Only unsupported Windows uses host compatibility.
     /// </summary>
     private ICommandRunner BuildSystemRunRunner()
     {
-        var hostRunner = new LocalCommandRunner(_logger);
-        var executor = new DirectAppContainerExecutor(GetOrProbeMxcAvailability, _logger);
-
-        // Do NOT probe synchronously here: this runs while _capabilitiesLock is held
-        // (RegisterCapabilities), and a blocking wxc-exec --probe (~15s) would stall
-        // capability registration / reconnect. Log from a non-blocking peek; the
-        // first real probe happens lazily on the first system.run via the
-        // availability gate / executor provider below (off any of our locks).
-        var peeked = PeekMxcAvailability();
-        if (peeked is null)
-        {
-            _logger.Info(
-                $"[mxc] system.run runner = MxcCommandRunner " +
-                $"(executor={executor.Name}; MXC availability probe deferred to first use; " +
-                $"sandboxEnabled={(_settings?.SystemRunSandboxEnabled ?? true)})");
-        }
-        else if (peeked.HasAnyBackend)
-        {
-            _logger.Info(
-                $"[mxc] system.run runner = MxcCommandRunner " +
-                $"(executor={executor.Name}, sandboxEnabled={(_settings?.SystemRunSandboxEnabled ?? true)})");
-        }
-        else
-        {
-            // MXC unavailable on this host. The runner's top-level
-            // !_isSandboxAvailable() guard will either block or use the
-            // compatibility host fallback, depending on settings. The executor is
-            // constructed only to satisfy the constructor contract and is never
-            // invoked.
-            var reason = string.Join("; ", peeked.UnsupportedReasons);
-            var unavailableMode = (_settings?.SystemRunBlockHostFallbackWhenMxcUnavailable ?? false)
-                ? "commands will be blocked by strict fallback settings"
-                : "commands will run through host fallback";
-            _logger.Info($"[mxc] system.run runner = MxcCommandRunner (MXC unavailable, {unavailableMode}: {reason})");
-        }
-
+        // Admission is deferred, never probed under the capability-registration lock.
         var settingsDirectory = SettingsManager.SettingsDirectoryPath;
         return new MxcCommandRunner(
-            executor,
-            hostRunner,
             () => SnapshotSettings(),
             () => settingsDirectory,
-            // Re-probe on demand when sandbox availability is checked: returns the
-            // cached definitive verdict, or re-probes (single-flight) after a
-            // transient error / a prior SandboxUnavailableException-driven invalidation.
-            () => GetOrProbeMxcAvailability().HasAnyBackend,
-            invalidateAvailability: InvalidateMxcAvailability,
-            _logger);
+            GetOrProbeMxcAvailability,
+            _logger,
+            contextProvider: () => MxcWindowsRequestContext.Capture(settingsDirectory));
     }
 
     /// <summary>
     /// Snapshot the live <see cref="SettingsManager"/> into the wire-shaped
-    /// <see cref="SettingsData"/> that MxcCommandRunner / MxcPolicyBuilder consume.
-    /// Defensive default keeps sandbox enabled if _settings is null.
+    /// <see cref="SettingsData"/> consumed by the immutable request builder.
     /// </summary>
-    private SettingsData SnapshotSettings()
-    {
-        if (_settings is null)
-            return new SettingsData
-            {
-                SystemRunSandboxEnabled = true,
-                SystemRunBlockHostFallbackWhenMxcUnavailable = false,
-                SystemRunAllowOutbound = false,
-                SystemRunAllowWindowsUi = false,
-            };
-
-        return new SettingsData
-        {
-            SystemRunSandboxEnabled = _settings.SystemRunSandboxEnabled,
-            SystemRunBlockHostFallbackWhenMxcUnavailable = _settings.SystemRunBlockHostFallbackWhenMxcUnavailable,
-            SystemRunAllowOutbound = _settings.SystemRunAllowOutbound,
-            SystemRunAllowWindowsUi = _settings.SystemRunAllowWindowsUi,
-            // Sandbox page fields — read by MxcPolicyBuilder.ForSystemRun.
-            SandboxClipboard = _settings.SandboxClipboard,
-            SandboxDocumentsAccess = _settings.SandboxDocumentsAccess,
-            SandboxDownloadsAccess = _settings.SandboxDownloadsAccess,
-            SandboxDesktopAccess = _settings.SandboxDesktopAccess,
-            // Deep-copy each SandboxCustomFolder so a concurrent UI thread mutation of
-            // Access (between snapshot and policy build) can't race with us. The class
-            // is mutable so a shallow copy of the list would share references.
-            SandboxCustomFolders = _settings.SandboxCustomFolders is { Count: > 0 } src
-                ? src.Select(f => new SandboxCustomFolder { Path = f.Path, Access = f.Access }).ToList()
-                : null,
-            SandboxTimeoutMs = _settings.SandboxTimeoutMs,
-            SandboxMaxOutputBytes = _settings.SandboxMaxOutputBytes,
-        };
-    }
+    private SettingsData SnapshotSettings() => _settings?.SnapshotSystemRunSettings() ?? new();
 
     private MxcAvailability? _mxcAvailability;
     private DateTime _mxcNextProbeAllowedAtUtc;
@@ -737,7 +678,7 @@ public sealed class NodeService : IDisposable, IAsyncDisposable
 
     /// <summary>
     /// Minimum interval before re-probing after a transient probe error. Bounds the
-    /// cost of re-spawning <c>wxc-exec --probe</c> while a probe error persists,
+    /// cost of retrying the native SDK probe while a load/probe error persists,
     /// while still letting a momentary glitch self-heal quickly.
     /// </summary>
     private static readonly TimeSpan MxcProbeRetryInterval = TimeSpan.FromSeconds(5);
@@ -750,7 +691,7 @@ public sealed class NodeService : IDisposable, IAsyncDisposable
     /// doesn't pin the whole process to uncontained execution.
     /// </summary>
     /// <remarks>
-    /// The blocking probe (<c>wxc-exec --probe</c>, up to ~15s) is NEVER run while
+    /// The native SDK probe is NEVER run while
     /// holding <see cref="_mxcAvailabilityLock"/>: concurrent callers share a single
     /// in-flight probe (single-flight) and wait on it OUTSIDE the lock, so a slow
     /// probe can't serialize unrelated callers or stall lock users. The retry window
@@ -794,7 +735,7 @@ public sealed class NodeService : IDisposable, IAsyncDisposable
             // poison the single-flight slot or leak out of the shared task.
             _logger.Warn($"[mxc] availability probe threw unexpectedly: {ex.GetType().Name}: {ex.Message}");
             result = new MxcAvailability(
-                false, false, false, null,
+                false, false, false,
                 new[] { "MXC availability probe failed unexpectedly." }, probeErrored: true);
         }
 
@@ -1033,6 +974,31 @@ public sealed class NodeService : IDisposable, IAsyncDisposable
         }
     }
 
+    public void ApplyOllamaPermission(bool enabled)
+    {
+        lock (_capabilitiesLock)
+        {
+            if (!enabled)
+            {
+                if (_ollamaCapability is null)
+                    return;
+
+                _ollamaCapability.Revoke();
+                _capabilities.Remove(_ollamaCapability);
+                _ollamaCapability = null;
+                return;
+            }
+
+            _ollamaBackend ??= new OllamaInferenceBackend();
+            _ollamaCapability ??= new OllamaCapability(_logger, _ollamaBackend);
+            if (_capabilities.Count != 0 &&
+                !_capabilities.Contains(_ollamaCapability))
+            {
+                _capabilities.Add(_ollamaCapability);
+            }
+        }
+    }
+
     public GatewayNodeInfo? GetLocalNodeInfo()
     {
         if (_nodeClient == null)
@@ -1087,6 +1053,8 @@ public sealed class NodeService : IDisposable, IAsyncDisposable
             disabled.AddRange(CommandCenterCommandGroups.DangerousCommands.Where(command => command.StartsWith("tts.", StringComparison.OrdinalIgnoreCase)));
         if (_settings?.NodeSttEnabled != true)
             disabled.AddRange(new[] { "stt.listen", "stt.status" });
+        if (_settings?.NodeOllamaInferenceEnabled != true)
+            disabled.AddRange(new[] { OllamaCapability.ModelsCommand, OllamaCapability.ChatCommand });
         return disabled;
     }
 
@@ -1897,19 +1865,12 @@ public sealed class NodeService : IDisposable, IAsyncDisposable
             throw new InvalidOperationException("Screen capture service not available");
         }
         
-        cancellationToken.ThrowIfCancellationRequested();
-        // Notify user that screen capture is happening (throttled to avoid spam)
-        var now = DateTime.Now;
-        if ((now - _lastScreenCaptureNotification).TotalSeconds > 10)
-        {
-            _lastScreenCaptureNotification = now;
-            RequestNodeToast(
-                LocalizationHelper.GetString("Toast_ScreenCaptured"),
-                LocalizationHelper.GetString("Toast_ScreenCapturedDetail"),
-                "node:screen-captured");
-        }
-        
-        return await _screenCaptureService.CaptureAsync(args, cancellationToken);
+        return await SensitiveCaptureExecutor.ExecuteAsync(
+            SensitiveCapturePlans.ScreenSnapshot,
+            EnsureCaptureConsentAsync,
+            ShowSensitiveCaptureIndicator,
+            ct => _screenCaptureService.CaptureAsync(args, ct),
+            cancellationToken);
     }
 
     private async Task<ScreenRecordResult> OnScreenRecord(
@@ -1921,7 +1882,7 @@ public sealed class NodeService : IDisposable, IAsyncDisposable
             throw new InvalidOperationException("Screen recording service not available");
         }
 
-        await EnsureRecordingConsentAsync(RecordingType.Screen, cancellationToken);
+        await EnsureCaptureConsentAsync(CaptureConsentType.Screen, cancellationToken);
         await ShowRecordingCountdownAsync(cancellationToken);
         cancellationToken.ThrowIfCancellationRequested();
 
@@ -1983,10 +1944,15 @@ public sealed class NodeService : IDisposable, IAsyncDisposable
         {
             throw new InvalidOperationException("Camera capture service not available");
         }
-        
+
         try
         {
-            return await _cameraCaptureService.SnapAsync(args, cancellationToken);
+            return await SensitiveCaptureExecutor.ExecuteAsync(
+                SensitiveCapturePlans.CameraSnap,
+                EnsureCaptureConsentAsync,
+                ShowSensitiveCaptureIndicator,
+                ct => _cameraCaptureService.SnapAsync(args, ct),
+                cancellationToken);
         }
         catch (UnauthorizedAccessException ex)
         {
@@ -2011,7 +1977,7 @@ public sealed class NodeService : IDisposable, IAsyncDisposable
             throw new InvalidOperationException("Camera capture service not available");
         }
 
-        await EnsureRecordingConsentAsync(RecordingType.Camera, cancellationToken);
+        await EnsureCaptureConsentAsync(CaptureConsentType.Camera, cancellationToken);
         await ShowRecordingCountdownAsync(cancellationToken);
         cancellationToken.ThrowIfCancellationRequested();
 
@@ -2049,7 +2015,21 @@ public sealed class NodeService : IDisposable, IAsyncDisposable
         }
     }
     
-    private async Task<LocationResult> GetLocationAsync(LocationGetArgs args)
+    private Task<LocationResult> GetLocationAsync(
+        LocationGetArgs args,
+        CancellationToken cancellationToken)
+    {
+        return SensitiveCaptureExecutor.ExecuteAsync(
+            SensitiveCapturePlans.LocationGet,
+            EnsureCaptureConsentAsync,
+            ShowSensitiveCaptureIndicator,
+            ct => ReadLocationAsync(args, ct),
+            cancellationToken);
+    }
+
+    private static async Task<LocationResult> ReadLocationAsync(
+        LocationGetArgs args,
+        CancellationToken cancellationToken)
     {
         var geolocator = new global::Windows.Devices.Geolocation.Geolocator
         {
@@ -2057,9 +2037,10 @@ public sealed class NodeService : IDisposable, IAsyncDisposable
                 ? global::Windows.Devices.Geolocation.PositionAccuracy.High
                 : global::Windows.Devices.Geolocation.PositionAccuracy.Default
         };
-        
-        using var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(args.TimeoutMs));
-        var position = await geolocator.GetGeopositionAsync().AsTask(cts.Token);
+
+        using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        timeoutCts.CancelAfter(TimeSpan.FromMilliseconds(args.TimeoutMs));
+        var position = await geolocator.GetGeopositionAsync().AsTask(timeoutCts.Token);
         
         return new LocationResult
         {
@@ -2068,6 +2049,14 @@ public sealed class NodeService : IDisposable, IAsyncDisposable
             AccuracyMeters = position.Coordinate.Accuracy,
             TimestampMs = position.Coordinate.Timestamp.ToUnixTimeMilliseconds()
         };
+    }
+
+    private void ShowSensitiveCaptureIndicator(SensitiveCapturePlan plan)
+    {
+        RequestNodeToast(
+            LocalizationHelper.GetString(plan.ToastTitleResourceKey),
+            LocalizationHelper.GetString(plan.ToastDetailResourceKey),
+            plan.NotificationKey);
     }
 
     private Task<TtsSpeakResult> OnTtsSpeakAsync(TtsSpeakArgs args, CancellationToken cancellationToken)
@@ -2210,11 +2199,11 @@ public sealed class NodeService : IDisposable, IAsyncDisposable
         });
     }
 
-    private async Task EnsureRecordingConsentAsync(
-        RecordingType type,
+    private async Task EnsureCaptureConsentAsync(
+        CaptureConsentType type,
         CancellationToken cancellationToken)
     {
-        if (HasRecordingConsent(type)) return;
+        if (HasCaptureConsent(type)) return;
 
         Task<bool>? existingConsentPrompt = null;
         TaskCompletionSource<bool>? ownedConsentPrompt = null;
@@ -2223,7 +2212,7 @@ public sealed class NodeService : IDisposable, IAsyncDisposable
         try
         {
             // Re-check after acquiring lock: a prior caller may have resolved consent.
-            if (HasRecordingConsent(type)) return;
+            if (HasCaptureConsent(type)) return;
 
             var inFlight = GetConsentPrompt(type);
             if (inFlight != null)
@@ -2244,30 +2233,57 @@ public sealed class NodeService : IDisposable, IAsyncDisposable
         if (existingConsentPrompt != null)
         {
             if (!await existingConsentPrompt.WaitAsync(cancellationToken))
-                throw new InvalidOperationException("Recording denied: user has not given consent");
+                throw new InvalidOperationException("Capture denied: user has not given consent");
             return;
         }
 
         var clearPrompt = true;
         try
         {
-            var dialogTask = ShowRecordingConsentDialogAsync(type);
+            var dialogTask = ShowCaptureConsentDialogAsync(type, out var closeDialog);
+            var consentTimeout = TimeSpan.FromMilliseconds(
+                Math.Max(1000, _settings?.CaptureConsentTimeoutMs ?? 120_000));
+
+            // Bind the fail-closed timeout to the prompt itself, not to this
+            // caller's cancellationToken: the prompt (and ownedConsentPrompt)
+            // are shared with any other concurrent caller of the same
+            // consent type via _screen/_camera/_locationConsentInFlight, so
+            // the timeout must keep running even if this owning caller is
+            // canceled/disconnects first. Layering .WaitAsync(cancellationToken)
+            // below lets this caller stop waiting on its own cancellation
+            // without tearing down the shared bounded task other waiters (or
+            // the abandoned-prompt observer below) still depend on.
+            var boundedConsentTask = ConsentPromptTimeoutGate.WithTimeout(
+                dialogTask,
+                consentTimeout,
+                onTimedOut: () =>
+                {
+                    _logger.Warn(
+                        $"[CaptureConsent] {type} consent prompt timed out after " +
+                        $"{consentTimeout.TotalSeconds:F0}s with no response; denying (fail-closed).");
+                    closeDialog();
+                });
+
             bool consented;
             try
             {
-                consented = await dialogTask.WaitAsync(cancellationToken);
+                // Fail closed if nobody answers within consentTimeout: an
+                // unattended caller (local MCP, an automated agent, a hosted
+                // test) must never hang the underlying request forever waiting
+                // on a window no human can see or click.
+                consented = await boundedConsentTask.WaitAsync(cancellationToken);
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
                 clearPrompt = false;
-                ObserveAbandonedConsentPrompt(dialogTask, type, ownedConsentPrompt!);
+                ObserveAbandonedConsentPrompt(boundedConsentTask, type, ownedConsentPrompt!);
                 throw;
             }
 
             ownedConsentPrompt!.TrySetResult(consented);
 
             if (!consented)
-                throw new InvalidOperationException("Recording denied: user has not given consent");
+                throw new InvalidOperationException("Capture denied: user has not given consent");
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -2289,7 +2305,7 @@ public sealed class NodeService : IDisposable, IAsyncDisposable
 
     private void ObserveAbandonedConsentPrompt(
         Task<bool> dialogTask,
-        RecordingType type,
+        CaptureConsentType type,
         TaskCompletionSource<bool> consentPrompt)
     {
         _ = CompleteAbandonedConsentPromptAsync(dialogTask, type, consentPrompt);
@@ -2297,7 +2313,7 @@ public sealed class NodeService : IDisposable, IAsyncDisposable
 
     private async Task CompleteAbandonedConsentPromptAsync(
         Task<bool> dialogTask,
-        RecordingType type,
+        CaptureConsentType type,
         TaskCompletionSource<bool> consentPrompt)
     {
         try
@@ -2306,7 +2322,7 @@ public sealed class NodeService : IDisposable, IAsyncDisposable
         }
         catch (Exception ex)
         {
-            _logger.Debug($"[RecordingConsent] Abandoned prompt completion failed: {ex.Message}");
+            _logger.Debug($"[CaptureConsent] Abandoned prompt completion failed: {ex.Message}");
             consentPrompt.TrySetResult(false);
         }
         finally
@@ -2316,7 +2332,7 @@ public sealed class NodeService : IDisposable, IAsyncDisposable
     }
 
     private async Task ClearConsentPromptAsync(
-        RecordingType type,
+        CaptureConsentType type,
         TaskCompletionSource<bool> consentPrompt)
     {
         await _consentLock.WaitAsync();
@@ -2331,45 +2347,126 @@ public sealed class NodeService : IDisposable, IAsyncDisposable
         }
     }
 
-    private bool HasRecordingConsent(RecordingType type)
+    private bool HasCaptureConsent(CaptureConsentType type)
     {
-        return type == RecordingType.Screen
-            ? _settings?.ScreenRecordingConsentGiven == true
-            : _settings?.CameraRecordingConsentGiven == true;
+        return type switch
+        {
+            CaptureConsentType.Screen => _settings?.ScreenRecordingConsentGiven == true,
+            CaptureConsentType.Camera => _settings?.CameraRecordingConsentGiven == true,
+            CaptureConsentType.Location => _settings?.LocationConsentGiven == true,
+            _ => false
+        };
     }
 
-    private TaskCompletionSource<bool>? GetConsentPrompt(RecordingType type)
+    private TaskCompletionSource<bool>? GetConsentPrompt(CaptureConsentType type)
     {
-        return type == RecordingType.Screen
-            ? _screenConsentInFlight
-            : _cameraConsentInFlight;
+        return type switch
+        {
+            CaptureConsentType.Screen => _screenConsentInFlight,
+            CaptureConsentType.Camera => _cameraConsentInFlight,
+            CaptureConsentType.Location => _locationConsentInFlight,
+            _ => null
+        };
     }
 
-    private void SetConsentPrompt(RecordingType type, TaskCompletionSource<bool>? prompt)
+    private void SetConsentPrompt(CaptureConsentType type, TaskCompletionSource<bool>? prompt)
     {
-        if (type == RecordingType.Screen)
-            _screenConsentInFlight = prompt;
-        else
-            _cameraConsentInFlight = prompt;
+        switch (type)
+        {
+            case CaptureConsentType.Screen:
+                _screenConsentInFlight = prompt;
+                break;
+            case CaptureConsentType.Camera:
+                _cameraConsentInFlight = prompt;
+                break;
+            case CaptureConsentType.Location:
+                _locationConsentInFlight = prompt;
+                break;
+        }
     }
 
-    private Task<bool> ShowRecordingConsentDialogAsync(RecordingType type)
+    private Task<bool> ShowCaptureConsentDialogAsync(CaptureConsentType type, out Action closeDialog)
     {
         var dialogTcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var dialogGate = new object();
+        Dialogs.RecordingConsentDialog? dialog = null;
+        var closeRequested = false;
+
+        // Lets EnsureCaptureConsentAsync force this prompt closed on timeout
+        // (fail-closed denial) instead of leaving an unattended window open
+        // forever. Best-effort: if the dialog hasn't been created yet, the
+        // creation callback below checks closeRequested and skips showing it.
+        closeDialog = () =>
+        {
+            Dialogs.RecordingConsentDialog? toClose;
+            lock (dialogGate)
+            {
+                closeRequested = true;
+                toClose = dialog;
+            }
+            if (toClose == null) return;
+            _dispatcherQueue.TryEnqueue(() =>
+            {
+                try { toClose.Close(); }
+                catch (Exception ex) { _logger.Debug($"[CaptureConsent] Timed-out dialog close failed: {ex.Message}"); }
+            });
+        };
 
         if (!_dispatcherQueue.TryEnqueue(async () =>
         {
             try
             {
-                var dialog = new Dialogs.RecordingConsentDialog(type);
-                var consented = await dialog.ShowAsync();
+                var created = new Dialogs.RecordingConsentDialog(type);
+                bool alreadyTimedOut;
+                lock (dialogGate)
+                {
+                    alreadyTimedOut = closeRequested;
+                    dialog = created;
+                }
+                if (alreadyTimedOut)
+                {
+                    // Consent already timed out before the dialog could be
+                    // created; never show a prompt whose answer no longer
+                    // matters.
+                    dialogTcs.TrySetResult(false);
+                    created.Close();
+                    return;
+                }
+
+                var consented = await created.ShowAsync();
+
+                bool timedOutWhileAwaitingAnswer;
+                lock (dialogGate)
+                {
+                    timedOutWhileAwaitingAnswer = closeRequested;
+                }
+                if (timedOutWhileAwaitingAnswer)
+                {
+                    // The consent timeout already committed this prompt to a
+                    // fail-closed denial (and requested the window close)
+                    // before ShowAsync() returned. A click that was already
+                    // in flight at that instant must not persist a "late"
+                    // grant for an outcome the caller already received as
+                    // denied - keep the timeout's result and settings state
+                    // consistent instead of racing a stray late click.
+                    dialogTcs.TrySetResult(false);
+                    return;
+                }
 
                 if (consented && _settings != null)
                 {
-                    if (type == RecordingType.Screen)
-                        _settings.ScreenRecordingConsentGiven = true;
-                    else
-                        _settings.CameraRecordingConsentGiven = true;
+                    switch (type)
+                    {
+                        case CaptureConsentType.Screen:
+                            _settings.ScreenRecordingConsentGiven = true;
+                            break;
+                        case CaptureConsentType.Camera:
+                            _settings.CameraRecordingConsentGiven = true;
+                            break;
+                        case CaptureConsentType.Location:
+                            _settings.LocationConsentGiven = true;
+                            break;
+                    }
                     _settings.Save();
                 }
 
@@ -2377,12 +2474,12 @@ public sealed class NodeService : IDisposable, IAsyncDisposable
             }
             catch (Exception ex)
             {
-                _logger.Error($"[RecordingConsent] Dialog error: {ex.Message}");
+                _logger.Error($"[CaptureConsent] Dialog error: {ex.Message}");
                 dialogTcs.TrySetResult(false);
             }
         }))
         {
-            throw new InvalidOperationException("Recording denied: unable to show consent prompt");
+            throw new InvalidOperationException("Capture denied: unable to show consent prompt");
         }
 
         return dialogTcs.Task;
@@ -2477,6 +2574,9 @@ public sealed class NodeService : IDisposable, IAsyncDisposable
         try { _navigationPromptGate.Dispose(); } catch (Exception ex) { _logger.Debug($"NodeService: Dispose NavigationPromptGate failed: {ex.Message}"); }
 
         try { _deviceStatusProvider?.Dispose(); } catch (Exception ex) { _logger.Debug($"NodeService: Dispose DeviceStatusProvider failed: {ex.Message}"); }
+
+        try { _ollamaCapability?.Dispose(); } catch (Exception ex) { _logger.Debug($"NodeService: Dispose OllamaCapability failed: {ex.Message}"); }
+        try { _ollamaBackend?.Dispose(); } catch (Exception ex) { _logger.Debug($"NodeService: Dispose OllamaInferenceBackend failed: {ex.Message}"); }
 
         if (_canvasWindow != null && !_canvasWindow.IsClosed)
         {

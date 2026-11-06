@@ -1,5 +1,6 @@
 using System.Text.Json;
 using System.Runtime.Versioning;
+using OpenClaw.Shared.Inference.Catalog;
 
 namespace OpenClaw.SetupEngine.Tests;
 
@@ -32,6 +33,10 @@ public class SetupConfigTests : IDisposable
         Assert.Equal("trace", config.LogLevel);
         Assert.False(config.RollbackOnFailure);
         Assert.Equal("loopback", config.Gateway.Bind);
+        Assert.Null(config.Gateway.Selection);
+        Assert.Null(config.Gateway.Version);
+        Assert.Null(config.Gateway.FallbackVersion);
+        Assert.Null(config.Gateway.InstalledVersion);
         Assert.Equal("hybrid", config.Gateway.ReloadMode);
         Assert.False(config.SkipPermissions);
         Assert.False(config.SkipWizard);
@@ -43,6 +48,19 @@ public class SetupConfigTests : IDisposable
         Assert.Equal(TailscaleAuthMode.Browser, config.Tailscale.AuthMode);
         Assert.Equal(300, config.Tailscale.AuthTimeoutSeconds);
         Assert.Equal(300, config.Tailscale.ServeApprovalTimeoutSeconds);
+        Assert.False(config.LocalAi.Enabled);
+    }
+
+    [Fact]
+    public void BundledConfig_RequiresExplicitLocalAiOptIn()
+    {
+        var config = SetupConfig.LoadFromFile(Path.Combine(
+            RepositoryRoot(),
+            "src",
+            "OpenClaw.SetupEngine",
+            "default-config.json"));
+
+        Assert.False(config.LocalAi.Enabled);
     }
 
     [Fact]
@@ -61,6 +79,26 @@ public class SetupConfigTests : IDisposable
         Assert.DoesNotContain("ValidationPackagePath", json, StringComparison.Ordinal);
         Assert.NotNull(loaded);
         Assert.Null(loaded.Gateway.ValidationPackagePath);
+    }
+
+    [Fact]
+    public void InstalledGatewayVersion_IsRuntimeOnly()
+    {
+        var config = new SetupConfig
+        {
+            Gateway = new GatewayConfig
+            {
+                Version = "latest",
+                FallbackVersion = "2026.6.34",
+                InstalledVersion = "2026.9.1"
+            }
+        };
+
+        var json = JsonSerializer.Serialize(config, SetupConfig.JsonWriteOptions);
+
+        Assert.Contains("\"Version\": \"latest\"", json, StringComparison.Ordinal);
+        Assert.Contains("\"FallbackVersion\": \"2026.6.34\"", json, StringComparison.Ordinal);
+        Assert.DoesNotContain("InstalledVersion", json, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -93,7 +131,7 @@ public class SetupConfigTests : IDisposable
     public void EffectiveGatewayUrl_UsesPort()
     {
         var config = new SetupConfig { GatewayPort = 9999 };
-        Assert.Equal("ws://localhost:9999", config.EffectiveGatewayUrl);
+        Assert.Equal("ws://127.0.0.1:9999", config.EffectiveGatewayUrl);
     }
 
     [Fact]
@@ -332,6 +370,105 @@ public class SetupConfigTests : IDisposable
                 .GetBoolean());
     }
 
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void TraySettingsConfig_CapabilityMerge_ChangesOnlyNodeSettings(bool enabled)
+    {
+        var settingsPath = Path.Combine(_tempDir, "settings.json");
+        var registryPath = Path.Combine(_tempDir, "gateways.json");
+        const string registry = """{"ActiveGatewayId":"native","Gateways":[{"Id":"native","DeviceToken":"paired-device-token"}]}""";
+        File.WriteAllText(registryPath, registry);
+        var existing = new Dictionary<string, object?>
+        {
+            ["AutoStart"] = true,
+            ["EnableMcpServer"] = false,
+            ["EnableManagedLocalGatewayAutoRepair"] = false,
+            ["GatewayUrl"] = "ws://localhost:18789",
+            ["Token"] = "legacy-shared-token",
+            ["BootstrapToken"] = "legacy-bootstrap-token",
+            ["CustomKey"] = new { Nested = new[] { "one", "two" }, Enabled = true },
+            ["UnknownNull"] = null,
+            ["EnableNodeMode"] = !enabled,
+            ["NodeSystemRunEnabled"] = !enabled,
+            ["NodeCanvasEnabled"] = enabled,
+            ["NodeScreenEnabled"] = !enabled,
+            ["NodeCameraEnabled"] = enabled,
+            ["NodeLocationEnabled"] = !enabled,
+            ["NodeBrowserProxyEnabled"] = enabled,
+            ["NodeTtsEnabled"] = !enabled,
+            ["NodeSttEnabled"] = enabled,
+        };
+        File.WriteAllText(settingsPath, JsonSerializer.Serialize(existing));
+        var settings = new TraySettingsConfig
+        {
+            EnableNodeMode = enabled,
+            AutoStart = false,
+            EnableManagedLocalGatewayAutoRepair = true,
+        };
+        settings.ApplyCapabilities(new CapabilitiesConfig
+        {
+            System = enabled,
+            Canvas = !enabled,
+            Screen = enabled,
+            Camera = !enabled,
+            Location = enabled,
+            Browser = !enabled,
+            Tts = enabled,
+            Stt = !enabled,
+        });
+
+        settings.MergeCapabilitiesIntoSettingsFile(settingsPath);
+
+        using var result = JsonDocument.Parse(File.ReadAllText(settingsPath));
+        var root = result.RootElement;
+        Assert.Equal(existing.Count, root.EnumerateObject().Count());
+        Assert.Equal(enabled, root.GetProperty("EnableNodeMode").GetBoolean());
+        Assert.Equal(enabled, root.GetProperty("NodeSystemRunEnabled").GetBoolean());
+        Assert.Equal(!enabled, root.GetProperty("NodeCanvasEnabled").GetBoolean());
+        Assert.Equal(enabled, root.GetProperty("NodeScreenEnabled").GetBoolean());
+        Assert.Equal(!enabled, root.GetProperty("NodeCameraEnabled").GetBoolean());
+        Assert.Equal(enabled, root.GetProperty("NodeLocationEnabled").GetBoolean());
+        Assert.Equal(!enabled, root.GetProperty("NodeBrowserProxyEnabled").GetBoolean());
+        Assert.Equal(enabled, root.GetProperty("NodeTtsEnabled").GetBoolean());
+        Assert.Equal(!enabled, root.GetProperty("NodeSttEnabled").GetBoolean());
+        foreach (var key in new[]
+        {
+            "AutoStart", "EnableMcpServer", "EnableManagedLocalGatewayAutoRepair",
+            "GatewayUrl", "Token", "BootstrapToken", "CustomKey", "UnknownNull",
+        })
+        {
+            Assert.True(JsonElement.DeepEquals(
+                JsonSerializer.SerializeToElement(existing[key]), root.GetProperty(key)), key);
+        }
+        Assert.Equal(registry, File.ReadAllText(registryPath));
+    }
+
+    [Fact]
+    public void TraySettingsConfig_CapabilityMerge_CreatesOnlyNodeSettings()
+    {
+        var settingsPath = Path.Combine(_tempDir, "native", "settings.json");
+        var settings = new TraySettingsConfig
+        {
+            AutoStart = true,
+            EnableManagedLocalGatewayAutoRepair = true,
+        };
+
+        settings.MergeCapabilitiesIntoSettingsFile(settingsPath);
+
+        using var result = JsonDocument.Parse(File.ReadAllText(settingsPath));
+        var expectedKeys = new[]
+        {
+            "EnableNodeMode", "NodeSystemRunEnabled", "NodeCanvasEnabled",
+            "NodeScreenEnabled", "NodeCameraEnabled", "NodeLocationEnabled",
+            "NodeBrowserProxyEnabled", "NodeTtsEnabled", "NodeSttEnabled",
+        };
+        Assert.Equal(expectedKeys.Order(), result.RootElement.EnumerateObject().Select(p => p.Name).Order());
+        Assert.All(result.RootElement.EnumerateObject(), property => Assert.True(property.Value.GetBoolean()));
+        Assert.Single(Directory.EnumerateFiles(Path.GetDirectoryName(settingsPath)!));
+        Assert.False(File.Exists(Path.Combine(_tempDir, "gateways.json")));
+    }
+
     [Fact]
     public void TraySettingsConfig_SetupRerun_PreservesExistingAutoRepairKillSwitch()
     {
@@ -378,6 +515,21 @@ public class SetupConfigTests : IDisposable
         Assert.False(traySettings.NodeSttEnabled);
     }
 
+    /// <summary>
+    /// The install-review card's WSL title/description in CapabilitiesPage.xaml is a design-time
+    /// placeholder that CapabilitiesPage.xaml.cs immediately overwrites at runtime with
+    /// SetupReviewSummaryBuilder's DistroTitle/DistroDescription. This pins the default-config
+    /// runtime text to the same simplified copy so the two cannot drift again.
+    /// </summary>
+    [Fact]
+    public void SetupReviewSummary_DistroTitleAndDescription_MatchSimplifiedReviewCopy()
+    {
+        var summary = SetupReviewSummaryBuilder.Build(new SetupConfig());
+
+        Assert.Equal("Install Ubuntu 24.04 in WSL", summary.DistroTitle);
+        Assert.Equal("Creates a separate OpenClawGateway instance. Uses several GB.", summary.DistroDescription);
+    }
+
     [Fact]
     public void SetupReviewSummary_UsesActiveSetupConfig()
     {
@@ -387,6 +539,7 @@ public class SetupConfigTests : IDisposable
         {
             Environment.SetEnvironmentVariable("OPENCLAW_TRAY_DATA_DIR", Path.Combine(_tempDir, "roaming"));
             Environment.SetEnvironmentVariable("OPENCLAW_TRAY_LOCAL_DATA_DIR", Path.Combine(_tempDir, "local"));
+            LocalModelInfo qwen35B = LocalModelCatalog.Find(LocalModelCatalog.Qwen35BModelId)!;
             var config = new SetupConfig
             {
                 DistroName = "CustomClaw",
@@ -396,7 +549,13 @@ public class SetupConfigTests : IDisposable
                 {
                     Bind = "lan",
                     InstallUrl = "https://example.test/install.sh",
-                    Version = GatewayReleasePolicy.SecurityFloor
+                    Version = "2026.8.1"
+                },
+                LocalAi =
+                {
+                    Enabled = true,
+                    SelectedModelId = qwen35B.Id,
+                    SelectedProfileId = LocalModelCatalog.GetProfiles(qwen35B)[1].Id,
                 }
             };
 
@@ -404,19 +563,96 @@ public class SetupConfigTests : IDisposable
 
             Assert.Contains("Debian", summary.DistroTitle);
             Assert.Contains("CustomClaw", summary.DistroDescription);
+            Assert.Contains("several GB", summary.DistroDescription);
             Assert.Contains("19999", summary.GatewayEndpoint);
             Assert.Contains("LAN bind enabled", summary.GatewayDescription);
             Assert.Contains("example.test", summary.InstallerDescription);
             Assert.Contains("Unverified custom installer", summary.InstallerDescription);
             Assert.Contains("CustomClaw", summary.ExactCommands);
             Assert.Contains("19999", summary.ExactCommands);
+            Assert.Contains(
+                $"'{InstallCliStep.InstallerTempDirectoryPreview}'",
+                summary.ExactCommands);
+            Assert.Contains("'https://example.test/install.sh'", summary.ExactCommands);
+            Assert.DoesNotContain("--connect-timeout", summary.ExactCommands);
+            Assert.DoesNotContain("--max-time", summary.ExactCommands);
+            Assert.DoesNotContain("--remove-on-error", summary.ExactCommands);
+            Assert.Contains(
+                "bash -s -- --version '2026.8.1' < \"$installer\"",
+                summary.ExactCommands);
+            Assert.DoesNotContain("--node-version", summary.ExactCommands);
+            Assert.DoesNotContain("--retry", summary.ExactCommands);
+            Assert.DoesNotContain("| bash", summary.ExactCommands);
             Assert.Equal("CustomClaw · LAN:19999", summary.CompletionGatewaySummary);
+            Assert.Equal("Qwen 3.6 35B-A3B installed", summary.LocalAiTitle);
+            Assert.StartsWith(
+                "llama-server for Windows · loads on first request · ",
+                summary.LocalAiDescription,
+                StringComparison.Ordinal);
+            Assert.Contains("256K context", summary.LocalAiDescription, StringComparison.Ordinal);
+            Assert.Contains("Q8_0 target and MTP draft KV", summary.LocalAiDescription, StringComparison.Ordinal);
+            Assert.DoesNotContain("full CUDA offload", summary.LocalAiDescription, StringComparison.Ordinal);
+            Assert.DoesNotContain("immutable revision", summary.LocalAiDescription, StringComparison.Ordinal);
+            Assert.DoesNotContain("llama-server b", summary.LocalAiDescription, StringComparison.Ordinal);
         }
         finally
         {
             Environment.SetEnvironmentVariable("OPENCLAW_TRAY_DATA_DIR", oldData);
             Environment.SetEnvironmentVariable("OPENCLAW_TRAY_LOCAL_DATA_DIR", oldLocalData);
         }
+    }
+
+    [Fact]
+    public void SetupReviewSummary_DefaultsToNpmLatestWithoutVersionArgument()
+    {
+        var summary = SetupReviewSummaryBuilder.Build(new SetupConfig());
+
+        Assert.Contains("Latest stable OpenClaw package from npm", summary.InstallerDescription);
+        Assert.Equal("npm latest", summary.InstallerBadge);
+        Assert.DoesNotContain("--version", summary.ExactCommands, StringComparison.Ordinal);
+        Assert.Contains("--node-version", summary.ExactCommands, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void SetupReviewSummary_InvalidInstallerDoesNotPreviewUnreachableDownload()
+    {
+        var config = new SetupConfig
+        {
+            Gateway =
+            {
+                InstallUrl = "http://example.test/install.sh",
+                Version = "2026.8.1"
+            }
+        };
+
+        var summary = SetupReviewSummaryBuilder.Build(config);
+
+        Assert.Contains(
+            "setup stops before CLI download: installer URL must use HTTPS",
+            summary.ExactCommands);
+        Assert.DoesNotContain("curl ", summary.ExactCommands);
+        Assert.DoesNotContain("bash -s", summary.ExactCommands);
+    }
+
+    [Fact]
+    public void SetupReviewSummary_DescribesExactAndChannelSelectorsWithoutCallingThemCandidates()
+    {
+        var exact = SetupReviewSummaryBuilder.Build(new SetupConfig
+        {
+            Gateway = new GatewayConfig { Version = "2026.8.2" }
+        });
+        var beta = SetupReviewSummaryBuilder.Build(new SetupConfig
+        {
+            Gateway = new GatewayConfig { Version = "beta" }
+        });
+
+        Assert.Contains("Exact OpenClaw package 2026.8.2", exact.InstallerDescription);
+        Assert.Equal("2026.8.2", exact.InstallerBadge);
+        Assert.Contains("--version '2026.8.2'", exact.ExactCommands);
+        Assert.Contains("OpenClaw beta channel", beta.InstallerDescription);
+        Assert.Equal("npm beta", beta.InstallerBadge);
+        Assert.DoesNotContain("candidate", exact.InstallerDescription, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("candidate", beta.InstallerDescription, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]
@@ -479,17 +715,30 @@ public class SetupConfigTests : IDisposable
         Assert.False(result.RootElement.GetProperty("NodeSystemRunEnabled").GetBoolean());
     }
 
-    [Fact]
-    public void TraySettingsConfig_CorruptExistingFile_BacksUpAndThrows()
+    [Theory]
+    [InlineData(false, "{not json")]
+    [InlineData(true, "{not json")]
+    [InlineData(false, "[]")]
+    [InlineData(true, "[]")]
+    public void TraySettingsConfig_CorruptExistingFile_BacksUpAndThrows(bool capabilitiesOnly, string content)
     {
         var settingsPath = Path.Combine(_tempDir, "settings.json");
-        File.WriteAllText(settingsPath, "{not json");
+        File.WriteAllText(settingsPath, content);
 
-        var ex = Assert.Throws<InvalidDataException>(() => new TraySettingsConfig().MergeIntoSettingsFile(settingsPath));
+        var settings = new TraySettingsConfig();
+        var ex = Assert.Throws<InvalidDataException>(() =>
+        {
+            if (capabilitiesOnly)
+                settings.MergeCapabilitiesIntoSettingsFile(settingsPath);
+            else
+                settings.MergeIntoSettingsFile(settingsPath);
+        });
 
         Assert.Contains("settings.json is corrupt", ex.Message);
-        Assert.Equal("{not json", File.ReadAllText(settingsPath));
-        Assert.Single(Directory.EnumerateFiles(_tempDir, "settings.json.corrupt-*.bak"));
+        Assert.IsAssignableFrom<JsonException>(ex.InnerException);
+        Assert.Equal(content, File.ReadAllText(settingsPath));
+        var backup = Assert.Single(Directory.EnumerateFiles(_tempDir, "settings.json.corrupt-*.bak"));
+        Assert.Equal(content, File.ReadAllText(backup));
     }
 
     [Fact]
@@ -499,9 +748,10 @@ public class SetupConfigTests : IDisposable
         File.WriteAllText(settingsPath, "{not json");
 
         Assert.Throws<InvalidDataException>(() => new TraySettingsConfig().MergeIntoSettingsFile(settingsPath));
+        Assert.Throws<InvalidDataException>(() => new TraySettingsConfig().MergeCapabilitiesIntoSettingsFile(settingsPath));
         Assert.Throws<InvalidDataException>(() => TraySettingsConfig.UpdateAutoStartInSettingsFile(settingsPath, autoStart: true));
 
-        Assert.Equal(2, Directory.EnumerateFiles(_tempDir, "settings.json.corrupt-*.bak").Count());
+        Assert.Equal(3, Directory.EnumerateFiles(_tempDir, "settings.json.corrupt-*.bak").Count());
     }
 
     [Fact]
@@ -514,8 +764,13 @@ public class SetupConfigTests : IDisposable
         Assert.True(File.Exists(settingsPath));
         var result = JsonDocument.Parse(File.ReadAllText(settingsPath));
         Assert.True(result.RootElement.GetProperty("EnableNodeMode").GetBoolean());
+        Assert.False(result.RootElement.GetProperty("AutoStart").GetBoolean());
+        Assert.True(result.RootElement.GetProperty("EnableManagedLocalGatewayAutoRepair").GetBoolean());
         Assert.True(result.RootElement.GetProperty("NodeTtsEnabled").GetBoolean());
         Assert.True(result.RootElement.GetProperty("NodeSttEnabled").GetBoolean());
+        Assert.Equal(11, result.RootElement.EnumerateObject().Count());
+        Assert.False(result.RootElement.TryGetProperty("Token", out _));
+        Assert.False(result.RootElement.TryGetProperty("BootstrapToken", out _));
     }
 
     [Fact]
@@ -549,6 +804,96 @@ public class SetupConfigTests : IDisposable
     }
 
     [Fact]
+    [SupportedOSPlatform("windows")]
+    public void TrayArtifactCleanup_ResetOnboardingSettings_RemovesLegacyGatewayTokens()
+    {
+        var settingsPath = Path.Combine(_tempDir, "settings.json");
+        File.WriteAllText(
+            settingsPath,
+            """
+            {"GatewayUrl":"ws://127.0.0.1:18789","Token":"leftover-shared","BootstrapToken":"leftover-bootstrap","EnableNodeMode":true,"NotifyHealth":false}
+            """);
+
+        TrayArtifactCleanup.ResetOnboardingSettings(_tempDir, new SetupLogger(filePath: null), preserveNodeSettings: false);
+
+        using var result = JsonDocument.Parse(File.ReadAllText(settingsPath));
+        Assert.False(result.RootElement.TryGetProperty("GatewayUrl", out _));
+        Assert.False(result.RootElement.TryGetProperty("Token", out _));
+        Assert.False(result.RootElement.TryGetProperty("BootstrapToken", out _));
+        Assert.False(result.RootElement.GetProperty("EnableNodeMode").GetBoolean());
+        Assert.False(result.RootElement.GetProperty("NotifyHealth").GetBoolean());
+
+        File.WriteAllText(
+            settingsPath,
+            """
+            {"Token":"leftover-shared","BootstrapToken":"leftover-bootstrap","NotifyHealth":false}
+            """);
+
+        TrayArtifactCleanup.ResetOnboardingSettings(_tempDir, new SetupLogger(filePath: null), preserveNodeSettings: true);
+
+        using var leftover = JsonDocument.Parse(File.ReadAllText(settingsPath));
+        Assert.False(leftover.RootElement.TryGetProperty("Token", out _));
+        Assert.False(leftover.RootElement.TryGetProperty("BootstrapToken", out _));
+        Assert.False(leftover.RootElement.GetProperty("NotifyHealth").GetBoolean());
+    }
+
+    [Fact]
+    [SupportedOSPlatform("windows")]
+    public void TrayArtifactCleanup_UnreadableGatewayRegistry_LeavesOnboardingSettingsUnchanged()
+    {
+        var settingsPath = Path.Combine(_tempDir, "settings.json");
+        var gatewaysPath = Path.Combine(_tempDir, "gateways.json");
+        const string settings = """{"GatewayUrl": "ws://127.0.0.1:18789", "EnableNodeMode": true, "AutoStart": true}""";
+        File.WriteAllText(settingsPath, settings);
+        File.WriteAllText(gatewaysPath, """{"gateways":[{"id":"gw-1","url":"ws://127.0.0.1:18789"}],"activeId":"gw-1"}""");
+        var logPath = Path.Combine(_tempDir, "setup.jsonl");
+
+        using (var held = new FileStream(gatewaysPath, FileMode.Open, FileAccess.Read, FileShare.None))
+        using (var logger = new SetupLogger(logPath))
+        {
+            TrayArtifactCleanup.ApplyOnboardingReset(_tempDir, logger);
+        }
+
+        Assert.Equal(settings, File.ReadAllText(settingsPath));
+        Assert.Contains(
+            "Left onboarding settings unchanged because the gateway registry could not be read.",
+            File.ReadAllText(logPath));
+    }
+
+    [Fact]
+    [SupportedOSPlatform("windows")]
+    public void TrayArtifactCleanup_MissingGatewayRegistry_DisablesNodeSettings()
+    {
+        var settingsPath = Path.Combine(_tempDir, "settings.json");
+        File.WriteAllText(settingsPath, """{"GatewayUrl": "ws://127.0.0.1:18789", "EnableNodeMode": true, "AutoStart": true}""");
+
+        TrayArtifactCleanup.ApplyOnboardingReset(_tempDir, new SetupLogger(filePath: null));
+
+        var result = JsonDocument.Parse(File.ReadAllText(settingsPath));
+        Assert.False(result.RootElement.TryGetProperty("GatewayUrl", out _));
+        Assert.False(result.RootElement.GetProperty("EnableNodeMode").GetBoolean());
+        Assert.False(result.RootElement.GetProperty("AutoStart").GetBoolean());
+    }
+
+    [Fact]
+    [SupportedOSPlatform("windows")]
+    public void TrayArtifactCleanup_ReadableGatewayRecord_PreservesNodeSettings()
+    {
+        var settingsPath = Path.Combine(_tempDir, "settings.json");
+        File.WriteAllText(settingsPath, """{"GatewayUrl": "ws://127.0.0.1:18789", "EnableNodeMode": true, "AutoStart": true}""");
+        File.WriteAllText(
+            Path.Combine(_tempDir, "gateways.json"),
+            """{"gateways":[{"id":"gw-1","url":"ws://127.0.0.1:18789"}],"activeId":"gw-1"}""");
+
+        TrayArtifactCleanup.ApplyOnboardingReset(_tempDir, new SetupLogger(filePath: null));
+
+        var result = JsonDocument.Parse(File.ReadAllText(settingsPath));
+        Assert.False(result.RootElement.TryGetProperty("GatewayUrl", out _));
+        Assert.True(result.RootElement.GetProperty("EnableNodeMode").GetBoolean());
+        Assert.True(result.RootElement.GetProperty("AutoStart").GetBoolean());
+    }
+
+    [Fact]
     public void WslConfig_Defaults()
     {
         var wsl = new WslConfig();
@@ -572,6 +917,9 @@ public class SetupConfigTests : IDisposable
         Assert.StartsWith(WindowsNodeContextSection.BeginMarker + "\n", block);
         Assert.Contains("This WSL gateway may be paired", block);
         Assert.Contains("exec host=node", block);
+        Assert.Contains("Share Windows Ollama", block);
+        Assert.Contains("ollama.models", block);
+        Assert.Contains("separate from the app-managed Local AI gateway provider", block);
         Assert.DoesNotContain("tools.exec.security full", block);
         Assert.DoesNotContain("tools.exec.ask off", block);
         Assert.EndsWith("\n" + WindowsNodeContextSection.EndMarker, block);
@@ -604,10 +952,41 @@ public class SetupConfigTests : IDisposable
     }
 
     [Fact]
+    public void StepResult_RestartRequired_IsTypedTerminal()
+    {
+        var result = StepResult.RestartRequired("restart Windows");
+        var (outcome, message, error, detail) = result;
+
+        Assert.False(result.IsSuccess);
+        Assert.Equal(StepOutcome.FailedTerminal, outcome);
+        Assert.Equal("restart Windows", message);
+        Assert.Null(error);
+        Assert.Null(detail);
+        Assert.True(result.RequiresRestart);
+    }
+
+    [Fact]
     public void PipelineResult_ExitCodes()
     {
         Assert.Equal(0, new PipelineResult(PipelineOutcome.Success).ExitCode);
         Assert.Equal(1, new PipelineResult(PipelineOutcome.Failed).ExitCode);
         Assert.Equal(3, new PipelineResult(PipelineOutcome.Cancelled).ExitCode);
+    }
+
+    private static string RepositoryRoot()
+    {
+        if (Environment.GetEnvironmentVariable("OPENCLAW_REPO_ROOT") is { Length: > 0 } configured)
+            return configured;
+
+        var directory = AppContext.BaseDirectory;
+        while (!string.IsNullOrWhiteSpace(directory))
+        {
+            if (File.Exists(Path.Combine(directory, "src", "OpenClaw.SetupEngine", "default-config.json")))
+                return directory;
+
+            directory = Directory.GetParent(directory)?.FullName;
+        }
+
+        throw new DirectoryNotFoundException("Could not locate repository root for default-config.json.");
     }
 }
