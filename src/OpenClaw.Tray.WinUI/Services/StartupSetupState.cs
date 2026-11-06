@@ -91,12 +91,20 @@ internal static class StartupSetupState
         return HasNonDefaultGatewayUrl(settings);
     }
 
-    private static bool HasNonDefaultGatewayUrl(SettingsManager settings) =>
-        !string.IsNullOrWhiteSpace(settings.GatewayUrl)
-        && !string.Equals(
-            settings.GatewayUrl,
-            AppIdentity.SetupGatewayUrl,
-            StringComparison.OrdinalIgnoreCase);
+    private static bool HasNonDefaultGatewayUrl(SettingsManager settings)
+    {
+        if (string.IsNullOrWhiteSpace(settings.GatewayUrl))
+            return false;
+
+        return !string.Equals(
+                settings.GatewayUrl,
+                AppIdentity.SetupGatewayUrl,
+                StringComparison.OrdinalIgnoreCase)
+            && !string.Equals(
+                settings.GatewayUrl,
+                $"ws://localhost:{AppIdentity.SetupGatewayPort}",
+                StringComparison.OrdinalIgnoreCase);
+    }
 
     public static bool CanStartNodeGateway(SettingsManager settings, string dataPath)
     {
@@ -124,12 +132,13 @@ internal static class StartupSetupState
             return false;
         }
 
-        if (settings.EnableNodeMode)
+        if (settings.EnableNodeMode &&
+            (HasStoredNodeDeviceToken(dataPath, registry) || HasBootstrapGatewayRecord(registry)))
         {
-            return !HasStoredNodeDeviceToken(dataPath, registry)
-                && !HasBootstrapGatewayRecord(registry);
+            return false;
         }
 
+        // Node pairing readiness is independent of whether a gateway was configured.
         if (registry is not null
             && SetupExistingGatewayClassifier.HasAnyExistingGatewayConnection(registry, settings, dataPath))
         {

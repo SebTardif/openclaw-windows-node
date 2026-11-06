@@ -38,6 +38,7 @@ public class WindowsNodeClient : WebSocketClientBase
     // even after OnDisconnected clears _isPendingApproval.
     private volatile bool _pairingBlocked;
     private volatile bool _rateLimited;
+    private volatile bool _protocolMismatch;
     private bool _useV2Signature; // true after v3 signature rejected by gateway
     public bool UseV2Signature { get => _useV2Signature; set => _useV2Signature = value; }
     private readonly HandshakeChallengeGate _handshakeChallengeGate = new();
@@ -90,6 +91,8 @@ public class WindowsNodeClient : WebSocketClientBase
     /// </summary>
     public Func<CancellationToken, Task<ReconnectAuthorizationResult>>?
         HandshakeAuthorizationAsync { get; set; }
+    /// <summary>Raised with sanitized wire-protocol compatibility details for the current handshake.</summary>
+    public event EventHandler<GatewayProtocolCompatibility>? ProtocolCompatibilityChanged;
 
     protected override void OnReconnectAuthorizationDenied(
         ReconnectAuthorizationResult authorization)
@@ -297,6 +300,12 @@ public class WindowsNodeClient : WebSocketClientBase
             }
             var type = typeProp.GetString();
             _logger.Debug($"[NODE] Processing message type: {type}");
+
+            if (_protocolMismatch)
+            {
+                _logger.Warn("[NODE] Ignoring message after terminal protocol mismatch");
+                return;
+            }
             
             switch (type)
             {
@@ -626,13 +635,19 @@ public class WindowsNodeClient : WebSocketClientBase
                     requestId,
                     response.Ok,
                     response.Payload,
-                    response.Error),
+                    response.Error,
+                    response.ErrorCode),
                 error => SendNodeInvokeResultAsync(requestId, false, null, error),
                 invocation!),
             CancellationToken.None);
     }
     
-    private async Task SendNodeInvokeResultAsync(string requestId, bool success, object? payload, string? error)
+    private async Task SendNodeInvokeResultAsync(
+        string requestId,
+        bool success,
+        object? payload,
+        string? error,
+        string? errorCode = null)
     {
         // Gateway expects: id (not requestId), nodeId, ok, payload (not result)
         var response = new
@@ -646,7 +661,7 @@ public class WindowsNodeClient : WebSocketClientBase
                 nodeId = _deviceIdentity.DeviceId,  // Our device ID
                 ok = success,
                 payload = payload,
-                error = error == null ? null : new { message = error }
+                error = error == null ? null : new { code = errorCode, message = error }
             }
         };
         
@@ -860,26 +875,52 @@ public class WindowsNodeClient : WebSocketClientBase
         if (root.TryGetProperty("ok", out var okProp) &&
             okProp.ValueKind == JsonValueKind.False)
         {
-            if (isConnectResponse &&
-                !_handshakeChallengeGate.IsAuthorized(sourceConnectionGeneration))
+            if (!isConnectResponse)
+            {
+                _logger.Warn(
+                    $"[NODE] Ignoring non-connect failed reply id={responseId ?? "none"}");
+                return;
+            }
+
+            if (!_handshakeChallengeGate.IsAuthorized(sourceConnectionGeneration))
             {
                 _logger.Warn("[HANDSHAKE] Ignoring stale node connect denial.");
                 return;
             }
-            if (isConnectResponse)
-                Volatile.Write(ref _pendingConnectRequestId, null);
+
+            Volatile.Write(ref _pendingConnectRequestId, null);
             HandleRequestError(root);
             return;
         }
 
         if (!root.TryGetProperty("payload", out var payload))
         {
-            _logger.Warn("[NODE] Response has no payload");
+            if (isConnectResponse)
+                HandleProtocolMismatch("connect success response has no payload");
             return;
         }
+
+        var isHelloOk = GatewayProtocolContract.IsHelloOk(payload);
+        if (isHelloOk && !isConnectResponse)
+        {
+            _logger.Warn("[HANDSHAKE] Ignoring uncorrelated node hello-ok.");
+            return;
+        }
+
+        if (isConnectResponse &&
+            !GatewayProtocolContract.TryValidateHelloOk(payload, out var protocolError))
+        {
+            var compatibility = GatewayProtocolCompatibility.FromGatewayExpectation(
+                GatewayProtocolContract.TryGetProtocol(payload, out var protocol) ? protocol : null);
+            HandleProtocolMismatch(protocolError, compatibility);
+            return;
+        }
+
+        if (!isHelloOk)
+            return;
         
         // Handle hello-ok (successful registration)
-        if (payload.TryGetProperty("type", out var t) && t.GetString() == "hello-ok")
+        if (isHelloOk)
         {
             if (!isConnectResponse ||
                 !_handshakeChallengeGate.IsAuthorized(sourceConnectionGeneration))
@@ -894,6 +935,11 @@ public class WindowsNodeClient : WebSocketClientBase
             var reconnectingAfterApproval = _pairingApprovedAwaitingReconnect;
             _isConnected = true;
             _rateLimited = false; // Clear transient rate-limit on successful connect
+            _protocolMismatch = false;
+            _ = GatewayProtocolContract.TryGetProtocol(payload, out var acceptedProtocol);
+            ProtocolCompatibilityChanged?.Invoke(
+                this,
+                GatewayProtocolCompatibility.Compatible(acceptedProtocol));
             ResetReconnectAttempts();
             
             // Extract node ID if returned
@@ -1032,6 +1078,13 @@ public class WindowsNodeClient : WebSocketClientBase
         var effectiveErrorCode = detailCode ?? errorCode;
         _logger.Info($"[HANDSHAKE] Connect error: message=\"{error}\", code={errorCode}, detailCode={detailCode ?? "none"}");
 
+        if (!_isConnected &&
+            ClassifyConnectionFailure(error, errorCode, detailCode) == GatewayErrorKind.ProtocolMismatch)
+        {
+            HandleProtocolMismatch(error, GatewayProtocolContract.ParseMismatch(root));
+            return;
+        }
+
         if (string.Equals(errorCode, "NOT_PAIRED", StringComparison.OrdinalIgnoreCase))
         {
             if (_isPendingApproval)
@@ -1111,6 +1164,22 @@ public class WindowsNodeClient : WebSocketClientBase
             return GatewayErrorKind.Auth;
 
         return GatewayErrorClassifier.ClassifyWithCode(error, errorCode, detailsCode);
+    }
+
+    private void HandleProtocolMismatch(
+        string detail,
+        GatewayProtocolCompatibility? compatibility = null)
+    {
+        _protocolMismatch = true;
+        _isConnected = false;
+        Volatile.Write(ref _pendingConnectRequestId, null);
+        AbortCurrentWebSocket(CurrentConnectionGeneration);
+        _logger.Warn($"[NODE] Gateway protocol mismatch: {TokenSanitizer.Sanitize(detail)}");
+        ProtocolCompatibilityChanged?.Invoke(
+            this,
+            compatibility ?? GatewayProtocolCompatibility.FromGatewayExpectation(expectedProtocol: null));
+        ConnectionFailure?.Invoke(this, GatewayErrorKind.ProtocolMismatch);
+        RaiseStatusChanged(ConnectionStatus.Error);
     }
 
     // Structured terminal-auth codes (wrong shared/bootstrap token, rate limit, token not
@@ -1774,7 +1843,7 @@ public class WindowsNodeClient : WebSocketClientBase
             id = response.Id,
             ok = response.Ok,
             payload = response.Payload,
-            error = response.Ok ? null : new { message = response.Error }
+            error = response.Ok ? null : new { code = response.ErrorCode, message = response.Error }
         };
         
         await SendRawAsync(JsonSerializer.Serialize(msg, s_ignoreNullOptions));
@@ -1874,6 +1943,9 @@ public class WindowsNodeClient : WebSocketClientBase
             return false;
 
         if (_rateLimited)
+            return false;
+
+        if (_protocolMismatch)
             return false;
 
         return true;

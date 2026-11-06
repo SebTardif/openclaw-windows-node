@@ -80,17 +80,30 @@ public class McpHttpServerIntegrationTests : IClassFixture<TrayAppFixture>
         Assert.True(payload.RootElement.GetProperty("sent").GetBoolean());
     }
 
-    [IntegrationFact]
+    [MxcIntegrationFact]
     public async Task SystemRun_Where_ReturnsExpectedOutput()
     {
+        var expectedPath = Path.Combine(Environment.SystemDirectory, "cmd.exe");
         using var payload = await _fixture.Client.CallToolExpectSuccessAsync("system.run", new
         {
-            command = new[] { "where.exe", "cmd.exe" },
+            command = new[] { "where.exe", $"{Environment.SystemDirectory}:cmd.exe" },
             timeoutMs = 10_000,
         });
         var stdout = payload.RootElement.GetProperty("stdout").GetString() ?? "";
-        Assert.Contains("cmd.exe", stdout, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(expectedPath, stdout.TrimEnd('\r', '\n'), ignoreCase: true);
         Assert.Equal(0, payload.RootElement.GetProperty("exitCode").GetInt32());
+    }
+
+    public sealed class MxcIntegrationFactAttribute : Xunit.FactAttribute
+    {
+        public MxcIntegrationFactAttribute()
+        {
+            if (Environment.GetEnvironmentVariable("OPENCLAW_RUN_INTEGRATION") != "1" ||
+                Environment.GetEnvironmentVariable("OPENCLAW_RUN_MXC_NATIVE_PROOF") != "1")
+                Skip = "Native system.run proof requires both integration and isolated MXC proof opt-ins.";
+            else if (!OpenClaw.Shared.Mxc.MxcAvailability.Probe().CanRunSystemRunSandbox)
+                Skip = "MXC BaseContainer with protected-path denial is unavailable. No host bypass is permitted.";
+        }
     }
 
     [IntegrationFact]
@@ -397,16 +410,17 @@ public class McpHttpServerIntegrationTests : IClassFixture<TrayAppFixture>
     }
 
     [IntegrationFact]
-    public async Task CanvasNavigate_ReturnsNavigated()
+    public async Task CanvasNavigate_LocalAddressReturnsUnsupportedInCanvas()
     {
-        // HttpUrlValidator only accepts http/https. We don't need the page to
-        // resolve or launch — the fixture suppresses external browser launches,
-        // and the tool returns success as soon as the navigate event is raised.
+        // A loopback URL deterministically exercises validation, DNS-risk
+        // enrichment, and the registered handler without depending on hosted
+        // CI being able to initialize and navigate a WebView window.
         using var payload = await _fixture.Client.CallToolExpectSuccessAsync("canvas.navigate", new
         {
-            url = "https://example.com/",
+            url = "http://127.0.0.1/",
         });
-        Assert.True(payload.RootElement.GetProperty("navigated").GetBoolean());
+        Assert.False(payload.RootElement.GetProperty("navigated").GetBoolean());
+        Assert.Equal("unsupported_in_canvas", payload.RootElement.GetProperty("opener").GetString());
     }
 
     [IntegrationFact]
