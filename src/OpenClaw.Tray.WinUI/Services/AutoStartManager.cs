@@ -221,9 +221,21 @@ public static class AutoStartManager
             else
             {
                 DeleteRunKey();
-                WindowsStartupTaskRegistration.Unregister(AppIdentity.StartupTaskName);
+                var taskName = AppIdentity.StartupTaskName;
+                if (WindowsStartupTaskRegistration.Exists(taskName))
+                    WindowsStartupTaskRegistration.Unregister(taskName);
+                if (UnpackagedRunValueRemains() || WindowsStartupTaskRegistration.Exists(taskName))
+                {
+                    throw new AutoStartRefusedException(
+                        "Auto-start stayed on. The Run value or the logon task is still present.");
+                }
+
                 Logger.Info("Auto-start disabled");
             }
+        }
+        catch (AutoStartRefusedException)
+        {
+            throw;
         }
         catch (Exception ex)
         {
@@ -302,6 +314,20 @@ public static class AutoStartManager
                 _ => $"Windows did not enable the packaged startup task (state: {state})."
             },
             state is StartupTaskState.DisabledByUser or StartupTaskState.DisabledByPolicy);
+    }
+
+    private static bool UnpackagedRunValueRemains()
+    {
+        try
+        {
+            using var key = Registry.CurrentUser.OpenSubKey(RegistryKey, writable: false);
+            return key?.GetValue(AppName) != null;
+        }
+        catch (Exception ex)
+        {
+            Logger.Warn($"Failed to read the auto-start Run value: {ex.Message}");
+            return true;
+        }
     }
 
     private static void DeleteRunKey()
