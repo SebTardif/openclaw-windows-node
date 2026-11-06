@@ -65,6 +65,7 @@ internal sealed class GatewayService
 
         _clientGeneration++;
         _currentClient = newClient;
+        _state.AgentsListUnsupported = newClient?.IsAgentsListUnsupported ?? false;
 
         // Clear service-level caches on actual client swap
         if (!ReferenceEquals(oldClient, newClient))
@@ -123,13 +124,14 @@ internal sealed class GatewayService
         client.CronRunsUpdated += OnCronRunsUpdated;
         client.ConfigUpdated += OnConfigUpdated;
         client.ConfigSchemaUpdated += OnConfigSchemaUpdated;
-        client.SkillsStatusUpdated += OnSkillsStatusUpdated;
         client.AgentEventReceived += OnAgentEventReceived;
         client.NodePairListUpdated += OnNodePairListUpdated;
         client.DevicePairListUpdated += OnDevicePairListUpdated;
         client.ModelsListUpdated += OnModelsListUpdated;
         client.PresenceUpdated += OnPresenceUpdated;
+        client.SelfProfileChanged += OnSelfProfileChanged;
         client.AgentsListUpdated += OnAgentsListUpdated;
+        client.AgentsListUnsupportedChanged += OnAgentsListUnsupportedChanged;
         client.AgentFilesListUpdated += OnAgentFilesListUpdated;
         client.AgentFileContentUpdated += OnAgentFileContentUpdated;
     }
@@ -154,18 +156,25 @@ internal sealed class GatewayService
         client.CronRunsUpdated -= OnCronRunsUpdated;
         client.ConfigUpdated -= OnConfigUpdated;
         client.ConfigSchemaUpdated -= OnConfigSchemaUpdated;
-        client.SkillsStatusUpdated -= OnSkillsStatusUpdated;
         client.AgentEventReceived -= OnAgentEventReceived;
         client.NodePairListUpdated -= OnNodePairListUpdated;
         client.DevicePairListUpdated -= OnDevicePairListUpdated;
         client.ModelsListUpdated -= OnModelsListUpdated;
         client.PresenceUpdated -= OnPresenceUpdated;
+        client.SelfProfileChanged -= OnSelfProfileChanged;
         client.AgentsListUpdated -= OnAgentsListUpdated;
+        client.AgentsListUnsupportedChanged -= OnAgentsListUnsupportedChanged;
         client.AgentFilesListUpdated -= OnAgentFilesListUpdated;
         client.AgentFileContentUpdated -= OnAgentFileContentUpdated;
     }
 
     // ── Category C: Re-raised events (update AppState + re-raise for App) ──
+
+    private void OnSelfProfileChanged(object? sender, EventArgs e)
+    {
+        if (sender != _currentClient) return;
+        EnqueueModelUpdate(() => _state.SelfProfileRevision++);
+    }
 
     private void OnConnectionStatusChanged(object? sender, ConnectionStatus status)
     {
@@ -444,13 +453,6 @@ internal sealed class GatewayService
         EnqueueModelUpdate(() => _state.CronRuns = cloned);
     }
 
-    private void OnSkillsStatusUpdated(object? sender, JsonElement data)
-    {
-        if (sender != _currentClient) return;
-        var cloned = data.Clone();
-        EnqueueModelUpdate(() => _state.SkillsData = cloned);
-    }
-
     private void OnConfigUpdated(object? sender, JsonElement data)
     {
         if (sender != _currentClient) return;
@@ -469,7 +471,17 @@ internal sealed class GatewayService
     {
         if (sender != _currentClient) return;
         var cloned = data.Clone();
-        EnqueueModelUpdate(() => _state.AgentsList = cloned);
+        EnqueueModelUpdate(() =>
+        {
+            _state.AgentsListUnsupported = false;
+            _state.AgentsList = cloned;
+        });
+    }
+
+    private void OnAgentsListUnsupportedChanged(object? sender, bool unsupported)
+    {
+        if (sender != _currentClient) return;
+        EnqueueModelUpdate(() => _state.AgentsListUnsupported = unsupported);
     }
 
     private void OnAgentFilesListUpdated(object? sender, JsonElement data)

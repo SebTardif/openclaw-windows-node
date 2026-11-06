@@ -26,7 +26,7 @@ Single source of truth for all gateway-cached data. Implements `INotifyPropertyC
 src/OpenClaw.Tray.WinUI/Services/AppState.cs
 ```
 
-**Properties** (24+): `Status`, `CurrentActivity`, `Sessions`, `Channels`, `Nodes`, `Usage`, `UsageCost`, `UsageStatus`, `GatewaySelf`, `NodePairList`, `DevicePairList`, `ModelsList`, `Presence`, `AgentsList`, `Config`, `ConfigSchema`, `SkillsData`, `CronList`, `CronStatus`, `CronRuns`, `AgentFilesList`, `AgentFileContent`, `AuthFailureMessage`, `UpdateInfo`, `LastCheckTime`
+**Properties** (24+): `Status`, `CurrentActivity`, `Sessions`, `Channels`, `Nodes`, `Usage`, `UsageCost`, `UsageStatus`, `GatewaySelf`, `NodePairList`, `DevicePairList`, `ModelsList`, `Presence`, `AgentsList`, `Config`, `ConfigSchema`, `CronList`, `CronStatus`, `CronRuns`, `AgentFilesList`, `AgentFileContent`, `AuthFailureMessage`, `UpdateInfo`, `LastCheckTime`
 
 **Threading model**: All property writes must happen on the UI thread (enforced by `Debug.Assert` in `SetField`). This guarantees `PropertyChanged` fires on the UI thread, so pages can update UI directly without `DispatcherQueue.TryEnqueue`.
 
@@ -81,7 +81,8 @@ App creates `AppState` and `GatewayService` in `OnLaunched` and wires them toget
 - `OnManagerStateChanged` - maps `GatewayConnectionSnapshot` to `ConnectionStatus`, writes `AppState.Status`
 - Node service handlers - `OnNodeStatusChanged`, `OnPairingStatusChanged`, etc.
 - Toast/notification display (via `ToastService`)
-- Window management - `ShowHub`, `ShowChatWindow`, `ShowVoiceOverlay`
+- Window routing - `ShowHub` delegates chat/Workspace routes to `WindowManager`;
+  `ShowVoiceOverlay` retains the voice overlay path
 - Tray icon/menu updates (subscribes to `AppState.PropertyChanged`)
 - `IAppCommands` implementation
 
@@ -123,19 +124,25 @@ private void OnAppStateChanged(object? sender, PropertyChangedEventArgs e)
 |------|----------|
 | ConnectionPage | Status, NodePairList, DevicePairList, Channels, UsageCost, Sessions, GatewaySelf |
 | SessionsPage | Sessions, ModelsList |
-| ChannelsPage | Channels |
 | UsagePage | Usage, UsageCost, UsageStatus |
 | InstancesPage | Nodes, Presence |
 | ConfigPage | Config, ConfigSchema |
-| BindingsPage | Config |
 | CronPage | CronList, CronStatus, CronRuns |
-| SkillsPage | SkillsData |
 | WorkspacePage | AgentFilesList, AgentFileContent |
 | AgentEventsPage | AgentEventAdded (separate event) |
 | AboutPage | GatewaySelf |
 
 Pages that don't observe AppState: ChatPage, SettingsPage, SandboxPage,
 VoiceSettingsPage.
+
+Workspace is the only application chat host. Its retained `ChatPage` observes
+the app-owned `OpenClawChatDataProvider`, not a Settings frame or a tray popup.
+`WorkspaceWindow` owns agent/session selection and navigation history; external
+session actions and composer-created selections keep that destination, sidebar,
+and rendered thread synchronized. Pending selection survives an unready provider
+and is consumed once by either the native or WebView renderer.
+Closing Workspace disposes its mounted composer host, not the background
+Gateway/MCP runtime or provider.
 
 ### HubWindow - minimal role
 

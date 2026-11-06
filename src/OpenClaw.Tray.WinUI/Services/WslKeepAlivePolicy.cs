@@ -1,3 +1,4 @@
+using System.Text.Json;
 using OpenClaw.Connection;
 using OpenClaw.Shared;
 
@@ -6,13 +7,18 @@ namespace OpenClawTray.Services;
 internal static class WslKeepAlivePolicy
 {
     private static string DefaultSetupManagedDistroName => AppIdentity.SetupDistroName;
-    private static string DefaultSetupManagedFriendlyName => $"Local ({AppIdentity.SetupDistroName})";
+
+    public static bool CanManageGateway(GatewayRecord? activeRecord, bool isIsolated) =>
+        !isIsolated || !string.IsNullOrWhiteSpace(activeRecord?.SetupManagedDistroName);
 
     public static bool ShouldStart(GatewayRecord? activeRecord, string? legacyGatewayUrl)
     {
+        if (GatewayFixtureIsolation.IsEnabled)
+            return false;
+
         if (activeRecord is not null)
         {
-            if (activeRecord.SshTunnel is not null)
+            if (activeRecord.NativePackageFamilyName is not null || activeRecord.SshTunnel is not null)
                 return false;
 
             return activeRecord.IsLocal
@@ -28,6 +34,9 @@ internal static class WslKeepAlivePolicy
         string? setupStateDistroName,
         string? environmentOverride)
     {
+        if (GatewayFixtureIsolation.IsEnabled)
+            return null;
+
         if (activeRecord is not null &&
             GatewayRecordEditing.ResolveManagedDistroName(activeRecord) is { } managedDistroName)
             return managedDistroName;
@@ -76,15 +85,37 @@ internal static class WslKeepAlivePolicy
         return WslCommandLineMatcher.IsKeepaliveForDistro(commandLine, distroName);
     }
 
+    public static bool TryReadMarkerStartTimeUtc(JsonElement startElement, out DateTime utc)
+    {
+        if (startElement.TryGetDateTimeOffset(out var offset))
+        {
+            utc = offset.UtcDateTime;
+            return true;
+        }
+
+        if (startElement.TryGetDateTime(out var dateTime) && dateTime.Kind == DateTimeKind.Utc)
+        {
+            utc = dateTime;
+            return true;
+        }
+
+        utc = default;
+        return false;
+    }
+
     public static bool IsMarkedKeepaliveProcessIdentity(
         string? processName,
         DateTime processStartTimeUtc,
         DateTime markerStartTimeUtc)
     {
+        var markerUtc = markerStartTimeUtc.Kind == DateTimeKind.Local
+            ? markerStartTimeUtc.ToUniversalTime()
+            : markerStartTimeUtc;
+        var processUtc = processStartTimeUtc.Kind == DateTimeKind.Local
+            ? processStartTimeUtc.ToUniversalTime()
+            : processStartTimeUtc;
         return string.Equals(processName, "wsl", StringComparison.OrdinalIgnoreCase) &&
-            Math.Abs(
-                (processStartTimeUtc -
-                 DateTime.SpecifyKind(markerStartTimeUtc, DateTimeKind.Utc)).TotalSeconds) <= 5;
+            Math.Abs((processUtc - markerUtc).TotalSeconds) <= 5;
     }
 
     public static bool TryGetMarkerDistroName(string markerJson, out string distroName)
@@ -107,15 +138,7 @@ internal static class WslKeepAlivePolicy
     }
 
     public static bool IsSetupManagedLocalRecord(GatewayRecord record)
-    {
-        if (record.SshTunnel is not null)
-            return false;
-
-        if (GatewayRecordEditing.ResolveManagedDistroName(record) is not null)
-            return record.IsLocal || LocalGatewayUrlClassifier.IsLocalGatewayUrl(record.Url);
-
-        return IsLegacyDefaultSetupManagedLocalRecord(record);
-    }
+        => GatewayRecordEditing.IsSetupManagedLocalRecord(record);
 
     public static bool IsSameSetupManagedGateway(
         GatewayRecord expected,
@@ -139,8 +162,4 @@ internal static class WslKeepAlivePolicy
     private static string? GetSetupManagedDistroName(GatewayRecord record)
         => GatewayRecordEditing.ResolveManagedDistroName(record);
 
-    private static bool IsLegacyDefaultSetupManagedLocalRecord(GatewayRecord record) =>
-        record.IsLocal
-        && LocalGatewayUrlClassifier.IsLocalGatewayUrl(record.Url)
-        && string.Equals(record.FriendlyName, DefaultSetupManagedFriendlyName, StringComparison.Ordinal);
 }

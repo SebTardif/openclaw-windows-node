@@ -1,5 +1,6 @@
 using Microsoft.Toolkit.Uwp.Notifications;
 using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Automation.Peers;
 using Microsoft.UI.Xaml.Controls;
 using OpenClaw.Connection;
 using OpenClaw.Shared;
@@ -52,10 +53,127 @@ public sealed partial class SettingsPage : Page
 
     public void Initialize()
     {
+        StoreMigrationAction.Content = LocalizationHelper.GetString("Migration2_InnoAction");
+        StoreMigrationCard.Visibility = InnoMigrationHandoff.IsAvailable ? Visibility.Visible : Visibility.Collapsed;
         PopulateAppInfo();
         InitializeGatewayInfo();
         if (CurrentApp.Settings is { } settings)
             LoadGatewaySection(settings);
+    }
+
+    private void OnStoreMigration(object sender, RoutedEventArgs e) =>
+        AsyncEventHandlerGuard.Run(OnStoreMigrationAsync, new AppLogger(), nameof(OnStoreMigration));
+
+    private async Task OnStoreMigrationAsync()
+    {
+        StoreMigrationAction.IsEnabled = false;
+        try
+        {
+            var confirmation = new ContentDialog
+            {
+                XamlRoot = XamlRoot,
+                Title = LocalizationHelper.GetString("Migration2_InnoConsentTitle"),
+                Content = LocalizationHelper.GetString("Migration2_InnoConsent"),
+                PrimaryButtonText = LocalizationHelper.GetString("Migration2_InnoAction"),
+                CloseButtonText = LocalizationHelper.GetString("Migration_StoreNotNow"),
+                DefaultButton = ContentDialogButton.Close
+            };
+            if (await confirmation.ShowAsync() != ContentDialogResult.Primary)
+                return;
+            var messageKey = await InnoMigrationHandoff.GrantAndLaunchAsync();
+            ShowStoreMigrationStatus(messageKey, messageKey == "Migration2_InnoGranted"
+                ? InfoBarSeverity.Success : InfoBarSeverity.Error,
+                canDownloadSetup: messageKey == "Migration2_InnoRepairRequired");
+        }
+        catch (Exception exception)
+        {
+            Logger.Error($"Could not show migration consent: {exception.Message}");
+            ShowStoreMigrationStatus("Migration2_InnoFailed", InfoBarSeverity.Error);
+        }
+        finally
+        {
+            StoreMigrationAction.IsEnabled = true;
+        }
+    }
+
+    private void OnDownloadMigrationSetup(object sender, RoutedEventArgs e) =>
+        AsyncEventHandlerGuard.Run(DownloadMigrationSetupAsync, new AppLogger(), nameof(OnDownloadMigrationSetup));
+
+    private async Task DownloadMigrationSetupAsync()
+    {
+        StoreMigrationDownloadSetup.IsEnabled = false;
+        try
+        {
+            // Browser download only. The user runs Setup after exiting the app; we do not
+            // launch executables, uninstall anything, or infer that repair has succeeded.
+            if (!await global::Windows.System.Launcher.LaunchUriAsync(InnoMigrationHandoff.InstallerUri))
+                throw new InvalidOperationException("Windows declined the installer download URI.");
+        }
+        catch (Exception exception)
+        {
+            Logger.Error($"Could not open migration Setup download: {exception.Message}");
+            ShowStoreMigrationStatus("Migration2_InnoSetupLinkFailed", InfoBarSeverity.Error,
+                canDownloadSetup: true, address: InnoMigrationHandoff.InstallerUri.AbsoluteUri);
+        }
+        finally
+        {
+            StoreMigrationDownloadSetup.IsEnabled = true;
+        }
+    }
+
+    private void ShowStoreMigrationStatus(string messageKey, InfoBarSeverity severity,
+        bool canDownloadSetup = false, string? address = null)
+    {
+        var message = LocalizationHelper.GetString(messageKey);
+        var presented = StoreMigrationLinkFailure.Present(message, address);
+        StoreMigrationStatus.Message = presented.Instruction;
+        if (presented.SelectableAddress is null)
+        {
+            StoreMigrationSetupAddress.Text = "";
+            StoreMigrationSetupAddress.Visibility = Visibility.Collapsed;
+        }
+        else
+        {
+            StoreMigrationSetupAddress.Text = presented.SelectableAddress;
+            StoreMigrationSetupAddress.Visibility = Visibility.Visible;
+        }
+        StoreMigrationDownloadSetup.Visibility = canDownloadSetup ? Visibility.Visible : Visibility.Collapsed;
+        StoreMigrationStatus.Severity = severity;
+        // Re-open a bar the user never dismissed so a second result is announced
+        // rather than silently swapping the text of the first one.
+        StoreMigrationStatus.IsOpen = false;
+        StoreMigrationStatus.Visibility = Visibility.Visible;
+        // The bar is collapsed while idle so it does not consume layout spacing, but a
+        // collapsed element has no automation peer, and InfoBar announces through the
+        // existing peer only. Realize it before opening or the announcement is dropped.
+        FrameworkElementAutomationPeer.CreatePeerForElement(StoreMigrationStatus);
+        StoreMigrationStatus.IsOpen = true;
+    }
+
+    private void OnStoreMigrationStatusClosed(InfoBar sender, InfoBarClosedEventArgs args)
+    {
+        if (!sender.IsOpen)
+            sender.Visibility = Visibility.Collapsed;
+    }
+
+    /// <summary>Returns to the top so history Back from About to Settings visibly changes position.</summary>
+    internal void ShowTop() => PageScroll.ChangeView(null, 0, null, disableAnimation: true);
+
+    internal void ShowAbout()
+    {
+        if (IsLoaded)
+            AboutHeading.StartBringIntoView();
+        else
+        {
+            Loaded -= OnAboutLoaded;
+            Loaded += OnAboutLoaded;
+        }
+    }
+
+    private void OnAboutLoaded(object sender, RoutedEventArgs e)
+    {
+        Loaded -= OnAboutLoaded;
+        AboutHeading.StartBringIntoView();
     }
 
     /// <summary>
@@ -119,7 +237,8 @@ public sealed partial class SettingsPage : Page
 
     private void PopulateAppInfo()
     {
-        AppInfoVersionText.Text = AppVersionInfo.DisplayVersion;
+        AppInfoVersionText.Text = SettingsAppInfoProjection.ResolveDisplayVersion(
+            AppVersionInfo.DisplayVersion, PackageHelper.PackageVersion);
         var windowsAppSdk = SettingsAppInfoProjection.ResolveWindowsAppSdkDisplayName(
             Assembly.GetEntryAssembly()?.GetName().Name, AppContext.BaseDirectory);
         AppInfoRuntimeText.Text = SettingsAppInfoProjection.BuildRuntimeStack(
@@ -231,10 +350,10 @@ public sealed partial class SettingsPage : Page
     private void LoadGatewaySection(SettingsManager settings)
     {
         var setupStatePath = Path.Combine(SetupExistingGatewayClassifier.ResolveLocalDataPath(), "setup-state.json");
-        var activeGatewayAccess = GatewayHostAccessClassifier.Classify(CurrentApp.Registry?.GetActive());
-
-        _localGatewayInstalled = File.Exists(setupStatePath)
-            || (settings.GatewayUrl?.StartsWith("ws://localhost", StringComparison.OrdinalIgnoreCase) == true);
+        var activeGateway = CurrentApp.Registry?.GetActive();
+        var activeGatewayAccess = GatewayHostAccessClassifier.Classify(activeGateway);
+        _localGatewayInstalled = SetupExistingGatewayClassifier.HasWslInstallationForSettings(
+            File.Exists(setupStatePath), CurrentApp.Registry?.GetAll(), activeGateway, settings.GatewayUrl);
 
         OpenClawOnboardCard.Visibility = activeGatewayAccess.CanControlWslGateway
             ? Visibility.Visible : Visibility.Collapsed;
@@ -290,6 +409,11 @@ public sealed partial class SettingsPage : Page
     private void OnDocumentationLink(object sender, RoutedEventArgs e)
     {
         OpenShellTarget(DocumentationUrl, "documentation");
+    }
+
+    private void OnSupportLink(object sender, RoutedEventArgs e)
+    {
+        OpenShellTarget(SupportLinks.OfficialSupportUrl, "support");
     }
 
     private void OnGitHubLink(object sender, RoutedEventArgs e)

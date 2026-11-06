@@ -1,0 +1,377 @@
+// <summary>
+// Selects deterministic local inference plans from hardware facts and the pinned model catalog.
+// Selection does not probe hardware or install artifacts, and GPU-specific recipes retain their adapter binding.
+// Usage:
+//   LocalInferenceSelectionResult selection = LocalInferenceSelector.Select(hardware, requestedModelId);
+//   if (selection.Plan is { } plan) Launch(plan);
+// </summary>
+
+using System.Runtime.InteropServices;
+
+namespace OpenClaw.Shared.Inference.Catalog;
+
+/// <summary>Whether catalog selection produced a complete native inference plan.</summary>
+public enum LocalInferenceSelectionStatus
+{
+    Selected = 0,
+    Unsupported = 1,
+}
+
+/// <summary>Stable reason returned when no inference plan can be selected.</summary>
+public enum LocalInferenceSelectionFailureCode
+{
+    None = 0,
+    RuntimeUnavailable = 1,
+    NoNvidiaGpu = 2,
+    UnknownModel = 3,
+    /// <summary>RTX Spark detected, but this memory SKU has no recommended local model.</summary>
+    NotRecommendedForSku = 4,
+}
+
+/// <summary>Whether a caller accepted the catalog default or named a model explicitly.</summary>
+public enum LocalInferenceModelSelectionOrigin
+{
+    Default = 0,
+    Explicit = 1,
+}
+
+/// <summary>A complete, immutable native inference choice.</summary>
+/// <param name="BoundGpuStableId">
+/// The adapter this recipe was chosen for, when the choice is only valid on that
+/// adapter. RTX Spark recipes come from a fixed per-device SKU table, so the recipe
+/// and the GPU that runs it must be the same adapter; eligibility restricts its
+/// candidates to this id. Null means any qualifying NVIDIA GPU may run the plan,
+/// which is the generic discrete-GPU behavior.
+/// </param>
+public sealed record LocalInferencePlan(
+    LlamaRuntimeVariant Runtime,
+    LocalModelInfo Model,
+    LocalInferenceRunProfile Profile,
+    LocalInferenceModelSelectionOrigin ModelSelectionOrigin,
+    string? BoundGpuStableId = null);
+
+/// <summary>The deterministic result of selecting from the pinned local inference catalog.</summary>
+public sealed record LocalInferenceSelectionResult
+{
+    private LocalInferenceSelectionResult(
+        LocalInferenceSelectionStatus status,
+        LocalInferenceSelectionFailureCode failureCode,
+        LocalInferencePlan? plan)
+    {
+        Status = status;
+        FailureCode = failureCode;
+        Plan = plan;
+    }
+
+    public LocalInferenceSelectionStatus Status { get; }
+    public LocalInferenceSelectionFailureCode FailureCode { get; }
+    public LocalInferencePlan? Plan { get; }
+    public bool IsSelected => Status == LocalInferenceSelectionStatus.Selected;
+
+    internal static LocalInferenceSelectionResult Selected(LocalInferencePlan plan) =>
+        new(LocalInferenceSelectionStatus.Selected, LocalInferenceSelectionFailureCode.None, plan);
+
+    internal static LocalInferenceSelectionResult Unsupported(LocalInferenceSelectionFailureCode failureCode) =>
+        new(LocalInferenceSelectionStatus.Unsupported, failureCode, null);
+}
+
+/// <summary>
+/// Selects a deterministic local inference plan from hardware facts and pinned catalog recipes.
+/// </summary>
+public static class LocalInferenceSelector
+{
+    /// <summary>Selects the requested catalog model or the hardware's recommended default plan.</summary>
+    public static LocalInferenceSelectionResult Select(
+        HostHardwareInfo hardware,
+        string? requestedModelId = null) =>
+        Select(hardware, requestedModelId, includeRetiredInstalledModel: false);
+
+    /// <summary>
+    /// Resolves an explicit model from an existing installation receipt. Retired models
+    /// remain valid here, but are never admitted by the fresh-selection overload.
+    /// </summary>
+    internal static LocalInferenceSelectionResult SelectInstalled(
+        HostHardwareInfo hardware,
+        string installedModelId)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(installedModelId);
+        return Select(hardware, installedModelId, includeRetiredInstalledModel: true);
+    }
+
+    /// <summary>
+    /// Selects the best-fitting profile for a user-supplied Hugging Face model. Custom
+    /// models always use the generic runtime and are never bound to one adapter.
+    /// </summary>
+    public static LocalInferenceSelectionResult SelectCustom(HostHardwareInfo hardware, LocalModelInfo model)
+    {
+        ArgumentNullException.ThrowIfNull(hardware);
+        ArgumentNullException.ThrowIfNull(model);
+        if (model.CustomRecipe is null)
+            throw new ArgumentException("Only custom models can be selected by recipe.", nameof(model));
+
+        LlamaRuntimeVariant? runtime = LlamaRuntimeCatalog.Find(hardware.CpuArchitecture, model.RuntimeFamily);
+        if (runtime is null)
+            return LocalInferenceSelectionResult.Unsupported(LocalInferenceSelectionFailureCode.RuntimeUnavailable);
+        if (!hardware.HasNvidiaGpu)
+            return LocalInferenceSelectionResult.Unsupported(LocalInferenceSelectionFailureCode.NoNvidiaGpu);
+
+        LocalInferenceRunProfile profile = SelectBestFittingProfile(hardware, runtime, model) ??
+            LocalModelCatalog.GetProfiles(model)[^1];
+        return LocalInferenceSelectionResult.Selected(
+            new LocalInferencePlan(runtime, model, profile, LocalInferenceModelSelectionOrigin.Explicit));
+    }
+
+    private static LocalInferenceSelectionResult Select(
+        HostHardwareInfo hardware,
+        string? requestedModelId,
+        bool includeRetiredInstalledModel)
+    {
+        ArgumentNullException.ThrowIfNull(hardware);
+
+        LlamaRuntimeVariant? runtime = LlamaRuntimeCatalog.Find(hardware.CpuArchitecture);
+        if (runtime is null)
+            return LocalInferenceSelectionResult.Unsupported(
+                LocalInferenceSelectionFailureCode.RuntimeUnavailable);
+
+        if (!hardware.HasNvidiaGpu)
+            return LocalInferenceSelectionResult.Unsupported(LocalInferenceSelectionFailureCode.NoNvidiaGpu);
+
+        LocalModelInfo? model;
+        LocalInferenceRunProfile profile;
+        LocalInferenceModelSelectionOrigin modelSelectionOrigin;
+        string? boundGpuStableId = null;
+        GpuInfo? sparkGpu = hardware.NvidiaGpus.FirstOrDefault(
+            gpu => gpu.IsRtxSpark && LocalInferenceQualificationPolicy.HasCompleteFacts(gpu));
+        var sparkPick = sparkGpu is null
+            ? null
+            : RtxSparkInferenceSelector.SelectDefault(sparkGpu);
+        if (string.IsNullOrWhiteSpace(requestedModelId))
+        {
+            if (sparkPick is not null)
+            {
+                // Bind the plan to this adapter: the SKU table answers "what should
+                // THIS Spark run", so the recipe is only valid on the Spark that
+                // produced it, never on some other GPU eligibility might rank higher.
+                (model, profile) = sparkPick.Value;
+                boundGpuStableId = sparkGpu!.StableId;
+            }
+            else
+            {
+                // Either no Spark, or a Spark SKU with no recommended model. In the
+                // latter case the Spark is excluded rather than failing the whole
+                // host, so a discrete GPU alongside it can still qualify normally.
+                HostHardwareInfo genericHardware = sparkGpu is null
+                    ? hardware
+                    : hardware with
+                    {
+                        Gpus = hardware.Gpus.Where(gpu => !gpu.IsRtxSpark).ToArray(),
+                    };
+                if (!genericHardware.HasNvidiaGpu)
+                {
+                    return LocalInferenceSelectionResult.Unsupported(
+                        LocalInferenceSelectionFailureCode.NotRecommendedForSku);
+                }
+
+                (runtime, model, profile) = SelectDefaultModelAndProfile(genericHardware, runtime);
+            }
+
+            modelSelectionOrigin = LocalInferenceModelSelectionOrigin.Default;
+        }
+        else
+        {
+            model = includeRetiredInstalledModel
+                ? LocalModelCatalog.FindInstalled(requestedModelId)
+                : LocalModelCatalog.Find(requestedModelId);
+            if (model is null)
+                return LocalInferenceSelectionResult.Unsupported(LocalInferenceSelectionFailureCode.UnknownModel);
+            runtime = LlamaRuntimeCatalog.Find(hardware.CpuArchitecture, model.RuntimeFamily);
+            if (runtime is null)
+                return LocalInferenceSelectionResult.Unsupported(LocalInferenceSelectionFailureCode.RuntimeUnavailable);
+            if (sparkPick is { } recommended &&
+                string.Equals(recommended.Model.Id, model.Id, StringComparison.OrdinalIgnoreCase))
+            {
+                // Setup persists the recommended model id and passes it back here, so
+                // the SKU's own recommendation arrives as an explicit request. Re-deriving
+                // its profile through the generic fit-test would silently discard the
+                // pinned profile the SKU table specifies (the 64 GB tier's reduced context
+                // is not the largest that merely fits) and drop the adapter binding.
+                // A request for any other model is a real user override and still uses
+                // the generic fit-test below.
+                profile = recommended.Profile;
+                boundGpuStableId = sparkGpu!.StableId;
+            }
+            else
+            {
+                profile = SelectBestFittingProfile(hardware, runtime, model, includeRetiredInstalledModel) ??
+                    LocalModelCatalog.GetProfiles(model)[^1];
+            }
+
+            modelSelectionOrigin = LocalInferenceModelSelectionOrigin.Explicit;
+        }
+
+        return LocalInferenceSelectionResult.Selected(
+            new LocalInferencePlan(runtime, model, profile, modelSelectionOrigin, boundGpuStableId));
+    }
+
+    private static (LlamaRuntimeVariant Runtime, LocalModelInfo Model, LocalInferenceRunProfile Profile) SelectDefaultModelAndProfile(
+        HostHardwareInfo hardware,
+        LlamaRuntimeVariant runtime)
+    {
+        // A priority-0, explicit-alternative model (currently only the
+        // experimental 96GB Flash-Next recipe) is offered solely by
+        // RtxSparkInferenceSelector for its one intended SKU, never picked as
+        // a generic dGPU default or fallback -- excluded here so a large
+        // enough non-Spark GPU (or a Spark GPU IsRtxSpark fails to detect)
+        // can't land on it by tie-break/fallback ordering. Priority-0 models
+        // that aren't explicit alternatives (the other Spark-only recipes)
+        // keep their existing, unrelated reachability.
+        IEnumerable<LocalModelInfo> genericDefaultCandidates = LocalModelCatalog.Models
+            .Where(model => model.RecommendationPriority > 0 || !model.IsExplicitAlternative);
+        foreach (LocalModelInfo candidate in genericDefaultCandidates
+                     .OrderByDescending(model => model.RecommendationPriority)
+                     .ThenByDescending(LocalModelCatalog.TotalDownloadSizeBytes))
+        {
+            LlamaRuntimeVariant? candidateRuntime = LlamaRuntimeCatalog.Find(hardware.CpuArchitecture, candidate.RuntimeFamily);
+            if (candidateRuntime is null)
+                continue;
+            LocalInferenceRunProfile? profile = SelectBestFittingProfile(hardware, candidateRuntime, candidate);
+            if (profile is not null)
+                return (candidateRuntime, candidate, profile);
+        }
+
+        LocalModelInfo fallback = genericDefaultCandidates
+            .Where(model => LlamaRuntimeCatalog.Find(hardware.CpuArchitecture, model.RuntimeFamily) is not null)
+            .OrderBy(LocalModelCatalog.TotalDownloadSizeBytes)
+            .First();
+        return (LlamaRuntimeCatalog.Find(hardware.CpuArchitecture, fallback.RuntimeFamily)!,
+            fallback, LocalModelCatalog.GetProfiles(fallback)[^1]);
+    }
+
+    private static LocalInferenceRunProfile? SelectBestFittingProfile(
+        HostHardwareInfo hardware,
+        LlamaRuntimeVariant runtime,
+        LocalModelInfo model,
+        bool installed = false) =>
+        LocalModelCatalog.GetProfiles(model).FirstOrDefault(profile =>
+            new LocalManagedInferenceProfile(runtime, model, profile).Fits(hardware, installed));
+}
+
+internal static class LocalInferenceQualificationPolicy
+{
+    public static bool IsNemotronBolt(LocalModelInfo model) =>
+        string.Equals(model.Id, LocalModelCatalog.NemotronBoltModelId, StringComparison.OrdinalIgnoreCase);
+
+    public static bool IsQualifiedBoltGpu(GpuInfo gpu) =>
+        gpu.Name.Contains("RTX Spark N1X", StringComparison.OrdinalIgnoreCase);
+
+    public static long? GetCurrentFreeMemoryBytes(HostHardwareInfo hardware, GpuInfo gpu, LocalModelInfo model)
+    {
+        long? cudaFree = GetEffectiveFreeMemoryBytes(gpu);
+        if (!IsNemotronBolt(model))
+            return cudaFree;
+
+        // CUDA's per-context free budget stays flat under model allocations on
+        // Windows N1X. Commit availability is a second bound, never extra RAM.
+        return cudaFree is { } free && hardware.AvailableCommitMemoryBytes is >= 0
+            ? Math.Min(free, hardware.AvailableCommitMemoryBytes.Value)
+            : null;
+    }
+
+    public static bool HasCompleteFacts(GpuInfo gpu) =>
+        IsStableGpuId(gpu.StableId) &&
+        gpu.GpuVisibleMemoryBytes is > 0 &&
+        gpu.CudaMajorVersion is not null;
+
+    public static bool HasRuntimePrerequisites(GpuInfo gpu, LlamaRuntimeVariant runtime)
+    {
+        ArgumentNullException.ThrowIfNull(gpu);
+        ArgumentNullException.ThrowIfNull(runtime);
+        return HasCompleteFacts(gpu) &&
+            gpu.CudaMajorVersion >= runtime.CudaVersion.Major;
+    }
+
+    public static long GetRequiredMemoryBytes(
+        LocalModelInfo model,
+        LocalInferenceRunProfile profile)
+    {
+        ArgumentNullException.ThrowIfNull(model);
+        ArgumentNullException.ThrowIfNull(profile);
+        long weightsBytes = LocalModelCatalog.TotalDownloadSizeBytes(model);
+        return SaturatingAdd(
+            SaturatingAdd(
+                SaturatingAdd(weightsBytes, GetKvCacheMemoryBytes(model.Recipe, profile)),
+                GetDraftKvCacheMemoryBytes(model.Recipe, profile)),
+            profile.RuntimeWorkspaceBytes);
+    }
+
+    internal static long GetKvCacheMemoryBytes(
+        LocalModelRunRecipe recipe,
+        LocalInferenceRunProfile profile)
+    {
+        ArgumentNullException.ThrowIfNull(recipe);
+        ArgumentNullException.ThrowIfNull(profile);
+        long vectorsPerTypePerToken = SaturatingMultiply(
+            recipe.FullAttentionLayerCount,
+            recipe.KeyValueHeadCount);
+        long bytesPerToken = SaturatingAdd(
+            SaturatingMultiply(
+                vectorsPerTypePerToken,
+                EncodedBytes(recipe.KeyValueHeadDimension, profile.KeyCachePrecision)),
+            SaturatingMultiply(
+                vectorsPerTypePerToken,
+                EncodedBytes(recipe.KeyValueHeadDimension, profile.ValueCachePrecision)));
+        return SaturatingMultiply(bytesPerToken, profile.ContextTokens);
+    }
+
+    internal static long GetDraftKvCacheMemoryBytes(
+        LocalModelRunRecipe recipe,
+        LocalInferenceRunProfile profile)
+    {
+        ArgumentNullException.ThrowIfNull(recipe);
+        ArgumentNullException.ThrowIfNull(profile);
+
+        if (recipe.SpeculativeDecoding == SpeculativeDecodingMode.None)
+            return 0;
+
+        // Draft artifacts use the target's KV head geometry, but can have
+        // multiple attention layers independent of the target layer count.
+        long vectorsPerTypePerToken = SaturatingMultiply(
+            recipe.DraftAttentionLayerCount,
+            recipe.KeyValueHeadCount);
+        long bytesPerToken = SaturatingAdd(
+            SaturatingMultiply(
+                vectorsPerTypePerToken,
+                EncodedBytes(recipe.KeyValueHeadDimension, profile.DraftKeyCachePrecision)),
+            SaturatingMultiply(
+                vectorsPerTypePerToken,
+                EncodedBytes(recipe.KeyValueHeadDimension, profile.DraftValueCachePrecision)));
+        return SaturatingMultiply(bytesPerToken, profile.ContextTokens);
+    }
+
+    public static long GetEffectiveTotalMemoryBytes(GpuInfo gpu) =>
+        gpu.GpuVisibleMemoryBytes is > 0 ? gpu.GpuVisibleMemoryBytes.Value : 0;
+
+    public static long? GetEffectiveFreeMemoryBytes(GpuInfo gpu) =>
+        gpu.FreeGpuVisibleMemoryBytes is >= 0 ? gpu.FreeGpuVisibleMemoryBytes.Value : null;
+
+    private static bool IsStableGpuId(string? value) =>
+        !string.IsNullOrWhiteSpace(value) &&
+        !value.Any(character => char.IsControl(character) || char.IsWhiteSpace(character));
+
+    private static long EncodedBytes(long elementCount, KvCachePrecision precision) => precision switch
+    {
+        KvCachePrecision.F16 => SaturatingMultiply(elementCount, 2),
+        KvCachePrecision.Q8_0 => SaturatingMultiply((SaturatingAdd(elementCount, 31)) / 32, 34),
+        _ => throw new ArgumentOutOfRangeException(nameof(precision)),
+    };
+
+    private static long SaturatingMultiply(long left, long right) =>
+        left == 0 || right == 0
+            ? 0
+            : left > long.MaxValue / right
+                ? long.MaxValue
+                : left * right;
+
+    public static long SaturatingAdd(long left, long right) =>
+        right > long.MaxValue - left ? long.MaxValue : left + right;
+}

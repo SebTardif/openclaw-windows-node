@@ -14,7 +14,6 @@ using System.Collections.Generic;
 using System.ComponentModel;
 using System.Diagnostics;
 using System.IO;
-using System.Text.Json;
 using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 
@@ -52,7 +51,6 @@ public sealed partial class DebugPage : Page
 
     private static readonly string LocalAppData = AppIdentity.ResolveLocalDataDirectory();
     private static readonly string LogPath = Path.Combine(LocalAppData, "openclaw-tray.log");
-    private static readonly string DeviceKeyPath = Path.Combine(LocalAppData, "device-key-ed25519.json");
 
     // Brushes for the colored log rendering. Use SystemFill* theme
     // tokens (per docs/design/tokens.md) so the colors track
@@ -147,10 +145,19 @@ public sealed partial class DebugPage : Page
     /// </summary>
     protected override void OnNavigatedFrom(NavigationEventArgs e)
     {
+        Deactivate();
+        base.OnNavigatedFrom(e);
+    }
+
+    /// <summary>
+    /// Also called by the Settings view when it is hidden: clearing the frame content does not
+    /// raise <see cref="OnNavigatedFrom"/>.
+    /// </summary>
+    internal void Deactivate()
+    {
         _detailMode = DetailMode.None;
         _detailGeneration++;
         StopCopyFeedbackTimer();
-        base.OnNavigatedFrom(e);
     }
 
     // ── Top status InfoBar ───────────────────────────────────────────
@@ -614,38 +621,43 @@ public sealed partial class DebugPage : Page
     {
         try
         {
-            if (File.Exists(DeviceKeyPath))
-            {
-                var json = File.ReadAllText(DeviceKeyPath);
-                using var doc = JsonDocument.Parse(json);
-                if (doc.RootElement.TryGetProperty("deviceId", out var id))
-                {
-                    var deviceId = id.GetString() ?? "Unknown";
-                    DeviceIdText.Text = deviceId.Length > 24
-                        ? string.Concat(deviceId.AsSpan(0, 16), "…", deviceId.AsSpan(deviceId.Length - 6))
-                        : deviceId;
-                    DeviceIdText.Tag = deviceId;
-                }
-                else
-                {
-                    DeviceIdText.Text = "Not found";
-                }
-
-                if (doc.RootElement.TryGetProperty("publicKey", out var pk))
-                {
-                    var pkText = pk.GetString() ?? "Unknown";
-                    PublicKeyText.Text = pkText;
-                    PublicKeyText.Tag = pkText;
-                }
-                else
-                {
-                    PublicKeyText.Text = "Not found";
-                }
-            }
-            else
+            var registry = CurrentApp.Registry;
+            var active = registry?.GetActive();
+            if (registry == null || string.IsNullOrEmpty(active?.Id))
             {
                 DeviceIdText.Text = "No device key file";
                 PublicKeyText.Text = "—";
+                return;
+            }
+
+            var path = DiagnosticsDeviceIdentity.IdentityFilePath(
+                registry.GetIdentityDirectory(active.Id));
+            if (!File.Exists(path))
+            {
+                DeviceIdText.Text = "No device key file";
+                PublicKeyText.Text = "—";
+                return;
+            }
+
+            var fields = DiagnosticsDeviceIdentity.ReadCopyFields(File.ReadAllText(path));
+            if (string.IsNullOrEmpty(fields.DeviceId))
+            {
+                DeviceIdText.Text = "Not found";
+            }
+            else
+            {
+                DeviceIdText.Tag = fields.DeviceId;
+                DeviceIdText.Text = DiagnosticsDeviceIdentity.Shorten(fields.DeviceId);
+            }
+
+            if (string.IsNullOrEmpty(fields.PublicKey))
+            {
+                PublicKeyText.Text = "Not found";
+            }
+            else
+            {
+                PublicKeyText.Text = fields.PublicKey;
+                PublicKeyText.Tag = fields.PublicKey;
             }
         }
         catch (Exception ex)
@@ -855,8 +867,7 @@ public sealed partial class DebugPage : Page
         _suppressOverrideChange = true;
         try
         {
-            SelectByTag(HubChatOverrideCombo, DebugChatSurfaceOverrides.HubChat.ToString());
-            SelectByTag(TrayChatOverrideCombo, DebugChatSurfaceOverrides.TrayChat.ToString());
+            SelectByTag(ChatOverrideCombo, DebugChatSurfaceOverrides.WorkspaceChat.ToString());
         }
         finally
         {
@@ -886,16 +897,10 @@ public sealed partial class DebugPage : Page
         return ChatSurfaceOverride.NoOverride;
     }
 
-    private void OnHubChatOverrideChanged(object sender, SelectionChangedEventArgs e)
+    private void OnChatOverrideChanged(object sender, SelectionChangedEventArgs e)
     {
         if (_suppressOverrideChange) return;
-        DebugChatSurfaceOverrides.HubChat = ParseOverride(HubChatOverrideCombo);
-    }
-
-    private void OnTrayChatOverrideChanged(object sender, SelectionChangedEventArgs e)
-    {
-        if (_suppressOverrideChange) return;
-        DebugChatSurfaceOverrides.TrayChat = ParseOverride(TrayChatOverrideCombo);
+        DebugChatSurfaceOverrides.WorkspaceChat = ParseOverride(ChatOverrideCombo);
     }
 
 }
