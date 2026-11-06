@@ -222,11 +222,17 @@ public sealed partial class CronPage : Page
 
     private void StartObservedCronRun(string jobId, CronJobViewModel? vm)
     {
+        var client = CurrentApp.GatewayClient;
+        if (client == null)
+        {
+            ShowDisconnected();
+            return;
+        }
         if (_runningJobIds.Contains(jobId)) return;
         _runningJobIds.Add(jobId);
         RefreshJobActionButtons(jobId);
 
-        CurrentApp.GatewayClient.RunCronJobDetailedAsync(jobId).ContinueWith(t =>
+        client.RunCronJobDetailedAsync(jobId).ContinueWith(t =>
         {
             DispatcherQueue?.TryEnqueue(() =>
             {
