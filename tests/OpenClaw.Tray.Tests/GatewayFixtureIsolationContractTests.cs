@@ -88,6 +88,22 @@ public sealed class GatewayFixtureIsolationContractTests
     }
 
     [Fact]
+    public void UnpackagedDisable_DoesNotClaimSuccessWhileTheLogonTaskRemains()
+    {
+        var body = BodyAfter(ReadTraySource("Services", "AutoStartManager.cs"),
+            "private static void SetUnpackagedAutoStart(bool enable)");
+        var disable = body[body.IndexOf("DeleteRunKey();", StringComparison.Ordinal)..];
+
+        Assert.Contains("WindowsStartupTaskRegistration.Exists(taskName)", disable);
+        Assert.Contains("WindowsStartupTaskRegistration.Unregister(taskName)", disable);
+        var refusal = disable.IndexOf("throw new AutoStartRefusedException", StringComparison.Ordinal);
+        var success = disable.IndexOf("Auto-start disabled", StringComparison.Ordinal);
+        Assert.True(refusal >= 0 && refusal < success, "Disable must fail before it reports success.");
+        Assert.Contains("catch (AutoStartRefusedException)", body);
+        Assert.Contains("throw;", body[body.IndexOf("catch (AutoStartRefusedException)", StringComparison.Ordinal)..]);
+    }
+
+    [Fact]
     public void AutoStart_FixtureRollbackAvoidsInstalledRegistrationReads()
     {
         var body = BodyAfter(ReadTraySource("Services", "AutoStartManager.cs"),
