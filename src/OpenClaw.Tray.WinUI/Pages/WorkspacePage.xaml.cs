@@ -50,6 +50,7 @@ public sealed partial class WorkspacePage : Page
     // Monotonic token guarding against out-of-order async results: a list/file
     // load applies only when its token still matches the latest request.
     private int _loadToken;
+    private LegacyAgentFileApply.Request? _legacyFileRequest;
 
     /// <summary>Set by HubWindow before <see cref="Initialize"/> to specify the active agent scope.</summary>
     public string AgentId { get; set; } = "main";
@@ -626,6 +627,7 @@ public sealed partial class WorkspacePage : Page
         }
 
         _usingLegacyAgentFilesFallback = true;
+        _legacyFileRequest = new LegacyAgentFileApply.Request(AgentId, entry.RequestPath, token);
         try
         {
             await client.RequestAgentFileGetAsync(AgentId, entry.RequestPath);
@@ -649,11 +651,16 @@ public sealed partial class WorkspacePage : Page
 
         var name = GetString(fileEl, "path") ?? GetString(fileEl, "name");
         if (string.IsNullOrEmpty(name)) return;
+        if (_legacyFileRequest is not { } inFlight)
+            return;
+        if (!LegacyAgentFileApply.IsCurrent(inFlight, AgentId, _loadToken))
+            return;
+        if (!LegacyAgentFileApply.ReturnedNameMatches(inFlight.RequestPath, name))
+            return;
 
+        var requestPath = inFlight.RequestPath;
         var entry = _entriesByPath.Values.FirstOrDefault(e =>
-            string.Equals(e.RequestPath, name, StringComparison.OrdinalIgnoreCase) ||
-            string.Equals(e.RelativePath, name, StringComparison.OrdinalIgnoreCase) ||
-            string.Equals(e.Name, name, StringComparison.OrdinalIgnoreCase));
+            string.Equals(e.RequestPath, requestPath, StringComparison.OrdinalIgnoreCase));
         if (entry == null) return;
 
         bool missing = GetBool(fileEl, "missing") ?? false;
