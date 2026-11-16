@@ -1482,6 +1482,11 @@ public static class ChatTimelineReducer
                 var fastPathText = replace
                     ? StripAssistantPrefix(state.Entries, text, idx, presentation)
                     : AppendWithOverlap(existing.Text, text);
+                // A cumulative frame that strips to empty has no new text for
+                // this bubble. The reconcile and new-bubble paths already
+                // leave the timeline alone. Do the same here.
+                if (replace && !string.IsNullOrEmpty(text) && string.IsNullOrEmpty(fastPathText))
+                    return state;
                 return state with
                 {
                     Entries = state.Entries.SetItem(idx, existing with
