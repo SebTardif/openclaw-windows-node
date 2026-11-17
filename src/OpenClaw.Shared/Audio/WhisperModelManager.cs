@@ -98,7 +98,8 @@ public sealed class WhisperModelManager
             InFlightDownloads,
             key,
             token => DownloadModelCoreAsync(info, destPath, progress, token),
-            cancellationToken);
+            cancellationToken,
+            TimeSpan.FromMinutes(30));
     }
 
     private async Task DownloadModelCoreAsync(
@@ -131,17 +132,14 @@ public sealed class WhisperModelManager
             using (var contentStream = await response.Content.ReadAsStreamAsync(cancellationToken))
             using (var fileStream = new FileStream(tempPath, FileMode.Create, FileAccess.Write, FileShare.None, 81920))
             {
-                var buffer = new byte[81920];
-                long downloadedBytes = 0;
-                int bytesRead;
-
-                while ((bytesRead = await contentStream.ReadAsync(buffer, cancellationToken)) > 0)
-                {
-                    await fileStream.WriteAsync(buffer.AsMemory(0, bytesRead), cancellationToken);
-                    downloadedBytes += bytesRead;
-                    progress?.Report((downloadedBytes, totalBytes));
-                }
-
+                await BoundedDownload.CopyAsync(
+                    contentStream,
+                    fileStream,
+                    info.ApproximateSizeBytes,
+                    info.Name,
+                    cancellationToken,
+                    progress,
+                    totalBytes);
                 await fileStream.FlushAsync(cancellationToken);
             }
 
