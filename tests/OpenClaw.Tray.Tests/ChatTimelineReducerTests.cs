@@ -2502,6 +2502,49 @@ public class ChatTimelineReducerTests
     }
 
     [Fact]
+    public void IntraTurnFastPath_RegressionCumulative_DoesNotBlankActiveBubble()
+    {
+        // The active assistant is still the timeline tail, so the replace
+        // takes the fast path. A stale cumulative frame that contains only
+        // the earlier bubble strips to empty. That must not wipe the tail.
+        const string a1 = "Investigating the workspace layout in detail now.";
+        const string a2Tail = "Here's the partial finding so far for A2.";
+        const string a2Next = "Here's the partial finding so far for A2. More arrived.";
+
+        var state = ChatTimelineReducer.Apply(
+            ChatTimelineState.Initial(),
+            new ChatUserMessageEvent("Look at the repo."));
+        state = ChatTimelineReducer.Apply(state,
+            new ChatMessageEvent(a1, ReconcilePrevious: true, IsStreaming: false));
+        state = ChatTimelineReducer.Apply(state,
+            new ChatToolStartEvent("ls", "ls", ToolCallId: "tc-1"));
+        state = ChatTimelineReducer.Apply(state,
+            new ChatToolOutputEvent("", ToolCallId: "tc-1"));
+        state = ChatTimelineReducer.Apply(state,
+            new ChatMessageEvent(a1 + "\n\n" + a2Tail, ReconcilePrevious: true, IsStreaming: true));
+
+        var before = state.Entries.Where(e => e.Kind == ChatTimelineItemKind.Assistant).ToList();
+        Assert.Equal(2, before.Count);
+        Assert.Equal(a2Tail, before[1].Text);
+        var a2Id = before[1].Id;
+        Assert.Equal(a2Id, state.ActiveAssistantId);
+
+        var stale = ChatTimelineReducer.Apply(state,
+            new ChatMessageEvent(a1, ReconcilePrevious: true, IsStreaming: true));
+        var afterStale = stale.Entries.Where(e => e.Kind == ChatTimelineItemKind.Assistant).ToList();
+        Assert.Equal(2, afterStale.Count);
+        Assert.Equal(a1, afterStale[0].Text);
+        Assert.Equal(a2Tail, afterStale[1].Text);
+        Assert.Equal(a2Id, afterStale[1].Id);
+
+        var continued = ChatTimelineReducer.Apply(stale,
+            new ChatMessageEvent(a1 + "\n\n" + a2Next, ReconcilePrevious: true, IsStreaming: true));
+        var afterContinue = continued.Entries.Where(e => e.Kind == ChatTimelineItemKind.Assistant).ToList();
+        Assert.Equal(a2Next, afterContinue[1].Text);
+        Assert.Equal(a2Id, afterContinue[1].Id);
+    }
+
+    [Fact]
     public void IntraTurnFinalResend_AfterTools_IsTreatedAsNoop()
     {
         // Regression for the live-app duplicate-bubble bug: after a
