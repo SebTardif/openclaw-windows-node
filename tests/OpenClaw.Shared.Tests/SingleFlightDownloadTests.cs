@@ -59,13 +59,37 @@ public sealed class SingleFlightDownloadTests
         callerCts.Cancel();
 
         await Assert.ThrowsAsync<TaskCanceledException>(() => canceledWaiter);
-        Assert.False(sharedToken.CanBeCanceled);
+        Assert.True(sharedToken.CanBeCanceled);
+        Assert.False(sharedToken.IsCancellationRequested);
 
         release.SetResult();
         await continuingWaiter;
 
         Assert.Equal(1, Volatile.Read(ref started));
         await WaitUntilAsync(() => inFlight.IsEmpty);
+    }
+
+    [Fact]
+    public async Task CancelingTheOnlyWaiter_CancelsTheSharedOperation()
+    {
+        var inFlight = new ConcurrentDictionary<string, Lazy<Task>>(StringComparer.OrdinalIgnoreCase);
+        var started = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        CancellationToken sharedToken = default;
+
+        Task Start(CancellationToken token)
+        {
+            sharedToken = token;
+            started.TrySetResult();
+            return new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously).Task;
+        }
+
+        using var callerCts = new CancellationTokenSource();
+        var waiter = SingleFlightDownload.RunAsync(inFlight, "asset", Start, callerCts.Token);
+        await started.Task;
+        callerCts.Cancel();
+
+        await Assert.ThrowsAsync<TaskCanceledException>(() => waiter);
+        await WaitUntilAsync(() => sharedToken.IsCancellationRequested);
     }
 
     [Fact]
